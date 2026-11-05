@@ -99,6 +99,9 @@ pub(super) struct HeaderIvars {
     hovered: Cell<bool>,
     /// The pointer is over the `+` itself: the stronger fill.
     over_plus: Cell<bool>,
+    /// The texts of the tooltips on the header ([`GroupHeader::place_tips`]), kept for as long as
+    /// they are on it: the view does not keep them.
+    tips: RefCell<Vec<Retained<NSString>>>,
     pressed: Cell<Option<Press>>,
     /// Where the press that is `pressed` went down, in the window's space: how far the pointer
     /// has gone from it says whether it is a drag.
@@ -283,6 +286,7 @@ impl GroupHeader {
             look: Cell::new(None),
             hovered: Cell::new(false),
             over_plus: Cell::new(false),
+            tips: RefCell::new(Vec::new()),
             pressed: Cell::new(None),
             press_at: Cell::new(NSPoint::ZERO),
             toggled_from: Cell::new(None),
@@ -491,13 +495,40 @@ impl GroupHeader {
             heading.tabs,
             if heading.tabs == 1 { "tab" } else { "tabs" }
         ))));
-        self.setToolTip(Some(&NSString::from_str(if heading.collapsed {
+        self.place_tips(&heading);
+        self.place_arrow(&heading, ink, look.reduce);
+        self.setNeedsDisplay(true);
+    }
+
+    /// The tooltips: the header's, which opens or closes the group, and while the `+` shows, the
+    /// `+`'s beside it, which adds a tab. One tooltip for the whole header would name the
+    /// header's verb over the `+` too.
+    fn place_tips(&self, heading: &Heading) {
+        self.removeAllToolTips();
+        let mut header = NSRect::new(NSPoint::new(0.0, 0.0), self.bounds().size);
+        let mut tips = Vec::new();
+        if self.plus_shown() {
+            let plus = self.plus_rect();
+            header.size.width = plus.origin.x;
+            tips.push((plus, NSString::from_str("New Tab in Group")));
+        }
+        let verb = if heading.collapsed {
             "Open group"
         } else {
             "Close group"
-        })));
-        self.place_arrow(&heading, ink, look.reduce);
-        self.setNeedsDisplay(true);
+        };
+        tips.push((header, NSString::from_str(verb)));
+        let owners = tips
+            .into_iter()
+            .map(|(rect, words)| {
+                // SAFETY: an owner that does not answer `view:stringForToolTip:point:userData:`
+                // is shown by its description, which a string's is; it is kept in `tips` for as
+                // long as the tooltip is on the view, and the data is null.
+                unsafe { self.addToolTipRect_owner_userData(rect, &words, std::ptr::null_mut()) };
+                words
+            })
+            .collect();
+        self.ivars().tips.replace(owners);
     }
 
     /// The arrow: its two pictures at the left, and which of them shows.
@@ -644,6 +675,20 @@ mod tests {
     /// The labels at a header's right end, a closed group's count and the key under ⌃⌘, are as
     /// wide as they draw: a frame the type's own width leaves the left of the number cut off.
     /// A source scan.
+    #[test]
+    fn the_plus_has_a_tooltip_of_its_own_and_the_header_no_tooltip_over_it() {
+        let source = include_str!("tab_group.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let at = source.find("fn place_tips(").expect("the tooltips");
+        let body = &source[at..at + source[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("\"New Tab in Group\""), "{body}");
+        assert!(body.contains("header.size.width = plus.origin.x"), "{body}");
+        assert!(
+            !source.contains("setToolTip("),
+            "one tooltip for the whole header"
+        );
+    }
+
     #[test]
     fn the_labels_at_a_headers_right_end_are_as_wide_as_they_draw() {
         let source = include_str!("tab_group.rs");
