@@ -29,6 +29,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kablo_bateri::paths;
+
 use super::message::Relayed;
 
 /// A word as `bateri --hex` takes it: `x` and the hex of its bytes, so that no shell on the way
@@ -76,8 +78,8 @@ fn quote(word: &str) -> String {
 
 /// The command line to run on the other machine, which a shell of any kind reads: a `sh` that hands
 /// over to the login shell, which runs a `sh` that looks for the command where the files of that
-/// machine are (`XDG_DATA_HOME` as the login shell has it, else under the home; `missing` is what it
-/// says, on stderr, with status 127, when it is nowhere) and runs it with the `words`, in hex.
+/// machine are (under the home, [`paths`]; `missing` is what it says, on stderr, with status 127,
+/// when it is nowhere) and runs it with the `words`, in hex.
 pub fn remote_line(missing: &str, words: &[String]) -> String {
     let hex: String = words
         .iter()
@@ -94,8 +96,15 @@ pub fn remote_line(missing: &str, words: &[String]) -> String {
             }
         })
         .collect();
+    let command = format!(
+        "{}/{}/{}/{}",
+        paths::DIR,
+        paths::SHELL,
+        paths::BIN,
+        paths::COMMAND
+    );
     let search = format!(
-        "for d in \"${{XDG_DATA_HOME:-$HOME/.local/share}}\" \"$HOME/.local/share\"; do [ -x \"$d/bateri/shell/bin/bateri\" ] && exec env BATERI_QUIET_ORPHAN=1 \"$d/bateri/shell/bin/bateri\" --hex \"$@\"; done; echo \"bateri: {missing}\" >&2; exit 127"
+        "[ -x \"$HOME/{command}\" ] && exec env BATERI_QUIET_ORPHAN=1 \"$HOME/{command}\" --hex \"$@\"; echo \"bateri: {missing}\" >&2; exit 127"
     );
     let login = format!("exec sh -c {} sh{hex}", quote(&search));
     format!(
@@ -295,7 +304,7 @@ mod tests {
                 .map(|word| format!(" {}", hex_word(word)))
                 .collect()
         };
-        // Under the home, the default.
+        // Under the home.
         let (_root, home) = home_with_bateri("under-home", ".local/share", "echo \"[$*]\"");
         let relayed = run_local(&home, &remote_line("n", &words(&["capture", "p9"]))).expect("ran");
         assert_eq!(relayed.status, 0, "{relayed:?}");
@@ -303,14 +312,15 @@ mod tests {
             relayed.stdout,
             format!("[--hex{}]\n", hex(&["capture", "p9"]))
         );
-        // Where `XDG_DATA_HOME` says, which the login shell has.
+        // Where `XDG_DATA_HOME` says is not looked in: the files of a machine are in one place.
         let (root, home) = home_with_bateri("xdg", "xdg-data", "echo xdg \"$#\"");
         let mut command = local_command(&home, &remote_line("n", &words(&["capture", "p9"])));
         command
             .env("SHELL", "/bin/sh")
             .env("XDG_DATA_HOME", home.join("xdg-data"));
         let relayed = execute(command, Duration::from_secs(20), OUTPUT).expect("ran");
-        assert_eq!(relayed.stdout, "xdg 3\n", "{relayed:?}");
+        assert_eq!(relayed.status, 127, "{relayed:?}");
+        assert_eq!(relayed.stdout, "", "{relayed:?}");
         drop(root);
     }
 

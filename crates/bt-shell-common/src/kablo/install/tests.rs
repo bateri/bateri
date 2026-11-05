@@ -95,7 +95,7 @@ impl Channel for Home {
             &[
                 "sh".into(),
                 "-c".into(),
-                format!("cd {dir} && HOME={dir} SHELL=/bin/zsh XDG_DATA_HOME= {command}"),
+                format!("cd {dir} && HOME={dir} SHELL=/bin/zsh {command}"),
             ],
             &bytes,
             Duration::from_secs(20),

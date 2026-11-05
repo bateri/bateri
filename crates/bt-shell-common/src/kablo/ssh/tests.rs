@@ -73,7 +73,7 @@ case $mode in
   config) printf 'user u\nhostname h\nport 22\nrequesttty auto\nsessiontype default\nproxyjump none\n'; exit 0;;
   check) if [ -e "$cp" ]; then echo "Master running (pid=1)" >&2; exit 0; fi; echo "Control socket connect($cp): No such file or directory" >&2; exit 255;;
   master) if [ {master_exit} -eq 0 ]; then : > "$cp"; fi; exit {master_exit};;
-  *) cd {home} && HOME={home} SHELL=/bin/zsh XDG_DATA_HOME= exec sh -c "$last";;
+  *) cd {home} && HOME={home} SHELL=/bin/zsh exec sh -c "$last";;
 esac
 "#,
             log = log.display(),

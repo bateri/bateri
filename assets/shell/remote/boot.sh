@@ -45,7 +45,7 @@
 #      silences sshd's.
 #   2. checks the login shell: zsh, bash and fish get the integration; any
 #      other (sh, csh, BusyBox ash) gets a plain login shell.
-#   3. looks for the files under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`
+#   3. looks for the files under `~/.local/share/bateri/shell/`
 #      (the same fixed path every time: a shell reads its files when it
 #      starts, so rewriting them under a running shell is harmless and nothing
 #      piles up) — the login shell's own entry file. Missing (nothing could be
@@ -153,14 +153,9 @@ case $bt_shell in
     ;;
 esac
 
-# 3. The files, where the call that wrote them put them. A relative `XDG_DATA_HOME` is ignored,
-# as the spec says.
-bt_data=${XDG_DATA_HOME:-}
-case $bt_data in
-  /*) ;;
-  *) bt_data=$HOME/.local/share ;;
-esac
-bt_dir=$bt_data/bateri/shell
+# 3. The files, where the call that wrote them put them: under the home, in the one place the
+# wrappers and kablo look in.
+bt_dir=$HOME/.local/share/bateri/shell
 # Run from its own file, it is where the files are, whatever the environment.
 case $0 in
   /*/boot.sh) bt_dir=${0%/boot.sh} ;;

@@ -55,6 +55,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_core::{PaneUuid, Settings, TERM_PROGRAM_VERSION};
 
+use kablo_bateri::paths;
+
 use crate::jobs::ssh_call;
 use crate::ssh_route::{
     Account, SESSION_PERSIST, SshConfig, SshRunner, parse_config, session_socket,
@@ -771,8 +773,12 @@ const REMOTE_FILES: [(&str, &str); 13] = [
 /// The files this Mac gets of [`REMOTE_FILES`]: the agent's command ([`files_script_here`]).
 const HERE_FILES: [&str; 1] = [AGENT_COMMAND_PATH];
 
+/// Files the writer does not write, on a server and on this Mac, and removes where it finds
+/// them: nothing reads them.
+const RETIRED: [&str; 1] = ["next.sh"];
+
 /// The script the server's `sh` reads from its standard input to write
-/// [`REMOTE_FILES`] under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`:
+/// [`REMOTE_FILES`] under `~/.local/share/bateri/shell/`:
 /// each file under a temporary name and renamed into place (a shell that starts
 /// meanwhile reads a whole file), one that is already the same left as it is
 /// (no rename on every connection), owner-only, nothing in `/tmp`, no log, the
@@ -814,20 +820,12 @@ pub fn files_script_here(kablo: Option<&str>, agent: bool) -> String {
 /// [`files_script_for`] and [`files_script_here`]: `here` writes the Mac's file
 /// ([`HERE_FILES`]) and does not look at `$SHELL`.
 fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
-    /// Where a server's files go: `XDG_DATA_HOME` as sshd's command has it, else under the home.
-    const SERVER_DIR: &str = r#"bt_data=${XDG_DATA_HOME:-}
-case $bt_data in /*) ;; *) bt_data=$HOME/.local/share ;; esac
-"#;
-    /// Where this Mac's go: under the home, whatever `XDG_DATA_HOME` is. The application's
-    /// environment is not a login shell's, and the wrappers look in one place
-    /// (`~/.local/share/bateri/shell/bin`), as kablo's counter keeps its state
-    /// (`~/.local/share/bateri/next`).
-    const HERE_DIR: &str = r#"case ${HOME-} in /*) ;; *) exit 0 ;; esac
-bt_data=$HOME/.local/share
-"#;
+    /// Where the files go, on a server and on this Mac alike: under the home, in the one place
+    /// the wrappers and kablo look in (`~/.local/share/bateri`, [`paths`]), whatever the
+    /// environment of the call is.
+    const HOME_DIR: &str = "case ${HOME-} in /*) ;; *) exit 0 ;; esac\n";
     /// The function that puts a file there.
-    const PRELUDE: &str = r#"bt_dir=$bt_data/bateri/shell
-bt_put() {
+    const PRELUDE: &str = r#"bt_put() {
   bt_tmp=$bt_dir/$1.tmp.$$
   if printf '%s' "$2" > "$bt_tmp"; then
     if cmp -s "$bt_tmp" "$bt_dir/$1"; then
@@ -869,18 +867,23 @@ bt_put() {
         .collect::<Vec<_>>()
         .join(" ");
     let served = if here {
-        HERE_DIR.to_owned()
+        HOME_DIR.to_owned()
     } else {
-        format!("{SERVED}{SERVER_DIR}")
+        format!("{SERVED}{HOME_DIR}")
     };
-    if here && !agent {
-        // Nothing to write; what an earlier call wrote goes.
-        let gone = HERE_FILES
+    let served = format!("{served}bt_dir=$HOME/{}/{}\n", paths::DIR, paths::SHELL);
+    let quoted = |paths: &[&str]| {
+        paths
             .iter()
             .map(|path| format!("\"$bt_dir/{path}\""))
             .collect::<Vec<_>>()
-            .join(" ");
-        return format!("{served}{PRELUDE}rm -f {gone} 2>/dev/null\nexit 0\n");
+            .join(" ")
+    };
+    let retired = quoted(&RETIRED);
+    if here && !agent {
+        // Nothing to write; what an earlier call wrote goes.
+        let gone = quoted(&HERE_FILES);
+        return format!("{served}{PRELUDE}rm -f {gone} {retired} 2>/dev/null\nexit 0\n");
     }
     let mut text = format!("{served}{PRELUDE}(umask 077 && mkdir -p {made} && \\\n");
     for (path, content) in &files {
@@ -899,18 +902,23 @@ bt_put() {
             crate::upload::sq(&content)
         ));
     }
+    let command = quoted(&[AGENT_COMMAND_PATH]);
     if agent {
-        text.push_str("  { chmod u+x \"$bt_dir/bin/bateri\" || :; }) 2>/dev/null\nexit 0\n");
+        text.push_str(&format!(
+            "  {{ chmod u+x {command} || :; rm -f {retired} || :; }}) 2>/dev/null\nexit 0\n"
+        ));
     } else {
-        text.push_str("  { rm -f \"$bt_dir/bin/bateri\" || :; }) 2>/dev/null\nexit 0\n");
+        text.push_str(&format!(
+            "  {{ rm -f {command} {retired} || :; }}) 2>/dev/null\nexit 0\n"
+        ));
     }
     text
 }
 
 /// What the call that looks for kablo does to a server, for a test: `sh -s` reads
 /// [`files_script`] with the environment sshd gives a command (`HOME`, `SHELL`,
-/// `XDG_DATA_HOME` pinned under the home, `extra` on top). The files are in place when it
-/// returns; what it could not write it did not.
+/// an `XDG_DATA_HOME` that is not where the files go, `extra` on top). The files are in place
+/// when it returns; what it could not write it did not.
 #[cfg(test)]
 pub(crate) fn seed_files(
     shell: &std::path::Path,
@@ -949,7 +957,7 @@ pub(crate) fn seed_files_for(
         .env_clear()
         .env("HOME", home)
         .env("SHELL", shell)
-        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_DATA_HOME", home.join("elsewhere"))
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .envs(extra.iter().map(|(key, value)| (*key, value.as_str())))
         .current_dir(home)
@@ -2563,6 +2571,8 @@ mod remote_shells {
         RemoteTarget, Session, SessionOptions, TerminalOptions, Theme,
     };
 
+    use kablo_bateri::paths;
+
     use super::{boot, boot_in, remote_command};
     use crate::child::tests::{click_dock, read_dock, screen};
     use crate::child::{SilentWake, wait_until};
@@ -2615,8 +2625,8 @@ mod remote_shells {
     }
 
     /// sshd's call: `shell -c '<the wrapped remote command>'`, `HOME` and
-    /// `SHELL` as sshd sets them, `XDG_DATA_HOME` pinned under the home (the
-    /// test machine's must not leak in), `extra` on top.
+    /// `SHELL` as sshd sets them, an `XDG_DATA_HOME` that is not where the files go (the test
+    /// machine's must not leak in), `extra` on top.
     ///
     /// It runs where the pane would see it: under the local shell's `ssh`
     /// command (block [`PARENT`]: our identified `A`, then `C`) with the
@@ -2651,7 +2661,7 @@ mod remote_shells {
             ("SHELL".to_owned(), shell.display().to_string()),
             (
                 "XDG_DATA_HOME".to_owned(),
-                home.join(".local/share").display().to_string(),
+                home.join("elsewhere").display().to_string(),
             ),
         ]);
         for (key, value) in extra {
@@ -2870,7 +2880,7 @@ mod remote_shells {
     /// The call that looks for kablo writes the shells' files, and writes them as the bootstrap
     /// used to: every file with the bytes it was built with (kablo's place in the agent's
     /// command), owner-only, the command runnable, a file that is the same left alone and one
-    /// that is not put back, nothing for a login shell the integration does not serve, a relative
+    /// that is not put back, nothing for a login shell the integration does not serve, an
     /// `XDG_DATA_HOME` ignored — through the `sh`s a server may have — and a call that cannot
     /// write ends well (the bootstrap says what is missing).
     #[test]
@@ -2948,32 +2958,19 @@ mod remote_shells {
                 "{name}"
             );
 
-            // A relative `XDG_DATA_HOME` is ignored, as the spec says; an absolute one is used.
+            // `XDG_DATA_HOME` moves nothing, relative or absolute: the files are under the home.
             let other = root.0.join("home2");
             std::fs::create_dir_all(&other).expect("home2");
             let other = std::fs::canonicalize(&other).expect("home2");
-            let wrote = super::seed_files_with(
-                &sh,
-                shell,
-                &other,
-                &[("XDG_DATA_HOME", "relative/data".to_owned())],
-                None,
-            );
-            assert!(wrote.success(), "{name}");
-            assert!(other.join(".local/share/bateri/shell/boot.sh").is_file());
-            assert!(!other.join("relative").exists(), "{name}");
             let elsewhere = root.0.join("data");
-            super::seed_files_with(
-                &sh,
-                shell,
-                &other,
-                &[("XDG_DATA_HOME", elsewhere.display().to_string())],
-                None,
-            );
-            assert!(
-                elsewhere.join("bateri/shell/bin/bateri").is_file(),
-                "{name}"
-            );
+            for xdg in ["relative/data".to_owned(), elsewhere.display().to_string()] {
+                let wrote =
+                    super::seed_files_with(&sh, shell, &other, &[("XDG_DATA_HOME", xdg)], None);
+                assert!(wrote.success(), "{name}");
+                assert!(other.join(".local/share/bateri/shell/boot.sh").is_file());
+                assert!(!other.join("relative").exists(), "{name}");
+                assert!(!elsewhere.exists(), "{name}");
+            }
             // Without kablo's place the agent's command keeps the word it looks for kablo by.
             let bare = std::fs::read_to_string(other.join(".local/share/bateri/shell/bin/bateri"))
                 .expect("command");
@@ -3020,6 +3017,108 @@ mod remote_shells {
         assert!(dir.join("boot.sh").is_file());
         assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), true).success());
         assert!(dir.join("bin/bateri").is_file());
+    }
+
+    /// The counter file a machine got from an earlier call goes with the next call, on a server
+    /// and on this Mac alike, and the files beside it stay as they are.
+    #[test]
+    fn the_counter_file_an_earlier_call_left_is_taken_away() {
+        let root = TempRoot::new("remote-files-retired");
+        let base = std::fs::canonicalize(&root.0).expect("root");
+        let sh = Path::new("/bin/sh");
+        let shell = Path::new("/usr/bin/bash");
+        let leave = |home: &Path| {
+            let dir = home.join(".local/share/bateri/shell");
+            std::fs::create_dir_all(&dir).expect("dir");
+            for retired in super::RETIRED {
+                std::fs::write(dir.join(retired), "old").expect("retired");
+            }
+            std::fs::write(dir.join("boot.sh"), "mine").expect("boot");
+            dir
+        };
+        let server = base.join("server");
+        let dir = leave(&server);
+        assert!(super::seed_files_for(sh, shell, &server, &[], Some("k/kablo"), true).success());
+        for retired in super::RETIRED {
+            assert!(!dir.join(retired).exists(), "{retired} stayed on a server");
+        }
+        assert!(dir.join("zsh/bateri.zsh").is_file());
+        assert_ne!(
+            std::fs::read_to_string(dir.join("boot.sh")).unwrap_or_default(),
+            "mine"
+        );
+        let off = base.join("server-off");
+        let dir = leave(&off);
+        assert!(super::seed_files_for(sh, shell, &off, &[], Some("k/kablo"), false).success());
+        for retired in super::RETIRED {
+            assert!(!dir.join(retired).exists(), "{retired} stayed at level off");
+        }
+        for agent in [true, false] {
+            let mac = base.join(format!("mac-{agent}"));
+            let dir = leave(&mac);
+            assert!(super::seed_files_here(&mac, Some("k/kablo"), agent).success());
+            for retired in super::RETIRED {
+                assert!(!dir.join(retired).exists(), "{retired} stayed on the Mac");
+            }
+            assert_eq!(
+                std::fs::read_to_string(dir.join("boot.sh")).expect("boot"),
+                "mine",
+                "the Mac does not write a server's files"
+            );
+        }
+    }
+
+    /// The writer and the readers of a machine's files name them once: what the writer puts
+    /// where, `kablo-bateri::paths` says.
+    #[test]
+    fn the_files_are_named_by_the_paths_the_readers_use() {
+        assert_eq!(
+            super::AGENT_COMMAND_PATH,
+            format!("{}/{}", paths::BIN, paths::COMMAND)
+        );
+        assert!(
+            super::REMOTE_FILES
+                .iter()
+                .any(|(path, _)| *path == paths::BOOT),
+            "{} is not written",
+            paths::BOOT
+        );
+        assert_eq!(super::RETIRED, [format!("{}.sh", paths::COUNTER)]);
+        let script = super::files_script_for(None, true);
+        assert!(
+            script.contains(&format!("bt_dir=$HOME/{}/{}\n", paths::DIR, paths::SHELL)),
+            "{script}"
+        );
+        let boot = include_str!("../../../assets/shell/remote/boot.sh");
+        assert!(
+            boot.contains(&format!("bt_dir=$HOME/{}/{}\n", paths::DIR, paths::SHELL)),
+            "boot.sh looks elsewhere"
+        );
+    }
+
+    /// What a server's shell has of the app is `LC_BATERI_TAB_URL` alone: `kablo bateri` reads
+    /// `BATERI_TAB_URL` as "this pane is the app of this machine's", and a file bateri writes to
+    /// a server that set it (or `TERM_PROGRAM`, the other thing a local pane has) would make a
+    /// server's pane read as a local one.
+    #[test]
+    fn no_file_a_server_gets_says_it_is_the_pane_of_an_app_on_the_server() {
+        for (path, content) in super::REMOTE_FILES {
+            for line in content
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+            {
+                assert!(
+                    !line
+                        .replace("LC_BATERI_TAB_URL", "")
+                        .contains("BATERI_TAB_URL"),
+                    "{path} sets BATERI_TAB_URL: {line}"
+                );
+                assert!(
+                    !line.contains("TERM_PROGRAM"),
+                    "{path} sets TERM_PROGRAM: {line}"
+                );
+            }
+        }
     }
 
     /// The command is kablo's, and the file on the machine only starts it: one command line, no
@@ -3765,7 +3864,7 @@ mod remote_shells {
             .env_clear()
             .env("HOME", home)
             .env("SHELL", shell)
-            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_DATA_HOME", home.join("elsewhere"))
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .envs(extra.iter().map(|(key, value)| (*key, value.as_str())))
             .current_dir(home)
@@ -3822,7 +3921,7 @@ mod remote_shells {
                     .env_clear()
                     .env("HOME", &home)
                     .env("SHELL", &shell)
-                    .env("XDG_DATA_HOME", home.join(".local/share"))
+                    .env("XDG_DATA_HOME", home.join("elsewhere"))
                     .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                     // An inherited value of another terminal is overridden.
                     .env("LC_TERMINAL", "iTerm2")
@@ -3875,7 +3974,7 @@ mod remote_shells {
                     .env_clear()
                     .env("HOME", &home)
                     .env("SHELL", &shell)
-                    .env("XDG_DATA_HOME", home.join(".local/share"))
+                    .env("XDG_DATA_HOME", home.join("elsewhere"))
                     .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                     .current_dir(&home)
                     .stdin(std::process::Stdio::null())
