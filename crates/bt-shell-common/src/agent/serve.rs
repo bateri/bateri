@@ -149,8 +149,9 @@ pub enum Answer {
     /// A `place` whose terminal runs on another server (`server`): the shell finds that server,
     /// then asks [`place_on`] to put the pane. The level has been judged as for [`Answer::Ssh`].
     PlaceOn(Place),
-    /// `relay`, from a server: the shell runs the command on the machine it names — on a thread
-    /// of its own — and answers how it ended ([`super::relay`]). The level has been judged.
+    /// `relay`: the shell runs the command on the machine it names over the connection it keeps
+    /// — on a thread of its own — and answers how it ended ([`super::relay`]). The level has been
+    /// judged.
     Relay(Relay),
 }
 

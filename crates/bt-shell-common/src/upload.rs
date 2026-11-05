@@ -388,10 +388,8 @@ impl Heard {
     /// nothing on success, and the reason a failure gives is the last line there.
     ///
     /// bsdtar writes `x name` when an entry begins and ends the line only when the
-    /// entry does, with `: error` if it failed. So the line of the entry it is in
-    /// when the link drops is never ended, and **ssh's own message lands on it**:
-    /// `x ./big.binclient_loop: send disconnect: Broken pipe`. Whatever follows the
-    /// next entry's name is therefore the line's own news ([`leaves`]). A listing
+    /// entry does, with `: error` if it failed: the `: error` after the next entry's
+    /// name is the line's own news ([`leaves`]). A listing
     /// line that does not name the next entry — the match has stalled on a name we
     /// do not read, or [`UNHEARD_LIMIT`] was passed — is still listing: every name
     /// we send starts with `./` ([`transfer`]), so `x ./` is bsdtar speaking. It
@@ -415,24 +413,6 @@ impl Heard {
         } else {
             Told::Other
         }
-    }
-
-    /// What the last listing line we could not place ([`Told::Unplaced`]) leaves for
-    /// the error text, once the stream has ended — it is the line ssh's message is
-    /// glued to if the link dropped while the match was stalled. Its entry is one we
-    /// sent and the server had not been heard to reach, so it is sought among those
-    /// (the longest name that fits, as `./a b` before `./a`); once, at the end, so
-    /// a long stalled listing costs no search per line.
-    fn glued(&self, line: &str) -> Option<String> {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let listed = line.strip_prefix("x ")?;
-        let rest = self
-            .unheard
-            .iter()
-            .filter_map(|name| Some((name.len(), after(listed, name)?)))
-            .max_by_key(|(len, _)| *len)?
-            .1;
-        leaves(listed, rest)
     }
 }
 
@@ -466,16 +446,9 @@ fn after(text: &str, name: &str) -> Option<String> {
 /// What bsdtar's `x {listed}` leaves for the error text, `rest` being what follows
 /// the entry's name: nothing for the listing alone; for an entry that failed the
 /// line as bsdtar writes it without `-v` (`./b: Can't create 'b'`), so the text
-/// reads as it did before; anything else is not bsdtar's — ssh's message, glued
-/// to the line bsdtar had not ended.
+/// reads as it did before.
 fn leaves(listed: &str, rest: String) -> Option<String> {
-    if rest.is_empty() {
-        None
-    } else if rest.starts_with(": ") {
-        Some(listed.to_owned())
-    } else {
-        Some(rest)
-    }
+    rest.starts_with(": ").then(|| listed.to_owned())
 }
 
 /// Whether the remote tar's `line` lists the entry `name`: GNU tar and busybox
@@ -1693,9 +1666,6 @@ pub(crate) fn collect_stderr(
             return String::new();
         };
         let mut text = String::new();
-        // The last listing line not placed and where the text stood after it: the
-        // one ssh's message may be glued to ([`Heard::glued`]).
-        let mut unplaced: Option<(String, usize)> = None;
         let mut reader = BufReader::new(stream);
         let mut bytes = Vec::new();
         loop {
@@ -1723,27 +1693,13 @@ pub(crate) fn collect_stderr(
             });
             let kept = match told {
                 Told::Other => Some(line.into_owned()),
-                Told::Listing(kept) => {
-                    unplaced = None;
-                    kept
-                }
-                Told::Unplaced => {
-                    unplaced = Some((line.into_owned(), text.len()));
-                    None
-                }
+                Told::Listing(kept) => kept,
+                Told::Unplaced => None,
             };
             if let Some(kept) = kept {
                 text.push_str(&kept);
                 text.push('\n');
             }
-        }
-        if let (Some(listing), Some((line, at))) = (&listing, unplaced)
-            && let Some(glued) = listing
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .glued(&line)
-        {
-            text.insert_str(at, &format!("{glued}\n"));
         }
         text
     })
@@ -4748,39 +4704,6 @@ mod tests {
         let (text, heard) = failure_text("x ./f0\nx ./f1\nx ./f2\n", &sent);
         assert_eq!(text, "");
         assert!(heard.lock().unwrap().lost);
-    }
-
-    #[test]
-    fn an_ssh_message_glued_to_bsdtars_unended_line_is_the_failure_text() {
-        // bsdtar had begun `big.bin` and not ended its line when the link dropped.
-        let (text, heard) = failure_text(
-            "x ./big.binclient_loop: send disconnect: Broken pipe\n",
-            &["./big.bin"],
-        );
-        assert_eq!(text, "client_loop: send disconnect: Broken pipe\n");
-        assert!(
-            heard.lock().unwrap().caught_up(),
-            "the server did reach big.bin"
-        );
-
-        // The name escaped, as bsdtar writes what it does not print.
-        let (text, _) = failure_text(
-            "x ./caf\\303\\251.binclient_loop: send disconnect: Broken pipe\n",
-            &["./café.bin"],
-        );
-        assert_eq!(text, "client_loop: send disconnect: Broken pipe\n");
-
-        // The match had stalled: the glued line is found among the entries not yet
-        // heard, the longest name that fits, and keeps its place in the text.
-        let (text, heard) = failure_text(
-            "x ./c\\314\\247\nx ./a bTimeout, server prod not responding.\nlost connection\n",
-            &["./ç", "./a", "./a b"],
-        );
-        assert_eq!(
-            text,
-            "Timeout, server prod not responding.\nlost connection\n"
-        );
-        assert!(!heard.lock().unwrap().caught_up());
     }
 
     #[test]

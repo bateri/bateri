@@ -1935,12 +1935,14 @@ server's interfaces and this Mac reaches it (bateri tries one connection when
 the port first shows). It shows **dim** when it does not: it listens only on
 the server itself (`127.0.0.1`, a dev server's usual default), a firewall
 keeps this Mac out, or the server sits behind a jump host. Opening a dim port
-forwards it through your ssh connection first — to the same port number on
-this Mac when that is free — then opens `http://localhost:<port>`, and the
-port turns green. The forward ends when the ssh session does. This needs a
-terminal on the server (`[remote] integration`, below; a plain `ssh` has none)
-and a Linux server; a port of a program started with `sudo` or in a container
-on the server does not show.
+forwards it over the connection bateri keeps to the server — to the same port
+number on this Mac when that is free — then opens `http://localhost:<port>`,
+and the port turns green. The forward ends when the session on the server does. A
+server whose administrator has forbidden forwarding (the file
+`/etc/kablo/no-forwarding`) opens no port, and bateri says so when you try to
+open one. This needs a terminal on the server (`[remote] integration`, below;
+a plain `ssh` has none) and a Linux server; a port of a program started with
+`sudo` or in a container on the server does not show.
 
 Ports are looked up only when something happens in the tab — a command
 starts or ends, or a program prints — never on a timer, so an idle tab costs

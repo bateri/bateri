@@ -8,7 +8,7 @@
 //! caller writes waits in a bounded channel the service takes from as far as the server's window
 //! allows, whenever it settles.
 
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,8 @@ pub(super) struct StreamOpen {
     what: What,
     port: Arc<ServicePort>,
     far: Far,
+    /// A person asked for it ([`Streams::of_a_person`]).
+    person: bool,
     /// The connection was told to dial now for it (once: a login that is still wanted is not
     /// tried again and again).
     dialed: bool,
@@ -83,9 +85,23 @@ impl Port for ServicePort {
 #[derive(Clone)]
 pub struct Streams {
     pub(super) tx: Sender<Msg>,
+    /// What is asked for is for a person ([`Streams::of_a_person`]).
+    pub(super) person: bool,
 }
 
 impl Streams {
+    /// The same, for what a person asked for (a command they ran, a file they dropped): a
+    /// connection that is waiting out the pause of a failure dials now for it, and one that wants
+    /// a login is tried once more. What nobody asked for (a preview, a listing, the load
+    /// indicator) waits for the connection as it is and does not dial it: every attempt that
+    /// fails is a login the server counts.
+    pub fn of_a_person(&self) -> Streams {
+        Streams {
+            tx: self.tx.clone(),
+            person: true,
+        }
+    }
+
     /// Runs `command` on the server of `account`, as [`RemoteCommand`] says. `wait` is how long
     /// the connection and the server's answer may take. `Err` is a line for the person who asked.
     pub fn command(
@@ -113,6 +129,23 @@ impl Streams {
         self.open(account, what, wait).map(RemoteStream::of)
     }
 
+    /// A person signed in for `account`'s server (a sheet they answered): a connection that
+    /// waited for the login dials now, as when a pane's login is done.
+    pub fn dial(&self, account: &str) {
+        let _ = self.tx.send(Msg::Retry(account.to_owned()));
+    }
+
+    /// Whether the connection to the server of `account` is up now: then a caller needs no
+    /// sign-in first, and none is looked at.
+    pub fn live(&self, account: &str) -> bool {
+        let (reply, answer) = mpsc::channel();
+        let asked = Msg::StreamLive {
+            account: account.to_owned(),
+            reply,
+        };
+        self.tx.send(asked).is_ok() && answer.recv_timeout(Duration::from_secs(2)).unwrap_or(false)
+    }
+
     fn open(&self, account: &str, what: What, wait: Duration) -> Result<remote::Opened, String> {
         let port = Arc::new(ServicePort {
             tx: self.tx.clone(),
@@ -126,6 +159,7 @@ impl Streams {
                 what,
                 port,
                 far,
+                person: self.person,
                 dialed: false,
             }))
             .map_err(|_| "bateri is shutting down".to_owned())?;
@@ -134,8 +168,20 @@ impl Streams {
 }
 
 impl Core {
-    /// A caller wants a stream: it waits for the account's connection.
+    /// Whether the account's connection is up ([`Streams::live`]).
+    pub(super) fn stream_live(&mut self, account: &str) -> bool {
+        self.hub
+            .client_mut(account)
+            .is_some_and(|client| matches!(client.link(), Link::Live))
+    }
+
+    /// A caller wants a stream: it waits for the account's connection. A server this process
+    /// keeps no connection to yet, but whose files the ledger knows, is connected as a pane
+    /// that returns to it would be (the program that asks is not a pane's).
     pub(super) fn stream_wanted(&mut self, open: StreamOpen) {
+        if !self.accounts.contains_key(&open.account) {
+            self.recall(&open.account);
+        }
         self.opening.push(open);
     }
 
@@ -166,8 +212,8 @@ impl Core {
                     continue;
                 }
                 Link::Retrying { .. } => {
-                    // The user asked: not after the pause of a connection that failed.
-                    if !open.dialed {
+                    // A person asked: not after the pause of a connection that failed.
+                    if open.person && !open.dialed {
                         open.dialed = true;
                         client.retry_now(now);
                     }
@@ -175,7 +221,7 @@ impl Core {
                     continue;
                 }
                 Link::NeedsLogin => {
-                    if open.dialed {
+                    if open.dialed || !open.person {
                         open.far.refused(&format!(
                             "{host} wants a login that bateri cannot give: open a terminal on it and log in"
                         ));
@@ -273,7 +319,7 @@ impl Core {
             client.hang_up(talk);
         }
         if let Some(mut piped) = self.pipes.remove(&(account.to_owned(), talk)) {
-            piped.far.over(&Over::Closed);
+            piped.far.over(&Over::Finished);
         }
     }
 

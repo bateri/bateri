@@ -927,6 +927,11 @@ enum Msg {
     Rewrite(String),
     /// A caller wants a program or a connection on an account's server ([`Streams`]).
     StreamOpen(pipes::StreamOpen),
+    /// Whether the account's connection is up now ([`Streams::live`]).
+    StreamLive {
+        account: String,
+        reply: Sender<bool>,
+    },
     /// A caller's reads took `bytes` of what a stream's far end sent.
     StreamTook {
         account: String,
@@ -1258,7 +1263,10 @@ impl Service {
         let serving = thread::Builder::new()
             .name("ssh-hold service".into())
             .spawn(move || core.run())?;
-        kept_backend.serving(Streams { tx: tx.clone() });
+        kept_backend.serving(Streams {
+            tx: tx.clone(),
+            person: false,
+        });
         Ok(Service {
             socket,
             tx,
@@ -1276,10 +1284,12 @@ impl Service {
     }
 
     /// What asks the service for a program or a connection on an account's server
-    /// ([`Streams`]).
+    /// ([`Streams`]); the application's own is the one [`Backend::serving`] was given.
+    #[cfg(test)]
     pub fn streams(&self) -> Streams {
         Streams {
             tx: self.tx.clone(),
+            person: false,
         }
     }
 
@@ -2037,6 +2047,9 @@ impl Core {
                 }
             }
             Msg::StreamOpen(open) => self.stream_wanted(open),
+            Msg::StreamLive { account, reply } => {
+                let _ = reply.send(self.stream_live(&account));
+            }
             Msg::StreamTook {
                 account,
                 talk,
@@ -2521,15 +2534,19 @@ impl Core {
             client.decline(ticket, "bateri is not taking requests from programs now");
             return;
         }
-        if let Some(talk) = client.accept(ticket) {
-            self.drafts.insert(
-                (account.to_owned(), talk),
-                Draft {
-                    from,
-                    bytes: Vec::new(),
-                },
-            );
-        }
+        // All the connection's streams in use: the program is told, not left to wait out its ten
+        // seconds for nothing.
+        let Some(talk) = client.accept(ticket) else {
+            client.decline(ticket, "bateri has too many requests going on now");
+            return;
+        };
+        self.drafts.insert(
+            (account.to_owned(), talk),
+            Draft {
+                from,
+                bytes: Vec::new(),
+            },
+        );
     }
 
     /// The program said more. A program that says more than a request is ever

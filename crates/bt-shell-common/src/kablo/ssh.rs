@@ -154,6 +154,14 @@ impl SshBackend {
             return Ok(());
         }
         self.touched(server, &server.host)?;
+        // A connection that is up needs no sign-in: the `ssh` that carries it is the login, and
+        // looking at the route would start `ssh -G` and `ssh -O check` for every command.
+        if self
+            .streams()
+            .is_ok_and(|streams| streams.live(&server.key))
+        {
+            return Ok(());
+        }
         if let Some(masters) = &self.masters {
             masters
                 .ensure(&self.target(server), ask)
@@ -166,6 +174,17 @@ impl SshBackend {
         self.streams
             .get()
             .ok_or_else(|| "bateri's connections are not running".to_owned())
+    }
+
+    /// The streams for a job: a person's when it has a sheet to ask with ([`Ask::Sheet`]), that
+    /// is, when a person started it.
+    fn streams_for(&self, person: bool) -> Result<Streams, String> {
+        let streams = self.streams()?;
+        Ok(if person {
+            streams.of_a_person()
+        } else {
+            streams.clone()
+        })
     }
 
     /// What a program's `bateri` runs on a server is kablo there, and the one-line file that
@@ -580,7 +599,7 @@ impl Backend for SshBackend {
             )
         })?;
         if local::is_account(&server.key) {
-            return Err(format!("{name} is this Mac"));
+            return Err(format!("{name} is this computer"));
         }
         // A server bateri has never put its files on has no `bateri` to start a terminal with.
         self.touched(&server, name)?;
@@ -591,12 +610,18 @@ impl Backend for SshBackend {
             return Ok(Reached { server, level });
         }
         let target = self.target(&server);
+        let person = matches!(ask, Ask::Sheet(_));
         let route = match &self.masters {
             Some(masters) => masters
                 .ensure(&target, ask)
                 .map_err(|denied| denied.text())?,
             None => self.route_of(&target),
         };
+        // The person who was asked for the login has given it: the connection that waited for it
+        // dials now, for the program that came after (it asks nothing itself).
+        if person && let Ok(streams) = self.streams() {
+            streams.dial(&server.key);
+        }
         let argv = ssh_argv_for(&target, &route);
         self.install_for_reach(&server, &argv, live);
         Ok(Reached { server, level })
@@ -613,8 +638,10 @@ impl Backend for SshBackend {
         ask: Ask,
         wait: Duration,
     ) -> Result<RemoteCommand, String> {
+        let person = matches!(ask, Ask::Sheet(_));
         self.connected(server, ask)?;
-        self.streams()?.command(&server.key, command, wait)
+        self.streams_for(person)?
+            .command(&server.key, command, wait)
     }
 
     fn connection(
@@ -625,8 +652,10 @@ impl Backend for SshBackend {
         ask: Ask,
         wait: Duration,
     ) -> Result<RemoteStream, String> {
+        let person = matches!(ask, Ask::Sheet(_));
         self.connected(server, ask)?;
-        self.streams()?.connection(&server.key, host, port, wait)
+        self.streams_for(person)?
+            .connection(&server.key, host, port, wait)
     }
 
     fn reachable(&self, account: &str, server: &KabloHost) {

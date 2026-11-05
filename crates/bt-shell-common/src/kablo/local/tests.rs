@@ -2864,9 +2864,14 @@ mod relayed {
         });
         let path = kablo_proto::install::install_path(&version).expect("a path");
         // kablo for the server, and the files of a server bateri has set up: the writer's own.
-        let artifact = bundle
-            .artifact(kablo_proto::install::Target::LinuxAarch64)
-            .expect("a kablo for the server");
+        let (status, said) = sshd.run("uname -m", &[]);
+        assert_eq!(status, Some(0), "the server's machine");
+        let target = match said.trim() {
+            "aarch64" | "arm64" => kablo_proto::install::Target::LinuxAarch64,
+            "x86_64" => kablo_proto::install::Target::LinuxX86_64,
+            other => panic!("a server of {other}: no kablo for it"),
+        };
+        let artifact = bundle.artifact(target).expect("a kablo for the server");
         let (status, _) = sshd.run(
             &format!(
                 "mkdir -p \"$(dirname \"$HOME/{path}\")\" && cat > \"$HOME/{path}.new\" && chmod 755 \"$HOME/{path}.new\" && mv -f \"$HOME/{path}.new\" \"$HOME/{path}\""

@@ -85,6 +85,8 @@ pub mod shortcuts;
 pub mod split;
 pub mod ssh_hosts;
 pub mod ssh_route;
+#[cfg(test)]
+mod ssh_spawners;
 pub mod ssh_wrap;
 pub mod stage;
 pub mod tabs;

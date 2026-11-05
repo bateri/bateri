@@ -3,8 +3,8 @@
 //! half, without I/O.
 //!
 //! - **The helper session's protocol** ([`helper_script`], [`request_line`],
-//!   [`parse_greeting`], [`parse_reply`]): one long-lived `ssh … sh` per pane
-//!   answers "does this exist, what is it, how big, how old" line by
+//!   [`parse_greeting`], [`parse_reply`]): one long-lived `sh` per pane, run over
+//!   the connection kablo keeps to its server, answers "does this exist, what is it, how big, how old" line by
 //!   line. A request is one line of `sh` the loop `eval`s, every path
 //!   quoted with `upload`'s [`sq`] and rejected by its [`is_safe`] (no
 //!   backslash, no control character — so no newline can split a request);
@@ -872,7 +872,7 @@ struct SshDestination {
     translatable: bool,
 }
 
-/// Walks the ssh argv the way `upload::ssh_argv` does (`jobs`'s
+/// Walks the ssh argv the way [`crate::upload::ssh_argv_for`] does (`jobs`'s
 /// [`SSH_VALUED`] says which flag takes a value; options after the destination
 /// count too, the remote command ends the walk).
 fn parse_ssh(target: &RemoteTarget) -> Option<SshDestination> {

@@ -223,8 +223,14 @@ fn carry(socket: TcpStream, served: &Served, host: &str, port: u16, shared: &Sha
             let _ = io::copy(&mut from_client, &mut writer);
             // The client has no more to say: the server's end hears it end (`writer` drops).
         });
-    let _ = io::copy(&mut reader, &mut to_client);
-    let _ = to_client.shutdown(Shutdown::Write);
+    // The server's end ended: cleanly, the client may still have something to say and is waited
+    // for; with an error the answer is cut, and the client is let go of at once.
+    let said_all = io::copy(&mut reader, &mut to_client).is_ok();
+    let _ = to_client.shutdown(if said_all {
+        Shutdown::Write
+    } else {
+        Shutdown::Both
+    });
     if let Ok(up) = up {
         let _ = up.join();
     }

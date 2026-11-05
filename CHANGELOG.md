@@ -34,11 +34,15 @@ of every installed copy. A version without a section is not released.
   each machine ran for itself; it is now `kablo bateri` (the file `bateri` on your `PATH` only starts it), and bateri on the Mac
   tells it where it runs. A terminal an agent opens on a server is started the same way as on this Mac, a number is still never
   given twice, and a server is set up with the new kablo the first time a program reaches it.
+- **What bateri does on a server goes over the one connection kablo keeps to it.** Previews and listings, the load indicator, files dropped on a server pane and downloads, open ports, and what a program on a server asks of your other machines (`bateri split -S prod`, `bateri send p9@prod`) each started an `ssh` of their own. They share the terminal's connection now: no second login, no second password question, and `ssh` is started only to sign in and to put kablo on a server.
+- **A server whose administrator forbids forwarding opens no port**, and bateri says why when you try; the file is `/etc/kablo/no-forwarding`.
+- **`bateri capture p9@prod` that prints more than 4 MiB ends with an error that says so**, as it already did for a program on a server. What bateri runs on another machine for a program on a server (`bateri wait p9@prod`) lasts as long as the job and ends with the program that asked: no hour limit, and nothing is left running on the server when you press ^C.
 - **A program that prints a lot reaches the screen faster.** Text, colored output and wide
   characters cost less on the way from a program to the window.
 
 ### Fixed
 
+- `bateri split` with no program, run where the bateri app does not answer (a terminal that belongs to no pane of this computer, a plain ssh shell), is an error now: it used to open a terminal nobody could see.
 - A tab title about as wide as its room no longer shakes and flickers at its fade. Every title in the tab list also starts at the same place now, whether it fits or not.
 - A program's view on a server comes back by itself after the connection drops, as when the computer sleeps. It used to leave an empty pane with the program still running behind it, until you quit the program and started it again.
 - If the program ended while the connection was gone, its view closes and nothing is typed at the prompt that took its place.

@@ -17,8 +17,8 @@
 //! link carries ([`kablo_proto::tune`]). The conversations of mail are the exception: their owner
 //! bounds what it keeps itself and the credit goes back as the bytes arrive. What the owner says
 //! goes as far as the window the server gave allows and the rest waits for its credit
-//! ([`Client::unsent`] tells how much waits); a server that sends more than it was given, or
-//! anything after its own `eof`, has the stream closed.
+//! ([`Client::unsent`] tells how much waits); a server that sends more than it was given has the
+//! stream closed, and what it sends after its own `eof` is dropped.
 //!
 //! **The end.** [`Client::finish`] says the owner has nothing more (`eof`) once what it said is
 //! sent. A conversation or a connection is over ([`Over::Finished`]) when both ends have said so; a
@@ -350,6 +350,7 @@ impl Client {
     }
 
     /// How many streams are on this connection.
+    #[cfg(test)]
     pub fn streams_open(&self) -> usize {
         self.streams.table.len()
     }

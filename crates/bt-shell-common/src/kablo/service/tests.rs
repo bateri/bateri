@@ -3256,6 +3256,29 @@ fn an_application_that_takes_no_mail_is_given_none_and_a_ticket_that_comes_anywa
 }
 
 #[test]
+fn a_ticket_that_comes_when_all_the_streams_are_in_use_is_declined_in_words() {
+    let (rig, _holder, _terminal) = mail_rig("mail-full");
+    let held: Vec<_> = (0..kablo_proto::v1::stream::MAX_STREAMS)
+        .map(|_| {
+            rig.service
+                .streams()
+                .command(ACCOUNT, running(&["sleep", "100"]), Duration::from_secs(20))
+                .expect("a program")
+        })
+        .collect();
+    let ticket = program_calls(&rig, None);
+    until("the decline", || !rig.world.bridge().declined().is_empty());
+    assert_eq!(
+        rig.world.bridge().declined(),
+        [(
+            ticket,
+            "bateri has too many requests going on now".to_owned()
+        )]
+    );
+    drop(held);
+}
+
+#[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn an_answer_to_a_letter_of_a_connection_that_went_is_not_said_on_the_next() {
     let (rig, _holder, _terminal) = mail_rig("letter-stale");
@@ -4532,6 +4555,26 @@ fn a_caller_runs_a_program_reads_its_output_and_errors_apart_and_waits_for_how_i
 }
 
 #[test]
+fn a_stream_the_server_closes_before_it_said_all_it_had_is_an_error_to_the_reader() {
+    let (rig, _holder) = streams_rig("stream-cut");
+    let mut command = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["sleep", "100"]), Duration::from_secs(20))
+        .expect("a program");
+    let stream = last_stream(&rig);
+    rig.world.bridge().sender_data(stream, b"half");
+    rig.world.bridge().sender_close(stream);
+    let mut out = Vec::new();
+    let error = command
+        .stdout
+        .read_to_end(&mut out)
+        .expect_err("not the whole of it");
+    assert!(error.to_string().contains("closed the stream"), "{error}");
+    assert_eq!(out, b"half");
+}
+
+#[test]
 fn what_the_server_sent_is_credited_as_the_caller_reads_it() {
     let (rig, _holder) = streams_rig("stream-credit");
     let mut command = rig
@@ -4641,6 +4684,92 @@ fn an_open_the_server_refuses_is_the_servers_words_and_a_server_nobody_keeps_is_
         .err()
         .expect("no such account");
     assert!(error.contains("keeps no connection"), "{error}");
+}
+
+#[test]
+fn a_job_nobody_asked_for_does_not_dial_a_connection_that_wants_a_login_and_a_persons_does_once() {
+    let rig = Rig::new("stream-login");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::PermissionDenied));
+    rig.world.break_connection();
+    until("it needs a login", || {
+        rig.service.shown(&pane).map(|shown| shown.link) == Some(PaneLink::NeedsLogin)
+    });
+    let attempts = rig.world.count("carry");
+
+    let error = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["ls"]), Duration::from_secs(20))
+        .err()
+        .expect("refused");
+    assert!(error.contains("wants a login"), "{error}");
+    assert_eq!(
+        rig.world.count("carry"),
+        attempts,
+        "nothing was dialed for it"
+    );
+
+    let error = rig
+        .service
+        .streams()
+        .of_a_person()
+        .command(ACCOUNT, running(&["ls"]), Duration::from_secs(20))
+        .err()
+        .expect("refused");
+    assert!(error.contains("wants a login"), "{error}");
+    assert_eq!(
+        rig.world.count("carry"),
+        attempts + 1,
+        "one try for a person"
+    );
+
+    // A person signed in: the connection that waited for it dials, and a job nobody asked for
+    // rides it.
+    rig.world.carry_fails_with(None);
+    rig.service.streams().dial(ACCOUNT);
+    rig.service
+        .streams()
+        .command(ACCOUNT, running(&["ls"]), Duration::from_secs(20))
+        .expect("the connection is back");
+}
+
+#[test]
+fn a_connection_that_is_up_is_said_to_be_and_a_server_nobody_keeps_is_not() {
+    let (rig, _holder) = streams_rig("stream-live");
+    until("the connection", || rig.service.streams().live(ACCOUNT));
+    assert!(!rig.service.streams().live("nobody@nowhere:22"));
+}
+
+#[test]
+fn a_server_the_ledger_knows_and_no_pane_of_this_run_uses_is_connected_for_a_program_that_asks() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("stream-recalled", world, ledger.clone(), END_GRACE);
+    ledger.remember(
+        &local::host(),
+        &Installed {
+            target: kablo_proto::install::Target::MacosAarch64,
+            version: "0.2.0".to_owned(),
+            path: String::new(),
+            fresh: false,
+        },
+    );
+    let command = rig
+        .service
+        .streams()
+        .command(
+            local::ACCOUNT,
+            running(&["sh", "-c", "true"]),
+            Duration::from_secs(20),
+        )
+        .expect("a program on a server the ledger knows");
+    drop(command);
 }
 
 #[test]

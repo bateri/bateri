@@ -832,7 +832,26 @@ install: bundle
 DEV_APP = $(TARGET_DIR)/dev/bateri-dev.app
 DEV_ID = dev.bateri.dev
 DEV_SETTINGS = $(HOME)/.config/bateri-dev
-dev:
+# What `dev` packages is the kablo this tree is built against: the pins of kablo's crates in
+# `Cargo.toml` are one commit, and the release in `$(KABLO_DIST)` was built from it (a development
+# release's version ends `+` and the first twelve digits of its commit). A release built from
+# another commit would be a bateri whose kablo and kablo's crates are two versions of the wire; this
+# stops before anything is packaged or opened.
+.PHONY: kablo-rev
+kablo-rev:
+	@revs=$$(grep 'git = "https://github.com/bateri/kablo"' Cargo.toml | sed -E 's/.*rev = "([0-9a-f]+)".*/\1/' | sort -u); \
+	case "$$revs" in ""|*[!0-9a-f]*) echo "dev: Cargo.toml pins kablo's crates at more than one commit (or none): $$revs"; exit 1;; esac; \
+	test -f $(KABLO_DIST)/SHA256SUMS || { echo "dev: there is no kablo release in $(KABLO_DIST) (KABLO_DIST names the directory of one — kablo's \`make dist\` writes it)"; exit 1; }; \
+	version=$$(awk '{print $$2}' $(KABLO_DIST)/SHA256SUMS | grep '^kablo-' | sed -E 's/^kablo-(.*)-(aarch64|x86_64)-(apple|unknown)-.*/\1/' | sort -u); \
+	test "$$(echo "$$version" | wc -l | tr -d ' ')" = 1 || { echo "dev: $(KABLO_DIST) holds more than one kablo version: $$version"; exit 1; }; \
+	built=$${version#*+}; \
+	if test "$$built" != "$$version" && test "$${revs#$$built}" = "$$revs"; then \
+		echo "dev: the kablo in $(KABLO_DIST) is $$version, built from $$built, and Cargo.toml pins kablo's crates at $$revs."; \
+		echo "dev: build the release from that commit — \`make dist\` in kablo's checkout at $$revs — or give KABLO_DIST=<its dist>."; \
+		exit 1; \
+	fi
+
+dev: kablo-rev
 	@if pgrep -f '^$(DEV_APP)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
 		echo "dev: bateri-dev is open — quit it first (⌘Q), then retry"; exit 1; fi
 	$(MAKE) --no-print-directory bundle APP=$(DEV_APP) SIGN_ID=-

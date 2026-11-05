@@ -88,6 +88,16 @@ pub(super) struct Far {
     answer: Option<Sender<Result<(), String>>>,
 }
 
+impl Drop for Far {
+    /// A stream the service lets go of without ending it (the service itself stopped) is over for
+    /// the caller too: its readers get the reason and its wait for the end is released.
+    fn drop(&mut self) {
+        if self.shared.ended().over.is_none() {
+            self.over(&Over::Lost);
+        }
+    }
+}
+
 /// The two ends of the pipes of one stream.
 pub(super) fn pipes(port: Arc<dyn Port>) -> (Handles, Far) {
     let shared = Arc::new(Shared {
@@ -183,16 +193,19 @@ impl RemoteCommand {
     }
 
     /// Waits until the program has ended, and says how ([`End::wait`]).
+    #[cfg(test)]
     pub fn wait(&self) -> Result<Exit, String> {
         self.end.wait()
     }
 
     /// How the program ended, if it has ([`End::try_wait`]).
+    #[cfg(test)]
     pub fn try_wait(&self) -> Option<Result<Exit, String>> {
         self.end.try_wait()
     }
 
     /// Ends the program now ([`End::kill`]).
+    #[cfg(test)]
     pub fn kill(&self) {
         self.end.kill();
     }
@@ -466,7 +479,7 @@ impl Far {
                 "the stream ended before the program said how it ended",
             ),
             Over::Closed => (
-                false,
+                true,
                 "the server closed the stream before the program said how it ended",
             ),
             Over::Failed { text, .. } => (true, text.as_str()),

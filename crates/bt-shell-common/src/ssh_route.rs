@@ -1,9 +1,9 @@
-//! Which ssh connection a remote file job rides on: bateri's own master
+//! Which ssh connection kablo's bridge to a server rides on: bateri's own master
 //! connection, the user's, or a new master of ours — decided **once, before the
-//! job starts**.
+//! bridge starts**.
 //!
 //! The pieces here are the pure and the process half of that gate; every
-//! remote file job goes through [`Masters::ensure`]:
+//! connection to a server goes through [`Masters::ensure`]:
 //!
 //! - **Route** ([`Route`], [`plan`]): our socket alive (`-O check`) → ours; the
 //!   user's own master alive (`ssh -G`'s `ControlPath` + `-O check`) → today's
@@ -23,7 +23,7 @@
 //!   owner is this module.
 //! - **The user's terminal session** ([`session_socket`]): a
 //!   wrapped interactive `ssh` was a master at `u-<key>` in this instance's
-//!   directory ([`crate::ssh_wrap`] added the options) and a job rides it
+//!   directory ([`crate::ssh_wrap`] added the options) and a connection rides it
 //!   ([`Route::Ours`]) before ours is opened. Only the `ssh` of a shell started
 //!   before an update is wrapped now; the route still joins such a master while
 //!   it lives. (A terminal on a server has its own, [`socket_path`]'s.) Its lifetime is the user's: a
