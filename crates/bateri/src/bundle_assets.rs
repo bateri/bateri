@@ -397,6 +397,87 @@ fn credits_markup_is_ascii() {
     }
 }
 
+/// A package carries the kablo this tree pins and no other: a kablo that is older
+/// than the pinned crates goes into a package without a word, and no later step
+/// looks. The recipe is run against stand-ins for a release directory; the version
+/// and the commit they are judged by are this tree's own, so a move of the pin
+/// needs no change here.
+#[test]
+fn a_package_carries_the_kablo_this_tree_pins_and_no_other() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let makefile = std::fs::read_to_string(root.join("Makefile")).expect("Makefile");
+    assert!(
+        makefile.contains("\nrelease-gate: kablo-published\n"),
+        "a release no longer stops on the wrong kablo"
+    );
+    assert!(
+        makefile.contains("\ndev: kablo-rev\n"),
+        "a development copy no longer stops on the wrong kablo"
+    );
+    assert!(
+        makefile.contains("\ninstall: kablo-rev bundle\n"),
+        "an install no longer stops on the wrong kablo"
+    );
+
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
+    let entry = lock
+        .split("name = \"kablo-bateri\"\n")
+        .nth(1)
+        .expect("Cargo.lock names kablo's crates");
+    let pinned = entry
+        .strip_prefix("version = \"")
+        .and_then(|rest| rest.split('"').next())
+        .expect("the version of the pinned crates");
+    let commit = entry
+        .split("rev=")
+        .nth(1)
+        .and_then(|rest| rest.get(..12))
+        .expect("the commit of the pinned crates");
+
+    let dist = std::env::temp_dir().join(format!("bt-kablo-dist-{}", std::process::id()));
+    std::fs::create_dir_all(&dist).expect("a directory");
+    let judged = |target: &str, versions: &[&str]| -> (bool, String) {
+        let sums: String = versions
+            .iter()
+            .map(|version| format!("0  kablo-{version}-aarch64-apple-darwin\n0  LICENSE\n"))
+            .collect();
+        std::fs::write(dist.join("SHA256SUMS"), sums).expect("a list of sums");
+        // What `make` was asked for around this test is not what is asked here.
+        let out = Command::new("make")
+            .current_dir(&root)
+            .env_remove("MAKEFLAGS")
+            .env_remove("MFLAGS")
+            .env_remove("MAKELEVEL")
+            .args(["-s", target])
+            .arg(format!("KABLO_DIST={}", dist.display()))
+            .output()
+            .expect("make");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    let development = format!("{pinned}-dev+{commit}");
+    let stranger = format!("{pinned}-dev+000000000000");
+    for (versions, for_dev, for_release) in [
+        (vec![pinned], true, true),
+        (vec![development.as_str()], true, false),
+        (vec![stranger.as_str()], false, false),
+        (vec!["0.0.1"], false, false),
+        (vec![pinned, "0.0.1"], false, false),
+    ] {
+        let (dev, said) = judged("kablo-rev", &versions);
+        assert_eq!(dev, for_dev, "dev, {versions:?}: {said}");
+        let (release, said) = judged("kablo-published", &versions);
+        assert_eq!(release, for_release, "release, {versions:?}: {said}");
+        assert_eq!(said.is_empty(), for_release, "{versions:?}: {said}");
+    }
+    let (_, said) = judged("kablo-published", &["0.0.1"]);
+    assert!(said.contains(pinned), "it names the kablo to build: {said}");
+    let _ = std::fs::remove_dir_all(&dist);
+}
+
 /// The package carries kablo's files where the application looks for them, for
 /// all four targets, and takes them from a release directory it checks.
 ///

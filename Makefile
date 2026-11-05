@@ -721,7 +721,9 @@ package: bundle dmgbuild
 # is built. The note shows both on the release page and in Sparkle's "new
 # version available" window — a window without a note was pushing the user to
 # "Install" without knowing what they were installing. The version number is
-# `Cargo.toml`'s; the gate reads it, there is no need to give `VERSION=`.
+# `Cargo.toml`'s; the gate reads it, there is no need to give `VERSION=`. The
+# gate also stops first if the kablo in `$(KABLO_DIST)` is not the published one
+# this tree pins (`kablo-published`): the package would carry it without a word.
 #
 # `release` writes the commit it built to `$(RELEASE_DIR)/commit` and `publish`
 # tags **that** commit, not whatever HEAD is at that moment — the tag always
@@ -748,7 +750,7 @@ RELEASE_DIR = $(TARGET_DIR)/release/v$(VERSION)
 NOTES = $(RELEASE_DIR)/notes.md
 RELEASE_URL = https://github.com/$(REPO)/releases/download/v$(VERSION)/
 
-release-gate:
+release-gate: kablo-published
 	@echo '$(VERSION)' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || { echo "release: version '$(VERSION)' is not x.y.z (Cargo.toml)"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "release: the working tree is not clean, the version must come from a known code"; exit 1; }
 	@tools/gate.sh check-push || { echo "release: run \`make gate-push\` first — a release goes out only from a commit that passed every test"; exit 1; }
@@ -812,7 +814,7 @@ ship:
 INSTALL_DIR ?= /Applications
 INSTALLED = $(INSTALL_DIR)/bateri.app
 
-install: bundle
+install: kablo-rev bundle
 	@if pgrep -f '^$(INSTALLED)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
 		echo "install: $(INSTALLED) is open — quit it first (⌘Q), then retry"; exit 1; fi
 	rm -rf $(INSTALLED).new
@@ -832,24 +834,32 @@ install: bundle
 DEV_APP = $(TARGET_DIR)/dev/bateri-dev.app
 DEV_ID = dev.bateri.dev
 DEV_SETTINGS = $(HOME)/.config/bateri-dev
-# What `dev` packages is the kablo this tree is built against: the pins of kablo's crates in
-# `Cargo.toml` are one commit, and the release in `$(KABLO_DIST)` was built from it (a development
-# release's version ends `+` and the first twelve digits of its commit). A release built from
-# another commit would be a bateri whose kablo and kablo's crates are two versions of the wire; this
-# stops before anything is packaged or opened.
-.PHONY: kablo-rev
+# What is packaged is the kablo this tree is built against: the pins of kablo's crates in
+# `Cargo.toml` are one commit, and the release in `$(KABLO_DIST)` belongs to it. A development
+# release says the commit it was built from (its version ends `+` and the first twelve digits of
+# it); a published one has the version `Cargo.lock` gives the pinned crates, so no version is ever
+# typed. Any other release would be a bateri whose kablo and kablo's crates are two versions of the
+# wire; this stops before anything is packaged or opened.
+KABLO_DIST_VERSION = awk '{print $$2}' $(KABLO_DIST)/SHA256SUMS | grep '^kablo-' | sed -E 's/^kablo-(.*)-(aarch64|x86_64)-(apple|unknown)-.*/\1/' | sort -u
+.PHONY: kablo-rev kablo-published
 kablo-rev:
 	@revs=$$(grep 'git = "https://github.com/bateri/kablo"' Cargo.toml | sed -E 's/.*rev = "([0-9a-f]+)".*/\1/' | sort -u); \
-	case "$$revs" in ""|*[!0-9a-f]*) echo "dev: Cargo.toml pins kablo's crates at more than one commit (or none): $$revs"; exit 1;; esac; \
-	test -f $(KABLO_DIST)/SHA256SUMS || { echo "dev: there is no kablo release in $(KABLO_DIST) (KABLO_DIST names the directory of one — kablo's \`make dist\` writes it)"; exit 1; }; \
-	version=$$(awk '{print $$2}' $(KABLO_DIST)/SHA256SUMS | grep '^kablo-' | sed -E 's/^kablo-(.*)-(aarch64|x86_64)-(apple|unknown)-.*/\1/' | sort -u); \
-	test "$$(echo "$$version" | wc -l | tr -d ' ')" = 1 || { echo "dev: $(KABLO_DIST) holds more than one kablo version: $$version"; exit 1; }; \
+	case "$$revs" in ""|*[!0-9a-f]*) echo "kablo: Cargo.toml pins kablo's crates at more than one commit (or none): $$revs"; exit 1;; esac; \
+	test -f $(KABLO_DIST)/SHA256SUMS || { echo "kablo: there is no kablo release in $(KABLO_DIST) (KABLO_DIST names the directory of one — kablo's \`make dist\` writes it)"; exit 1; }; \
+	version=$$($(KABLO_DIST_VERSION)); \
+	test "$$(echo "$$version" | wc -l | tr -d ' ')" = 1 || { echo "kablo: $(KABLO_DIST) holds more than one kablo version: $$version"; exit 1; }; \
+	pinned=$$(awk -F'"' '/^name = "kablo-bateri"$$/ {getline; print $$2; exit}' Cargo.lock); \
 	built=$${version#*+}; \
-	if test "$$built" != "$$version" && test "$${revs#$$built}" = "$$revs"; then \
-		echo "dev: the kablo in $(KABLO_DIST) is $$version, built from $$built, and Cargo.toml pins kablo's crates at $$revs."; \
-		echo "dev: build the release from that commit — \`make dist\` in kablo's checkout at $$revs — or give KABLO_DIST=<its dist>."; \
+	if { test "$$built" = "$$version" && test "$$version" != "$$pinned"; } || { test "$$built" != "$$version" && test "$${revs#$$built}" = "$$revs"; }; then \
+		echo "kablo: the kablo in $(KABLO_DIST) is $$version, and this tree pins kablo $$pinned at $$revs."; \
+		echo "kablo: build the pinned one — \`make dist\` in kablo's checkout at $$revs, or \`make release\` there to publish it — or give KABLO_DIST=<its dist>."; \
 		exit 1; \
 	fi
+
+# A release of bateri carries a published kablo; a development release is for `dev`.
+kablo-published: kablo-rev
+	@version=$$($(KABLO_DIST_VERSION)); \
+	case "$$version" in *+*) echo "kablo: the kablo in $(KABLO_DIST) is $$version, a development release: publish kablo first — \`make release\` in its checkout writes it there."; exit 1;; esac
 
 dev: kablo-rev
 	@if pgrep -f '^$(DEV_APP)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
