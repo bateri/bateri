@@ -875,8 +875,19 @@ fn a_folder_the_server_would_not_make_is_tried_again_with_the_next_terminal() {
     assert_eq!(rig.service.stage_of("u@rasp:22"), None);
     assert!(!world.staged().contains(&"ready".to_owned()));
 
-    // A server that could not count is not asked for a folder: it may not be there at all.
-    let tried = world.staged().len();
+    // A server that could not count is not asked for a folder: it may not be there at all. The
+    // bridge's dial asks as well, on a thread of its own and a moment after the terminal's step,
+    // so the first terminal's asking is waited out before it is counted.
+    let mut tried = world.staged().len();
+    let mut still = Instant::now();
+    until("the first terminal's steps to end", || {
+        let now = world.staged().len();
+        if now != tried {
+            tried = now;
+            still = Instant::now();
+        }
+        still.elapsed() > Duration::from_millis(300)
+    });
     let _uncounted = Holder::new(&rig.socket(), "b-uncounted");
     let asked = world.count("number");
     until("the uncounted terminal was numbered", || {

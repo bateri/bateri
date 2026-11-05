@@ -2900,6 +2900,7 @@ mod tests {
         assert!(session.exists(), "a live session socket stays");
         assert!(dir.join(OWNER_FILE).exists(), "so does its owner file");
         drop(listener);
+        until_let_go(|| UnixStream::connect(&session).is_ok());
         masters.close_all(Instant::now() + Duration::from_secs(5));
         assert!(!dir.exists(), "a stale one goes with the directory");
         std::fs::remove_dir_all(&scratch).unwrap();
@@ -4036,15 +4037,20 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// Waits, up to two seconds, until nobody listens on a holder's socket in `dir`. A test that
+    /// Waits, up to two seconds, while `listening` says somebody listens on a socket. A test that
     /// closes its listener does not end the listening at once: a child another test forks at that
     /// moment holds the socket until it execs, as a holder that ends is gone only once nothing
     /// holds its socket.
-    fn let_go(dir: &Path) {
+    fn until_let_go(listening: impl Fn() -> bool) {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while holder_listening(dir) && std::time::Instant::now() < until {
+        while listening() && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// [`until_let_go`] for a holder's socket in `dir`.
+    fn let_go(dir: &Path) {
+        until_let_go(|| holder_listening(dir));
     }
 
     /// The sweep leaves a live holder's directory (a holder of the bateri before kablo) alone
