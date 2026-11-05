@@ -1127,6 +1127,9 @@ define_class!(
             // dial; a timed run starts no ssh and runs no startup file.
             if self.ivars().run.is_none() {
                 crate::child::learn_login_path();
+                // The font list the settings window and the palette show takes a fraction
+                // of a second the first time: taken now, off the main thread.
+                crate::font_options::warm_families();
             }
             // macOS's own tabs are off: every window carries its tabs itself
             // (`window`'s header). Turned off before the menu exists, so AppKit

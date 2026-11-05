@@ -3823,7 +3823,10 @@ mod tests {
     fn monospaced_families_are_the_ones_the_chain_accepts() {
         // The settings window's Font list: every selectable family opens
         // from the chain without a warning — the criterion is the same as
-        // `open_chain`'s.
+        // `open_chain`'s. The test fonts are registered first: CoreText keeps
+        // the list of fonts it has seen, and a list taken while another test
+        // is half way through registering them would miss the last one.
+        fixture::register_test_fonts();
         let families = monospaced_families();
         assert!(
             families.iter().any(|f| f == fixture::DEFAULT_FAMILY),
@@ -3844,6 +3847,32 @@ mod tests {
             let (_, issue) = rules::open_chain(Some(family), POINT_SIZE);
             assert_eq!(issue, None, "{family}");
         }
+    }
+
+    #[test]
+    fn a_font_that_declares_fixed_pitch_is_monospaced_though_the_system_does_not_flag_it() {
+        // Obel Mono says `post.isFixedPitch` and every advance is the same,
+        // and CoreText leaves its monospace trait unset: the chain takes it
+        // by its own declaration, in the list and without a warning. The
+        // proportional family beside it is still out. Registered before any
+        // list is taken, as in the test above.
+        fixture::register_test_fonts();
+        let families = monospaced_families();
+        for family in [fixture::OBEL_MONO, fixture::JETBRAINS_MONO] {
+            assert!(
+                families.iter().any(|f| f == family),
+                "{family}: {families:?}"
+            );
+            assert_eq!(family_issue(family), None, "{family}");
+        }
+        assert!(
+            !families.iter().any(|f| f == fixture::PROPORTIONAL_FAMILY),
+            "{families:?}"
+        );
+        assert!(matches!(
+            family_issue(fixture::PROPORTIONAL_FAMILY),
+            Some(FontIssue::NotMonospaced { .. })
+        ));
     }
 
     #[test]

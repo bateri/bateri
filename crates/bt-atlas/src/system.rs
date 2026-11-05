@@ -57,13 +57,17 @@ pub(crate) trait FontSystem {
     /// Never called with [`Face::Regular`].
     fn derive(regular: &Self::Font, face: Face) -> Option<Self::Font>;
 
-    /// Does the font system consider the font monospaced — the single
-    /// criterion behind both the chain's warning and the settings list.
+    /// Does the font system itself consider the font monospaced — one half of
+    /// the criterion behind both the chain's warning and the settings list;
+    /// the other half, the font's own declaration, is platformless
+    /// (`rules::monospaced`).
     fn is_monospaced(font: &Self::Font) -> bool;
 
     /// Candidate family names for the settings window's Font list — a
     /// pre-filter only; the last word is the platformless filter
-    /// (`rules::monospaced_families`).
+    /// (`rules::monospaced_families`). A backend that can read font tables
+    /// lets through the families its own flag rejects: the filter's second
+    /// half decides those (CoreText does not flag Obel Mono).
     fn families() -> Vec<String>;
 
     /// The character's glyph number; `None` for `.notdef`.

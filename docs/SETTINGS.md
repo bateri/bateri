@@ -1361,7 +1361,11 @@ letter_spacing = 1.0
 - A family that is not monospaced (`"Helvetica"`) is **not rejected**, it
   gives a warning: `font "Helvetica" is not monospaced; text may not line up`.
   The cell width comes from the space character; letters wider than that are
-  clipped to the cell.
+  clipped to the cell. A font counts as monospaced when macOS flags it so or
+  when the font itself says every glyph has the same width and has outlines of
+  its own (a bitmap-only font does not count): that is how a monospaced font
+  macOS does not flag, such as Obel Mono, is listed and opens without a
+  warning.
 - **A character the chosen font lacks comes from the system.** As long as it
   fits in one cell, it is drawn from macOS's own font chain; you do not need
   to change your font or define a fallback list. The measure is the
@@ -1540,10 +1544,7 @@ terminal does:
 (the web and native views a program opens) use their own fonts and are not
 shaped. A shape the cells cannot hold — a character the font draws as several
 glyphs, characters the font reorders, ink that reaches outside the cells it
-stands for — is drawn as the plain characters. Obel Mono's glyphs all have the same advance, but macOS does not flag
-the family as monospaced, so `family = "Obel Mono"` gives the `is not
-monospaced` warning above, the family is not in the Font list of the settings
-window or the palette, and the text still lines up.
+stands for — is drawn as the plain characters.
 
 #### Temporary font size: Cmd +, Cmd −, Cmd 0
 

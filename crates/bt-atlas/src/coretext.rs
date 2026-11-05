@@ -21,7 +21,7 @@ use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontTableOptions,
     CTFontUIFontType, CTLine, CTRun, kCTFontAttributeName, kCTFontFamilyNameAttribute,
     kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue,
-    kCTFontSymbolicTrait, kCTFontTraitsAttribute, kCTFontWeightTrait,
+    kCTFontTraitsAttribute, kCTFontWeightTrait,
 };
 
 use crate::raster::DrawResult;
@@ -206,23 +206,23 @@ impl FontSystem for CoreText {
         traits.contains(CTFontSymbolicTraits::TraitMonoSpace)
     }
 
-    /// Candidates come from the descriptors CoreText matches on its monospace
-    /// bit, not from every family on the machine: opening and asking every
-    /// family means opening hundreds of fonts, and the window would wait for
-    /// it while opening. System families starting with a dot
-    /// (`.AppleSystemUIFont`) are not shown to the user.
+    /// Every family on the machine is a candidate, not only the ones CoreText
+    /// flags monospaced: a font can be fixed-pitch in its own tables and still
+    /// carry no `TraitMonoSpace` (Obel Mono), and the platformless filter
+    /// ([`rules::monospaced`]) is what decides. The price is opening each
+    /// family and reading its `post` table: 0.7 ms a family, 146 ms for the 202
+    /// of the Mac this was measured on. That is too long for a window that is
+    /// opening, so the list is taken once per process and warmed in the
+    /// background at launch (`bt_shell_common::font_options`). System families
+    /// starting with a dot (`.AppleSystemUIFont`) are not shown to the user.
     fn families() -> Vec<String> {
-        // The `TraitMonoSpace` bit is `1 << 10`; it fits in an `i32`
-        // losslessly.
-        let mono = CFNumber::new_i32(CTFontSymbolicTraits::TraitMonoSpace.bits() as i32);
-        // SAFETY: both keys are constants CoreText exports, alive for the
-        // whole program.
-        let (traits_key, symbolic_key) = unsafe { (kCTFontTraitsAttribute, kCTFontSymbolicTrait) };
-        let traits = CFDictionary::from_slices(&[symbolic_key], &[&*mono]);
-        let attributes = CFDictionary::from_slices(&[traits_key], &[&*traits]);
-        // SAFETY: the dictionary has the shape CoreText expects —
-        // `kCTFontSymbolicTrait` → `CFNumber` under `kCTFontTraitsAttribute`.
-        let wanted = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
+        // SAFETY: the dictionary is empty: a descriptor with no attribute
+        // set at all, which CoreText matches against every font it has.
+        let wanted = unsafe {
+            CTFontDescriptor::with_attributes(
+                CFDictionary::<CFString, CFType>::from_slices(&[], &[]).as_opaque(),
+            )
+        };
         // SAFETY: `wanted` is alive; there is no mandatory key set.
         let Some(matches) = (unsafe { wanted.matching_font_descriptors(None) }) else {
             return Vec::new();

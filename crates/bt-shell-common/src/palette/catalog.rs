@@ -23,8 +23,6 @@
 //! veil, the tab bar's place and icons). Typing, deleting and arrival effects, and everything
 //! that decides what a session does, are chosen and written, never previewed.
 
-use std::sync::OnceLock;
-
 use bt_core::{
     CaretShape, ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, Erase,
     IconColors, KeepRunning, Keypress, Osc52, ReduceMotion, RemoteStatsMode, RestoreWindows,
@@ -408,17 +406,13 @@ fn theme_label(token: &str) -> String {
 /// warning — the list the settings window shows, so no row names a font that
 /// is not here and answers `font "X" not found` when chosen. Taken **once**
 /// per process: `choices` asks for it every time a page opens and the list
-/// opens every installed family to answer. The value in effect is added when it
-/// is not in the list ([`Setting::choices`]).
+/// opens every installed family to answer ([`font_options::families`], which the
+/// settings window shares). The value in effect is added when it is not in the
+/// list ([`Setting::choices`]).
 fn font_families() -> Vec<String> {
-    static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
-    FAMILIES
-        .get_or_init(|| {
-            std::iter::once(String::new())
-                .chain(bt_gpu::monospaced_families())
-                .collect()
-        })
-        .clone()
+    std::iter::once(String::new())
+        .chain(font_options::families())
+        .collect()
 }
 
 fn family_label(token: &str) -> String {

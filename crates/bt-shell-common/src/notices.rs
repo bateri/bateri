@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(
             font_messages([
                 FontNotice::NotMonospaced {
-                    family: "Obel Mono".to_owned()
+                    family: "Helvetica".to_owned()
                 },
                 FontNotice::NoFeature {
                     family: "Obel Mono".to_owned(),
@@ -183,7 +183,7 @@ mod tests {
                 },
             ]),
             [
-                "font \"Obel Mono\" is not monospaced; text may not line up",
+                "font \"Helvetica\" is not monospaced; text may not line up",
                 "font \"Obel Mono\" has no feature \"ss99\"",
                 "font \"System Mono\" has no feature \"calt\"",
             ]

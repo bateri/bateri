@@ -176,6 +176,27 @@ pub fn options(family: Option<&str>) -> Vec<FontOption> {
         .clone()
 }
 
+/// The monospaced families of this machine, the list the settings window and the palette's Font
+/// page both show. Taken **once** per process and shared by the two: the answer opens every
+/// installed family and reads its tables, which takes a fraction of a second at the first call
+/// and must not be paid by whichever window asks first ([`warm_families`]).
+pub fn families() -> Vec<String> {
+    static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
+    FAMILIES.get_or_init(bt_gpu::monospaced_families).clone()
+}
+
+/// Takes [`families`] on a thread of its own, so that the list is there by the time the first
+/// window that shows it opens; a window that asks before it is done waits for the rest, not for
+/// a second pass.
+pub fn warm_families() {
+    // A thread that cannot be born costs the first window the wait it would have had anyway.
+    let _ = std::thread::Builder::new()
+        .name("font-families".to_owned())
+        .spawn(|| {
+            let _ = families();
+        });
+}
+
 /// The option `id` of `font`'s family; `None` when the font does not offer it.
 pub fn find(font: &FontOptions, id: &str) -> Option<FontOption> {
     options(font.family.as_deref())

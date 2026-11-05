@@ -361,9 +361,40 @@ pub(crate) fn open_chain(family: Option<&str>, point_size: f64) -> (Font, Option
         };
         return (font, Some(issue));
     }
-    let issue =
-        (!Backend::is_monospaced(&font)).then_some(FontIssue::NotMonospaced { family: returned });
+    let issue = (!monospaced(&font)).then_some(FontIssue::NotMonospaced { family: returned });
     (font, issue)
+}
+
+/// Whether the chain takes `font` as monospaced — the one question behind the
+/// warning ([`open_chain`]) and the settings list ([`monospaced_families`]).
+///
+/// The font system's own answer ([`FontSystem::is_monospaced`]) is not the
+/// whole of it: CoreText reads a trait bit that a family can leave unset
+/// while every glyph has the same advance (Obel Mono says so in its `post`
+/// table and its `hmtx`, and CoreText does not flag it). The font's own
+/// declaration counts too, `post.isFixedPitch`, when the font has outlines of
+/// its own: a bitmap-only font (`GB18030 Bitmap`) declares it as well and is
+/// not a font the grid can draw.
+pub(crate) fn monospaced(font: &Font) -> bool {
+    Backend::is_monospaced(font) || declares_fixed_pitch(font) && has_outlines(font)
+}
+
+/// `post.isFixedPitch`: a `u32` at byte 12 of the table's header, non-zero
+/// when the font says every glyph has the same advance.
+fn declares_fixed_pitch(font: &Font) -> bool {
+    Backend::table(font, *b"post").is_some_and(|post| fixed_pitch_flag(&post))
+}
+
+fn fixed_pitch_flag(post: &[u8]) -> bool {
+    post.get(12..16).is_some_and(|flag| flag != [0; 4])
+}
+
+/// Whether the font carries outlines (`glyf`, `CFF ` or `CFF2`) and not only
+/// bitmaps.
+fn has_outlines(font: &Font) -> bool {
+    [*b"glyf", *b"CFF ", *b"CFF2"]
+        .into_iter()
+        .any(|tag| Backend::table(font, tag).is_some_and(|table| !table.is_empty()))
 }
 
 /// Names of the monospaced families on this machine, in case-insensitive
@@ -371,10 +402,10 @@ pub(crate) fn open_chain(family: Option<&str>, point_size: f64) -> (Font, Option
 ///
 /// A family enters the list only if the chain would open it **without a
 /// warning**: the font system resolves the name to its own family
-/// ([`same_family`]) and the font it opens is monospaced
-/// ([`FontSystem::is_monospaced`]). The backend's candidates
-/// ([`FontSystem::families`]) are only a pre-filter — the last word belongs
-/// to these two criteria, so no family they reject can get into the list.
+/// ([`same_family`]) and the font it opens is monospaced ([`monospaced`]).
+/// The backend's candidates ([`FontSystem::families`]) are only a
+/// pre-filter — the last word belongs to these two criteria, so no family
+/// they reject can get into the list.
 pub fn monospaced_families() -> Vec<String> {
     let mut names = Backend::families();
     names.sort_by_cached_key(|name| name.to_lowercase());
@@ -384,7 +415,7 @@ pub fn monospaced_families() -> Vec<String> {
     const PROBE_SIZE: f64 = 12.0;
     names.retain(|name| {
         let (font, returned) = Backend::open(name, PROBE_SIZE);
-        same_family(&returned, name) && Backend::is_monospaced(&font)
+        same_family(&returned, name) && monospaced(&font)
     });
     names
 }
@@ -1173,6 +1204,26 @@ pub(crate) fn unpremultiply(target: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `post.isFixedPitch` is the `u32` at byte 12: a short or damaged table
+    /// declares nothing.
+    #[test]
+    fn the_fixed_pitch_flag_is_read_from_the_post_header() {
+        let mut post = vec![0u8; 32];
+        assert!(!fixed_pitch_flag(&post));
+        post[15] = 1;
+        assert!(fixed_pitch_flag(&post));
+        post[15] = 0;
+        post[12] = 1;
+        assert!(fixed_pitch_flag(&post));
+        // The neighbours of the flag are not the flag.
+        let mut post = vec![0u8; 32];
+        post[11] = 1;
+        post[16] = 1;
+        assert!(!fixed_pitch_flag(&post));
+        assert!(!fixed_pitch_flag(&post[..15]));
+        assert!(!fixed_pitch_flag(&[]));
+    }
 
     /// Below `1` the cell keeps both parts of its height for every split a
     /// font can ask for: synthetic ascents and descents from one

@@ -23,6 +23,7 @@ of every installed copy. A version without a section is not released.
 ### Fixed
 
 - The command palette's font list shows only the monospaced families this Mac has, so choosing one no longer ends in `font "JetBrains Mono" not found`.
+- A monospaced font that macOS does not flag as one, such as Obel Mono, is in the Settings font list and the palette's, and no longer gets the `is not monospaced` warning in the title bar.
 - A program with a lot of output keeps what bateri knows about it through later updates of kablo: its folder, its blocks and that a command is running. The first update to this version cannot do that yet, and 0.24.1's check covers it.
 - The number of tabs on a closed group in the sidebar is no longer cut off on its left.
 - The `+` on a group's header says New Tab in Group when you point at it, not Close group.

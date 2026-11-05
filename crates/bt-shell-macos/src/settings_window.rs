@@ -1400,6 +1400,7 @@ pub(crate) struct Ivars {
     usage_generation: Cell<u64>,
     /// The monospaced families on the machine — **once** when the window is
     /// born: the list opens every candidate with CoreText and is not worth rebuilding on every save.
+    /// The palette shows the same list (`font_options::families`, warmed at launch).
     families: Vec<String>,
 }
 
@@ -1787,7 +1788,7 @@ impl SettingsWindow {
             limits: RefCell::new(Vec::new()),
             folders: RefCell::new((String::new(), String::new())),
             usage_generation: Cell::new(0),
-            families: bt_gpu::monospaced_families(),
+            families: crate::font_options::families(),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
