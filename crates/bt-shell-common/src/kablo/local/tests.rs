@@ -3128,3 +3128,104 @@ mod relayed {
         service.stop();
     }
 }
+
+/// A relay that crashes leaves nothing to the one the warden starts, and the marks of a command
+/// that started long ago went out of the ring with its first bytes: the terminal comes back with
+/// nothing that says a command runs, and the pane reads as a shell at its prompt. What holds the
+/// terminal says otherwise, and the pane's owner tells the session so.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_whose_marks_went_with_its_relay_is_a_command_once_the_owner_says_so() {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("mark");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = Arc::new(RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+        streams: Default::default(),
+        stand_in: Default::default(),
+    });
+    let ledger = Arc::new(Ledger::memory());
+    // A command starts, and prints more than the ring holds.
+    let script = "printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007'; \
+         head -c 9000000 /dev/zero | tr '\\0' 'x'; printf '\\nALIVE\\n'; exec sleep 300";
+
+    let service = Service::start(&service_dir, backend.clone(), ledger.clone()).expect("a service");
+    let options = plain_options(script, &ground.home);
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    let pane = options.pane_uuid.clone().expect("a pane");
+    let stream = service
+        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .expect("a terminal of this computer");
+    let id = ledger.terminals_of(ACCOUNT).remove(0);
+    ground.kept = Some(PathBuf::from(kablo));
+    ground.made.push(id.clone());
+    let session = bt_core::Session::streamed(
+        options,
+        Arc::new(Ends::default()) as Arc<dyn bt_core::Wake>,
+        stream,
+    )
+    .expect("a session over the stream");
+    waits_for("the program's output", || shows(&session, "ALIVE"));
+    assert!(session.running_command().is_some(), "its marks say so");
+    drop(session);
+    service.stop();
+
+    // The relay crashes, and the warden starts another.
+    let relays = || {
+        let found = Command::new("pgrep")
+            .args(["-f", &format!("relay --id {id}$")])
+            .output()
+            .expect("pgrep");
+        String::from_utf8_lossy(&found.stdout)
+            .lines()
+            .filter_map(|pid| pid.trim().parse::<i32>().ok())
+            .collect::<Vec<i32>>()
+    };
+    let crashed = relays();
+    assert_eq!(crashed.len(), 1, "one relay: {crashed:?}");
+    // SAFETY: the relay of a terminal this test made, found by that terminal's name.
+    assert_eq!(unsafe { libc::kill(crashed[0], libc::SIGKILL) }, 0);
+    waits_for("the warden to start another relay", || {
+        let now = relays();
+        now.len() == 1 && now != crashed
+    });
+
+    let service = Service::start(&service_dir, backend, ledger).expect("a second service");
+    let options = plain_options(script, &ground.home);
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    let stream = service
+        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .expect("its terminal");
+    let session = bt_core::Session::streamed(
+        options,
+        Arc::new(Ends::default()) as Arc<dyn bt_core::Wake>,
+        stream,
+    )
+    .expect("a session over the stream");
+    session.set_shell_name(Some("zsh".to_owned()));
+    waits_for("the past read", || !session.replaying());
+    assert_eq!(
+        session.running_command(),
+        None,
+        "no mark says a command runs"
+    );
+    assert_eq!(session.pane_title().whole(), "zsh");
+
+    assert!(session.note_program_in_front(Some("/work/api".to_owned())));
+    assert!(session.running_command().is_some());
+    assert_eq!(session.pane_title().whole(), "api");
+    drop(session);
+    service.stop();
+}
