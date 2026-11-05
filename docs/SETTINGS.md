@@ -90,7 +90,8 @@ looks, `[appearance] content_edge` ("Content edge") and
 `[appearance] tab_details` ("Tab details") and `[appearance]
 resize_in_steps` ("Resize in steps") and `[appearance] tab_position`
 ("Tabs") and `[appearance] tab_icons`
-("Tab icons") with `tab_icon_colors` ("Icon colors"); on
+("Tab icons") with `tab_icon_colors` ("Icon colors") and `tab_running`
+("Running tab"); on
 folder rows
 Change… opens a folder
 picker (a folder under your home directory is written as `~/…`), on the
@@ -308,6 +309,10 @@ tab_icons = true
 # own where it has a colored brand (Claude, Antigravity, Gemini, Qwen); the
 # single-color ones and the kinds bateri draws itself stay as they are.
 tab_icon_colors = "theme"
+# "tail" | "tail_ring" | "breathe". How a tab says a command runs, in the line round
+# its icon: a line with a fading tail going round, the same over a faint line that
+# stands all the way round, or the whole line fading in and out where it stands.
+tab_running = "tail"
 # "top" | "side". Where a window's tabs sit: a bar along the top, in the title
 # row, or a full-height column at the window's left edge, where the title row
 # goes and the traffic lights sit at the column's head. One place for every
@@ -1093,6 +1098,7 @@ tab_details = "smart"
 resize_in_steps = false
 tab_icons = true
 tab_icon_colors = "theme"
+tab_running = "tail"
 tab_position = "top"
 ```
 
@@ -1110,6 +1116,7 @@ tab_position = "top"
 | `resize_in_steps` | `true` \| `false` | `false` | resize a window a whole cell at a time while its edge is dragged |
 | `tab_icons` | `true` \| `false` | `true` | show the program a tab runs as an icon on a tile before its title |
 | `tab_icon_colors` | `"theme"` \| `"brand"` | `"theme"` | whether the icon uses the theme's colors only, or keeps the program's own color where it has one |
+| `tab_running` | `"tail"` \| `"tail_ring"` \| `"breathe"` | `"tail"` | how a tab says a command runs, in the line round its icon: a fading tail going round, the same over a faint standing line, or the whole line fading in and out |
 | `tab_position` | `"top"` \| `"side"` | `"top"` | where a window's tabs sit: a bar along the top, or a column at the left edge |
 
 - `theme = "system"` leaves the theme to the macOS appearance: `light_theme`
@@ -1983,7 +1990,7 @@ it, so no version shows there.
 On a narrow line the path shortens first, down to its last folder (`…/api`);
 then the Node version goes, then the Python version, then the rest of the
 path and the branch. The environment's name goes last, and no name or
-version is ever cut. Over ssh the line shows the server (`⇄ host`), not your
+version is ever cut. Over ssh the line shows the server (`host`), not your
 Mac's environment. `python_env = false` and `node_version = false` turn each
 part off at once, in every open tab; both are also in the settings window's
 General page.
@@ -2067,7 +2074,7 @@ the pane does not take a dropped file (a path from this Mac would mean nothing
 to the server's shell), and the dock below keeps saying where you are.
 
 While you are on a remote machine over ssh or mosh, the dock's context line
-shows `⇄ host` and its top line is colored. `hosts` picks that color by host,
+shows `host` and its top line is colored. `hosts` picks that color by host,
 so you know from the color that you are on prod.
 
 The same marks apply to **database clients**. While `psql`, `mysql` or
@@ -2200,11 +2207,11 @@ companion program, which the first `ssh` to a server puts there (one file under
 root). The pane shows that terminal as if `ssh` had run in it, so you log in
 the way you always did (the password, the second factor and the question
 whether to trust the server's key are asked in the pane), the dock shows
-`⇄ host`, and the directory (OSC 7) and then command blocks work remotely too.
+`host`, and the directory (OSC 7) and then command blocks work remotely too.
 The line you type at the server's prompt is in the dock, as in a local tab —
 zsh, bash 4.4 or newer and fish: you click in it, select, edit it with ←, → and
 ⌫, paste with ⌘V, and the grid does not show the line twice. The dock's bottom
-line stays what it was — `⇄ rasp  ~/app`, a short warning when the server's load
+line stays what it was — `rasp  ~/app`, a short warning when the server's load
 passes a threshold — with no branch, no environment and no permanent gauge.
 Where you set `integration = "blocks"` (above), the server's shell keeps its own
 line and prompt, the way a local one does. While a command runs on the server, or
@@ -2248,12 +2255,12 @@ saved windows; nothing secret is in it (no password, no key).
 
 While the connection is down the pane shows the terminal's last screen under a
 veil — the grid and the line you had typed in the dock — without the caret, and
-the dock's bottom line stays clear and says what is going on: `⇄ rasp  Reconnecting… · ⏎ try now`. Keys are not sent — the
+the dock's bottom line stays clear and says what is going on: `rasp  Reconnecting… · ⏎ try now`. Keys are not sent — the
 system beeps — except ⏎, which tries again at once instead of waiting out the
 pause (1 s, 2 s, up to 30 s), and scrolling through the screen still works.
 bateri also tries again the moment the Mac wakes up. A key or an agent signs in
 by itself, and so does a password saved in the Keychain; a password nobody saved
-(or a second factor) makes the line say `⇄ rasp  Needs your password · ⏎ log in`,
+(or a second factor) makes the line say `rasp  Needs your password · ⏎ log in`,
 and nothing is tried until you press ⏎, which opens a sheet to log in
 — one for the server, whichever of its panes you press ⏎ in; a second pane's ⏎
 brings that sheet's tab forward. Logging in brings every terminal on the server
@@ -2306,7 +2313,7 @@ the server's rc files.
   no download or preview, no load indicator, no ports, no ⌘ check of paths
   and no password kept in the Keychain for it; bateri opens no
   connection of its own to that host. The remote session is still detected, so
-  the dock says `⇄ host`, colored by `hosts`, and the tab and the title name
+  the dock says `host`, colored by `hosts`, and the tab and the title name
   the server. Turning `integration` on for the host (Shell ▸ Shell Integration
   on “{host}”) is the way to get all of it back, from the next `ssh`.
 - A value that is not accepted and a settings file that cannot be read **turn
@@ -2357,7 +2364,7 @@ and touched (a covered tab, a window nobody uses for two minutes).
   takes priority over the path, and the path is shortened from the left with
   `…`. The host is never shortened. While a transfer is in progress, the
   indicator is hidden.
-- **Clicking the server's name** — `⇄ rasp` at the left of the status bar,
+- **Clicking the server's name** — `rasp` at the left of the status bar,
   or the warning when there is one — opens the server's card: the host and its
   operating system, the CPU (with the number of cores) and the memory as a bar
   each, and the processes using the most CPU; while open, it refreshes on every
@@ -2406,7 +2413,7 @@ the background* and opens beside whoever has it.
   one Mac at a time. ⌘P does not find these terminals from its root — only on the
   server's page — so a terminal in use on another Mac is never taken by accident.
 - **The dimmed pane** keeps its last screen, takes no keys, and the line at its
-  bottom says `⇄ rasp  Opened on MacBook · ⏎ bring back`: ⏎ takes the terminal back,
+  bottom says `rasp  Opened on MacBook · ⏎ bring back`: ⏎ takes the terminal back,
   from where the pane was, and the pane on the other Mac goes dim in turn. If the
   Mac that was using the terminal was asleep or offline when it was taken, it finds
   out when it connects again, and its pane comes back dimmed too instead of joining

@@ -3,7 +3,7 @@
 //! A program's view covers the whole pane, and a view that covers the pane could imitate the
 //! terminal under it. So the header over the pane — the application's own, outside the view's
 //! area — says what the view cannot say for itself, each thing once, and for as long as the
-//! view is up: where the program runs (`⇄ prod`, the dock's mark for a server; nothing on this
+//! view is up: where the program runs (`prod`, the dock's name for a server; nothing on this
 //! Mac), which program it is (its icon, when it gave one, and its name), what the view is (its
 //! title, when it says more than the program's name), and the way out — one button,
 //! **Quit ⌃C**, the verb and the key it is.
@@ -17,10 +17,6 @@
 //!
 //! Platform-free: the AppKit shell draws the words (`bt-shell-macos::tab_head`), and another
 //! shell would do the same.
-
-/// The mark before the server a program runs on: the dock's mark for a remote session
-/// (`bt_core::dock::REMOTE_MARK`), so the strip names a server the way the dock does.
-pub const REMOTE_MARK: char = '⇄';
 
 /// The button's verb. The program is named once, left of it, not again in it.
 pub const QUIT: &str = "Quit";
@@ -44,7 +40,7 @@ pub const NAME_LIMIT: usize = 32;
 /// What the strip says, each part ready to be drawn; a part that is `None` is not drawn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Strip {
-    /// Where the program runs, `⇄ prod`, in the colour the dock gives a server; `None` on this
+    /// Where the program runs, `prod`, in the colour the dock gives a server; `None` on this
     /// Mac.
     pub place: Option<String>,
     /// The program, in the strong colour: what the person trusts and what the button quits.
@@ -83,7 +79,7 @@ pub fn strip(title: Option<&str>, place: Option<&str>, program: Option<&str>) ->
         program.as_deref().unwrap_or("the program")
     );
     Strip {
-        place: place.map(|place| format!("{REMOTE_MARK} {place}")),
+        place,
         program,
         title,
         quit_tip,
@@ -166,7 +162,7 @@ mod tests {
     #[test]
     fn a_view_on_a_server_says_where_the_program_runs_with_the_docks_mark() {
         let strip = strip(Some("Containers"), Some("prod"), Some("Docker UI"));
-        assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
+        assert_eq!(strip.place.as_deref(), Some("prod"));
         assert_eq!(strip.program.as_deref(), Some("Docker UI"));
         assert_eq!(strip.title.as_deref(), Some("Containers"));
     }
@@ -182,7 +178,7 @@ mod tests {
     fn a_program_nobody_here_can_name_is_not_given_a_name() {
         // A plain `ssh`: the place is known, the program is not.
         let strip = strip(Some("list"), Some("prod"), None);
-        assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
+        assert_eq!(strip.place.as_deref(), Some("prod"));
         assert_eq!(strip.program, None);
         assert_eq!(strip.title.as_deref(), Some("list"));
         assert_eq!(
@@ -237,7 +233,7 @@ mod tests {
         assert_eq!(title.chars().count(), TITLE_LIMIT);
         assert!(title.ends_with('…'));
         let name = format!("{}…", "x".repeat(NAME_LIMIT - 1));
-        assert_eq!(strip.place, Some(format!("⇄ {name}")));
+        assert_eq!(strip.place.as_deref(), Some(name.as_str()));
         assert_eq!(strip.program, Some(name));
 
         // Line breaks, tabs and runs of spaces are one space; controls and the characters that
@@ -249,7 +245,7 @@ mod tests {
             Some("a\u{2066}b"),
         );
         assert_eq!(strip.title.as_deref(), Some("Quit bateri now"));
-        assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
+        assert_eq!(strip.place.as_deref(), Some("prod"));
         assert_eq!(strip.program.as_deref(), Some("ab"));
     }
 

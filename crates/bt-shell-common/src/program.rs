@@ -1103,16 +1103,7 @@ fn venv_config(path: &Path) -> Option<PathBuf> {
 /// `path` with the home directory written as `~`. A home of `/` (or one
 /// that is not absolute) shortens nothing. Also the tab bar's summary card's
 /// directory (`tabs::card_lines`).
-pub(crate) fn tilde(path: &Path, home: Option<&Path>) -> String {
-    let rest = home
-        .filter(|home| home.is_absolute() && home.components().count() > 1)
-        .and_then(|home| path.strip_prefix(home).ok());
-    match rest {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
-        Some(rest) => format!("~/{}", rest.to_string_lossy()),
-        None => path.to_string_lossy().into_owned(),
-    }
-}
+pub(crate) use bt_core::tilde;
 
 /// The background job: the interpreter's `--version` ([`VERSION_TIMEOUT`]),
 /// the venv's configuration and a Kubernetes session's context from its

@@ -627,7 +627,7 @@ fn said(look: &HeadLook) -> String {
 }
 
 /// The band's title as it is drawn: the pane's title in the focus's ink and weight; over a view,
-/// where the program runs (the info role, the dock's `⇄ host`), the program in the title's ink
+/// where the program runs (the info role, the dock's `host`), the program in the title's ink
 /// and weight, and the view's title in the dim role — in that order, so the title is what a
 /// fade cuts first and the place what it cuts last.
 fn title_text(look: &HeadLook, palette: Palette) -> Retained<NSMutableAttributedString> {

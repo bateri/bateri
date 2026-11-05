@@ -1,4 +1,4 @@
-//! **The server's card**: a click on `⇄ rasp` in the dock of a pane that shows a terminal the
+//! **The server's card**: a click on `rasp` in the dock of a pane that shows a terminal the
 //! server keeps opens it. Above, the server's load (small: the CPU and the memory as a bar each
 //! and the busiest processes); below, the terminals the server keeps that no pane of this Mac
 //! shows — *Running in the background · N*, with *Open All in New Tab* in the heading — and the

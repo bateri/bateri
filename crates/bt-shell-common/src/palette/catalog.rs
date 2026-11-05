@@ -27,7 +27,7 @@ use bt_core::{
     CaretShape, ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, Erase,
     IconColors, KeepRunning, Keypress, Osc52, ReduceMotion, RemoteStatsMode, RestoreWindows,
     SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabDetails, TabPosition,
+    TabDetails, TabPosition, TabRunning,
 };
 
 use super::row::{Kind, Preview, Row, Scope, Slot, Tone};
@@ -438,7 +438,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 36] = [
+static CATALOG: [Setting; 37] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -692,6 +692,17 @@ static CATALOG: [Setting; 36] = [
         SettingsEdit::IconColors
     ),
     named!(
+        "appearance.tab_running",
+        Appearance,
+        "Running Tab",
+        "tab running command line tail breathe animation",
+        true,
+        None,
+        TabRunning,
+        |s| s.tab_running,
+        SettingsEdit::TabRunning
+    ),
+    named!(
         "terminal.scrollbar",
         Terminal,
         "Scroll Bar",
@@ -878,8 +889,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_thirty_six_settings_once_each() {
-        assert_eq!(all().len(), 36);
+    fn the_catalog_lists_the_thirty_seven_settings_once_each() {
+        assert_eq!(all().len(), 37);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -1010,7 +1021,7 @@ mod tests {
         assert_eq!(dark.opens, Some(Scope::Theme(Slot::Dark)));
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
-        assert_eq!(rows(&settings).len(), 36);
+        assert_eq!(rows(&settings).len(), 37);
     }
 
     #[test]
@@ -1063,6 +1074,7 @@ mod tests {
                 "appearance.tab_position",
                 "appearance.tab_icons",
                 "appearance.tab_icon_colors",
+                "appearance.tab_running",
             ]
         );
     }

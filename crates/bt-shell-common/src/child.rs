@@ -160,6 +160,12 @@ pub fn shell() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// [`shell`]'s name: `zsh`, what a pane's title says while the shell sits at its prompt.
+pub fn shell_name() -> Option<String> {
+    let shell = shell()?;
+    Some(shell.file_name()?.to_string_lossy().into_owned())
+}
+
 /// The shell in the user's passwd entry (`pw_shell`); `None` if it cannot be read.
 fn passwd_shell() -> Option<String> {
     passwd_field(|entry| entry.pw_shell)
@@ -233,6 +239,16 @@ impl PaneRuns {
         match self {
             Self::Shell(path) => Some(path),
             Self::UserShell | Self::Program { .. } => None,
+        }
+    }
+
+    /// The name of the shell the pane runs, what its title says at the prompt (`zsh`, `fish`);
+    /// `None` for a program of its own, which is no shell to name.
+    pub fn shell_name(&self) -> Option<String> {
+        match self {
+            Self::UserShell => shell_name(),
+            Self::Shell(path) => Some(path.file_name()?.to_string_lossy().into_owned()),
+            Self::Program { .. } => None,
         }
     }
 
@@ -805,6 +821,16 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::settings::TempRoot;
+
+    #[test]
+    fn a_pane_says_the_name_of_the_shell_it_was_asked_for_and_none_for_a_program() {
+        let asked = PaneRuns::Shell(PathBuf::from("/opt/homebrew/bin/fish"));
+        assert_eq!(asked.shell_name().as_deref(), Some("fish"));
+        assert_eq!(PaneRuns::UserShell.shell_name(), shell_name());
+        for keep_open in [false, true] {
+            assert_eq!(PaneRuns::Program { keep_open }.shell_name(), None);
+        }
+    }
 
     /// Writes `body` (a `#!/bin/sh` script) to `path` as a program (mode 755) that a test is
     /// about to run, ready to run at once.

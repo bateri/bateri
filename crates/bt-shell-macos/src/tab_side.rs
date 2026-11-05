@@ -63,11 +63,11 @@ use objc2_quartz_core::{CALayer, CATransaction};
 use super::tab_group::{GroupHeader, HeaderLook};
 use super::{
     AgentLine, AgentTone, Chip, Dragging, Emblem, Heading, IconStyle, Motion, Palette, Seen, Shown,
-    Standing, TabBar, Tint, draw_badged_tile, glyph_slot, paint_in, plain_box, rounded,
+    Standing, TabBar, Tint, draw_badged_tile, glyph_slot, paint_in, plain_box, row_face,
 };
 use crate::card;
 use crate::split::Rect;
-use crate::tabs::{self, Column, Entry, FADE, Side, TAB_RADIUS};
+use crate::tabs::{self, BUTTON_RADIUS, Column, Entry, FADE, Side};
 
 /// A model rectangle as the view's: both are top-down, in points.
 pub(super) fn ns_rect(rect: Rect) -> NSRect {
@@ -483,6 +483,7 @@ impl TabBar {
                     picked: false,
                     glowing: false,
                     single: true,
+                    noticed: !shown.notice.is_empty(),
                     ghost: false,
                     side: false,
                 },
@@ -499,7 +500,7 @@ impl TabBar {
             );
         }
         iv.sidebar.setFrame(ns_rect(head.sidebar));
-        iv.sidebar.set_look(palette, TAB_RADIUS);
+        iv.sidebar.set_look(palette, BUTTON_RADIUS);
         iv.sidebar.set_badge(shown.unseen);
         iv.eye.setHidden(true);
         // The badge says what waits while the column hides; its counts wait with it.
@@ -508,7 +509,7 @@ impl TabBar {
         }
         if let Some(new_tab) = head.new_tab {
             iv.new_tab.setFrame(ns_rect(new_tab));
-            iv.new_tab.set_look(palette, TAB_RADIUS);
+            iv.new_tab.set_look(palette, BUTTON_RADIUS);
         }
         iv.warning.setHidden(true);
         iv.list.setHidden(true);
@@ -654,6 +655,7 @@ impl TabBar {
                     picked: picks.contains(&label.tab) && !naming,
                     glowing: glowing[index],
                     single: false,
+                    noticed: false,
                     ghost: flight
                         .drag
                         .is_some_and(|drag| drag.torn && dragged == Some(index)),
@@ -744,19 +746,19 @@ impl TabBar {
         iv.mask.set(&iv.strip, &column, scale);
 
         iv.sidebar.setFrame(ns_rect(column.sidebar));
-        iv.sidebar.set_look(palette, TAB_RADIUS);
+        iv.sidebar.set_look(palette, BUTTON_RADIUS);
         iv.sidebar.set_badge(None);
         iv.eye.setFrame(ns_rect(column.activity));
-        iv.eye.set_look(palette, TAB_RADIUS);
+        iv.eye.set_look(palette, BUTTON_RADIUS);
         iv.eye.set_on(shown.activity);
         iv.eye.setHidden(!shown.agents);
         iv.new_tab.setFrame(ns_rect(column.new_tab));
-        iv.new_tab.set_look(palette, TAB_RADIUS);
+        iv.new_tab.set_look(palette, BUTTON_RADIUS);
         iv.list.setHidden(true);
         match column.warning {
             Some(button) => {
                 iv.warning.setFrame(ns_rect(button));
-                iv.warning.set_look(palette, TAB_RADIUS);
+                iv.warning.set_look(palette, BUTTON_RADIUS);
                 iv.warning.set_foot(Some(column.fit.radius));
                 let text = NSString::from_str(&shown.notice);
                 iv.warning.setToolTip(Some(&text));
@@ -1076,7 +1078,7 @@ impl TallyButton {
         };
         let bounds = self.bounds();
         if iv.hot.get() {
-            let radius = TAB_RADIUS;
+            let radius = BUTTON_RADIUS;
             rounded_corners(
                 bounds,
                 [radius, radius, radius, iv.foot.get().unwrap_or(radius)],
@@ -1409,7 +1411,7 @@ impl AgentRows {
         // selected face (10 %) and a hover of 7 %. One agent's row is the chip's: its face, its
         // hover, its `×` and its key are the chip's.
         if bundled {
-            rounded(bounds, TAB_RADIUS, Tint::of(palette.title, 0.04), None);
+            row_face(bounds, Tint::of(palette.title, 0.04), None);
         }
         let hot = iv.hot.get();
         let mut next = 0.0;
@@ -1421,14 +1423,13 @@ impl AgentRows {
             let strong = iv.selected.get() && (line.focused || !bundled);
             let lit = hot == Some(index) && !strong;
             if bundled && strong {
-                rounded(
+                row_face(
                     row,
-                    TAB_RADIUS,
                     Tint::of(palette.title, 0.0625),
                     Some(palette.selected_line),
                 );
             } else if bundled && lit {
-                rounded(row, TAB_RADIUS, Tint::of(palette.title, 0.03125), None);
+                row_face(row, Tint::of(palette.title, 0.03125), None);
             }
             // The program's tile, where a row's stands, level with the name: in the line's top
             // band, the height of a plain row, however far the status and the details run below.

@@ -1,7 +1,7 @@
 //! The dock's **context row** — the footer under the input block: its two
 //! zones and the one plan the drawing and the mouse both read.
 //!
-//! **Left, the lead: where this row is.** The local path and branch, `⇄ host`
+//! **Left, the lead: where this row is.** The local path and branch, `host`
 //! and the remote path, a program guide bar's title, an upload's host and
 //! text. Each form builds only its own lead ([`Lead`]); none of them lays out
 //! the right side.
@@ -29,7 +29,7 @@
 //! branch, a title, a port number, a button's label.
 //!
 //! **The local form's own order** ([`LocalPlan`]): `(.venv) 3.12  {path} |
-//! {branch} | node 22.11`. The active environment heads the row like `⇄ host`
+//! {branch} | node 22.11`. The active environment heads the row like `host`
 //! does the remote form's — where you are, read first —, the Node version
 //! trails the branch. Within the lead's budget the path shortens from the
 //! left down to its last folder (`…/api`), then the Node version drops, then
@@ -48,14 +48,14 @@ use super::*;
 use crate::shell::{DockEnvironment, FooterPort, RemoteLink};
 
 /// The gap between the lead and the trailing zone, and between two of its
-/// items, in columns — the remote form's own gap (`⇄ prod  /srv`).
+/// items, in columns — the remote form's own gap (`prod  /srv`).
 const GAP: usize = 2;
 
 /// A clickable part of the context row — what [`footer_hit`] finds and
 /// [`footer_span`] anchors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FooterControl {
-    /// The server's name, `⇄ rasp`: the door to the server's card. Only in the
+    /// The server's name, `rasp`: the door to the server's card. Only in the
     /// context row of a pane that shows a terminal the server keeps
     /// ([`DockContext::server`]); a plain `ssh` has nothing behind its name.
     Server,
@@ -87,9 +87,9 @@ enum Lead<'a> {
         branch: &'a str,
         environment: &'a DockEnvironment,
     },
-    /// `⇄ {host}  {remote path}` (`host` as shown, with a port the user named).
+    /// `{host}  {remote path}` (`host` as shown, with a port the user named).
     Remote { host: &'a str, cwd: &'a str },
-    /// `⇄ {host}  {what the connection is doing}`: the remote form while the
+    /// `{host}  {what the connection is doing}`: the remote form while the
     /// connection to a kept terminal's server is down ([`RemoteLink`]). The
     /// path is not shown — it is as old as the connection.
     Down {
@@ -100,7 +100,7 @@ enum Lead<'a> {
     },
     /// `{title} · {detail}  {path}`.
     Program(&'a ProgramBar),
-    /// `⇄ {host}  {text}`.
+    /// `{host}  {text}`.
     Transfer(&'a Transfer),
 }
 
@@ -329,16 +329,14 @@ fn path_floor(path: &str) -> usize {
     }
 }
 
-/// `⇄ host`'s width.
+/// The server's name's width.
 fn remote_head(host: &str) -> usize {
-    2 + host.chars().count()
+    host.chars().count()
 }
 
-/// How many columns of `⇄ host` are drawn in `budget`: all of it, or the mark
-/// alone when the host does not fit (the host is never shortened).
-fn remote_head_drawn(host: &str, budget: usize) -> usize {
-    let head = remote_head(host);
-    if head > budget { budget.min(1) } else { head }
+/// Whether the server's name is drawn in `budget`: all of it or none, it is never shortened.
+fn remote_head_fits(host: &str, budget: usize) -> bool {
+    remote_head(host) <= budget
 }
 
 /// A guide bar's `{title} · {detail}` width.
@@ -536,7 +534,7 @@ fn parts(context: &DockContext) -> (Lead<'_>, [Option<Item<'_>>; ITEMS]) {
         return (Lead::Program(bar), [ports, hint]);
     }
     let lead = Lead::Local {
-        cwd: &context.cwd,
+        cwd: context.shown_cwd(),
         branch: &context.branch,
         environment: &context.environment,
     };
@@ -783,21 +781,20 @@ fn emit_lead(
                 sink,
             );
         }
-        // `⇄ {host}` in the mark's color (the theme's `info` when unmarked),
+        // `{host}` in the mark's color (the theme's `info` when unmarked),
         // two spaces, then the remote path in the two tiers of the local path;
         // no branch and no `|` — the branch belongs to the local repo, the
         // remote side's is unknown. **The host is not shortened**, for the
         // branch's reason: a shortened host name (`prod-we…`) can be read as
-        // another machine. If it does not fit only `⇄` remains — saying we are
-        // remote is still correct information. If the remote shell prints no
-        // OSC 7 there is no path at all.
+        // another machine. If it does not fit nothing stands in its place. If
+        // the remote shell prints no OSC 7 there is no path at all.
         Lead::Remote { host, cwd } => {
             let color = theme.mark_linear(context.remote_mark);
             emit_remote_head(host, color, budget, row, sink, |rest| {
                 path_cells(cwd, rest, dim, quiet).1
             });
         }
-        // `⇄ {host}` as above, then what the connection is doing in the dim
+        // `{host}` as above, then what the connection is doing in the dim
         // tone — the full text, or the state alone when that is what fits, or
         // nothing: a half sentence (`Reconnecting… · ⏎ t`) would promise a key
         // that is not named.
@@ -853,7 +850,7 @@ fn emit_lead(
                 .chain(path);
             emit_context(line, budget, row, sink);
         }
-        // `⇄ {host}` in the mark's color (the remote form's prefix and color
+        // `{host}` in the mark's color (the remote form's head and color
         // are kept), the text dim and **shortened from the right** with `…`:
         // its information is at the start (which file, which number). The
         // result's tone at the start of the text: success green, error red.
@@ -958,8 +955,8 @@ fn local_cells<'a>(
     head.chain(gap).chain(path).chain(branch).chain(node)
 }
 
-/// `⇄ {host}  {tail}` within `budget`: the tail gets what is left after the
-/// head and the gap (`tail(rest)`); `⇄` alone if the host does not fit.
+/// `{host}  {tail}` within `budget`: the tail gets what is left after the
+/// head and the gap (`tail(rest)`); nothing if the host does not fit.
 fn emit_remote_head<I: Iterator<Item = (char, LinearRgba)>>(
     host: &str,
     color: LinearRgba,
@@ -968,18 +965,15 @@ fn emit_remote_head<I: Iterator<Item = (char, LinearRgba)>>(
     sink: &mut impl FnMut(Cell),
     tail: impl FnOnce(usize) -> I,
 ) {
-    let mark = std::iter::once((REMOTE_MARK, color));
-    let head = remote_head(host);
-    // The mark alone when the head is cut: [`remote_head_drawn`], which the
-    // server name's clickable span reads too.
-    if remote_head_drawn(host, budget) < head {
-        emit_context(mark, budget, row, sink);
+    // Nothing when the head is cut: [`remote_head_fits`], which the server
+    // name's clickable span reads too.
+    if !remote_head_fits(host, budget) {
         return;
     }
-    let rest = budget.saturating_sub(head + REMOTE_GAP.chars().count());
-    let line = mark
-        .chain(std::iter::once((' ', color)))
-        .chain(host.chars().map(|ch| (ch, color)))
+    let rest = budget.saturating_sub(remote_head(host) + REMOTE_GAP.chars().count());
+    let line = host
+        .chars()
+        .map(|ch| (ch, color))
         .chain(REMOTE_GAP.chars().map(|ch| (ch, color)))
         .chain(tail(rest));
     emit_context(line, budget, row, sink);
@@ -1268,10 +1262,10 @@ pub fn footer_spans(
 }
 
 /// The context-local column the server's name ends at, `[0, end)` being what a
-/// click on `⇄ rasp` hits: only in the remote form of a pane that shows a terminal
+/// click on `rasp` hits: only in the remote form of a pane that shows a terminal
 /// the server keeps ([`DockContext::server`]) — a plain `ssh` has nothing behind
 /// its name, and the upload row's host is the transfer's. The width is what
-/// [`emit_remote_head`] draws, from the same [`remote_head_drawn`]; had the two
+/// [`emit_remote_head`] draws, from the same [`remote_head_fits`]; had the two
 /// diverged a click would land next to the name.
 fn server_name_end(context: &DockContext, plan: &Plan<'_>) -> Option<usize> {
     if !context.server {
@@ -1280,7 +1274,7 @@ fn server_name_end(context: &DockContext, plan: &Plan<'_>) -> Option<usize> {
     let Lead::Remote { host, .. } = plan.lead else {
         return None;
     };
-    Some(remote_head_drawn(host, plan.lead_budget)).filter(|&end| end > 0)
+    remote_head_fits(host, plan.lead_budget).then(|| remote_head(host))
 }
 
 /// The dock-local column the context row's trailing zone starts at on a

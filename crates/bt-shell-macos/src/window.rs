@@ -3683,7 +3683,7 @@ impl TerminalWindow {
         let title = tab
             .and_then(|id| self.tab(id))
             .or_else(|| self.try_selected_tab())
-            .and_then(|tab| tab.automatic_title())
+            .and_then(|tab| tab.group_seed())
             .unwrap_or_default();
         self.ivars().groups.borrow().suggest_name(&title)
     }
@@ -4844,15 +4844,13 @@ impl TerminalWindow {
     /// One tab as the bar shows it: a single tab's label is the window's title, an upload's
     /// prefix included; among several each tab shows its session title.
     fn label_of(tab: &TerminalTab, single: bool) -> Label {
-        let title = if single {
-            tab.title()
-        } else {
-            tab.session_title()
-        };
+        let heading = tab.heading(single);
         let indicator = tab.indicator();
         Label {
             tab: tab.id(),
-            title: title.unwrap_or_else(|| "bateri".to_owned()),
+            title: heading.title.unwrap_or_else(|| "bateri".to_owned()),
+            place_len: heading.place_len,
+            server: heading.server,
             indicator,
             emblem: tab.emblem(indicator),
             running: tab.running_for(),

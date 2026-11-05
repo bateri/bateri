@@ -1,4 +1,4 @@
-//! What the server's card says: the card that opens from `⇄ rasp` in the dock of a pane that
+//! What the server's card says: the card that opens from `rasp` in the dock of a pane that
 //! shows a terminal the server keeps. Only the words and the numbers, so the platform shells
 //! draw one card and `make linux` runs its tests.
 //!

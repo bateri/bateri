@@ -148,7 +148,7 @@ fn rounded(rect: NSRect, radius: f64) -> Retained<NSBezierPath> {
     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius)
 }
 
-fn grown(rect: NSRect, by: f64) -> NSRect {
+pub(crate) fn grown(rect: NSRect, by: f64) -> NSRect {
     NSRect::new(
         NSPoint::new(rect.origin.x - by, rect.origin.y - by),
         NSSize::new(
@@ -704,11 +704,10 @@ pub(crate) fn animate(secs: f64, change: impl Fn() + 'static, done: impl Fn() + 
 // ─── The shade under the cards ───────────────────────────────────────────
 
 /// How a card stands off the ground: the shadow under its foot (`offset`
-/// down, `blur`, cast by a fill `spread` points inside the card, so it shows
-/// under the foot and not round the sides) and the cut round it. The shadow's
-/// `offset` and `blur` are in the device's pixels, not points: the footings
-/// were tuned on what `NSShadow` cast in a view, which took them so
-/// (`draw_shadow`).
+/// down, `blur`, cast by a fill `spread` points inside the card, so it falls
+/// most under the foot and only a little round the sides) and the cut round
+/// it. All of them come out in points: the picture's context takes the shadow's
+/// numbers so at any scale (`draw_shadow`; read off a 2x window).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Footing {
     pub offset: f64,
@@ -861,10 +860,9 @@ fn draw_shadow(rect: NSRect, footing: Footing) {
         };
         let caster = at(caster);
         NSGraphicsContext::saveGraphicsState_class();
-        // The shadow is cast in the device's space, where its numbers are the footing's own —
-        // pixels, as `NSShadow` cast them in the view the footings were tuned in — and down the
-        // picture: `NSShadow` itself casts the same offset down a view's backing store and up a
-        // bitmap, so only the direction is taken from this drawing.
+        // The shadow is cast with the footing's own numbers and down the picture: `NSShadow`
+        // itself casts the same offset down a view's backing store and up a bitmap, so only the
+        // direction is taken from this drawing.
         if let Some(context) = NSGraphicsContext::currentContext() {
             let context = context.CGContext();
             let down =

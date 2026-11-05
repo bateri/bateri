@@ -250,7 +250,7 @@ fn context_strip(width_px: f64, cell: CellMetrics) -> ContextStrip {
 
 /// This moment's dock share: **zero** on the alternate screen, otherwise the birth value
 /// — except a **remote** session's alternate screen, where the dock stays as the
-/// one-row status bar (`⇄ host`, the transfer line): vim on the server still
+/// one-row status bar (`host`, the transfer line): vim on the server still
 /// shows where it runs. One row is exactly the context band (`band_px(0) ==
 /// dock_px(1)`), so the remote app's grid is not offset.
 ///

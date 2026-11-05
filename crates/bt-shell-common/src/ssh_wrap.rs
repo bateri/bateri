@@ -611,7 +611,7 @@ pub fn kablo_path(
 
 /// The command a new kablo terminal runs: the bootstrap
 /// ([`remote_command`]'s, as an argument vector — `new` takes no shell string),
-/// so the terminal's shell is the integrated one and the dock, the blocks, `⇄`
+/// so the terminal's shell is the integrated one and the dock, the blocks, the server's name
 /// and `LC_BATERI_TAB_URL` work as in a wrapped session. `cwd` is the
 /// starting directory ([`boot_in`]), `parent` the local block of the `ssh`
 /// command, `tab` the pane's identity; the nonce is the attempt's

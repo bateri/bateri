@@ -158,7 +158,7 @@ impl Machine {
         match self {
             Machine::All => ALL_TABS.to_owned(),
             Machine::Local => LOCAL.to_owned(),
-            Machine::Host(host) => format!("⇄ {host}"),
+            Machine::Host(host) => host.clone(),
         }
     }
 
@@ -758,7 +758,7 @@ pub fn tile_width(width: f64, columns: usize) -> f64 {
 pub enum Row {
     /// A group's dim heading ("api-work · 2 tabs").
     Heading { group: u64, text: String },
-    /// A server's section heading ("In the background on ⇄ rasp · 3"); `section` is its place
+    /// A server's section heading ("In the background on rasp · 3"); `section` is its place
     /// among [`Overview::sections`].
     Section {
         section: usize,
@@ -1412,7 +1412,7 @@ mod tests {
         let overview = mixed();
         assert_eq!(
             names(&overview),
-            vec!["All tabs", "This Computer", "⇄ db1", "⇄ rasp"]
+            vec!["All tabs", "This Computer", "db1", "rasp"]
         );
         let counts: Vec<String> = overview
             .machines()
@@ -1487,7 +1487,7 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec!["All tabs", "This Computer", "⇄ db1", "⇄ rasp", "All tabs"],
+            vec!["All tabs", "This Computer", "db1", "rasp", "All tabs"],
             "after the last server, All tabs again"
         );
         overview.cycle(false);
@@ -1708,7 +1708,7 @@ mod tests {
             &Machine::Host("rasp".to_owned()),
             "the search never selects a machine"
         );
-        assert_eq!(overview.placeholder(), "Find on ⇄ rasp");
+        assert_eq!(overview.placeholder(), "Find on rasp");
         overview.set_machine(Machine::All);
         assert_eq!(overview.placeholder(), FIND);
     }
@@ -1811,13 +1811,13 @@ mod tests {
         let rows = overview.machines();
         let db2 = rows
             .iter()
-            .find(|row| row.title == "⇄ db2")
+            .find(|row| row.title == "db2")
             .expect("a row for db2");
         assert_eq!(db2.count, "1 in the background");
         assert_eq!(db2.account.as_deref(), Some("u@db2:22"));
         let rasp = rows
             .iter()
-            .find(|row| row.title == "⇄ rasp")
+            .find(|row| row.title == "rasp")
             .expect("a row for rasp");
         assert_eq!(rasp.count, "1 tab · 2 in the background");
         // The last terminal of db2 goes: its section and its row go, and the machine falls
@@ -1825,7 +1825,7 @@ mod tests {
         overview.set_machine(Machine::Host("db2".to_owned()));
         assert_eq!(away_names(&overview), ["psql"]);
         overview.set_background(vec![overview.sections()[1].clone()]);
-        assert!(!names(&overview).contains(&"⇄ db2".to_owned()));
+        assert!(!names(&overview).contains(&"db2".to_owned()));
         assert_eq!(overview.machine(), &Machine::All);
         assert_eq!(away_names(&overview), ["claude", "cargo watch"]);
     }
@@ -1867,8 +1867,8 @@ mod tests {
         assert_eq!(
             headings,
             [
-                "Running in the background on ⇄ db2 · 1",
-                "Running in the background on ⇄ rasp · 2"
+                "Running in the background on db2 · 1",
+                "Running in the background on rasp · 2"
             ]
         );
         // Three tabs, then the terminals numbered on from them, none of them the tabs'.
@@ -2075,9 +2075,9 @@ mod tests {
         assert_eq!(
             headings(&overview),
             [
-                "Running in the background on ⇄ db2 · 1",
-                "On other computers on ⇄ nas · 1",
-                "Running in the background on ⇄ rasp · 2",
+                "Running in the background on db2 · 1",
+                "On other computers on nas · 1",
+                "Running in the background on rasp · 2",
                 "On other computers · 2",
             ]
         );

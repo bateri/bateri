@@ -694,6 +694,38 @@ impl IconColors {
     }
 }
 
+/// `[appearance] tab_running`: how a tab says a command runs, in the line round its tile.
+///
+/// Only the platform shell reads it (the tab bar's drawing); the session never sees it. One field
+/// of [`Changes`] covers it with [`Settings::tab_icons`], which the shell answers the same way. An
+/// ordinary key: a value that isn't accepted is the default at launch and leaves the value in effect
+/// at save time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabRunning {
+    /// A line with a bright head and a tail that fades, going round.
+    #[default]
+    Tail,
+    /// The same over a faint line that stands all the way round: a running tab is found at a glance.
+    TailRing,
+    /// The whole line, fading in and out where it stands.
+    Breathe,
+}
+
+impl TabRunning {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("tail", Self::Tail),
+        ("tail_ring", Self::TailRing),
+        ("breathe", Self::Breathe),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[appearance] tab_position`: where a window's tabs sit.
 ///
 /// Only the platform shell reads it (the window's layout and the tab list's
@@ -1423,7 +1455,7 @@ pub enum RemoteStatsMode {
     Numbers,
     /// Nothing while nothing is past its threshold, then only the values that
     /// are: the dock stays quiet about a server that is fine, and the server's
-    /// card (the click on `⇄ host`) has the numbers.
+    /// card (the click on `host`) has the numbers.
     #[default]
     Alerts,
     /// No indicator and no sampling.
@@ -1572,6 +1604,9 @@ pub struct Settings {
     /// `[appearance] tab_icon_colors`: theme colors or brand colors for the
     /// icon ([`IconColors`]). Doesn't enter `TerminalOptions`.
     pub tab_icon_colors: IconColors,
+    /// `[appearance] tab_running`: how a tab says a command runs ([`TabRunning`]). Doesn't enter
+    /// `TerminalOptions`.
+    pub tab_running: TabRunning,
     /// `[appearance] tab_position`: the tabs in a bar at the top or in a column
     /// at the left ([`TabPosition`]). Doesn't enter `TerminalOptions`.
     pub tab_position: TabPosition,
@@ -1673,6 +1708,7 @@ impl Default for Settings {
             resize_in_steps: false,
             tab_icons: true,
             tab_icon_colors: IconColors::default(),
+            tab_running: TabRunning::default(),
             tab_position: TabPosition::default(),
             font: FontOptions::default(),
             osc52: Osc52::Copy,
@@ -1798,6 +1834,8 @@ pub enum SettingsEdit {
     TabIcons(bool),
     /// The settings window's "Icon colors": `[appearance] tab_icon_colors`.
     IconColors(IconColors),
+    /// The settings window's "Running tab": `[appearance] tab_running`.
+    TabRunning(TabRunning),
     /// View ▸ Tabs ▸ and the settings window's "Tabs": `[appearance]
     /// tab_position`.
     TabPosition(TabPosition),
@@ -1913,6 +1951,7 @@ impl SettingsEdit {
                 "tab_icon_colors",
                 "appearance.tab_icon_colors",
             ),
+            Self::TabRunning(_) => ("appearance", "tab_running", "appearance.tab_running"),
             Self::TabPosition(_) => ("appearance", "tab_position", "appearance.tab_position"),
             Self::FontFamily(_) => ("font", "family", "font.family"),
             Self::FontSize(_) => ("font", "size", "font.size"),
@@ -1971,6 +2010,7 @@ impl SettingsEdit {
             Self::SplitStyle(style) => style.name().into(),
             Self::TabDetails(details) => details.name().into(),
             Self::IconColors(colors) => colors.name().into(),
+            Self::TabRunning(running) => running.name().into(),
             Self::TabPosition(position) => position.name().into(),
             Self::Osc52(mode) => mode.name().into(),
             Self::CursorMotion(motion) => motion.name().into(),
@@ -2152,6 +2192,10 @@ tab_icons = true
 # own where it has a colored brand (Claude, Antigravity, Gemini, Qwen); the
 # single-color ones and the kinds bateri draws itself stay as they are.
 tab_icon_colors = "theme"
+# "tail" | "tail_ring" | "breathe". How a tab says a command runs, in the line round
+# its icon: a line with a fading tail going round, the same over a faint line that
+# stands all the way round, or the whole line fading in and out where it stands.
+tab_running = "tail"
 # "top" | "side". Where a window's tabs sit: a bar along the top, in the title
 # row, or a full-height column at the window's left edge, where the title row
 # goes and the traffic lights sit at the column's head. One place for every
@@ -2659,6 +2703,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("tab_running") {
+                    parsed.settings.tab_running = named_enum(
+                        text,
+                        item,
+                        "appearance.tab_running",
+                        TabRunning::NAMES,
+                        fallback.tab_running,
+                        &mut parsed.diagnostics,
+                    );
+                }
                 if let Some(item) = appearance.get("tab_position") {
                     parsed.settings.tab_position = named_enum(
                         text,
@@ -2683,6 +2737,7 @@ stats_interval = 3
                 parsed.settings.resize_in_steps = fallback.resize_in_steps;
                 parsed.settings.tab_icons = fallback.tab_icons;
                 parsed.settings.tab_icon_colors = fallback.tab_icon_colors;
+                parsed.settings.tab_running = fallback.tab_running;
                 parsed.settings.tab_position = fallback.tab_position;
             }
             None => {}
@@ -3052,7 +3107,8 @@ stats_interval = 3
             tab_details: self.tab_details != new.tab_details,
             resize_in_steps: self.resize_in_steps != new.resize_in_steps,
             tab_icons: self.tab_icons != new.tab_icons
-                || self.tab_icon_colors != new.tab_icon_colors,
+                || self.tab_icon_colors != new.tab_icon_colors
+                || self.tab_running != new.tab_running,
             tab_position: self.tab_position != new.tab_position,
             ports: self.shell_ports != new.shell_ports,
             environment: self.shell_python_env != new.shell_python_env
@@ -3824,10 +3880,9 @@ pub struct Changes {
     /// fits every window to its lone pane's cells at once instead of at the
     /// next drag. A field of its own, for [`Self::caret`]'s reason.
     pub resize_in_steps: bool,
-    /// [`Settings::tab_icons`] or [`Settings::tab_icon_colors`] changed: the
-    /// platform shell draws every tab bar again. One field for both, because
-    /// the shell does the same for either; a field of its own, for
-    /// [`Self::caret`]'s reason.
+    /// [`Settings::tab_icons`], [`Settings::tab_icon_colors`] or [`Settings::tab_running`]
+    /// changed: the platform shell draws every tab bar again. One field for them, because the
+    /// shell does the same for each; a field of its own, for [`Self::caret`]'s reason.
     pub tab_icons: bool,
     /// [`Settings::shell_ports`] changed: the platform shell starts or stops
     /// every pane's port probe. A field of its own, for [`Self::caret`]'s
@@ -4692,6 +4747,7 @@ mod tests {
             ("appearance", "resize_in_steps"),
             ("appearance", "tab_icons"),
             ("appearance", "tab_icon_colors"),
+            ("appearance", "tab_running"),
             ("appearance", "tab_position"),
             ("font", "size"),
             ("font", "line_height"),
@@ -4923,6 +4979,7 @@ mod tests {
             resize_in_steps: true,
             tab_icons: false,
             tab_icon_colors: IconColors::Brand,
+            tab_running: TabRunning::Breathe,
             tab_position: TabPosition::Side,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
@@ -6393,6 +6450,28 @@ hosts = [
     }
 
     #[test]
+    fn how_a_tab_says_it_runs_is_read() {
+        assert_eq!(clean("").tab_running, TabRunning::Tail);
+        for (value, expected) in [
+            ("tail", TabRunning::Tail),
+            ("tail_ring", TabRunning::TailRing),
+            ("breathe", TabRunning::Breathe),
+        ] {
+            let text = format!("[appearance]\ntab_running = \"{value}\"\n");
+            assert_eq!(clean(&text).tab_running, expected, "{value}");
+            assert_eq!(expected.name(), value);
+        }
+        let new = Settings {
+            tab_running: TabRunning::Breathe,
+            ..Settings::default()
+        };
+        assert!(
+            Settings::default().changes(&new).tab_icons,
+            "the bars draw again"
+        );
+    }
+
+    #[test]
     fn tab_icons_and_their_colors_are_read() {
         assert!(clean("").tab_icons, "icons are on by default");
         assert_eq!(clean("").tab_icon_colors, IconColors::Theme);
@@ -7762,6 +7841,7 @@ cursor = \"spring\"
             SettingsEdit::ResizeInSteps(on) => settings.resize_in_steps = on,
             SettingsEdit::TabIcons(on) => settings.tab_icons = on,
             SettingsEdit::IconColors(colors) => settings.tab_icon_colors = colors,
+            SettingsEdit::TabRunning(running) => settings.tab_running = running,
             SettingsEdit::TabPosition(position) => settings.tab_position = position,
             SettingsEdit::FontFamily(name) => {
                 settings.font.family = (!name.is_empty()).then_some(name);
@@ -7864,6 +7944,7 @@ cursor = \"spring\"
             SettingsEdit::ResizeInSteps(true),
             SettingsEdit::TabIcons(false),
             SettingsEdit::IconColors(IconColors::Brand),
+            SettingsEdit::TabRunning(TabRunning::Breathe),
             SettingsEdit::TabPosition(TabPosition::Side),
             SettingsEdit::FontFamily("Menlo".to_owned()),
             SettingsEdit::FontFamily(String::new()),

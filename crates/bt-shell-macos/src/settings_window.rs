@@ -33,7 +33,7 @@ use bt_core::{
     IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep,
     ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
     SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabDetails, TabPosition, UnfocusedCaret,
+    TabDetails, TabPosition, TabRunning, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
@@ -238,6 +238,7 @@ enum Key {
     TabDetails,
     TabIcons,
     TabIconColors,
+    TabRunning,
     ResizeInSteps,
     TabPosition,
     PythonEnv,
@@ -247,7 +248,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 51] = [
+    const ALL: [Key; 52] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -294,6 +295,7 @@ impl Key {
         Key::TabDetails,
         Key::TabIcons,
         Key::TabIconColors,
+        Key::TabRunning,
         Key::ResizeInSteps,
         Key::TabPosition,
         Key::PythonEnv,
@@ -333,6 +335,7 @@ impl Key {
             Key::ResizeInSteps => "appearance.resize_in_steps",
             Key::TabIcons => "appearance.tab_icons",
             Key::TabIconColors => "appearance.tab_icon_colors",
+            Key::TabRunning => "appearance.tab_running",
             Key::TabPosition => "appearance.tab_position",
             Key::Font => "font.family",
             Key::Size => "font.size",
@@ -585,6 +588,19 @@ impl Choice for IconColors {
         match self {
             IconColors::Theme => "Theme",
             IconColors::Brand => "Brand",
+        }
+    }
+}
+
+impl Choice for TabRunning {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            TabRunning::Tail => "Tail",
+            TabRunning::TailRing => "Tail and ring",
+            TabRunning::Breathe => "Breathe",
         }
     }
 }
@@ -1225,6 +1241,7 @@ struct Controls {
     tab_details: Retained<NSPopUpButton>,
     tab_icons: Retained<NSSwitch>,
     tab_icon_colors: Retained<NSPopUpButton>,
+    tab_running: Retained<NSPopUpButton>,
     tab_position: Retained<NSPopUpButton>,
     minimum_contrast: Retained<NSPopUpButton>,
     shape: Retained<NSPopUpButton>,
@@ -1421,6 +1438,7 @@ define_class!(
                 Key::SplitStyle => choice_at(index).map(SettingsEdit::SplitStyle),
                 Key::TabDetails => choice_at(index).map(SettingsEdit::TabDetails),
                 Key::TabIconColors => choice_at(index).map(SettingsEdit::IconColors),
+                Key::TabRunning => choice_at(index).map(SettingsEdit::TabRunning),
                 Key::TabPosition => choice_at(index).map(SettingsEdit::TabPosition),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
                 Key::CommandLevel => choice_at(index).map(SettingsEdit::CommandLevel),
@@ -1845,6 +1863,7 @@ impl SettingsWindow {
         select_choice(&c.tab_details, settings.tab_details);
         set_switch(&c.tab_icons, settings.tab_icons);
         select_choice(&c.tab_icon_colors, settings.tab_icon_colors);
+        select_choice(&c.tab_running, settings.tab_running);
         select_choice(&c.tab_position, settings.tab_position);
 
         select_choice(&c.shape, settings.cursor);
@@ -2580,6 +2599,7 @@ impl SettingsWindow {
         let resize_in_steps = self.switch(Key::ResizeInSteps);
         let tab_icons = self.switch(Key::TabIcons);
         let tab_icon_colors = self.popup::<IconColors>(Key::TabIconColors);
+        let tab_running = self.popup::<TabRunning>(Key::TabRunning);
         let tab_position = self.popup::<TabPosition>(Key::TabPosition);
         let mut appearance = Form::new(mtm);
         appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
@@ -2697,6 +2717,13 @@ impl SettingsWindow {
             &tab_icon_colors,
             &[&tab_icon_colors],
             Some("Theme: icons use the theme's colors. Brand: programs with a colored brand keep it."),
+        );
+        appearance.row(
+            Key::TabRunning,
+            "Running tab:",
+            &tab_running,
+            &[&tab_running],
+            Some("How a tab says a command runs. Tail: a line with a fading tail goes round its icon. Tail and ring: the same over a faint line. Breathe: the whole line fades in and out."),
         );
 
         // Cursor
@@ -2970,6 +2997,7 @@ impl SettingsWindow {
             tab_details,
             tab_icons,
             tab_icon_colors,
+            tab_running,
             tab_position,
             minimum_contrast,
             shape,
@@ -3462,7 +3490,7 @@ mod tests {
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
-                    focus_frame = []\nsplit_style = []\ntab_details = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_position = []\n\
+                    focus_frame = []\nsplit_style = []\ntab_details = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_running = []\ntab_position = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -3533,6 +3561,7 @@ mod tests {
                 Key::TabDetails => SettingsEdit::TabDetails(TabDetails::Always),
                 Key::TabIcons => SettingsEdit::TabIcons(false),
                 Key::TabIconColors => SettingsEdit::IconColors(IconColors::Brand),
+                Key::TabRunning => SettingsEdit::TabRunning(TabRunning::Breathe),
                 Key::TabPosition => SettingsEdit::TabPosition(TabPosition::Side),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
@@ -3599,6 +3628,7 @@ mod tests {
         check::<ContentEdge>();
         check::<SplitStyle>();
         check::<IconColors>();
+        check::<TabRunning>();
         check::<TabPosition>();
         check::<ShellIntegration>();
         check::<CommandLevel>();

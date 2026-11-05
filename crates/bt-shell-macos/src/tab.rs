@@ -32,7 +32,7 @@
 //! it left.
 //!
 //! **The focused pane** is the pane of the window's first responder
-//! ([`TerminalTab::focused_pane`]): the title, `⇄`, upload percentage and
+//! ([`TerminalTab::focused_pane`]): the title, the server, upload percentage and
 //! the inheritance of a new tab or split come from it. ⌘W closes it,
 //! and in the last pane the tab. Its card's frame is the stronger one — the
 //! other panes sit under the dim veil only with `dim_unfocused_splits`
@@ -453,6 +453,14 @@ define_class!(
     unsafe impl NSObjectProtocol for TerminalTab {}
 );
 
+/// What the bar says of a tab ([`TerminalTab::heading`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TabHeading {
+    pub(crate) title: Option<String>,
+    pub(crate) place_len: usize,
+    pub(crate) server: Option<String>,
+}
+
 impl TerminalTab {
     /// A tab around its first pane, in window `window`: the container is born
     /// with the pane filling it; splits come afterwards
@@ -734,7 +742,7 @@ impl TerminalTab {
                         kind: pane.program_kind(),
                         title: pane
                             .session()
-                            .map(|session| session.title())
+                            .map(|session| session.pane_title().head())
                             .unwrap_or_default(),
                         indicator: tabs::indicator(self.signals_of(pane, hidden, away)),
                         focused: own,
@@ -1268,6 +1276,35 @@ impl TerminalTab {
     pub(crate) fn session_title(&self) -> Option<String> {
         let title = self.automatic_title()?;
         Some(self.name().unwrap_or(title))
+    }
+
+    /// What the bar says of this tab, from one reading of its pane's title: the title ([`Self::title`]
+    /// for a single tab, [`Self::session_title`] among several), how many bytes at its end are the
+    /// place a row says more quietly (none for a tab with its own name) and the server the focused
+    /// pane stands on. Nothing while there is no session yet.
+    pub(crate) fn heading(&self, single: bool) -> TabHeading {
+        let pane = self.focused_pane();
+        let Some(said) = pane.session().map(|session| session.pane_title()) else {
+            return TabHeading::default();
+        };
+        let name = self.name();
+        let place_len = if name.is_some() { 0 } else { said.place_len() };
+        let own = name.unwrap_or_else(|| said.whole());
+        TabHeading {
+            title: Some(if single {
+                upload::titled_as(pane.upload_title_prefix(), &own)
+            } else {
+                own
+            }),
+            place_len,
+            server: said.server,
+        }
+    }
+
+    /// What a group made for this tab starts as, whatever the tab is called: where it stands.
+    pub(crate) fn group_seed(&self) -> Option<String> {
+        let title = self.focused_pane().session()?.pane_title();
+        Some(title.group_seed().to_owned())
     }
 
     /// The title the focused pane's session reports, whatever the tab is

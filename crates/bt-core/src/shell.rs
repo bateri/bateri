@@ -106,7 +106,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -624,6 +624,9 @@ pub struct DockContext {
     /// The shell's working directory, the **full path**; it comes from OSC 7 and is
     /// empty if it never arrived.
     pub cwd: String,
+    /// [`Self::cwd`] as the folder row says it, with the home as `~` ([`tilde`]); empty while the
+    /// two are the same. Written with it, so the row's frames allocate nothing.
+    pub short_cwd: String,
     /// The git branch; **empty** if not a repository or unreadable. On a detached
     /// HEAD the short SHA instead of the branch — the shell does not say which it
     /// is, it only sends the name to show.
@@ -690,7 +693,7 @@ pub struct DockContext {
     /// ([`Self::clear_remote`], [`ShellLog::set_remote`]) — otherwise a new host
     /// would show the previous one's numbers until its first sample.
     pub stats: Option<RemoteStats>,
-    /// The pane shows a terminal a server keeps, and the remote form's `⇄ host`
+    /// The pane shows a terminal a server keeps, and the remote form's `host`
     /// is the door to that server's card ([`crate::FooterControl::Server`]). A
     /// plain `ssh` — an `ssh` the application sets nothing up on — has none, and its
     /// name is only a name.
@@ -1031,7 +1034,7 @@ impl PartialEq for RemoteStats {
 
 impl Eq for RemoteStats {}
 
-/// The dock's status line for the upload queue: in place of the context line `⇄ {host}  {body}{controls}` and progress on
+/// The dock's status line for the upload queue: in place of the context line `{host}  {body}{controls}` and progress on
 /// the top hairline.
 ///
 /// The body's text is formatted in `bt-shell` (bytes, speed, time, file count);
@@ -1048,7 +1051,7 @@ pub struct Transfer {
     /// shows for the same session. Display only: [`Self::mark`] is resolved
     /// from the bare host, not from this.
     pub host: String,
-    /// The host's resolved mark: the color of `⇄ host` and of the progress bar.
+    /// The host's resolved mark: the color of `host` and of the progress bar.
     pub mark: HostMark,
     /// The status text (`↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · …`).
     pub body: String,
@@ -1193,6 +1196,8 @@ impl Clone for DockContext {
     fn clone_from(&mut self, source: &Self) {
         self.cwd.clear();
         self.cwd.push_str(&source.cwd);
+        self.short_cwd.clear();
+        self.short_cwd.push_str(&source.short_cwd);
         self.branch.clear();
         self.branch.push_str(&source.branch);
         // Capacity is kept: allocation happens only at the **edge** of the remote session
@@ -1359,6 +1364,15 @@ pub struct EnvironmentRequest {
 }
 
 impl DockContext {
+    /// The directory as the folder row says it ([`Self::short_cwd`]).
+    pub(crate) fn shown_cwd(&self) -> &str {
+        if self.short_cwd.is_empty() {
+            &self.cwd
+        } else {
+            &self.short_cwd
+        }
+    }
+
     /// Uzak oturumun host'u; yerelde `None`. The **key** (marks, integration,
     /// saved passwords): what is shown is [`Self::remote_label`].
     pub fn remote_host(&self) -> Option<&str> {
@@ -1529,6 +1543,11 @@ impl Clone for RemoteTarget {
 /// the directory must be absolute or `~`-rooted; anything else (vim's title, a
 /// free-form one) is `None` and the remote folder stays unknown.
 pub(crate) fn title_directory(title: &str) -> Option<&str> {
+    stock_title(title).map(|(_, dir)| dir)
+}
+
+/// The host and the directory of a shell's stock title ([`title_directory`]'s shape).
+fn stock_title(title: &str) -> Option<(&str, &str)> {
     let (who, dir) = title.split_once(':')?;
     let dir = dir.strip_prefix(' ').unwrap_or(dir);
     let (user, host) = who.split_once('@')?;
@@ -1540,59 +1559,219 @@ pub(crate) fn title_directory(title: &str) -> Option<&str> {
     };
     let dir = dir.trim_end();
     (plain(user) && plain(host) && (dir.starts_with('/') || dir == "~" || dir.starts_with("~/")))
-        .then_some(dir)
+        .then_some((host, dir))
 }
 
-/// The window's (and the native tab's) title — priority order:
+/// `path` as a person says it: the home directory as `~`, below it `~/rest`, anything else whole.
+/// A home with no components of its own (`/`) shortens nothing. The one rule for the dock's folder
+/// row, the summary card and the command palette.
+pub fn tilde(path: &Path, home: Option<&Path>) -> String {
+    let rest = home
+        .filter(|home| home.is_absolute() && home.components().count() > 1)
+        .and_then(|home| path.strip_prefix(home).ok());
+    match rest {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.to_string_lossy()),
+        None => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// A pane's name ([`title_of`]). A pane's header says `who` alone, because the dock's folder row
+/// under it says where; a tab's row and every other list say both ([`Self::whole`]), with the place
+/// a step quieter where the type allows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTitle {
+    /// What runs there: a program's own title or the shell's name; empty on a server whose shell
+    /// has not been named, where the place says everything.
+    pub who: String,
+    /// Where, when only the shell has spoken: its folder's name, on a server the server's and then
+    /// the folder's.
+    pub place: Option<String>,
+    /// The server the pane stands on, as shown; `None` on this computer. A tab's row says
+    /// [`Self::place`] in the server's colour, and a program's title with the server in its tip.
+    pub server: Option<String>,
+}
+
+impl PaneTitle {
+    fn only(who: String) -> Self {
+        Self {
+            who,
+            place: None,
+            server: None,
+        }
+    }
+
+    /// The name in one line.
+    pub fn whole(&self) -> String {
+        match &self.place {
+            Some(place) if self.who.is_empty() => place.clone(),
+            Some(place) => format!("{} {place}", self.who),
+            None => self.who.clone(),
+        }
+    }
+
+    /// How many bytes at the end of [`Self::whole`] are the place, with the space before it.
+    pub fn place_len(&self) -> usize {
+        match &self.place {
+            Some(place) if self.who.is_empty() => place.len(),
+            Some(place) => place.len() + 1,
+            None => 0,
+        }
+    }
+
+    /// What a pane's header says: what runs there, or on a server whose shell has not been named
+    /// the place.
+    pub fn head(&self) -> String {
+        if self.who.is_empty() {
+            self.whole()
+        } else {
+            self.who.clone()
+        }
+    }
+
+    /// What a group made for this tab is named after ([`Self::whole`] would name it `zsh api`):
+    /// where it stands, the server rather than the server's folder, else what runs there.
+    pub fn group_seed(&self) -> &str {
+        match (&self.place, &self.server) {
+            (Some(_), Some(server)) => server,
+            (Some(place), None) => place,
+            (None, _) => &self.who,
+        }
+    }
+}
+
+/// What [`title_of`] is told of the place it runs in.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Here<'a> {
+    /// The name of the shell at the pane's prompt; `None` while a command runs, and in a pane
+    /// whose program is not the login shell.
+    pub(crate) shell: Option<&'a str>,
+    /// The name of the shell in front of the terminal a server keeps for this pane, as the server
+    /// says it; `None` for a plain `ssh`, which has no such word, and while a program is in front.
+    pub(crate) server_shell: Option<&'a str>,
+    /// Our remote shell is at its prompt: no program is in front on the server, and a title that is
+    /// not the shell's own is one a program left behind.
+    pub(crate) server_prompt: bool,
+    /// The title the pane had when its remote session began: the local shell's, the prompt's or the
+    /// command's own (`ssh rasp`, as oh-my-zsh and others name what runs). Nothing replaces it while
+    /// the server's shell sets no title, and a program there that saved it brings it back as it
+    /// leaves (`CSI 23 t`), so it is known by what it says.
+    pub(crate) before_remote: Option<&'a str>,
+    /// This computer's name ([`local_host`]).
+    pub(crate) host: Option<&'a str>,
+}
+
+/// This computer's name, as a shell's `%m` or `\h` says it; asked each time, because a Mac's name
+/// follows the network it is on and a prompt reads the name of the moment.
+pub(crate) fn local_host() -> Option<String> {
+    let mut name = [0u8; 256];
+    // SAFETY: the buffer is writable for the length given.
+    let done = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
+    if done != 0 {
+        return None;
+    }
+    let end = name.iter().position(|&byte| byte == 0)?;
+    std::str::from_utf8(&name[..end]).ok().map(str::to_owned)
+}
+
+/// Whether two names are one computer's: the short name and the whole one are the same computer.
+fn same_host(one: &str, other: &str) -> bool {
+    let short = |name: &'_ str| {
+        name.split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    short(one) == short(other)
+}
+
+/// The last component of a directory; the home directory itself is `~`, and `~` and `/` stay as
+/// they are.
+fn folder_of(dir: &str, home: Option<&Path>) -> String {
+    let path = Path::new(dir);
+    if home.is_some_and(|home| home == path) {
+        return "~".to_owned();
+    }
+    match path.file_name() {
+        Some(name) if dir != "~" => name.to_string_lossy().into_owned(),
+        _ => dir.to_owned(),
+    }
+}
+
+/// A pane's name — priority order:
 ///
-/// 1. **The application's OSC 0/2 title** (vim, ssh, Claude Code, oh-my-zsh's
-///    `termsupport`). An empty title is ignored: `\e]2;\a` is not a title, it
-///    would leave the tab nameless.
-/// 2. **The last component of the working directory** (OSC 7); the home
-///    directory itself is `~`, the root `/`. A subdirectory is `proj`, not
-///    `~/proj` — the tab is narrow and the last component is the distinguishing
-///    one.
-/// 3. `bateri`.
+/// 1. **The application's OSC 0/2 title** (vim, ssh, Claude Code, a command's name as oh-my-zsh
+///    sets it). An empty title is ignored: `\e]2;\a` is not a title, it would leave the tab
+///    nameless.
+/// 2. **The shell's own name and its folder** (`zsh bateri-term`), when nothing but the shell has
+///    spoken: no title, or its stock `user@host:dir` ([`stock_title`]), which every prompt of
+///    oh-my-zsh and Debian's bash sends and which says nothing of the pane a tab's narrow row can
+///    show. The folder is the last component (OSC 7, or the title's own directory); the home
+///    directory itself is `~`, the root `/`.
+/// 3. Without a shell's name (a command runs, the pane's program is not the login shell): the
+///    folder alone, else `bateri`.
 ///
-/// **While a remote session is active** (`remote` = the target as shown,
-/// [`host_label`]) the title carries the [`crate::dock::REMOTE_MARK`] prefix:
-/// `⇄ {OSC title}`, `⇄ {host}` (`⇄ {host}:{port}` for a port the user named) if
-/// there is no title; the local directory is never consulted. The prefix is
-/// unconditional, because most remote shells print `user@host: dir` into the
-/// title and what tells the remote apart among tabs is that; since the dock goes
-/// away on the alternate screen (vim on the remote), only the title carries the
-/// indicator.
+/// **While a remote session is active** (`remote` = the target as shown, [`host_label`]) the local
+/// directory is never consulted. A program's title is itself, and [`PaneTitle::server`] says where
+/// it runs: a tab's tile carries that as a dot, since the dock goes away on the alternate screen
+/// (vim on the remote). With nothing but the shell having spoken the place is the server's name,
+/// `{host}` (`{host}:{port}` for a port the user named), then the folder a stock title says, none at
+/// the server's home; the shell's name stands before it when it is known. **A stock title naming
+/// another computer** is the same name without a remote session (a pane showing a server's terminal
+/// says it through the stream).
 ///
-/// Pure and fed from three slots; the reader is [`crate::Session::title`]. The
-/// home directory is an argument, because this crate reads no environment — the
-/// application supplies the value ([`crate::SessionOptions::home`]).
+/// Pure and fed from four slots; the reader is [`crate::Session::pane_title`]. The home directory is
+/// an argument, because this crate reads no environment — the application supplies the value
+/// ([`crate::SessionOptions::home`]).
 pub(crate) fn title_of(
     osc_title: Option<&str>,
     cwd: Option<&str>,
     home: Option<&Path>,
     remote: Option<&str>,
-) -> String {
+    here: Here<'_>,
+) -> PaneTitle {
     let osc_title = osc_title.filter(|title| !title.trim().is_empty());
-    if let Some(host) = remote {
-        let mark = crate::dock::REMOTE_MARK;
-        return format!("{mark} {}", osc_title.unwrap_or(host));
-    }
-    if let Some(title) = osc_title {
-        return title.to_owned();
-    }
-    let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
-        return "bateri".to_owned();
+    let away = |host: &str, dir: &str, shell: Option<&str>| PaneTitle {
+        who: shell.unwrap_or_default().to_owned(),
+        place: Some(if dir == "~" {
+            host.to_owned()
+        } else {
+            format!("{host} · {}", folder_of(dir, None))
+        }),
+        server: Some(host.to_owned()),
     };
-    let path = Path::new(cwd);
-    if home.is_some_and(|home| home == path) {
-        return "~".to_owned();
+    if let Some(host) = remote {
+        let said = osc_title.filter(|title| here.before_remote != Some(*title));
+        return match said.map(|title| (title, stock_title(title))) {
+            Some((_, Some((_, dir)))) => away(host, dir, here.server_shell),
+            Some((title, None)) if !here.server_prompt => PaneTitle {
+                server: Some(host.to_owned()),
+                ..PaneTitle::only(title.to_owned())
+            },
+            _ => away(host, "~", here.server_shell),
+        };
     }
-    match path.file_name() {
-        Some(name) => name.to_string_lossy().into_owned(),
-        // An absolute path with no last component is only the root: `file_name` gives
-        // `None` for `/`. The scanner passes only absolute paths, so a relative `..`
-        // does not land here; even if it did, the path itself is an honest title.
-        None => cwd.to_owned(),
+    let stock = osc_title.and_then(stock_title);
+    if let Some((host, dir)) = stock
+        && here.host.is_some_and(|here| !same_host(here, host))
+    {
+        return away(host, dir, here.server_shell.or(here.shell));
+    }
+    if let (Some(title), None) = (osc_title, stock) {
+        return PaneTitle::only(title.to_owned());
+    }
+    let folder = stock
+        .map(|(_, dir)| dir)
+        .or(cwd.filter(|cwd| !cwd.is_empty()))
+        .map(|dir| folder_of(dir, home));
+    match (here.shell, folder) {
+        (Some(shell), place) => PaneTitle {
+            who: shell.to_owned(),
+            place,
+            server: None,
+        },
+        (None, Some(folder)) => PaneTitle::only(folder),
+        (None, None) => PaneTitle::only("bateri".to_owned()),
     }
 }
 
@@ -2392,6 +2571,15 @@ pub(crate) struct DockPrediction {
 }
 
 pub(crate) struct ShellLog {
+    /// The user's home directory ([`crate::SessionOptions::home`]): the folder row's `~`.
+    pub(crate) home: Option<PathBuf>,
+    /// The name of the pane's login shell ([`crate::Session::set_shell_name`]).
+    pub(crate) shell_name: Option<String>,
+    /// The name of the shell at the server's prompt ([`crate::Session::set_server_shell`]).
+    pub(crate) server_shell: Option<String>,
+    /// The title the pane had when its remote session began ([`crate::Session::set_remote`];
+    /// [`Here::before_remote`]).
+    pub(crate) title_before_remote: Option<String>,
     /// The local shell's trail: its phase (`None` = no integration), the
     /// running command's clock and the block ledger ([`BlockTrack`]).
     pub(crate) local: BlockTrack,
@@ -2911,6 +3099,10 @@ impl ShellLog {
             ours: false,
             command_open: false,
             command_cwd: String::new(),
+            home: None,
+            shell_name: None,
+            server_shell: None,
+            title_before_remote: None,
             // At startup the caret is the dock's (`caret_home_raw(None, Idle)`), so the first
             // handover is always in the Dock→Grid direction and the hold can apply to it.
             caret_raw: CaretHome::Dock,
@@ -3315,6 +3507,11 @@ impl ShellLog {
                 } else if self.context.cwd != path {
                     self.context.cwd.clear();
                     self.context.cwd.push_str(path);
+                    self.context.short_cwd.clear();
+                    let short = tilde(Path::new(path), self.home.as_deref());
+                    if short != path {
+                        self.context.short_cwd.push_str(&short);
+                    }
                     outcome.title = true;
                 }
             }
@@ -4026,6 +4223,12 @@ impl ShellLog {
         self.context.server && self.context.remote.is_some() && self.at_remote_prompt(shell)
     }
 
+    /// Whether our remote shell is at its prompt, whichever shell it is.
+    pub(crate) fn server_at_prompt(&self) -> bool {
+        self.remote_shell
+            .is_some_and(|shell| self.at_remote_prompt(shell))
+    }
+
     /// Whether a dock event the gate turned away is our remote shell's, at its
     /// prompt, and only early: the pane has not yet been told it shows a server's
     /// terminal ([`DockContext::server`], [`DockContext::remote`]) — those two come
@@ -4101,7 +4304,7 @@ impl ShellLog {
     /// prompt left in it (its editing word, its grid flag, a held line) is not the
     /// remote shell's and goes before the event is applied, and the dock's row
     /// appears — a change of its own, whatever the event says. **The branch is not
-    /// taken**: the remote context row is `⇄ host` and its path, it carries no
+    /// taken**: the remote context row is `host` and its path, it carries no
     /// branch, and the local one must not be overwritten by a server's.
     fn apply_remote_dock(&mut self, event: DockEvent<'_>, answers: u64) -> bool {
         if matches!(event, DockEvent::Branch { .. }) {
@@ -4493,10 +4696,11 @@ pub fn next_tick(elapsed: Duration) -> Duration {
     period - since
 }
 
+/// Where [`counter_period`] changes: the seconds tier ends and the minutes tier begins.
+const COUNTER_HOUR: Duration = Duration::from_secs(3600);
+
 /// How long one visible step of a running counter lasts at `elapsed`: a
-/// second, and a minute from the hour tier on — [`next_tick`]'s period and
-/// the tab bar's running ring's turn (twelve periods to a turn), one copy of
-/// the tiers.
+/// second, and a minute from the hour tier on — [`next_tick`]'s period.
 ///
 /// **A separate resolution per tier.** In the hour tier the text (`1h 07m`)
 /// changes once a minute; waking every second would have an hour draw 3540
@@ -4509,19 +4713,6 @@ pub fn counter_period(elapsed: Duration) -> Duration {
     } else {
         Duration::from_secs(60)
     }
-}
-
-/// Where [`counter_period`] changes: the seconds tier ends and the minutes tier begins.
-const COUNTER_HOUR: Duration = Duration::from_secs(3600);
-
-/// The time left until [`counter_period`] next changes — the end of the seconds tier — or `None`
-/// once the minutes tier, the last, is reached. The tab bar's running ring turns once per twelve
-/// periods and is set again where the period changes, so it asks here rather than keeping its own
-/// idea of "the hour".
-pub fn counter_tier_end(elapsed: Duration) -> Option<Duration> {
-    COUNTER_HOUR
-        .checked_sub(elapsed)
-        .filter(|left| !left.is_zero())
 }
 
 /// A running command's counter text for `elapsed` — whole seconds, then the
@@ -9812,19 +10003,13 @@ mod tests {
     }
 
     /// The seconds tier ends at the hour, where [`counter_period`] changes, and the minutes tier
-    /// is the last: nothing is left to wait for after it.
+    /// is the last.
     #[test]
     fn the_period_changes_once_at_the_hour() {
         let secs = Duration::from_secs;
-        assert_eq!(counter_tier_end(Duration::ZERO), Some(secs(3600)));
-        assert_eq!(
-            counter_tier_end(Duration::from_millis(3_599_250)),
-            Some(Duration::from_millis(750))
-        );
         assert_eq!(counter_period(Duration::from_millis(3_599_999)), secs(1));
-        assert_eq!(counter_tier_end(secs(3600)), None);
         assert_eq!(counter_period(secs(3600)), secs(60));
-        assert_eq!(counter_tier_end(secs(7200)), None);
+        assert_eq!(counter_period(secs(7200)), secs(60));
     }
 
     /// A lost `D` is not written to the **next** block.
@@ -10071,62 +10256,227 @@ mod tests {
         );
     }
 
+    /// [`title_of`] in one line, with nothing known of the place it runs in.
+    fn plain(
+        osc: Option<&str>,
+        cwd: Option<&str>,
+        home: Option<&Path>,
+        remote: Option<&str>,
+    ) -> String {
+        title_of(osc, cwd, home, remote, Here::default()).whole()
+    }
+
+    #[test]
+    fn a_shells_stock_title_gives_way_to_its_name_and_folder() {
+        let home = Path::new("/Users/someone");
+        let here = Here {
+            shell: Some("zsh"),
+            server_shell: None,
+            server_prompt: false,
+            before_remote: None,
+            host: Some("MacBookPro.local"),
+        };
+        let at = |osc, cwd| title_of(osc, cwd, Some(home), None, here);
+        let stock = at(Some("someone@MacBookPro:~/Projects/bateri-term"), None);
+        assert_eq!(stock.who, "zsh", "the header's part");
+        assert_eq!(stock.place.as_deref(), Some("bateri-term"));
+        assert_eq!(stock.whole(), "zsh bateri-term");
+        assert_eq!(stock.place_len(), " bateri-term".len());
+        // Debian's bash has a space after the colon; home is `~`.
+        assert_eq!(at(Some("someone@MacBookPro: ~"), None).whole(), "zsh ~");
+        // No title at all reads the same, from the working directory.
+        assert_eq!(at(None, Some("/Users/someone/proj")).whole(), "zsh proj");
+        assert_eq!(at(None, Some("/Users/someone")).whole(), "zsh ~");
+        assert_eq!(at(None, None).whole(), "zsh");
+        // A program's title and a command's name stay, whole, with no place.
+        for own in ["vim - notes.txt", "cargo build", "target/release/textpen"] {
+            let title = at(Some(own), Some("/tmp"));
+            assert_eq!((title.who.as_str(), title.place), (own, None));
+        }
+        // While a command runs there is no shell's name to say: the folder alone.
+        let running = Here {
+            shell: None,
+            ..here
+        };
+        assert_eq!(
+            title_of(
+                Some("someone@MacBookPro:~/proj"),
+                None,
+                Some(home),
+                None,
+                running
+            )
+            .whole(),
+            "proj"
+        );
+    }
+
+    #[test]
+    fn a_stock_title_of_another_computer_says_that_computer() {
+        let here = Here {
+            shell: None,
+            server_shell: Some("zsh"),
+            server_prompt: false,
+            before_remote: None,
+            host: Some("MacBookPro"),
+        };
+        let title = title_of(
+            Some("me@proAlfred:~/work/api"),
+            Some("/tmp"),
+            None,
+            None,
+            here,
+        );
+        assert_eq!(title.who, "zsh");
+        assert_eq!(title.place.as_deref(), Some("proAlfred · api"));
+        assert_eq!(title.server.as_deref(), Some("proAlfred"));
+        assert_eq!(title.group_seed(), "proAlfred");
+        assert_eq!(
+            title_of(Some("me@proAlfred:~"), None, None, None, here).whole(),
+            "zsh proAlfred"
+        );
+        // A remote session says its target's name, and the folder its shell says.
+        let remote = title_of(
+            Some("deploy@web-01: /var/www/app"),
+            None,
+            None,
+            Some("prod"),
+            here,
+        );
+        assert_eq!(remote.whole(), "zsh prod · app");
+        assert_eq!(remote.who, "zsh");
+        assert_eq!(remote.place_len(), " prod · app".len());
+        assert_eq!(
+            title_of(Some("deploy@web-01: ~"), None, None, Some("prod"), here).whole(),
+            "zsh prod"
+        );
+        // No shell's name: the server says everything, and all of it is the place.
+        let bare = title_of(
+            Some("deploy@web-01: ~"),
+            None,
+            None,
+            Some("prod"),
+            Here::default(),
+        );
+        assert_eq!(bare.whole(), "prod");
+        assert_eq!(bare.place_len(), "prod".len());
+    }
+
+    #[test]
+    fn the_folder_row_says_the_home_as_a_tilde() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.home = Some(PathBuf::from("/Users/someone"));
+        let mut at = |path: &str| {
+            log.apply_scan_answering(ScanEvent::Cwd { path, local: true }, 0);
+            (log.context.cwd.clone(), log.context.shown_cwd().to_owned())
+        };
+        let under = at("/Users/someone/Projects/bateri-term");
+        assert_eq!(
+            under.0, "/Users/someone/Projects/bateri-term",
+            "what the shell said stays"
+        );
+        assert_eq!(under.1, "~/Projects/bateri-term");
+        assert_eq!(at("/Users/someone").1, "~");
+        assert_eq!(
+            at("/Users/someone2/x").1,
+            "/Users/someone2/x",
+            "another user's home"
+        );
+        assert_eq!(at("/etc").1, "/etc");
+    }
+
     #[test]
     fn the_title_prefers_the_application_then_the_directory() {
         let home = Path::new("/Users/someone");
         // OSC 0/2 wins, whatever the directory.
-        assert_eq!(title_of(Some("vim"), Some("/tmp"), Some(home), None), "vim");
+        assert_eq!(plain(Some("vim"), Some("/tmp"), Some(home), None), "vim");
         // An empty (or whitespace-only) OSC title is ignored and falls to the directory.
-        assert_eq!(title_of(Some(""), Some("/tmp"), Some(home), None), "tmp");
-        assert_eq!(title_of(Some("  "), Some("/tmp"), Some(home), None), "tmp");
+        assert_eq!(plain(Some(""), Some("/tmp"), Some(home), None), "tmp");
+        assert_eq!(plain(Some("  "), Some("/tmp"), Some(home), None), "tmp");
         // `ResetTitle` deletes the slot: the title returns to the directory.
-        assert_eq!(
-            title_of(None, Some("/usr/local/bin"), Some(home), None),
-            "bin"
-        );
+        assert_eq!(plain(None, Some("/usr/local/bin"), Some(home), None), "bin");
         // The home directory itself is `~`, its subdirectory the last component.
+        assert_eq!(plain(None, Some("/Users/someone"), Some(home), None), "~");
+        assert_eq!(plain(None, Some("/Users/someone/"), Some(home), None), "~");
         assert_eq!(
-            title_of(None, Some("/Users/someone"), Some(home), None),
-            "~"
-        );
-        assert_eq!(
-            title_of(None, Some("/Users/someone/"), Some(home), None),
-            "~"
-        );
-        assert_eq!(
-            title_of(None, Some("/Users/someone/proj"), Some(home), None),
+            plain(None, Some("/Users/someone/proj"), Some(home), None),
             "proj"
         );
         // If the home directory is unknown, home is an ordinary directory too.
-        assert_eq!(
-            title_of(None, Some("/Users/someone"), None, None),
-            "someone"
-        );
+        assert_eq!(plain(None, Some("/Users/someone"), None, None), "someone");
         // Root.
-        assert_eq!(title_of(None, Some("/"), Some(home), None), "/");
+        assert_eq!(plain(None, Some("/"), Some(home), None), "/");
         // None: the application's name.
-        assert_eq!(title_of(None, None, Some(home), None), "bateri");
-        assert_eq!(title_of(None, Some(""), Some(home), None), "bateri");
+        assert_eq!(plain(None, None, Some(home), None), "bateri");
+        assert_eq!(plain(None, Some(""), Some(home), None), "bateri");
+    }
+
+    /// At the server's prompt a title that is not the shell's own is one a program left behind.
+    #[test]
+    fn a_program_gone_from_the_server_leaves_no_name() {
+        let here = |server_prompt| Here {
+            server_shell: Some("zsh"),
+            server_prompt,
+            ..Here::default()
+        };
+        let on = |osc, prompt| title_of(Some(osc), None, None, Some("rasp"), here(prompt)).whole();
+        assert_eq!(on("✳ Claude Code", false), "✳ Claude Code", "while it runs");
+        assert_eq!(on("✳ Claude Code", true), "zsh rasp", "once it has gone");
+        assert_eq!(
+            on("me@rasp:~/api", true),
+            "zsh rasp · api",
+            "the shell's own"
+        );
+    }
+
+    /// The title from before the session is the local shell's, wherever a program leaves it.
+    #[test]
+    fn the_title_from_before_the_session_is_not_the_servers() {
+        let on = |osc, server_prompt| {
+            title_of(
+                Some(osc),
+                None,
+                None,
+                Some("rasp"),
+                Here {
+                    server_shell: Some("zsh"),
+                    server_prompt,
+                    before_remote: Some("ssh rasp"),
+                    ..Here::default()
+                },
+            )
+            .whole()
+        };
+        assert_eq!(on("ssh rasp", false), "zsh rasp");
+        assert_eq!(on("ssh rasp", true), "zsh rasp");
+        assert_eq!(on("vim notes", false), "vim notes");
     }
 
     #[test]
-    fn a_remote_session_marks_the_title() {
+    fn a_remote_session_names_its_server() {
         // While remote is active the directory is never consulted; the OSC
-        // title with the prefix, otherwise the host.
+        // title as it is, otherwise the host.
         let home = Path::new("/Users/someone");
         let remote = Some("prod");
-        assert_eq!(
-            title_of(Some("deploy@prod: ~"), Some("/tmp"), Some(home), remote),
-            "⇄ deploy@prod: ~"
+        let vim = title_of(
+            Some("vim"),
+            Some("/tmp"),
+            Some(home),
+            remote,
+            Here::default(),
         );
-        assert_eq!(title_of(None, Some("/tmp"), Some(home), remote), "⇄ prod");
+        assert_eq!(vim.whole(), "vim");
+        assert_eq!(
+            vim.server.as_deref(),
+            Some("prod"),
+            "the tile says where it runs"
+        );
+        assert_eq!(vim.place_len(), 0);
+        assert_eq!(plain(None, Some("/tmp"), Some(home), remote), "prod");
         // An empty OSC title is ignored: it falls to the host, not to the directory.
-        assert_eq!(
-            title_of(Some(" "), Some("/tmp"), Some(home), remote),
-            "⇄ prod"
-        );
+        assert_eq!(plain(Some(" "), Some("/tmp"), Some(home), remote), "prod");
         // The host even when there is no directory.
-        assert_eq!(title_of(None, None, None, remote), "⇄ prod");
+        assert_eq!(plain(None, None, None, remote), "prod");
     }
 
     #[test]

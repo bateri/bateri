@@ -1976,7 +1976,7 @@ impl OverviewView {
         let look = iv.look.get();
         let (fill, line) = iv.row_look.get();
         if let Some(rect) = scene.fill {
-            rounded(rect, tabs::TAB_RADIUS, fill, Some(line));
+            rounded(rect, tabs::BUTTON_RADIUS, fill, Some(line));
         }
         let name = NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium });
         let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
