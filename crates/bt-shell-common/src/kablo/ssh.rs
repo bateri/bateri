@@ -33,15 +33,20 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use bt_core::{CommandLevel, PaneUuid, RemoteKind, RemoteTarget, Settings};
 
 use kablo_proto::SessionId;
+use kablo_proto::v1::stream::Command;
 
 use super::Cause;
 use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
 use super::local::{self, LocalChannel};
-use super::service::{Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal};
+use super::remote::{RemoteCommand, RemoteStream};
+use super::service::{
+    Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal, Streams,
+};
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost};
 use crate::upload::ssh_argv_for;
@@ -123,9 +128,46 @@ pub struct SshBackend {
     pub notes: Option<NotesNews>,
     /// The servers a program's reach has set up in this run ([`SshBackend::install_for_reach`]).
     pub filed: Mutex<std::collections::HashSet<String>>,
+    /// What asks the service for programs and connections on a server ([`Backend::serving`]).
+    pub streams: std::sync::OnceLock<Streams>,
 }
 
 impl SshBackend {
+    /// A server bateri has put its files on, or this Mac: `Err` is the line that says to open a
+    /// terminal on it first. Nothing is asked of a server bateri has never touched.
+    fn touched(&self, server: &KabloHost, name: &str) -> Result<(), String> {
+        if ssh_wrap::load(&self.state_path).knows(Fact::Touched, &server.key) {
+            Ok(())
+        } else {
+            Err(format!(
+                "bateri has not set up {name} yet: open a terminal on it in bateri first (ssh \
+                 {name}), then try again"
+            ))
+        }
+    }
+
+    /// The connection to `server` is one a stream can wait for: the server is one bateri keeps
+    /// terminals on, and the application's master to it is up (made now, asking for a password
+    /// through `ask` when it must be), as a pane of it would have it. This Mac needs none.
+    fn connected(&self, server: &KabloHost, ask: Ask) -> Result<(), String> {
+        if local::is_account(&server.key) {
+            return Ok(());
+        }
+        self.touched(server, &server.host)?;
+        if let Some(masters) = &self.masters {
+            masters
+                .ensure(&self.target(server), ask)
+                .map_err(|denied| denied.text())?;
+        }
+        Ok(())
+    }
+
+    fn streams(&self) -> Result<&Streams, String> {
+        self.streams
+            .get()
+            .ok_or_else(|| "bateri's connections are not running".to_owned())
+    }
+
     /// What a program's `bateri` runs on a server is kablo there, and the one-line file that
     /// starts it: a program that reaches a server before any terminal of this run did would run
     /// what an earlier build left (or, with no package's kablo there, nothing). So a program's
@@ -541,12 +583,7 @@ impl Backend for SshBackend {
             return Err(format!("{name} is this Mac"));
         }
         // A server bateri has never put its files on has no `bateri` to start a terminal with.
-        if !ssh_wrap::load(&self.state_path).knows(Fact::Touched, &server.key) {
-            return Err(format!(
-                "bateri has not set up {name} yet: open a terminal on it in bateri first (ssh \
-                 {name}), then try again"
-            ));
-        }
+        self.touched(&server, name)?;
         let level = (self.settings)().commands_for(&server.host);
         // Nothing is done for a server whose commands are off, a connection included: the
         // caller refuses, naming the setting.
@@ -575,6 +612,33 @@ impl Backend for SshBackend {
             level,
             argv,
         })
+    }
+
+    fn serving(&self, streams: Streams) {
+        let _ = self.streams.set(streams);
+    }
+
+    fn command(
+        &self,
+        server: &KabloHost,
+        command: Command,
+        ask: Ask,
+        wait: Duration,
+    ) -> Result<RemoteCommand, String> {
+        self.connected(server, ask)?;
+        self.streams()?.command(&server.key, command, wait)
+    }
+
+    fn connection(
+        &self,
+        server: &KabloHost,
+        host: &str,
+        port: u16,
+        ask: Ask,
+        wait: Duration,
+    ) -> Result<RemoteStream, String> {
+        self.connected(server, ask)?;
+        self.streams()?.connection(&server.key, host, port, wait)
     }
 
     fn reachable(&self, account: &str, server: &KabloHost) {

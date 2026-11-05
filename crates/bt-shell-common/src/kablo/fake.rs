@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use kablo_proto::hello::{Protocol, negotiate};
-use kablo_proto::v1::stream::{self, FailCode, Incoming, IncomingDecoder, MAX_DATA, Side};
+use kablo_proto::v1::stream::{self, Command, FailCode, Incoming, IncomingDecoder, MAX_DATA, Side};
 use kablo_proto::v1::{
     ClientName, ErrorCode, Exit, Features, Message, NewSession, OFFSET_END, Packet, Size, State,
     Status, TerminalState, View,
@@ -171,6 +171,20 @@ struct Talking {
     closed: bool,
 }
 
+/// What the client asked a stream to be the far end of ([`Bridge::opened_streams`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Opening {
+    /// A program, with the words it was asked with.
+    Command(Command),
+    /// A TCP connection.
+    Connection {
+        /// The target.
+        host: String,
+        /// Its port.
+        port: u16,
+    },
+}
+
 /// The bridge. One value is the server: its terminals outlive a connection;
 /// [`Bridge::disconnect`] ends the connection and the next bytes fed are a new one.
 pub struct Bridge {
@@ -201,6 +215,13 @@ pub struct Bridge {
     declined: Vec<(u32, String)>,
     /// How many times an end sent more than it was given, or after its `eof`.
     breaches: u32,
+    /// The streams the client opened for a program or a connection, in order.
+    opens: Vec<(u32, Opening)>,
+    /// An open is refused with this code and these words instead of taken.
+    refusing: Option<(FailCode, String)>,
+    /// The window the far end of a stream gives the client: the bytes it may send before the
+    /// far end credits it.
+    far_window: u32,
     /// A terminal's program takes a hang-up for no reason to end (only the
     /// kill does).
     stubborn: bool,
@@ -239,6 +260,9 @@ impl Bridge {
             sender_reads: true,
             declined: Vec::new(),
             breaches: 0,
+            opens: Vec::new(),
+            refusing: None,
+            far_window: 64 * 1024,
             stubborn: false,
             stalled: false,
             held: VecDeque::new(),
@@ -554,6 +578,48 @@ impl Bridge {
         }
     }
 
+    /// The program the server runs for the stream `stream` writes to its standard error.
+    pub fn sender_stderr(&mut self, stream: u32, bytes: &[u8]) {
+        let Some(talking) = self.talks.get_mut(&stream) else {
+            return;
+        };
+        let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        if talking.from_sender.eof || size > talking.from_sender.left {
+            self.breaches += 1;
+            return;
+        }
+        talking.from_sender.left -= size;
+        self.send_stream(stream, stream::Message::Stderr(bytes.to_vec()));
+    }
+
+    /// The program the server runs for the stream `stream` has ended with `exit`.
+    pub fn sender_exited(&mut self, stream: u32, exit: Exit) {
+        if self.talks.contains_key(&stream) {
+            self.send_stream(stream, stream::Message::Exited(exit));
+        }
+    }
+
+    /// What the client asked streams to be the far end of, by stream, in order.
+    pub fn opened_streams(&self) -> &[(u32, Opening)] {
+        &self.opens
+    }
+
+    /// From now on an open of a program or a connection is refused with `code` and `text` (and
+    /// taken again after [`Bridge::take_opens`]).
+    pub fn refuse_opens(&mut self, code: FailCode, text: &str) {
+        self.refusing = Some((code, text.to_owned()));
+    }
+
+    /// Opens are taken again.
+    pub fn take_opens(&mut self) {
+        self.refusing = None;
+    }
+
+    /// The window the far end of the next streams gives the client.
+    pub fn far_window(&mut self, bytes: u32) {
+        self.far_window = bytes;
+    }
+
     /// The program ends the conversation (its `kablo app` was interrupted).
     pub fn sender_close(&mut self, stream: u32) {
         if self.talks.remove(&stream).is_some() {
@@ -867,6 +933,12 @@ impl Bridge {
                 );
                 self.send_stream(stream, stream::Message::Opened { window: given });
             }
+            stream::Message::Open { window, port, host } => {
+                self.far_end(stream, window, Opening::Connection { host, port });
+            }
+            stream::Message::OpenCommand { window, command } => {
+                self.far_end(stream, window, Opening::Command(command));
+            }
             stream::Message::Data(bytes) => {
                 let reads = self.sender_reads;
                 let Some(talking) = self.talks.get_mut(&stream) else {
@@ -905,6 +977,34 @@ impl Bridge {
             }
             _ => {}
         }
+    }
+
+    /// The client opened a stream for a program or a connection: taken, or refused with the words
+    /// a test chose.
+    fn far_end(&mut self, stream: u32, window: u32, opening: Opening) {
+        self.opens.push((stream, opening));
+        if let Some((code, text)) = self.refusing.clone() {
+            self.send_stream(stream, stream::Message::Failed { code, text });
+            return;
+        }
+        let given = self.far_window;
+        self.talks.insert(
+            stream,
+            Talking {
+                from_sender: Leg {
+                    left: window,
+                    eof: false,
+                },
+                from_app: Leg {
+                    left: given,
+                    eof: false,
+                },
+                said: Vec::new(),
+                credit_from_app: 0,
+                closed: false,
+            },
+        );
+        self.send_stream(stream, stream::Message::Opened { window: given });
     }
 
     fn make(&mut self, session: Option<SessionId>, spec: NewSession) {

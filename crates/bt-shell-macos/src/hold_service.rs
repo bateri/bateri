@@ -679,6 +679,7 @@ pub(crate) fn serve(
     };
     let backend = SshBackend {
         filed: Default::default(),
+        streams: Default::default(),
         ssh: "ssh".to_owned(),
         bases,
         state_path: crate::remote_hosts_path(&home),

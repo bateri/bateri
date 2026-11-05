@@ -2224,3 +2224,256 @@ fn the_client_and_the_bridge_speak_across_a_real_pipe() {
     assert_eq!(heard, b"echo: ls\r");
     assert_eq!(client.offset_of(&terminal), Some(9));
 }
+
+// Streams: programs and connections the server runs for the client
+
+use kablo_proto::v1::stream::{Command, FailCode, MAX_DATA};
+
+use super::fake::Opening;
+
+fn command(words: &[&str]) -> Command {
+    Command::new(words.iter().map(|word| word.as_bytes().to_vec()).collect())
+}
+
+/// What the owner was told of the streams, in order, without the bytes.
+fn told(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TalkOpened { .. } => Some("opened".to_owned()),
+            Event::TalkData { data, .. } => Some(format!("data {}", data.len())),
+            Event::TalkStderr { data, .. } => Some(format!("stderr {}", data.len())),
+            Event::TalkEof { .. } => Some("eof".to_owned()),
+            Event::TalkExited { exit, .. } => Some(format!("exited {exit:?}")),
+            Event::TalkOver { over, .. } => Some(format!("over {over:?}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A connected rig whose bridge took the open of a program: the stream's number and its `Talk`.
+fn running(rig: &mut Rig) -> (u32, Talk) {
+    if !rig.client.link().is_live() {
+        rig.connect();
+    }
+    let talk = rig
+        .client
+        .open_command(command(&["sh", "-c", "cat"]))
+        .expect("an open");
+    rig.pump();
+    let (stream, _) = rig.bridge.opened_streams().last().expect("an open").clone();
+    (stream, talk)
+}
+
+#[test]
+fn a_program_is_asked_for_and_its_output_errors_and_end_come_apart() {
+    let mut rig = Rig::new(Age::Current);
+    let (stream, talk) = running(&mut rig);
+    assert_eq!(
+        rig.bridge.opened_streams(),
+        [(stream, Opening::Command(command(&["sh", "-c", "cat"])))]
+    );
+    rig.bridge.sender_data(stream, b"out");
+    rig.bridge.sender_stderr(stream, b"err!");
+    rig.bridge.sender_eof(stream);
+    rig.bridge.sender_exited(stream, Exit::Code(3));
+    rig.bridge.sender_close(stream);
+    rig.pump();
+    assert_eq!(
+        told(&rig.take()),
+        [
+            "opened",
+            "data 3",
+            "stderr 4",
+            "eof",
+            "exited Code(3)",
+            "over Closed"
+        ]
+    );
+    // The stream is gone with the server's `close`.
+    assert!(!rig.client.say(talk, b"late"));
+    assert_eq!(rig.client.streams_open(), 0);
+}
+
+#[test]
+fn what_the_server_sent_is_credited_as_the_owner_takes_it_and_not_before() {
+    let mut rig = Rig::new(Age::Current);
+    let (stream, talk) = running(&mut rig);
+    rig.take();
+    let start = kablo_proto::tune::START as usize;
+    let chunk = vec![7u8; MAX_DATA];
+    let mut sent = 0;
+    while sent + chunk.len() <= start {
+        rig.bridge.sender_data(stream, &chunk);
+        sent += chunk.len();
+    }
+    rig.pump();
+    assert_eq!(rig.bridge.breaches(), 0);
+    // Everything that came is in the window still: nothing is credited as it arrives.
+    assert_eq!(rig.bridge.credited_by_app(stream), 0);
+    // A little taken is not worth a message; most of the window taken is.
+    rig.client.took(talk, 4096);
+    rig.pump();
+    assert_eq!(rig.bridge.credited_by_app(stream), 0);
+    rig.client.took(talk, sent - 4096);
+    rig.pump();
+    assert!(
+        usize::try_from(rig.bridge.credited_by_app(stream)).unwrap_or(0) >= sent / 2,
+        "{}",
+        rig.bridge.credited_by_app(stream)
+    );
+}
+
+#[test]
+fn a_server_that_sends_past_its_window_has_the_stream_closed() {
+    let mut rig = Rig::new(Age::Current);
+    let (stream, _) = running(&mut rig);
+    rig.take();
+    let window = usize::try_from(kablo_proto::tune::START).unwrap_or(0);
+    let mut wire = Vec::new();
+    let mut sent = 0;
+    while sent <= window {
+        stream::Packet::new(stream, stream::Message::Data(vec![1; MAX_DATA]))
+            .encode(stream::Side::Server, &mut wire)
+            .expect("encodes");
+        sent += MAX_DATA;
+    }
+    rig.client.push(&wire, rig.now);
+    rig.pump();
+    assert!(told(&rig.take()).iter().any(|line| line == "over Closed"));
+    assert!(rig.bridge.app_closed(stream));
+}
+
+#[test]
+fn what_the_owner_says_goes_as_the_window_allows_and_the_rest_waits_for_credit() {
+    let mut rig = Rig::new(Age::Current);
+    rig.bridge.far_window(10);
+    rig.bridge.sender_reads(false);
+    let (stream, talk) = running(&mut rig);
+    assert!(rig.client.say(talk, &[5; 25]));
+    rig.pump();
+    assert_eq!(rig.bridge.said_to_sender(stream).len(), 10);
+    assert_eq!(rig.client.unsent(talk), Some(15));
+    assert!(rig.client.finish(talk));
+    rig.pump();
+    assert!(
+        !rig.bridge.app_finished(stream),
+        "the eof waits behind the bytes"
+    );
+    rig.bridge.sender_credit(stream, 15);
+    rig.pump();
+    assert_eq!(rig.bridge.said_to_sender(stream).len(), 25);
+    assert_eq!(rig.client.unsent(talk), Some(0));
+    assert!(rig.bridge.app_finished(stream));
+    // Nothing more can be said after `finish`.
+    assert!(!rig.client.say(talk, b"x"));
+}
+
+#[test]
+fn an_open_the_server_refuses_gives_its_words_whole() {
+    let mut rig = Rig::new(Age::Current);
+    rig.connect();
+    rig.bridge
+        .refuse_opens(FailCode::START_FAILED, "No such file or directory");
+    let talk = rig
+        .client
+        .open_command(command(&["nope"]))
+        .expect("an open");
+    rig.pump();
+    assert_eq!(
+        talks_over(&rig.take()),
+        [(
+            talk,
+            Over::Failed {
+                code: FailCode::START_FAILED,
+                text: "No such file or directory".to_owned()
+            }
+        )]
+    );
+    assert_eq!(rig.client.streams_open(), 0);
+}
+
+#[test]
+fn a_connection_is_over_when_both_ends_said_all_and_a_program_when_the_server_closes() {
+    let mut rig = Rig::new(Age::Current);
+    rig.connect();
+    let talk = rig
+        .client
+        .open_connection("db.internal", 5432)
+        .expect("an open");
+    rig.pump();
+    let (stream, opening) = rig.bridge.opened_streams()[0].clone();
+    assert_eq!(
+        opening,
+        Opening::Connection {
+            host: "db.internal".to_owned(),
+            port: 5432
+        }
+    );
+    rig.client.finish(talk);
+    rig.bridge.sender_eof(stream);
+    rig.pump();
+    assert_eq!(talks_over(&rig.take()), [(talk, Over::Finished)]);
+
+    // A program that has said its last byte has not ended: how it ended comes first.
+    let (stream, talk) = running(&mut rig);
+    rig.take();
+    rig.client.finish(talk);
+    rig.bridge.sender_eof(stream);
+    rig.pump();
+    assert!(talks_over(&rig.take()).is_empty());
+    rig.bridge.sender_exited(stream, Exit::Signal(9));
+    rig.bridge.sender_close(stream);
+    rig.pump();
+    assert_eq!(
+        told(&rig.take()),
+        ["exited Signal(9)".to_owned(), "over Closed".to_owned()]
+    );
+}
+
+#[test]
+fn hanging_up_closes_the_stream_and_a_lost_connection_ends_every_other() {
+    let mut rig = Rig::new(Age::Current);
+    let (first, hung) = running(&mut rig);
+    let second = rig.client.open_connection("a", 1).expect("a second stream");
+    rig.pump();
+    rig.take();
+    assert_eq!(rig.client.streams_open(), 2);
+    assert!(rig.client.hang_up(hung));
+    rig.pump();
+    assert!(rig.bridge.app_closed(first));
+    assert!(
+        talks_over(&rig.take()).is_empty(),
+        "an end asked for is not told"
+    );
+    rig.drop_connection();
+    assert_eq!(talks_over(&rig.take()), [(second, Over::Lost)]);
+    // A stream of the connection that went is no stream of the next.
+    rig.redial();
+    assert!(!rig.client.say(second, b"x"));
+    assert!(!rig.client.hang_up(second));
+}
+
+#[test]
+fn what_cannot_be_asked_for_is_refused_in_words_before_anything_is_sent() {
+    let mut rig = Rig::new(Age::Current);
+    // Not connected.
+    let error = rig.client.open_command(command(&["ls"])).unwrap_err();
+    assert!(error.contains("not up"), "{error}");
+    rig.connect();
+    rig.take();
+    let before = rig.bridge.received_streams.len();
+    assert!(rig.client.open_command(Command::new(Vec::new())).is_err());
+    assert!(rig.client.open_connection("", 22).is_err());
+    assert!(rig.client.open_connection("host", 0).is_err());
+    rig.pump();
+    assert_eq!(rig.bridge.received_streams.len(), before);
+    // The server's streams are all in use.
+    for n in 0..kablo_proto::v1::stream::MAX_STREAMS {
+        rig.client
+            .open_connection("h", 1)
+            .unwrap_or_else(|error| panic!("stream {n}: {error}"));
+    }
+    let error = rig.client.open_connection("h", 1).unwrap_err();
+    assert!(error.contains("all in use"), "{error}");
+}

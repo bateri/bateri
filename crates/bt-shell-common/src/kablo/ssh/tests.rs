@@ -113,6 +113,7 @@ impl World {
             mail: None,
             notes: None,
             filed: Default::default(),
+            streams: Default::default(),
         }
     }
 

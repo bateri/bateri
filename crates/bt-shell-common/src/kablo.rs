@@ -64,7 +64,7 @@ use std::time::{Duration, Instant};
 
 pub use kablo_proto::v1::{ErrorCode, Exit, NewSession, Size, Status, TerminalState};
 pub use kablo_proto::{Error, SessionId};
-pub use mail::{FailCode, Over, Talk};
+pub use streams::{FailCode, Over, Talk, UNSENT_LIMIT};
 
 use kablo_proto::v1::stream::{Incoming, IncomingDecoder};
 use kablo_proto::v1::{Capture, ClientName, MAX_HISTORY, Message, OFFSET_END, Packet, View};
@@ -78,9 +78,11 @@ pub mod ledger;
 pub mod local;
 pub mod mail;
 pub mod quit;
+pub mod remote;
 pub mod roster;
 pub mod service;
 pub mod ssh;
+pub mod streams;
 #[cfg(test)]
 mod tests;
 
@@ -420,21 +422,43 @@ pub enum Event {
         /// The terminal the program runs in.
         from: Option<SessionId>,
     },
-    /// The program said these bytes in a conversation the app took. They are
-    /// credited back already; the owner bounds what it keeps (see [`mail`]).
+    /// The server took the open of a stream the client asked for
+    /// ([`Client::open_command`], [`Client::open_connection`]): the owner's bytes go now.
+    TalkOpened {
+        /// The stream.
+        talk: Talk,
+    },
+    /// The server sent these bytes on a stream (a program's standard output, a connection's
+    /// bytes). The owner says it has taken them with [`Client::took`], and that is what credits
+    /// the server; for a conversation of mail they are credited back already and the owner
+    /// bounds what it keeps (see [`mail`]).
     TalkData {
-        /// The conversation.
+        /// The stream.
         talk: Talk,
         /// The bytes.
         data: Vec<u8>,
     },
-    /// The program has nothing more to say in the conversation; the app may
-    /// go on answering.
+    /// The program the server runs for a stream wrote these bytes to its standard error. Taken
+    /// as `TalkData` is.
+    TalkStderr {
+        /// The stream.
+        talk: Talk,
+        /// The bytes.
+        data: Vec<u8>,
+    },
+    /// The server has nothing more to say on the stream; the owner may go on saying.
     TalkEof {
-        /// The conversation.
+        /// The stream.
         talk: Talk,
     },
-    /// The conversation is over, and how. Not told of an end the owner asked for
+    /// The program the server runs for a stream has ended, and how. The stream's end follows.
+    TalkExited {
+        /// The stream.
+        talk: Talk,
+        /// How.
+        exit: Exit,
+    },
+    /// The stream is over, and how. Not told of an end the owner asked for
     /// ([`Client::hang_up`]).
     TalkOver {
         /// The conversation.
@@ -576,6 +600,9 @@ pub struct Client {
     ping: Option<Instant>,
     /// What the app takes from programs on the server ([`mail`]).
     mail: mail::Mail,
+    /// The streams the server runs or connects for the client, and the conversations of mail
+    /// ([`streams`]).
+    streams: streams::Streams,
     /// The number the next question about input carries. Never reused, so that an answer to a
     /// question of a connection that is gone cannot be taken for one of this one.
     token: u64,
@@ -603,6 +630,7 @@ impl Client {
             heard: now,
             ping: None,
             mail: mail::Mail::default(),
+            streams: streams::Streams::default(),
             token: 0,
         }
     }
@@ -1176,6 +1204,7 @@ impl Client {
         self.handshake.clear();
         self.decoder = IncomingDecoder::new();
         self.mail.reset();
+        self.streams.reset();
         self.outbox.clear();
         self.linked_at = None;
         self.ping = None;
@@ -1210,7 +1239,7 @@ impl Client {
                 self.link = Link::Live;
                 self.linked_at = Some(now);
                 self.events.push_back(Event::Linked);
-                self.mail.begin();
+                self.streams.begin();
                 if self.mail.offered() {
                     self.offer_tickets();
                 }

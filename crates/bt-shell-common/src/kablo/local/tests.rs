@@ -1701,3 +1701,270 @@ fn a_real_kablo_counts_for_the_window_and_reads_the_words_of_a_relayed_command_w
         Some(&*format!("bateri: no command '{word}'"))
     );
 }
+
+// ─── programs and connections over a real kablo ──────────────────────────
+
+/// This Mac's connection to a real kablo with one terminal on it, so that the service has the
+/// connection up for the programs and connections tests ask it for.
+struct Here {
+    ground: Ground,
+    service: Service,
+    _terminal: bt_core::Stream,
+}
+
+impl Here {
+    fn new(name: &str) -> Option<Here> {
+        let Some(bundle) = release() else {
+            eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+            return None;
+        };
+        let mut ground = Ground::new(name);
+        let service_dir = ground.root.join("svc");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&service_dir)
+            .expect("the service's directory");
+        let kablo =
+            kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+                .expect("a path");
+        let backend = RealMac {
+            bundle,
+            home: ground.home.clone(),
+            sockets: ground.sockets.clone(),
+        };
+        let ledger = Arc::new(Ledger::memory());
+        let service = Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger))
+            .expect("a service");
+        let options = plain_options("sleep 600", &ground.home);
+        let (spec, size) = new_session(&options.child_launch(), 1000);
+        let pane = options.pane_uuid.clone().expect("a pane");
+        let terminal = service
+            .open_local(&pane, spec, size, Duration::from_secs(30))
+            .expect("a terminal of this Mac");
+        let id = ledger.terminals_of(ACCOUNT).remove(0);
+        ground.kept = Some(PathBuf::from(kablo));
+        ground.made.push(id);
+        Some(Here {
+            ground,
+            service,
+            _terminal: terminal,
+        })
+    }
+
+    fn run(&self, words: &[&str]) -> Result<crate::kablo::remote::RemoteCommand, String> {
+        let command = kablo_proto::v1::stream::Command::new(
+            words.iter().map(|word| word.as_bytes().to_vec()).collect(),
+        );
+        self.service
+            .streams()
+            .command(ACCOUNT, command, Duration::from_secs(30))
+    }
+}
+
+/// Whether the process `pid` is there.
+fn alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_over_a_real_kablo_is_given_its_input_and_gives_its_output_errors_and_how_it_ended() {
+    let Some(here) = Here::new("run") else {
+        return;
+    };
+    let crate::kablo::remote::RemoteCommand {
+        stdin,
+        mut stdout,
+        mut stderr,
+        end,
+    } = here
+        .run(&[
+            "sh",
+            "-c",
+            "echo out-first; echo err-first >&2; cat; echo out-last; echo err-last >&2; exit 5",
+        ])
+        .expect("a program");
+    let mut stdin = stdin.expect("an input");
+    stdin.write_all(b"typed\n").expect("written");
+    drop(stdin);
+    // The two are read apart: neither waits for the other.
+    let errors = thread::spawn(move || {
+        let mut err = String::new();
+        stderr.read_to_string(&mut err).expect("errors");
+        err
+    });
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).expect("output");
+    assert_eq!(out, "out-first\ntyped\nout-last\n");
+    assert_eq!(errors.join().expect("errors"), "err-first\nerr-last\n");
+    assert_eq!(end.wait(), Ok(Exit::Code(5)));
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_the_server_cannot_start_is_refused_in_the_servers_words() {
+    let Some(here) = Here::new("refused") else {
+        return;
+    };
+    let error = here
+        .run(&["/nonexistent-dir/no-such-program"])
+        .err()
+        .expect("refused");
+    assert_eq!(error, "No such file or directory");
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_whose_handles_are_dropped_is_ended_on_the_server() {
+    let Some(here) = Here::new("hangup") else {
+        return;
+    };
+    let pidfile = here.ground.home.join("pid");
+    let command = here
+        .run(&[
+            "sh",
+            "-c",
+            &format!("echo $$ > '{}'; exec sleep 600", pidfile.display()),
+        ])
+        .expect("a program");
+    let started = Instant::now();
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty())
+        {
+            break pid;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the program never started"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(alive(&pid), "the program runs while it is held");
+    drop(command);
+    let dropped = Instant::now();
+    while alive(&pid) && dropped.elapsed() < Duration::from_secs(20) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let ended = !alive(&pid);
+    if !ended {
+        // What the test started is not left behind.
+        let _ = Command::new("kill").args(["-9", &pid]).status();
+    }
+    assert!(
+        ended,
+        "the program was still there 20 s after its handles were dropped"
+    );
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_connection_over_a_real_kablo_reaches_a_server_of_the_far_machine_and_its_ends_end_apart() {
+    let Some(here) = Here::new("tcp") else {
+        return;
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    // The far end answers each line with its length and, when the other end has said all it has,
+    // says "bye" and closes.
+    let far = thread::spawn(move || {
+        let (mut peer, _) = listener.accept().expect("a connection");
+        let mut said = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = peer.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            said.extend_from_slice(buf.get(..n).unwrap_or_default());
+            peer.write_all(format!("{}\n", said.len()).as_bytes())
+                .expect("answered");
+        }
+        peer.write_all(b"bye").expect("said bye");
+        said
+    });
+    let mut remote = here
+        .service
+        .streams()
+        .connection(ACCOUNT, "127.0.0.1", port, Duration::from_secs(30))
+        .expect("a connection");
+    let mut writer = remote.writer.take().expect("a writer");
+    writer.write_all(b"hello").expect("written");
+    let mut first = [0u8; 2];
+    remote.reader.read_exact(&mut first).expect("the answer");
+    assert_eq!(&first, b"5\n");
+    drop(writer);
+    let mut rest = String::new();
+    remote.reader.read_to_string(&mut rest).expect("the rest");
+    assert_eq!(rest, "bye");
+    assert_eq!(far.join().expect("the far end"), b"hello");
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn thirty_two_megabytes_go_through_a_program_and_come_back_whole_while_both_are_read_and_written() {
+    let Some(here) = Here::new("big") else {
+        return;
+    };
+    const BYTES: usize = 32 << 20;
+    let crate::kablo::remote::RemoteCommand {
+        stdin,
+        mut stdout,
+        stderr: _stderr,
+        end,
+    } = here.run(&["cat"]).expect("a program");
+    let mut stdin = stdin.expect("an input");
+    let started = Instant::now();
+    let writer = thread::spawn(move || {
+        let mut chunk = vec![0u8; 61_440];
+        let mut sent = 0usize;
+        while sent < BYTES {
+            let n = chunk.len().min(BYTES - sent);
+            for (offset, byte) in chunk.iter_mut().take(n).enumerate() {
+                *byte = ((sent + offset) % 251) as u8;
+            }
+            stdin
+                .write_all(chunk.get(..n).unwrap_or_default())
+                .expect("written");
+            sent += n;
+        }
+    });
+    let (done, heard) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut buf = vec![0u8; 100_000];
+        let mut got = 0usize;
+        let mut wrong = None;
+        loop {
+            let n = stdout.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            for (offset, byte) in buf.iter().take(n).enumerate() {
+                if *byte != ((got + offset) % 251) as u8 && wrong.is_none() {
+                    wrong = Some(got + offset);
+                }
+            }
+            got += n;
+        }
+        let _ = done.send((got, wrong));
+    });
+    let (got, wrong) = heard
+        .recv_timeout(Duration::from_secs(180))
+        .expect("the 32 MiB came back in time");
+    assert_eq!(wrong, None, "the first wrong byte");
+    assert_eq!(got, BYTES);
+    writer.join().expect("the writer");
+    reader.join().expect("the reader");
+    assert_eq!(end.wait(), Ok(Exit::Code(0)));
+    report(
+        "32 MiB through a program, both ways",
+        started.elapsed(),
+        BYTES * 2,
+    );
+}

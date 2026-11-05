@@ -122,12 +122,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bt_core::{PaneUuid, PtyOps, PtySize, RemoteTarget, Stream, StreamExit};
+use kablo_proto::v1::stream::Command;
 use kablo_proto::v1::{NewSession, Status};
 
 use super::hub::{Declined, HoldId, Hub, HubEvent};
 use super::install::Installed;
 use super::ledger::Ledger;
 use super::local;
+use super::remote::{RemoteCommand, RemoteStream};
 use super::roster::{Background, Roster, background_note, sort_recent_first};
 use super::{Attach, Cause, Client, ErrorCode, Event, Exit, Link, SessionId, Size, Talk};
 use crate::agent::Terminal;
@@ -531,6 +533,39 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Reached, String> {
         Err("this build cannot reach a server for a program".to_owned())
     }
+
+    /// The service's way to ask for programs and connections on the servers it keeps accounts
+    /// for: given once, when the service starts, to a backend that runs things for callers
+    /// ([`Backend::command`], [`Backend::connection`]).
+    fn serving(&self, _streams: Streams) {}
+
+    /// Runs `command` on `server` over the one connection kept to it, and gives it as a
+    /// [`RemoteCommand`] is held. `ask` is how a password is asked for when the connection has to
+    /// be made first; it **waits** for it, so this is called on a thread of its own and never on
+    /// the main one. `wait` is how long the connection and the server's answer may take. The `Err`
+    /// is a line for the person who asked.
+    fn command(
+        &self,
+        _server: &KabloHost,
+        _command: Command,
+        _ask: crate::ssh_route::Ask,
+        _wait: Duration,
+    ) -> Result<RemoteCommand, String> {
+        Err("this build cannot run a program on a server".to_owned())
+    }
+
+    /// Has `server` connect to `host:port` over the one connection kept to it, and gives the
+    /// connection as a [`RemoteStream`] is held. Waits as [`Backend::command`] does.
+    fn connection(
+        &self,
+        _server: &KabloHost,
+        _host: &str,
+        _port: u16,
+        _ask: crate::ssh_route::Ask,
+        _wait: Duration,
+    ) -> Result<RemoteStream, String> {
+        Err("this build cannot open a connection through a server".to_owned())
+    }
 }
 
 /// A server this Mac can reach for a program ([`Backend::reach`]).
@@ -832,6 +867,21 @@ enum Msg {
     Retry(String),
     /// The files of an account's server are to be written again ([`Service::rewrite_files`]).
     Rewrite(String),
+    /// A caller wants a program or a connection on an account's server ([`Streams`]).
+    StreamOpen(pipes::StreamOpen),
+    /// A caller's reads took `bytes` of what a stream's far end sent.
+    StreamTook {
+        account: String,
+        talk: Talk,
+        bytes: usize,
+    },
+    /// A caller wrote to a stream or has nothing more to write.
+    StreamWrote,
+    /// A caller is done with a stream, or ended it.
+    StreamHangUp {
+        account: String,
+        talk: Talk,
+    },
     /// The computer woke up.
     Wake,
     /// Ask every account for its terminals ([`Service::refresh_background`]).
@@ -1136,6 +1186,8 @@ impl Service {
             takes: BTreeMap::new(),
             ending: Vec::new(),
             drafts: BTreeMap::new(),
+            opening: Vec::new(),
+            pipes: BTreeMap::new(),
             collisions: BTreeMap::new(),
             surveys: Vec::new(),
             pictures: Vec::new(),
@@ -1147,6 +1199,7 @@ impl Service {
         let serving = thread::Builder::new()
             .name("ssh-hold service".into())
             .spawn(move || core.run())?;
+        kept_backend.serving(Streams { tx: tx.clone() });
         Ok(Service {
             socket,
             tx,
@@ -1161,6 +1214,14 @@ impl Service {
             stages,
             backend: kept_backend,
         })
+    }
+
+    /// What asks the service for a program or a connection on an account's server
+    /// ([`Streams`]).
+    pub fn streams(&self) -> Streams {
+        Streams {
+            tx: self.tx.clone(),
+        }
     }
 
     /// What the service asks of the world around it: the application asks it for what a
@@ -1688,6 +1749,11 @@ struct Core {
     /// What programs on the servers are saying to the application, until each has said
     /// all it had ([`Letter`]).
     drafts: BTreeMap<(String, Talk), Draft>,
+    /// The programs and connections callers asked for that wait for their account's connection
+    /// ([`Streams`]).
+    opening: Vec<pipes::StreamOpen>,
+    /// The ones that are open, by account and stream.
+    pipes: BTreeMap<(String, Talk), pipes::Piped>,
     /// How many times each holder's terminal was started again under another number
     /// ([`Core::collided`]).
     collisions: BTreeMap<HoldId, u8>,
@@ -1909,6 +1975,15 @@ impl Core {
                     }
                 }
             }
+            Msg::StreamOpen(open) => self.stream_wanted(open),
+            Msg::StreamTook {
+                account,
+                talk,
+                bytes,
+            } => self.stream_took(&account, talk, bytes),
+            // What it did is moved on when the service settles, which every message ends with.
+            Msg::StreamWrote => {}
+            Msg::StreamHangUp { account, talk } => self.stream_hung_up(&account, talk),
             Msg::Retry(account) => {
                 if let Some(client) = self.hub.client_mut(&account) {
                     client.retry_now(now);
@@ -2165,11 +2240,25 @@ impl Core {
                             }
                             Event::Created(status) => self.created(&account, &status, now),
                             Event::Ticket { ticket, from } => self.ticketed(&account, ticket, from),
-                            Event::TalkData { talk, data } => self.talked(&account, talk, &data),
-                            Event::TalkEof { talk } => self.said_all(&account, talk),
+                            Event::TalkOpened { talk } => self.stream_opened(&account, talk),
+                            Event::TalkData { talk, data } => {
+                                self.talked(&account, talk, &data);
+                                self.stream_bytes(&account, talk, data, false);
+                            }
+                            Event::TalkStderr { talk, data } => {
+                                self.stream_bytes(&account, talk, data, true);
+                            }
+                            Event::TalkEof { talk } => {
+                                self.said_all(&account, talk);
+                                self.stream_eof(&account, talk);
+                            }
+                            Event::TalkExited { talk, exit } => {
+                                self.stream_exited(&account, talk, exit);
+                            }
                             // Over before it said all it had: nothing was handed to anybody.
-                            Event::TalkOver { talk, .. } => {
+                            Event::TalkOver { talk, over } => {
                                 self.drafts.remove(&(account.clone(), talk));
+                                self.stream_over(&account, talk, &over);
                             }
                             _ => {}
                         }
@@ -2183,6 +2272,8 @@ impl Core {
             // hub tells as an event: another pass.
             moved |= self.flush();
             self.dial(now);
+            moved |= self.start_streams(now);
+            moved |= self.pump_streams();
             if !moved {
                 break;
             }
@@ -3907,6 +3998,9 @@ fn bridge_writer(mut writer: Box<dyn Write + Send>, written: &Receiver<Vec<u8>>)
         }
     }
 }
+
+mod pipes;
+pub use pipes::Streams;
 
 #[cfg(test)]
 mod tests;

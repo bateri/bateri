@@ -4405,3 +4405,262 @@ fn a_reader_waits_at_a_shut_gate_until_it_is_opened_or_its_throttle_is_dropped()
     drop(throttle);
     assert!(waiting.recv_timeout(Duration::from_secs(5)).is_ok());
 }
+
+// Streams: programs and connections the service runs for callers
+
+/// A rig with one terminal on the server, so that the account's connection is up.
+fn streams_rig(name: &str) -> (Rig, Holder) {
+    let rig = Rig::new(name);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    (rig, holder)
+}
+
+/// The words of a program to run.
+fn running(words: &[&str]) -> kablo_proto::v1::stream::Command {
+    kablo_proto::v1::stream::Command::new(words.iter().map(|w| w.as_bytes().to_vec()).collect())
+}
+
+/// The number of the stream the bridge was last asked to open.
+fn last_stream(rig: &Rig) -> u32 {
+    rig.world
+        .bridge()
+        .opened_streams()
+        .last()
+        .map(|(stream, _)| *stream)
+        .expect("an open")
+}
+
+#[test]
+fn a_caller_runs_a_program_reads_its_output_and_errors_apart_and_waits_for_how_it_ended() {
+    let (rig, _holder) = streams_rig("stream-run");
+    let mut command = rig
+        .service
+        .streams()
+        .command(
+            ACCOUNT,
+            running(&["sh", "-c", "cat"]),
+            Duration::from_secs(20),
+        )
+        .expect("a program");
+    let stream = last_stream(&rig);
+    // What the caller writes arrives as the program's input, and ends with the input.
+    let mut stdin = command.stdin.take().expect("an input");
+    stdin.write_all(b"ping").expect("written");
+    until("the program's input", || {
+        rig.world.bridge().said_to_sender(stream) == b"ping"
+    });
+    drop(stdin);
+    until("the end of the input", || {
+        rig.world.bridge().app_finished(stream)
+    });
+    // What the program wrote comes apart, and its end after.
+    rig.world.bridge().sender_data(stream, b"out ");
+    rig.world.bridge().sender_stderr(stream, b"err");
+    rig.world.bridge().sender_data(stream, b"put");
+    rig.world.bridge().sender_eof(stream);
+    rig.world.bridge().sender_exited(stream, Exit::Code(7));
+    rig.world.bridge().sender_close(stream);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    command.stdout.read_to_end(&mut out).expect("output");
+    command.stderr.read_to_end(&mut err).expect("errors");
+    assert_eq!(out, b"out put");
+    assert_eq!(err, b"err");
+    assert_eq!(command.wait(), Ok(Exit::Code(7)));
+    assert_eq!(command.try_wait(), Some(Ok(Exit::Code(7))));
+    assert_eq!(rig.world.bridge().breaches(), 0);
+}
+
+#[test]
+fn what_the_server_sent_is_credited_as_the_caller_reads_it() {
+    let (rig, _holder) = streams_rig("stream-credit");
+    let mut command = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["yes"]), Duration::from_secs(20))
+        .expect("a program");
+    let stream = last_stream(&rig);
+    let window = kablo_proto::tune::START as usize;
+    let chunk = vec![9u8; kablo_proto::v1::stream::MAX_DATA];
+    let mut sent = 0;
+    while sent + chunk.len() <= window {
+        rig.world.bridge().sender_data(stream, &chunk);
+        sent += chunk.len();
+    }
+    // A caller that has read nothing has taken nothing: the server waits.
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(rig.world.bridge().credited_by_app(stream), 0);
+    assert_eq!(rig.world.bridge().breaches(), 0);
+    let mut buf = vec![0u8; sent];
+    command
+        .stdout
+        .read_exact(&mut buf)
+        .expect("everything sent");
+    until("credit for what was read", || {
+        rig.world.bridge().credited_by_app(stream) as usize >= sent / 2
+    });
+}
+
+#[test]
+fn dropping_what_a_caller_holds_ends_the_program_and_a_kill_does_at_once() {
+    let (rig, _holder) = streams_rig("stream-drop");
+    let command = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["sleep", "100"]), Duration::from_secs(20))
+        .expect("a program");
+    let first = last_stream(&rig);
+    drop(command);
+    until("the stream is closed", || {
+        rig.world.bridge().app_closed(first)
+    });
+
+    let command = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["sleep", "100"]), Duration::from_secs(20))
+        .expect("a program");
+    let second = last_stream(&rig);
+    command.kill();
+    until("the stream is closed", || {
+        rig.world.bridge().app_closed(second)
+    });
+    // The caller who waited is told, and not left waiting.
+    assert!(command.wait().is_err());
+}
+
+#[test]
+fn a_connection_that_goes_ends_the_streams_with_an_error_the_caller_reads() {
+    let (rig, _holder) = streams_rig("stream-lost");
+    let mut command = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["sleep", "100"]), Duration::from_secs(20))
+        .expect("a program");
+    let stream = last_stream(&rig);
+    rig.world.bridge().sender_data(stream, b"some");
+    let mut first = [0u8; 4];
+    command.stdout.read_exact(&mut first).expect("what came");
+    assert_eq!(&first, b"some");
+    rig.world.break_connection();
+    let error = command.stdout.read_to_end(&mut Vec::new()).unwrap_err();
+    assert!(error.to_string().contains("lost"), "{error}");
+    let ended = command.wait().unwrap_err();
+    assert!(ended.contains("lost"), "{ended}");
+}
+
+#[test]
+fn an_open_the_server_refuses_is_the_servers_words_and_a_server_nobody_keeps_is_said() {
+    let (rig, _holder) = streams_rig("stream-refused");
+    rig.world.bridge().refuse_opens(
+        kablo_proto::v1::stream::FailCode::START_FAILED,
+        "No such file or directory",
+    );
+    let error = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["nope"]), Duration::from_secs(20))
+        .err()
+        .expect("refused");
+    assert_eq!(error, "No such file or directory");
+    let error = rig
+        .service
+        .streams()
+        .connection(ACCOUNT, "db", 5432, Duration::from_secs(20))
+        .err()
+        .expect("refused");
+    assert_eq!(error, "No such file or directory");
+    let error = rig
+        .service
+        .streams()
+        .command(
+            "nobody@nowhere:22",
+            running(&["ls"]),
+            Duration::from_secs(20),
+        )
+        .err()
+        .expect("no such account");
+    assert!(error.contains("keeps no connection"), "{error}");
+}
+
+#[test]
+fn a_connection_is_read_and_written_and_its_two_ends_end_apart() {
+    let (rig, _holder) = streams_rig("stream-tcp");
+    let mut remote = rig
+        .service
+        .streams()
+        .connection(ACCOUNT, "db.internal", 5432, Duration::from_secs(20))
+        .expect("a connection");
+    let stream = last_stream(&rig);
+    assert_eq!(
+        rig.world
+            .bridge()
+            .opened_streams()
+            .last()
+            .map(|(_, o)| o.clone()),
+        Some(crate::kablo::fake::Opening::Connection {
+            host: "db.internal".to_owned(),
+            port: 5432
+        })
+    );
+    let mut writer = remote.writer.take().expect("a writer");
+    writer.write_all(b"query").expect("written");
+    drop(writer);
+    until("the server's end has it all", || {
+        rig.world.bridge().said_to_sender(stream) == b"query"
+            && rig.world.bridge().app_finished(stream)
+    });
+    rig.world.bridge().sender_data(stream, b"rows");
+    rig.world.bridge().sender_eof(stream);
+    let mut rows = Vec::new();
+    remote.reader.read_to_end(&mut rows).expect("rows");
+    assert_eq!(rows, b"rows");
+}
+
+#[test]
+fn what_a_caller_writes_waits_for_the_servers_window_and_does_not_pile_up_here() {
+    let (rig, _holder) = streams_rig("stream-window");
+    rig.world.bridge().far_window(1000);
+    rig.world.bridge().sender_reads(false);
+    let mut command = rig
+        .service
+        .streams()
+        .command(ACCOUNT, running(&["cat"]), Duration::from_secs(20))
+        .expect("a program");
+    let stream = last_stream(&rig);
+    let mut stdin = command.stdin.take().expect("an input");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let writer = {
+        let accepted = Arc::clone(&accepted);
+        thread::spawn(move || {
+            let chunk = vec![1u8; 4096];
+            for _ in 0..256 {
+                if stdin.write_all(&chunk).is_err() {
+                    break;
+                }
+                accepted.fetch_add(chunk.len(), Ordering::SeqCst);
+            }
+        })
+    };
+    until("the first window is sent", || {
+        rig.world.bridge().said_to_sender(stream).len() == 1000
+    });
+    thread::sleep(Duration::from_millis(200));
+    // The caller was stopped, with no more than a few chunks held on its way.
+    let held = accepted.load(Ordering::SeqCst);
+    assert!(
+        held < 1000 + 16 * kablo_proto::v1::stream::MAX_DATA,
+        "{held}"
+    );
+    assert_eq!(rig.world.bridge().said_to_sender(stream).len(), 1000);
+    // Credit lets it go on, to the end of what it wrote.
+    let total = 256 * 4096;
+    rig.world
+        .bridge()
+        .sender_credit(stream, u32::try_from(total).unwrap_or(u32::MAX));
+    writer.join().expect("the writer ended");
+    until("everything arrived", || {
+        rig.world.bridge().said_to_sender(stream).len() == total
+    });
+    assert_eq!(rig.world.bridge().breaches(), 0);
+}
