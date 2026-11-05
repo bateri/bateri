@@ -57,7 +57,7 @@ pub use pencere_drive::{
     Drained, Field, Held, Host, Outline, Painted, Placement, Route, Scrolling, Tip, ZOOM_TEXT,
 };
 pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script};
-use pencere_sandbox::{Images, draw_figure};
+use pencere_sandbox::{FigureKey, Images, draw_figure, figure_key};
 pub use pencere_view::{
     Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, FieldState, FileEntry,
     FileSource, Fill, Id, Input, Key, KeyConvention, Keyboard, Menu, MenuEntry, Mods, Panel, Phase,
@@ -240,32 +240,27 @@ pub fn image(theme: &Theme, picture: &Picture, origin: (f32, f32)) -> UiImage {
     out
 }
 
-/// The paths of a canvas as the renderer's image: drawn into pixels in `theme`'s colours by the kit's
-/// own rasteriser ([`draw_figure`]: a colour resolved as a fill is, in sRGB, the figure's
-/// opacity on it), placed at the figure's box moved to `origin` pixels and cut at its clip.
-/// `None` for a figure with no room or nothing drawn.
-pub fn figure(
-    theme: &Theme,
-    figure: &Figure,
-    origin: (f32, f32),
-) -> Option<(pencere_sandbox::Bitmap, UiImage)> {
-    let bitmap = draw_figure(figure, |color| {
-        let (colour, alpha) = parts(theme, color);
-        let [r, g, b, _] = colour.to_srgb();
-        [r, g, b, alpha]
-    })?;
+/// What a colour of a canvas is drawn in, by the kit's own rasteriser ([`draw_figure`]): as a fill is
+/// resolved, in sRGB, the figure's opacity on it.
+fn figure_colour(theme: &Theme, color: Color) -> [f32; 4] {
+    let (colour, alpha) = parts(theme, color);
+    let [r, g, b, _] = colour.to_srgb();
+    [r, g, b, alpha]
+}
+
+/// Where a canvas's pixels go: at the figure's box moved to `origin` pixels and cut at its clip. The
+/// pixels are the box's, whole pixels rounded up, so they are drawn at their own size, a pixel to a
+/// pixel.
+fn figure_image(figure: &Figure, key: FigureKey, origin: (f32, f32)) -> UiImage {
     let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
-    // The pixels are the box's, whole pixels rounded up: drawn at their own size, a pixel to a
-    // pixel.
     #[allow(clippy::cast_precision_loss)]
     let rect = Rect::new(
         figure.rect.x,
         figure.rect.y,
-        bitmap.width as f32,
-        bitmap.height as f32,
+        key.width as f32,
+        key.height as f32,
     );
-    let image = UiImage::new(at(rect)).clip(at(figure.clip));
-    Some((bitmap, image))
+    UiImage::new(at(rect)).clip(at(figure.clip))
 }
 
 /// The files a page draws and requires: those of the open view's bundle, as a program sent them
@@ -453,8 +448,17 @@ fn to_list(
                     image(theme, picture, origin),
                 );
             }
+            // A canvas comes again with every frame, and drawing it costs what its pixels do, so
+            // one the renderer holds is not drawn: a gap of a comparison fills half a screen.
             Paint::Figure(drawn) => {
-                let Some((bitmap, image)) = figure(theme, drawn, origin) else {
+                let Some(key) = figure_key(drawn, |color| figure_colour(theme, color)) else {
+                    continue;
+                };
+                let image = figure_image(drawn, key, origin);
+                if renderer.ui_image_held(&mut list, key.id, image) {
+                    continue;
+                }
+                let Some(bitmap) = draw_figure(drawn, |color| figure_colour(theme, color)) else {
                     continue;
                 };
                 renderer.ui_image(
@@ -907,7 +911,16 @@ mod tests {
             paths: vec![ring],
             clip: Rect::new(0.0, 0.0, 30.0, 30.0),
         };
-        let (bitmap, image) = figure(&theme, &drawn, (0.0, 32.0)).expect("drawn");
+        let figure = |theme: &Theme, drawn: &Figure, origin: (f32, f32)| {
+            let key = figure_key(drawn, |color| figure_colour(theme, color)).expect("a key");
+            let bitmap = draw_figure(drawn, |color| figure_colour(theme, color)).expect("drawn");
+            assert_eq!(
+                (key.id, key.width, key.height),
+                (bitmap.id, bitmap.width, bitmap.height)
+            );
+            (bitmap, figure_image(drawn, key, origin))
+        };
+        let (bitmap, image) = figure(&theme, &drawn, (0.0, 32.0));
         // Whole pixels, the box's rounded up.
         assert_eq!((bitmap.width, bitmap.height), (40, 40));
         assert_eq!(
@@ -937,7 +950,7 @@ mod tests {
         );
         assert_eq!(at(20, 20), [0, 0, 0, 0]);
         // In another theme, another bitmap.
-        let (other, _) = figure(&Theme::BATERI_LIGHT, &drawn, (0.0, 0.0)).expect("drawn");
+        let (other, _) = figure(&Theme::BATERI_LIGHT, &drawn, (0.0, 0.0));
         assert_ne!(other.id, bitmap.id);
     }
 

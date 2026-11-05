@@ -797,6 +797,17 @@ impl Renderer {
         true
     }
 
+    /// Puts an image into `list` from the texture the renderer holds for `id`, for a bitmap whose
+    /// pixels cost something to make: `false`, and nothing in the list, where it holds none, and
+    /// [`Renderer::ui_image`] is to be given them.
+    pub fn ui_image_held(&self, list: &mut UiList, id: u64, image: UiImage) -> bool {
+        let held = self.ui.borrow().images.contains_key(&id);
+        if held {
+            list.items.push(UiItem::Image { texture: id, image });
+        }
+        held
+    }
+
     /// Lets go of every image texture: the page they were for is gone.
     pub fn ui_release_images(&self) {
         self.ui.borrow_mut().images.clear();

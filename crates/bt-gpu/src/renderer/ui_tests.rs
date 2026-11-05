@@ -700,6 +700,36 @@ fn an_image_has_the_corners_clip_and_opacity_of_a_box() {
     );
 }
 
+/// A bitmap that costs something to make is asked for by its id first: nothing goes into the list
+/// until the renderer has its texture, and then what is drawn is that texture, with no pixels asked
+/// for, for as long as the lists name it.
+#[test]
+fn an_image_is_drawn_from_the_texture_held_without_its_pixels() {
+    let r = renderer();
+    let one = bitmap(8, 1, &[opaque(RED)]);
+    let rect = UiRect::new(8.0, 8.0, 4.0, 4.0);
+
+    let mut list = UiList::new();
+    assert!(!r.ui_image_held(&mut list, 8, UiImage::new(rect)));
+    assert_eq!(list, UiList::new(), "nothing was put in the list");
+    assert!(put(&r, &mut list, &one, UiImage::new(rect)));
+    r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+
+    let mut next = UiList::new();
+    assert!(r.ui_image_held(&mut next, 8, UiImage::new(rect)));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &next);
+    let (red, green, blue) = at(&pixels, 9, 9);
+    assert!(
+        red > 150 && green < 100 && blue < 100,
+        "{:?}",
+        (red, green, blue)
+    );
+
+    // A frame that names nothing lets it go, and it is asked for again.
+    r.render_ui_offscreen(EDGE as u32, MIDTONE, &UiList::new());
+    assert!(!r.ui_image_held(&mut UiList::new(), 8, UiImage::new(rect)));
+}
+
 #[test]
 fn an_images_texture_lives_with_the_lists_that_name_it() {
     let r = renderer();

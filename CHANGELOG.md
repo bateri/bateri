@@ -16,6 +16,9 @@ of every installed copy. A version without a section is not released.
 
 - **A program that prints a lot reaches the screen faster.** Text, colored output and wide
   characters cost less on the way from a program to the window.
+- **A program's view scrolls more smoothly.** A picture a program draws is no longer drawn again with
+  every frame, and text with thousands of colored words takes no longer to draw far down than at the
+  top.
 
 ### Fixed
 
