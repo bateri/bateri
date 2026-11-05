@@ -3725,67 +3725,18 @@ mod tests {
         assert_eq!(slots.len(), faces.len());
     }
 
-    /// The remote session's mark (`bt_core::dock::REMOTE_MARK`).
-    ///
-    /// **A second copy, deliberately**: this crate does not see `bt-core`
-    /// (layer direction), so the character is written by hand here. The
-    /// link is in `bt-core`'s `the_remote_mark_is_the_one_the_atlas_checks`
-    /// test: if the mark changes, that one fails and points to this constant.
-    #[cfg(target_os = "macos")]
-    const REMOTE_MARK: char = '⇄';
-
-    // Calibration: names a font or a measured number.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_remote_mark_is_a_glyph_in_the_small_class() {
-        // The mark is an ordinary cell of the context line and the context
-        // line is in the small size class (the procedural gate is closed
-        // there, the fallback is open). The gate is **Menlo, by name**: the
-        // default chain varies from machine to machine (if SF Mono is
-        // installed it opens), the measured font is Menlo.
-        let slot_of = |a: &mut Atlas| {
-            a.slot(
-                Sprite::Char(REMOTE_MARK),
-                Face::Regular,
-                SizeClass::Small,
-                Half::Whole,
-            )
-            .0
-            .slot
-        };
-        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
-        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
-        assert_ne!(
-            slot_of(&mut menlo),
-            TOFU,
-            "'{REMOTE_MARK}' is a box in Menlo's small class"
-        );
-
-        // SF Mono is **not a gate**: if it is not installed the query is
-        // skipped and says so; if it is installed, the result is the
-        // subject of the visual check, here it is only printed.
-        let mut sf = Atlas::new(Some("SF Mono"), POINT_SIZE, 1.0, Spacing::default());
-        if sf.font_issue().is_some() {
-            eprintln!("SF Mono is not installed; the '{REMOTE_MARK}' query was skipped");
-        } else {
-            let tofu = slot_of(&mut sf) == TOFU;
-            eprintln!("SF Mono '{REMOTE_MARK}' in the small class: box = {tofu}");
-        }
-    }
-
     // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_reconnect_placeholder_has_no_box_in_the_normal_class() {
         // The reconnect offer's placeholder is **in the input
-        // line**, i.e. in the large class — the remote-mark test only asked the small
-        // class (the context line) and the face ladder is different there.
-        // The three non-ASCII characters too: the mark, the separator and ⏎.
+        // line**, i.e. in the large class, and the face ladder is different there from the
+        // small class of the context line. The non-ASCII characters: the separator and ⏎.
         // If a box appears, the string must change in `bt-core`
         // (`dock::RECONNECT_HINT`). Menlo, by name.
         let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
         assert_eq!(menlo.font_issue(), None, "Menlo did not open");
-        for ch in [REMOTE_MARK, '·', '⏎'] {
+        for ch in ['·', '⏎'] {
             let slot = menlo
                 .slot(
                     Sprite::Char(ch),

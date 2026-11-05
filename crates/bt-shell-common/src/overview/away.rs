@@ -23,12 +23,9 @@ pub const OPEN_BESIDE: &str = "Open Beside";
 pub const OPEN_ALL: &str = "Open All in New Tab";
 pub const END_TERMINAL: &str = "End Terminal";
 
-/// The heading of a server's section: `In the background on ⇄ rasp · 3`.
+/// The heading of a server's section: `In the background on rasp · 3`.
 pub fn section_text(host: &str, count: usize) -> String {
-    format!(
-        "{} on ⇄ {host} · {count}",
-        crate::palette::BACKGROUND_HEADING
-    )
+    format!("{} on {host} · {count}", crate::palette::BACKGROUND_HEADING)
 }
 
 /// One server's terminals in the background, as the card lists them (all of them, not its first
@@ -367,7 +364,7 @@ impl Overview {
                 section_text(&section.host, part.count)
             } else if alone {
                 format!(
-                    "{} on ⇄ {} · {}",
+                    "{} on {} · {}",
                     crate::server_card::OTHERS_HEADING,
                     section.host,
                     part.count

@@ -16,9 +16,23 @@ of every installed copy. A version without a section is not released.
 
 - **A program that prints a lot reaches the screen faster.** Text, colored output and wide
   characters cost less on the way from a program to the window.
+- **A shell's name instead of `user@host:dir`.** A pane's header says `zsh`, the tab's row says
+  `zsh bateri-term` with the folder a step quieter, and the dock's folder row writes your home as
+  `~`.
+- **Tabs have a new look.** Rows are a little taller, their corners and their icons' follow a softer
+  curve, the selected tab has a light edge and a soft shadow, and the buttons at the top of the
+  column are larger and finer. The close button and a group's `+` have no ground of their own.
+- **A running tab's line has a fading tail and keeps one pace**, however long the command has run.
+  `[appearance] tab_running` ("Running tab") also offers the same line over a faint ring, or a whole
+  line that breathes.
+- **`⇄` is gone.** A server's name now says it is a server by its color: `zsh prod` in the tab's row,
+  `prod  /srv/app` in the dock, as it stands in Show All Tabs. A program running on a server has a
+  dot on its icon's corner, and the server's name in the row's tooltip. The icon of a remote session
+  is a globe.
 
 ### Fixed
 
+- The line round a running tab no longer whips backward at the end of every turn.
 - A tab title about as wide as its room no longer shakes and flickers at its fade. Every title in the tab list also starts at the same place now, whether it fits or not.
 - A program's view on a server comes back by itself after the connection drops, as when the computer sleeps. It used to leave an empty pane with the program still running behind it, until you quit the program and started it again.
 - If the program ended while the connection was gone, its view closes and nothing is typed at the prompt that took its place.

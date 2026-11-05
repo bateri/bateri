@@ -5683,6 +5683,7 @@ impl Session {
         // falls per block, that is the upper bound on the number of blocks that can show in the history.
         let scrollback = options.terminal.scrollback;
         let mut log = ShellLog::new(scrollback);
+        log.home.clone_from(&home);
         // The scanner's copy is overwritten on every mirror; let it be the same
         // reading before the first mirror too.
         log.dock.cluster = options.cluster;
@@ -10320,8 +10321,8 @@ impl Session {
     }
 
     /// The window's title: the application's OSC 0/2 title → the directory's last
-    /// component (home `~`) → `bateri`; in a remote session `⇄ {OSC title}`,
-    /// otherwise `⇄ {host}`, with the port when the user named one other than
+    /// component (home `~`) → `bateri`; in a remote session `{OSC title}`,
+    /// otherwise `{host}`, with the port when the user named one other than
     /// 22 (rule `shell::title_of`).
     ///
     /// Takes the two leaf locks **in sequence**, not nested; does not touch the
@@ -10331,20 +10332,59 @@ impl Session {
     /// change is reported by [`Wake::title_changed`] (or the return of
     /// [`Session::set_remote`]) and its reader is the receiver of that news.
     pub fn title(&self) -> String {
+        self.pane_title().whole()
+    }
+
+    /// [`Self::title`] in its two parts: what a pane's header says, and where a tab's row goes
+    /// quieter.
+    ///
+    pub fn pane_title(&self) -> crate::PaneTitle {
         let osc = lock(&self.adapter.0.title).clone();
-        let (cwd, remote) = {
+        let (cwd, remote, shell, server_shell, server_prompt, before) = {
             let log = lock(&self.shell);
             (
                 log.context.cwd.clone(),
                 log.context.remote_label().map(str::to_owned),
+                log.shell_name
+                    .clone()
+                    .filter(|_| log.running_command().is_none()),
+                log.server_shell.clone(),
+                log.server_at_prompt(),
+                log.title_before_remote.clone(),
             )
         };
+        let host = crate::shell::local_host();
         crate::shell::title_of(
             osc.as_deref(),
             Some(&cwd),
             self.home.as_deref(),
             remote.as_deref(),
+            crate::shell::Here {
+                shell: shell.as_deref(),
+                server_shell: server_shell.as_deref(),
+                server_prompt,
+                before_remote: before.as_deref(),
+                host: host.as_deref(),
+            },
         )
+    }
+
+    /// The name of the shell this pane runs, for its title ([`Self::pane_title`]): `zsh`. Told
+    /// only by a pane whose program is the login shell; a pane showing a server's terminal or
+    /// running a program of its own says nothing, and its title stays the folder.
+    pub fn set_shell_name(&self, name: Option<String>) {
+        lock(&self.shell).shell_name = name;
+    }
+
+    /// The name of the shell in front of the terminal a server keeps for this pane, for its title
+    /// ([`Self::pane_title`]); `None` for a plain `ssh`, on this computer and while a program is in
+    /// front. Apart from [`Self::set_shell_name`]: the pane's own shell comes back when the
+    /// session ends, and it may not be the same one. `true` if it changed: the title says it.
+    pub fn set_server_shell(&self, name: Option<String>) -> bool {
+        let mut log = lock(&self.shell);
+        let changed = log.server_shell != name;
+        log.server_shell = name;
+        changed
     }
 
     /// The running command's generation; `None` if no command is running
@@ -10375,15 +10415,22 @@ impl Session {
     pub fn set_remote(&self, command: u64, target: Option<&RemoteTarget>) -> bool {
         // The title's epoch under `Term`: a read in flight (the `C` and a local
         // title in one chunk) is parsed by then.
-        let titles = {
+        let (titles, title) = {
             let _term = self.term.lock();
-            self.adapter.0.title_epoch.load(Ordering::Acquire)
+            (
+                self.adapter.0.title_epoch.load(Ordering::Acquire),
+                lock(&self.adapter.0.title).clone(),
+            )
         };
         let (changed, repaint) = {
             let mut log = lock(&self.shell);
             if log.running_command() == Some(command) {
                 let mark = log.context.remote_mark;
+                let began = log.context.remote.is_none();
                 let changed = log.set_remote(target);
+                if changed && began {
+                    log.title_before_remote = title;
+                }
                 if changed {
                     self.adapter
                         .0
@@ -10725,7 +10772,7 @@ impl Session {
     }
 
     /// Tells the context row that the pane shows a terminal a server keeps
-    /// (`true`), which makes the remote form's `⇄ host` the door to the
+    /// (`true`), which makes the remote form's `host` the door to the
     /// server's card, or that it does not; `true` if it changed. Gated like
     /// [`Self::set_remote_stats`]: `command` is the generation of the remote target
     /// ([`Self::remote_target`]), another one's or a finished ssh's late word is a
@@ -25938,6 +25985,47 @@ e\\314\\201.'; sleep 5";
         assert_eq!(wake.titles(), 3);
     }
 
+    /// The title the local shell gave `ssh` is no name of the server's; what the server writes is,
+    /// and once the session ends the local shell's says again.
+    #[test]
+    fn a_title_from_before_the_remote_session_is_not_the_servers() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf '\\033]2;ssh rasp\\007\\033]133;C\\007'; read _; \
+             printf '\\033[22;2t\\033]2;vim notes\\007'; read _; \
+             printf '\\033[23;2t'; sleep 5",
+            Arc::clone(&wake),
+        );
+        session.write(b"");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.title() != "ssh rasp" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(session.title(), "ssh rasp", "not remote yet");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("rasp"))));
+        assert_eq!(session.title(), "rasp");
+        assert_eq!(session.pane_title().place_len(), "rasp".len());
+        assert!(session.set_server_shell(Some("zsh".to_owned())));
+        assert!(!session.set_server_shell(Some("zsh".to_owned())));
+        assert_eq!(session.title(), "zsh rasp");
+        session.write(b"\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.title() != "vim notes" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(session.title(), "vim notes", "the server's own");
+        assert_eq!(session.pane_title().server.as_deref(), Some("rasp"));
+        // The program had saved the title it found and writes it again as it leaves.
+        session.write(b"\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.title() != "zsh rasp" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(session.title(), "zsh rasp", "not the local shell's again");
+    }
+
     #[test]
     fn a_command_start_is_reported_once_per_transition() {
         // The news is **on the transition** to `Running`; a second `C`
@@ -25955,7 +26043,7 @@ e\\314\\201.'; sleep 5";
         assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
         let first = session.running_command().expect("running after `C`");
         assert!(session.set_remote(first, Some(&RemoteTarget::ssh("prod"))));
-        assert_eq!(session.title(), "⇄ prod");
+        assert_eq!(session.title(), "prod");
         // A port the user named is part of the name the title shows (the same
         // host on another port is another machine to the reader); the default
         // port is not shown.
@@ -25964,9 +26052,9 @@ e\\314\\201.'; sleep 5";
             ..RemoteTarget::ssh("prod")
         };
         assert!(session.set_remote(first, Some(&on_port(Some(2222)))));
-        assert_eq!(session.title(), "⇄ prod:2222");
+        assert_eq!(session.title(), "prod:2222");
         assert!(session.set_remote(first, Some(&on_port(Some(22)))));
-        assert_eq!(session.title(), "⇄ prod");
+        assert_eq!(session.title(), "prod");
         // In a dock-less window the remote session does not move the input row
         // count: there is no band.
         let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);

@@ -242,7 +242,7 @@ pub struct Theme {
     /// Status: error. Today the stripe of a command block that ended with a
     /// nonzero exit code.
     pub error: u32,
-    /// Status: info. Today the **remote session**: the `⇄` with the host
+    /// Status: info. Today the **remote session**: the host's name
     /// in the context line and the dock's top hairline.
     ///
     /// Not `accent`, because that is the running command's stripe and ssh is a
@@ -251,7 +251,7 @@ pub struct Theme {
     /// background (3:1, `color::tests`): the host is text in the context line.
     pub info: u32,
     /// Status: warning. Today the remote host marked **staging**:
-    /// `⇄ host`, the dock's top hairline and the tab's dot — and the search
+    /// `host`, the dock's top hairline and the tab's dot — and the search
     /// matches' marks on the scroll bar's track
     /// ([`Theme::search_mark_linear`]).
     ///
@@ -726,6 +726,12 @@ impl Theme {
     /// [`separator_linear`] is one step dimmer and that is no longer ink.
     pub const fn quiet_linear(&self) -> LinearRgba {
         linear_rgba(self.quiet_rgb())
+    }
+
+    /// The same tone as **sRGB** bytes, for the shell's own text: a tab row's place.
+    pub const fn quiet_srgb(&self) -> [u8; 3] {
+        let Rgb { r, g, b } = self.quiet_rgb();
+        [r, g, b]
     }
 
     const fn quiet_rgb(&self) -> Rgb {

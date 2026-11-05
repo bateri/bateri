@@ -222,11 +222,10 @@ pub struct Part<K> {
 }
 
 /// The name a group starts with from its first tab's title: the folder it stands in (`~/code/api`
-/// → `api`), `home` for the home directory (`~`), the host for a remote tab (`⇄ db-1` → `db-1`),
+/// → `api`), `home` for the home directory (`~`),
 /// and [`UNTITLED`] when there is nothing to take.
 pub fn name_from(title: &str) -> String {
     let title = title.trim();
-    let title = title.strip_prefix('⇄').unwrap_or(title).trim();
     let folder = title
         .trim_end_matches('/')
         .rsplit('/')
@@ -2022,14 +2021,13 @@ mod tests {
 
     #[test]
     fn a_group_is_named_for_the_folder_of_its_first_tab() {
-        assert_eq!(name_from("⇄ db-1"), "db-1");
+        assert_eq!(name_from("db-1"), "db-1");
         assert_eq!(name_from("~"), "home");
-        assert_eq!(name_from("⇄ ~"), "home");
         assert_eq!(name_from("~/code/api"), "api");
         assert_eq!(name_from("/var/log/"), "log");
         assert_eq!(name_from("bateri"), "bateri");
         assert_eq!(name_from(""), UNTITLED);
-        assert_eq!(name_from("  ⇄  "), UNTITLED);
+        assert_eq!(name_from("   "), UNTITLED);
         assert_eq!(name_from("/"), UNTITLED);
 
         let (mut tabs, mut groups, _, _) = scene();

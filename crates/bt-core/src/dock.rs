@@ -284,17 +284,6 @@ const CONTEXT_ROW: u16 = 1;
 /// The mark at the start of a path shortened from the left.
 const ELLIPSIS: char = '…';
 
-/// The remote session's mark: in front of the host on the
-/// context row, and a prefix in the title and the tab
-/// ([`crate::shell::title_of`]). The **single copy** in this crate.
-///
-/// Not procedural, from the font: an ordinary cell of the context row. The
-/// gate checking that no box appears in the small class is in `bt-atlas`
-/// (`the_remote_mark_is_a_glyph_in_the_small_class`, by the Menlo name) and
-/// since that crate cannot see this, it writes the character by hand; the two
-/// copies are tied by `the_remote_mark_is_the_one_the_atlas_checks`.
-pub(crate) const REMOTE_MARK: char = '⇄';
-
 /// The part of the reconnect offer's placeholder after the host — a UI
 /// string. A single text: ssh's 255 does not tell a broken
 /// connection from a failed one, what tells them apart is ssh's own line
@@ -848,7 +837,7 @@ fn window_top(caret_row: usize, shown: usize) -> usize {
     caret_row.saturating_sub(shown.max(1) - 1)
 }
 
-/// The offer's placeholder: `⇄ {host}` in the mark's color, [`RECONNECT_HINT`]
+/// The offer's placeholder: `{host}` in the mark's color, [`RECONNECT_HINT`]
 /// in `dim`, after the caret when the line is empty.
 ///
 /// The same layer as the suggestion and **the same walk** ([`dock_layout`]):
@@ -875,12 +864,7 @@ fn render_reconnect(
         .predisplay
         .chars()
         .map(|ch| (ch, None))
-        .chain(
-            [REMOTE_MARK, ' ']
-                .into_iter()
-                .chain(label.chars())
-                .map(|ch| (ch, Some(accent))),
-        )
+        .chain(label.chars().map(|ch| (ch, Some(accent))))
         .chain(RECONNECT_HINT.chars().map(|ch| (ch, Some(dim))));
     let mut first_row = None;
     dock_layout(
@@ -2556,7 +2540,7 @@ mod tests {
         footer_hit(context, budget, col).is_some_and(|hit| hit.control == FooterControl::Stats)
     }
 
-    /// The server's name, `⇄ host`, as a click finds it.
+    /// The server's name, `host`, as a click finds it.
     fn server_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
         footer_span(context, budget, FooterControl::Server)
     }
@@ -3491,6 +3475,7 @@ mod tests {
         DockContext {
             // The local path and branch are **filled**: the remote form must not show them at all.
             cwd: "/Users/me/proj".into(),
+            short_cwd: String::new(),
             branch: "main".into(),
             remote: Some(RemoteTarget::ssh(host)),
             remote_label: host.into(),
@@ -3536,7 +3521,7 @@ mod tests {
         load(form, Some(23), 61, 54, &[1, 2, 4, 6, 4, 2, 1, 0])
     }
 
-    /// `⇄ prod  /srv/app` with the indicator.
+    /// `prod  /srv/app` with the indicator.
     fn loaded(stats: RemoteStats) -> DockContext {
         DockContext {
             stats: Some(stats),
@@ -3560,13 +3545,13 @@ mod tests {
         let (row, cells) = load_row(&loaded(calm(StatsForm::Sparkline)), 80);
         assert_eq!(
             row,
-            format!("{:<55}cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%", "⇄ prod  /srv/app")
+            format!("{:<55}cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%", "prod  /srv/app")
         );
         for col in [55, 59, 66, 68, 73, 77, 79] {
             assert_eq!(color_at(&cells, 1, col), dim, "col {col}");
         }
         let (row, _) = load_row(&loaded(calm(StatsForm::Numbers)), 80);
-        assert_eq!(row, format!("{:<64}cpu 23%  mem 61%", "⇄ prod  /srv/app"));
+        assert_eq!(row, format!("{:<64}cpu 23%  mem 61%", "prod  /srv/app"));
         // The host keeps the mark's color.
         assert_eq!(color_at(&cells, 1, 2), Some(THEME.info_linear()));
     }
@@ -3577,7 +3562,7 @@ mod tests {
         // and no gap or span left where it would have stood.
         let calm_alerts = loaded(calm(StatsForm::Alerts));
         let (row, _) = load_row(&calm_alerts, 80);
-        assert_eq!(row.trim_end(), "⇄ prod  /srv/app");
+        assert_eq!(row.trim_end(), "prod  /srv/app");
         assert_eq!(stats_span(&calm_alerts, 80), None);
         // The moment a value passes its threshold it appears, and goes again
         // when it is back under.
@@ -3586,7 +3571,7 @@ mod tests {
         assert!(row.ends_with("cpu 75%"), "{row}");
         assert!(stats_span(&hot, 80).is_some());
         let (row, _) = load_row(&loaded(load(StatsForm::Alerts, Some(69), 79, 84, &[])), 80);
-        assert_eq!(row.trim_end(), "⇄ prod  /srv/app");
+        assert_eq!(row.trim_end(), "prod  /srv/app");
         // A server that is calm in the alerts form is not mistaken for one that
         // is not sampled: the numbers form shows the same sample.
         let (row, _) = load_row(&loaded(load(StatsForm::Numbers, Some(69), 79, 84, &[])), 80);
@@ -3640,7 +3625,7 @@ mod tests {
         let (row, _) = load_row(&few, 80);
         assert_eq!(
             row,
-            format!("{:<55}cpu       ▄▆ 23%  mem 61%", "⇄ prod  /srv/app")
+            format!("{:<55}cpu       ▄▆ 23%  mem 61%", "prod  /srv/app")
         );
         assert_eq!(
             stats_span(&few, 80),
@@ -3649,7 +3634,7 @@ mod tests {
         // No CPU yet (the first sample): no made-up number, memory alone.
         let first = loaded(load(StatsForm::Sparkline, None, 61, 0, &[]));
         let (row, _) = load_row(&first, 80);
-        assert_eq!(row, format!("{:<73}mem 61%", "⇄ prod  /srv/app"));
+        assert_eq!(row, format!("{:<73}mem 61%", "prod  /srv/app"));
     }
 
     #[test]
@@ -3657,19 +3642,19 @@ mod tests {
         // Full → numbers → worst → none, each with the whole path
         // and two columns before the indicator.
         let context = loaded(calm(StatsForm::Sparkline));
-        let left = "⇄ prod  /srv/app";
+        let left = "prod  /srv/app";
         for (cols, gauge) in [
-            (43, "cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%"),
-            (42, "cpu 23%  mem 61%"),
-            (34, "cpu 23%  mem 61%"),
-            (33, "mem 61%"),
-            (25, "mem 61%"),
+            (41, "cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%"),
+            (40, "cpu 23%  mem 61%"),
+            (32, "cpu 23%  mem 61%"),
+            (31, "mem 61%"),
+            (23, "mem 61%"),
         ] {
             let (row, _) = load_row(&context, cols);
             let start = usize::from(cols) - gauge.chars().count();
             assert_eq!(row, format!("{left:<start$}{gauge}"), "{cols} columns");
         }
-        for cols in [24, 20, 16] {
+        for cols in [22, 18, 14] {
             let (row, _) = load_row(&context, cols);
             assert_eq!(
                 row, left,
@@ -3678,8 +3663,8 @@ mod tests {
             assert_eq!(stats_span(&context, cols), None);
         }
         // Below that the path is shortened as today.
-        let (row, _) = load_row(&context, 12);
-        assert_eq!(row, "⇄ prod  …app");
+        let (row, _) = load_row(&context, 10);
+        assert_eq!(row, "prod  …app");
         // A tie goes to the first value in `cpu, mem, disk` order.
         let tie = loaded(load(StatsForm::Numbers, Some(50), 50, 0, &[]));
         let (row, _) = load_row(&tie, 25);
@@ -3727,24 +3712,24 @@ mod tests {
         // the left with `…`; the host never does.
         // A critical number's column is `▲100%`'s: `▲95%` right-aligned in it.
         let context = loaded(load(StatsForm::Sparkline, Some(23), 95, 0, &[]));
-        let (row, cells) = load_row(&context, 21);
-        assert_eq!(row, "⇄ prod  …p  mem  ▲95%");
-        assert_eq!(color_at(&cells, 1, 17), Some(THEME.error_linear()));
-        let (row, _) = load_row(&context, 20);
+        let (row, cells) = load_row(&context, 19);
+        assert_eq!(row, "prod  …p  mem  ▲95%");
+        assert_eq!(color_at(&cells, 1, 15), Some(THEME.error_linear()));
+        let (row, _) = load_row(&context, 18);
         assert_eq!(
-            row, "⇄ prod  …  mem  ▲95%",
+            row, "prod  …  mem  ▲95%",
             "a one-column path budget is the mark alone"
         );
-        // The path has given way entirely: `⇄ prod`, the gap and the alarm.
-        let (row, _) = load_row(&context, 17);
-        assert_eq!(row, "⇄ prod  mem  ▲95%");
-        // `⇄ prod` + gap + the alarm no longer fit: the alarm drops too.
-        let (row, _) = load_row(&context, 16);
-        assert_eq!(row, "⇄ prod  /srv/app");
+        // The path has given way entirely: `prod`, the gap and the alarm.
+        let (row, _) = load_row(&context, 15);
+        assert_eq!(row, "prod  mem  ▲95%");
+        // `prod` + gap + the alarm no longer fit: the alarm drops too.
+        let (row, _) = load_row(&context, 14);
+        assert_eq!(row, "prod  /srv/app");
         // A calm worst value never pushes the path.
         let calm = loaded(calm(StatsForm::Sparkline));
-        let (row, _) = load_row(&calm, 20);
-        assert_eq!(row, "⇄ prod  /srv/app");
+        let (row, _) = load_row(&calm, 18);
+        assert_eq!(row, "prod  /srv/app");
     }
 
     #[test]
@@ -3753,13 +3738,13 @@ mod tests {
         for cols in 0..=70 {
             let (row, _) = load_row(&context, cols);
             assert!(
-                row.is_empty() || row == "⇄" || row.starts_with("⇄ prod"),
+                row.is_empty() || row.starts_with("prod"),
                 "{cols} columns: {row:?}"
             );
         }
-        let (row, _) = load_row(&context, 5);
-        assert_eq!(row, "⇄");
-        assert_eq!(stats_span(&context, 5), None);
+        let (row, _) = load_row(&context, 3);
+        assert_eq!(row, "");
+        assert_eq!(stats_span(&context, 3), None);
     }
 
     #[test]
@@ -3851,19 +3836,19 @@ mod tests {
         };
         assert_eq!(
             drawn(&taken("MacBook"), 80),
-            "⇄ rasp  Opened on MacBook · ⏎ bring back"
+            "rasp  Opened on MacBook · ⏎ bring back"
         );
         // Too narrow for the key: the state alone, never half a sentence.
-        assert_eq!(drawn(&taken("MacBook"), 28), "⇄ rasp  Opened on MacBook");
-        assert_eq!(drawn(&taken("MacBook"), 20), "⇄ rasp");
+        assert_eq!(drawn(&taken("MacBook"), 28), "rasp  Opened on MacBook");
+        assert_eq!(drawn(&taken("MacBook"), 20), "rasp");
         // A computer that gave no name; one with a wide character or a control in it.
         assert_eq!(
             drawn(&taken(""), 80),
-            "⇄ rasp  Opened on another computer · ⏎ bring back"
+            "rasp  Opened on another computer · ⏎ bring back"
         );
         assert_eq!(
             drawn(&taken(&crate::shell::computer_label("Mac\u{7}書")), 80),
-            "⇄ rasp  Opened on Mac? · ⏎ bring back"
+            "rasp  Opened on Mac? · ⏎ bring back"
         );
         // Nothing of it clickable: the server's card is a live connection's.
         assert_eq!(crate::footer_spans(&taken("MacBook"), 80).count(), 0);
@@ -3877,11 +3862,11 @@ mod tests {
         for (link, row) in [
             (
                 crate::RemoteLink::Reconnecting,
-                "⇄ prod  Reconnecting… · ⏎ try now",
+                "prod  Reconnecting… · ⏎ try now",
             ),
             (
                 crate::RemoteLink::LoginNeeded,
-                "⇄ prod  Needs your password · ⏎ log in",
+                "prod  Needs your password · ⏎ log in",
             ),
         ] {
             let down = DockContext {
@@ -3913,7 +3898,7 @@ mod tests {
             );
             // The connection back: the path again.
             let (cells, _) = draw_with(&state, &remote("prod", "/srv/app"), 80);
-            assert_eq!(row_text(&cells, 1), "⇄ prod  /srv/app");
+            assert_eq!(row_text(&cells, 1), "prod  /srv/app");
         }
     }
 
@@ -3926,8 +3911,8 @@ mod tests {
             link: Some(crate::RemoteLink::Reconnecting),
             ..remote("prod", "/srv/app")
         };
-        let full = "⇄ prod  Reconnecting… · ⏎ try now";
-        let short = "⇄ prod  Reconnecting…";
+        let full = "prod  Reconnecting… · ⏎ try now";
+        let short = "prod  Reconnecting…";
         for cols in 0..=48_u16 {
             let (cells, _) = draw_with(&state, &down, cols);
             let row = row_text(&cells, 1);
@@ -3936,11 +3921,10 @@ mod tests {
                 full
             } else if width >= short.chars().count() {
                 short
-            } else if width >= "⇄ prod".chars().count() {
-                "⇄ prod"
+            } else if width >= "prod".chars().count() {
+                "prod"
             } else {
-                // `⇄` alone, or nothing at all.
-                assert!(row.chars().count() <= width, "{cols}: {row:?}");
+                assert_eq!(row, "", "{cols} columns: the name is not cut");
                 continue;
             };
             assert_eq!(row, want, "{cols} columns");
@@ -3978,11 +3962,11 @@ mod tests {
         let plain = loaded(calm(StatsForm::Numbers));
         assert_eq!(server_span(&plain, 80), None);
         assert!(footer_hit(&plain, 80, 2).is_none());
-        // A kept terminal: `⇄ prod` is the span, as many columns as are drawn.
+        // A kept terminal: `prod` is the span, as many columns as are drawn.
         let kept = server(plain);
-        assert_eq!(server_span(&kept, 80), Some((0, 6)));
+        assert_eq!(server_span(&kept, 80), Some((0, 4)));
         assert_eq!(
-            footer_hit(&kept, 80, 5).map(|hit| hit.control),
+            footer_hit(&kept, 80, 3).map(|hit| hit.control),
             Some(FooterControl::Server)
         );
         assert!(
@@ -3991,30 +3975,30 @@ mod tests {
         );
         // The indicator is its own control beside it, and the spans do not overlap.
         let spans: Vec<_> = footer_spans(&kept, 80).collect();
-        assert_eq!(spans[0], (FooterControl::Server, 0, 6));
+        assert_eq!(spans[0], (FooterControl::Server, 0, 4));
         assert!(
             spans
                 .iter()
                 .any(|&(control, ..)| control == FooterControl::Stats)
         );
         assert!(spans.windows(2).all(|pair| pair[0].2 <= pair[1].1));
-        // The name is never shortened: where the host does not fit, the span is
-        // the mark alone — what `emit_remote_head` draws.
+        // The name is never shortened: where the host does not fit there is neither name nor
+        // span — what `emit_remote_head` draws.
         let (_, cells) = load_row(&server(remote("a-very-long-host-name", "/srv")), 8);
-        assert_eq!(row_text(&cells, 1).trim_end(), "⇄");
+        assert_eq!(row_text(&cells, 1).trim_end(), "");
         assert_eq!(
             server_span(&server(remote("a-very-long-host-name", "/srv")), 8),
-            Some((0, 1))
+            None
         );
         // Every width: the span is exactly the name's drawn columns.
         for cols in 1..40_u16 {
             let context = server(remote("prod", "/srv/app"));
             let (_, cells) = load_row(&context, cols);
             let drawn = row_text(&cells, 1);
-            let expect = if drawn.starts_with("⇄ prod") { 6 } else { 1 };
+            let expect = drawn.starts_with("prod").then_some((0, 4));
             assert_eq!(
                 server_span(&context, cols),
-                Some((0, expect)),
+                expect,
                 "{cols} columns: {drawn:?}"
             );
         }
@@ -4058,7 +4042,7 @@ mod tests {
             );
         }
         let (cells, _) = draw_with(&live("", "", "", 0), &context, 60);
-        assert_eq!(row_text(&cells, 1).trim_end(), "⇄ prod  /srv/app");
+        assert_eq!(row_text(&cells, 1).trim_end(), "prod  /srv/app");
     }
 
     #[test]
@@ -4361,7 +4345,7 @@ mod tests {
 
     #[test]
     fn an_upload_takes_over_the_context_row_and_the_edge() {
-        // The `⇄ host` prefix and color are kept,
+        // The host's name and color are kept,
         // the status next to it; the top line is a bar — the filled part
         // `info`, the empty track in the mark's color. With a single
         // item only `Cancel ⌘.`, right-aligned.
@@ -4370,7 +4354,7 @@ mod tests {
         let (cells, dock) = draw_with(&state, &context, COLS);
         assert_eq!(
             row_text(&cells, 1),
-            format!("{:<30}Cancel ⌘.", "⇄ prod  ↑ a.tar")
+            format!("{:<30}Cancel ⌘.", "prod  ↑ a.tar")
         );
         assert_eq!(color_at(&cells, 1, 2), Some(THEME.error_linear()), "host");
         assert_eq!(color_at(&cells, 1, 8), Some(THEME.dim_linear()), "body");
@@ -4426,7 +4410,7 @@ mod tests {
             ..uploading("Connection closed", 0, None)
         };
         let (cells, dock) = draw_with(&state, &closed, COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ prod  Connection closed");
+        assert_eq!(row_text(&cells, 1), "prod  Connection closed");
         assert_eq!(dock.edge, THEME.error_linear());
         assert_eq!(dock.progress, None);
         assert_eq!(dock.buttons, [None; 2]);
@@ -4489,7 +4473,7 @@ mod tests {
             row_text(&cells, 1),
             format!(
                 "{:<29}{:<21}Cancel all ⌘.",
-                "⇄ prod  ↑ 1 of 2 · a.tar", "Show transfers (2)"
+                "prod  ↑ 1 of 2 · a.tar", "Show transfers (2)"
             )
         );
         assert_eq!(
@@ -4566,14 +4550,14 @@ mod tests {
         };
         let done = "✓ a.tar → /srv";
         let (cells, _) = draw_with(&state, &line(done, TransferTone::Success, 14), COLS);
-        assert_eq!(row_text(&cells, 1), format!("⇄ vm  {done}"));
-        assert_eq!(color_at(&cells, 1, 6), Some(THEME.success_linear()));
-        assert_eq!(color_at(&cells, 1, 19), Some(THEME.success_linear()));
+        assert_eq!(row_text(&cells, 1), format!("vm  {done}"));
+        assert_eq!(color_at(&cells, 1, 4), Some(THEME.success_linear()));
+        assert_eq!(color_at(&cells, 1, 17), Some(THEME.success_linear()));
         let failed = "Failed — disk full · 0 of 3 uploaded";
         let (cells, _) = draw_with(&state, &line(failed, TransferTone::Error, 18), 60);
-        assert_eq!(color_at(&cells, 1, 6), Some(THEME.error_linear()));
+        assert_eq!(color_at(&cells, 1, 4), Some(THEME.error_linear()));
         assert_eq!(
-            color_at(&cells, 1, 23),
+            color_at(&cells, 1, 21),
             Some(THEME.error_linear()),
             "reason"
         );
@@ -4600,22 +4584,22 @@ mod tests {
             let (cells, _) = draw_with(&state, context, cols);
             row_text(&cells, 1)
         };
-        // `⇄ prod  ` is eight columns; the remaining budget is `cols - 8`.
+        // `prod  ` is six columns; the remaining budget is `cols - 6`.
         let queue = uploading("↑ a", 2, None);
-        assert!(labels(&queue, 44).ends_with("Show transfers (2)   Cancel all ⌘."));
-        assert!(labels(&queue, 43).ends_with("Show transfers (2)   Cancel all"));
-        let cancel_only = labels(&queue, 40);
+        assert!(labels(&queue, 42).ends_with("Show transfers (2)   Cancel all ⌘."));
+        assert!(labels(&queue, 41).ends_with("Show transfers (2)   Cancel all"));
+        let cancel_only = labels(&queue, 38);
         assert!(cancel_only.ends_with("Cancel all"));
         assert!(!cancel_only.contains("Show"));
         assert!(
-            !labels(&queue, 19).contains("Cancel"),
+            !labels(&queue, 17).contains("Cancel"),
             "cancel does not fit either"
         );
 
         let single = uploading("↑ a", 1, None);
-        assert!(labels(&single, 18).ends_with("Cancel"));
-        assert!(!labels(&single, 18).contains('⌘'));
-        assert!(!labels(&single, 15).contains("Cancel"));
+        assert!(labels(&single, 16).ends_with("Cancel"));
+        assert!(!labels(&single, 16).contains('⌘'));
+        assert!(!labels(&single, 13).contains("Cancel"));
     }
 
     #[test]
@@ -4657,23 +4641,23 @@ mod tests {
         let state = live("", "", "", 0);
         let context = uploading("↑ backup.tar.gz  18.2 / 44.6 MB", 1, None);
         let transfer = context.transfer.as_ref().unwrap();
-        // At 30 columns: 6 (`⇄ prod`) + 2 + body + 2 + 11 (button), the body is 9.
-        let (cells, _) = draw_with(&state, &context, 30);
+        // At 28 columns: 4 (`prod`) + 2 + body + 2 + 11 (button), the body is 9.
+        let (cells, _) = draw_with(&state, &context, 28);
         assert_eq!(
             row_text(&cells, 1),
-            format!("{:<20}Cancel ⌘.", "⇄ prod  ↑ backup…")
+            format!("{:<18}Cancel ⌘.", "prod  ↑ backup…")
         );
         assert_eq!(
-            transfer_button_at(transfer, 30, 19),
+            transfer_button_at(transfer, 28, 17),
             Some(TransferAction::Cancel)
         );
         // If the button does not fit there is none; the body takes the rest.
-        let (cells, _) = draw_with(&state, &context, 14);
-        assert_eq!(row_text(&cells, 1), "⇄ prod  ↑ bac…");
-        assert!((0..14).all(|col| transfer_button_at(transfer, 14, col).is_none()));
-        // If even the host does not fit, only the mark.
-        let (cells, dock) = draw_with(&state, &context, 4);
-        assert_eq!(row_text(&cells, 1), "⇄");
+        let (cells, _) = draw_with(&state, &context, 12);
+        assert_eq!(row_text(&cells, 1), "prod  ↑ bac…");
+        assert!((0..12).all(|col| transfer_button_at(transfer, 12, col).is_none()));
+        // If even the host does not fit, nothing.
+        let (cells, dock) = draw_with(&state, &context, 3);
+        assert_eq!(row_text(&cells, 1), "");
         assert_eq!(dock.buttons, [None; 2]);
     }
 
@@ -4873,14 +4857,14 @@ mod tests {
             ..remote("prod", "/srv/app")
         };
         let (row, _, _) = program_row(&remote, 60);
-        assert_eq!(row, "⇄ prod  /srv/app");
+        assert_eq!(row, "prod  /srv/app");
         let upload = DockContext {
             program: bar.program.clone(),
             remote: None,
             ..uploading("Connection closed", 0, None)
         };
         let (row, _, _) = program_row(&upload, 60);
-        assert_eq!(row, "⇄ prod  Connection closed");
+        assert_eq!(row, "prod  Connection closed");
     }
 
     #[test]
@@ -4922,12 +4906,12 @@ mod tests {
 
     #[test]
     fn a_reconnect_offer_fills_the_empty_line() {
-        // On an empty input row, after the caret, `⇄ host` in the
+        // On an empty input row, after the caret, `host` in the
         // mark's color, the rest `dim`; the caret at the start of the row, the
         // context row local.
         let state = live("", "", "", 0);
         let (cells, dock) = draw_with(&state, &offered("prod", HostMark::Production), COLS);
-        assert_eq!(text(&cells), "  ⇄ prod  Connection lost · ⏎ reconnect");
+        assert_eq!(text(&cells), "  prod  Connection lost · ⏎ reconnect");
         let color = |col: u16| {
             cells
                 .iter()
@@ -4955,18 +4939,18 @@ mod tests {
         let (cells, _) = draw_with(&state, &context, 60);
         assert_eq!(
             text(&cells),
-            "  ⇄ deploy@prod:2222  Connection lost · ⏎ reconnect"
+            "  deploy@prod:2222  Connection lost · ⏎ reconnect"
         );
     }
 
     #[test]
     fn the_reconnect_placeholder_is_clipped_not_wrapped() {
         let state = live("", "", "", 0);
-        let (cells, _) = draw_with(&state, &offered("prod", HostMark::None), 20);
-        assert_eq!(text(&cells), "  ⇄ prod  Connection");
+        let (cells, _) = draw_with(&state, &offered("prod", HostMark::None), 18);
+        assert_eq!(text(&cells), "  prod  Connection");
         // It does not wrap: there is no row other than the context row and the band does not grow.
         assert!(cells.iter().all(|cell| cell.row <= 1), "{cells:?}");
-        assert_eq!(needed_rows(&state, 20), 1);
+        assert_eq!(needed_rows(&state, 18), 1);
     }
 
     #[test]
@@ -4978,36 +4962,28 @@ mod tests {
             live("", "", "ls -la", 0),
         ] {
             let (cells, _) = draw_with(&state, &offer, COLS);
-            assert!(!text(&cells).contains('⇄'), "{:?}", text(&cells));
+            assert!(!text(&cells).contains("prod"), "{:?}", text(&cells));
         }
         let mut state = live("", "", "", 0);
         state.prebuffer = "for x in 1\n".into();
         let (cells, _) = draw_with(&state, &offer, COLS);
-        assert!(cells.iter().all(|cell| cell.ch != Some('⇄')));
+        assert!(!text(&cells).contains("prod"), "{:?}", text(&cells));
         // In `vicmd` ⏎ does not send the line, so there is no hint either.
         let mut state = live("", "", "", 0);
         state.insert_keymap = false;
         let (cells, _) = draw_with(&state, &offer, COLS);
-        assert!(cells.iter().all(|cell| cell.ch != Some('⇄')));
+        assert!(!text(&cells).contains("prod"), "{:?}", text(&cells));
         // Without an offer an empty row is empty.
         let (cells, _) = draw_with(&live("", "", "", 0), &context("/Users/me", ""), COLS);
         assert_eq!(text(&cells), "");
     }
 
     #[test]
-    fn the_remote_mark_is_the_one_the_atlas_checks() {
-        // `bt-atlas` cannot see `bt-core` and writes the character by hand
-        // (`the_remote_mark_is_a_glyph_in_the_small_class`): if the mark
-        // changes this fails and points to that test's constant.
-        assert_eq!(REMOTE_MARK, '⇄');
-    }
-
-    #[test]
     fn a_remote_session_shows_the_host_and_the_remote_path() {
-        // `⇄ host`, two spaces, the remote path; no local path and no branch.
+        // `host`, two spaces, the remote path; no local path and no branch.
         let state = live("", "", "", 0);
         let (cells, dock) = draw_with(&state, &remote("prod", "/var/www/app"), COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ prod  /var/www/app");
+        assert_eq!(row_text(&cells, 1), "prod  /var/www/app");
         // The mark and host are `info`, the path the local one's two tiers.
         let color = |col: u16| {
             cells
@@ -5015,7 +4991,7 @@ mod tests {
                 .find(|cell| cell.row == 1 && cell.col == col)
                 .map(|cell| cell.fg)
         };
-        // Columns: `⇄` 0, host 2..6, path from 8 (`/var/www/` 8..17, `app` 17..).
+        // Columns: host 0..4, path from 6 (`/var/www/` 6..15, `app` 15..).
         assert_eq!(color(0), Some(THEME.info_linear()));
         assert_eq!(color(2), Some(THEME.info_linear()), "host");
         assert_eq!(color(9), Some(THEME.quiet_linear()), "parent directory");
@@ -5029,7 +5005,7 @@ mod tests {
 
     #[test]
     fn a_marked_host_takes_its_mark_color() {
-        // `⇄ host` and the top line in the mark's color; the path
+        // `host` and the top line in the mark's color; the path
         // tiers and the context row's tone do not change.
         let state = live("", "", "", 0);
         for (mark, expected) in [
@@ -5067,7 +5043,7 @@ mod tests {
         // If the remote shell prints no OSC 7, only the host.
         let state = live("", "", "", 0);
         let (cells, _) = draw_with(&state, &remote("deploy@10.0.0.5", ""), COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ deploy@10.0.0.5");
+        assert_eq!(row_text(&cells, 1), "deploy@10.0.0.5");
     }
 
     /// [`remote`] for a target the user gave a port.
@@ -5087,38 +5063,38 @@ mod tests {
     fn the_remote_line_names_the_port_the_user_asked_for() {
         let state = live("", "", "", 0);
         let (cells, _) = draw_with(&state, &remote_on("10.0.0.5", 2222, "/srv"), COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ 10.0.0.5:2222  /srv");
+        assert_eq!(row_text(&cells, 1), "10.0.0.5:2222  /srv");
         let (cells, _) = draw_with(&state, &remote_on("deploy@10.0.0.5", 2222, ""), COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ deploy@10.0.0.5:2222");
+        assert_eq!(row_text(&cells, 1), "deploy@10.0.0.5:2222");
         let (cells, _) = draw_with(&state, &remote_on("::1", 2222, ""), COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ [::1]:2222");
+        assert_eq!(row_text(&cells, 1), "[::1]:2222");
         // The default port is not shown; the host stays what it was.
         let (cells, _) = draw_with(&state, &remote_on("prod", 22, "/srv"), COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ prod  /srv");
-        // The port is part of the name that is never cut: `⇄ prod:22…` would
+        assert_eq!(row_text(&cells, 1), "prod  /srv");
+        // The port is part of the name that is never cut: `prod:22…` would
         // read as another machine.
         let context = remote_on("prod", 2222, "/var/www/app");
-        let (cells, _) = draw_with(&state, &context, 11);
-        assert_eq!(row_text(&cells, 1), "⇄ prod:2222");
-        let (cells, _) = draw_with(&state, &context, 10);
-        assert_eq!(row_text(&cells, 1), "⇄");
+        let (cells, _) = draw_with(&state, &context, 9);
+        assert_eq!(row_text(&cells, 1), "prod:2222");
+        let (cells, _) = draw_with(&state, &context, 8);
+        assert_eq!(row_text(&cells, 1), "");
     }
 
     #[test]
     fn a_narrow_remote_line_trims_the_path_and_never_the_host() {
         let state = live("", "", "", 0);
         let context = remote("prod", "/var/www/app");
-        // 14 columns: `⇄ prod` six, two spaces, six for the path — the last five with `…`.
-        let (cells, _) = draw_with(&state, &context, 14);
-        assert_eq!(row_text(&cells, 1), "⇄ prod  …w/app");
-        // If there is no room for the path, only `⇄ host`.
-        let (cells, _) = draw_with(&state, &context, 6);
-        assert_eq!(row_text(&cells, 1), "⇄ prod");
-        // If the host does not fit it is **not clipped**: only the mark remains.
-        let (cells, _) = draw_with(&state, &context, 5);
-        assert_eq!(row_text(&cells, 1), "⇄");
+        // 12 columns: `prod` four, two spaces, six for the path — the last five with `…`.
+        let (cells, _) = draw_with(&state, &context, 12);
+        assert_eq!(row_text(&cells, 1), "prod  …w/app");
+        // If there is no room for the path, only `host`.
+        let (cells, _) = draw_with(&state, &context, 4);
+        assert_eq!(row_text(&cells, 1), "prod");
+        // If the host does not fit it is **not clipped**: nothing stands in its place.
+        let (cells, _) = draw_with(&state, &context, 3);
+        assert_eq!(row_text(&cells, 1), "");
         let (cells, _) = draw_with(&state, &context, 1);
-        assert_eq!(row_text(&cells, 1), "⇄");
+        assert_eq!(row_text(&cells, 1), "");
     }
 
     #[test]

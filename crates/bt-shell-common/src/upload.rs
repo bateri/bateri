@@ -3426,8 +3426,8 @@ mod tests {
 
     #[test]
     fn the_title_carries_the_percent_only_while_uploading() {
-        assert_eq!(titled(Some(64), "⇄ prod-web-1"), "↑ 64% · ⇄ prod-web-1");
-        assert_eq!(titled(None, "⇄ prod-web-1"), "⇄ prod-web-1");
+        assert_eq!(titled(Some(64), "prod-web-1"), "↑ 64% · prod-web-1");
+        assert_eq!(titled(None, "prod-web-1"), "prod-web-1");
 
         let mut uploads = queue_of(vec![job("a", false, 1, 100), job("b", false, 1, 100)]);
         assert_eq!(uploads.percent(), None, "not streaming yet");
@@ -4070,10 +4070,7 @@ mod tests {
         assert_eq!(status.body, "↓ 1 of 2 · syslog  50 / 200 B");
         assert!(transfers.title_percent_changed());
         assert_eq!(transfers.title_prefix(), Some(("↓", 25)));
-        assert_eq!(
-            titled_as(transfers.title_prefix(), "⇄ prod"),
-            "↓ 25% · ⇄ prod"
-        );
+        assert_eq!(titled_as(transfers.title_prefix(), "prod"), "↓ 25% · prod");
         assert_eq!(transfers.list().unwrap().title, "Downloading from prod");
 
         assert_eq!(transfers.finish(Outcome::Done), None);

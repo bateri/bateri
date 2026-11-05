@@ -3697,6 +3697,8 @@ impl TerminalPane {
                 opener: held.opener.clone(),
             });
         }
+        // The pane's own program is the login shell: only then is `zsh` its name at the prompt.
+        let runs_shell = self.ivars().run.is_none() && held.is_none();
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
         // is `bt-core`; that `smoke_shell` gives eight cells and six glyphs is
@@ -3846,6 +3848,7 @@ impl TerminalPane {
         // The host marks' list at birth; its live change comes
         // from `AppDelegate::reload_settings` ([`Self::set_host_marks`]).
         session.set_host_marks(&settings.remote_hosts);
+        session.set_shell_name(runs_shell.then(child::shell_name).flatten());
         // The text's contrast floor, before the first frame (this turn of the
         // main thread); its live change is [`Self::set_minimum_contrast`].
         session.set_minimum_contrast(settings.minimum_contrast);
@@ -4995,8 +4998,27 @@ impl TerminalPane {
     /// tells (`Backend::program_changed`): the tab reads the pane's kind again. The server's
     /// word is the news, so there is no probe to run.
     pub fn server_program_changed(&self) {
+        self.sync_server_shell();
         self.host().program_changed(self.ivars().id);
         self.offer_owed_view();
+    }
+
+    /// Tells the session the shell at the server's prompt, which its title says (`zsh rasp`): the
+    /// server's word about what is in front of the terminal it keeps for this pane. A program
+    /// there names itself and a plain `ssh` has no such word: the title is the server's name alone.
+    fn sync_server_shell(&self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        let shell = self
+            .server_target()
+            .and_then(|_| self.host().kept_terminal(self.uuid()))
+            .and_then(|shown| shown.program)
+            .filter(|name| program::is_shell_name(name))
+            .map(|name| name.trim_start_matches('-').to_owned());
+        if session.set_server_shell(shell) {
+            self.host().title_changed(self.ivars().id);
+        }
     }
 
     /// The decision over the sources with `server` as the server's word; `remember` writes it to
@@ -7066,6 +7088,7 @@ impl TerminalPane {
     /// load indicator's generation.
     pub(crate) fn remote_edge(&self) {
         self.check_upload_connection();
+        self.sync_server_shell();
         self.sync_server_door();
         self.sync_ssh_session();
         self.sync_stats_generation();
@@ -7121,7 +7144,7 @@ impl TerminalPane {
         }
     }
 
-    /// The remote edge's half for the dock: `⇄ rasp` is the door to the server's card exactly
+    /// The remote edge's half for the dock: `rasp` is the door to the server's card exactly
     /// while the pane is a server pane ([`Self::server_target`]) — written both ways, so a
     /// terminal that goes (the holder was refused after it was admitted and the pane runs the
     /// plain `ssh`, whose process-table target is the same) closes it again. The ssh's

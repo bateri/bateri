@@ -41,8 +41,8 @@ use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use super::{
-    CLOSE_INSET, CLOSE_RADIUS, CLOSE_SIDE, HINT_TEXT, Heading, Palette, TabBar, Tint, animate,
-    contains, label, paint, rounded, stroke,
+    CLOSE_INSET, CLOSE_SIDE, HINT_TEXT, Heading, Palette, TabBar, Tint, animate, contains, label,
+    paint, stroke,
 };
 use crate::groups::GroupId;
 use crate::tabs::{self, DRAG_SLOP, Indicator};
@@ -545,12 +545,6 @@ impl GroupHeader {
         if self.plus_shown() {
             let rect = self.plus_rect();
             let hot = iv.over_plus.get();
-            let fill = if hot {
-                palette.close_hover
-            } else {
-                palette.close
-            };
-            rounded(rect, CLOSE_RADIUS, fill, None);
             let (x, y) = (
                 rect.origin.x + rect.size.width / 2.0,
                 rect.origin.y + rect.size.height / 2.0,

@@ -37,7 +37,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bt_core::{HostMark, Mods, ProgramActivity};
+use bt_core::{HostMark, Mods, ProgramActivity, TabRunning};
 
 use crate::program::identity::Kind;
 use crate::split::Rect;
@@ -405,12 +405,29 @@ pub const BUTTON: f64 = 28.0;
 /// ([`Fit::of`]), and between the drag margin and the leftmost button.
 pub const EDGE: f64 = 8.0;
 
-/// A tab's corner radius; also the bar's buttons' where the window's corner is square or small
-/// ([`Fit::of`]).
-pub const TAB_RADIUS: f64 = 7.0;
+/// The bar's buttons' corner radius where the window's corner is square or small ([`Fit::of`]), and
+/// a row's in a list that is not a tab's (Show All Tabs' machines).
+pub const BUTTON_RADIUS: f64 = 7.0;
+
+/// A tab's face's corner radius, a chip's in the strip and a row's in the side column alike, on the
+/// curve [`corner_point`] draws.
+pub const ROW_RADIUS: f64 = 14.0;
+
+/// How square the corners of a tab's face and of a tile are: a corner is the superellipse
+/// `|x|^n + |y|^n = 1` with `n = 2^CORNER_SHAPE`, where 1 is a circle and more is squarer. AppKit
+/// has no such curve, so it is drawn from [`corner_point`].
+pub const CORNER_SHAPE: f64 = 1.5;
+
+/// The point of a corner's curve `angle` radians round its centre, on a corner of radius 1. Its
+/// signs are the angle's: the same four quarters a circle's are.
+pub fn corner_point(angle: f64) -> (f64, f64) {
+    let power = 2.0 / 2.0_f64.powf(CORNER_SHAPE);
+    let along = |value: f64| value.signum() * value.abs().powf(power);
+    (along(angle.cos()), along(angle.sin()))
+}
 
 /// A tab's height: a chip in the strip and a row in the side column are both this high.
-pub const TAB_HEIGHT: f64 = 28.0;
+pub const TAB_HEIGHT: f64 = 30.0;
 
 /// Space between two neighbouring buttons on the right.
 pub const BUTTON_GAP: f64 = 4.0;
@@ -630,7 +647,7 @@ impl Fit {
     /// centre sits 2 pt above the window's, and the gap runs from 6 pt at the top to [`EDGE`]
     /// at the side. Exactly concentric in a row twice the corner's radius would take a circle.
     pub fn of(corner: f64) -> Self {
-        let radius = (corner - EDGE).clamp(TAB_RADIUS, BUTTON / 2.0);
+        let radius = (corner - EDGE).clamp(BUTTON_RADIUS, BUTTON / 2.0);
         Self {
             inset: (corner - radius).max(EDGE),
             radius,
@@ -1164,7 +1181,7 @@ pub const GROUP_GAP: f64 = 10.0;
 
 /// Where a row's leading element (its icon with the deck, or the indicator) starts, from the row's
 /// left edge.
-pub const ROW_LEAD: f64 = 8.0;
+pub const ROW_LEAD: f64 = 6.5;
 
 /// What a row keeps free at its right end while neither `×` nor the ⌘ hint shows.
 pub const ROW_END: f64 = 8.0;
@@ -1221,7 +1238,7 @@ impl Side {
     ///
     /// The warning's corner towards the window's shares the window corner's centre ([`Fit::of`]:
     /// the inset and the radius add up to the corner, so the space round the corner does not pinch
-    /// at the diagonal) and its other three are [`TAB_RADIUS`], the rows'. Its [`Fit::inset`] is
+    /// at the diagonal) and its other three are [`BUTTON_RADIUS`]. Its [`Fit::inset`] is
     /// its space from the column's left edge and from the window's foot alike.
     pub fn layout(&self) -> Column {
         self.lay(std::iter::repeat_n(Entry::Tab, self.count))
@@ -1631,7 +1648,7 @@ pub struct Column {
     /// New Tab, at the head's right end, [`EDGE`] from the column's edge.
     pub new_tab: Rect,
     /// The settings warning, in the window's bottom-left corner. Its bottom-left radius is
-    /// [`Fit::radius`] of [`Column::fit`], the other three [`TAB_RADIUS`].
+    /// [`Fit::radius`] of [`Column::fit`], the other three [`BUTTON_RADIUS`].
     pub warning: Option<Rect>,
     /// Where the counts of what waits stand ([`Side::tally`]); `None` without any.
     pub counts: Option<Counts>,
@@ -2621,9 +2638,39 @@ pub fn ring_running(
     }
 }
 
-/// One counter period's worth of the running ring's turn: the ring goes round once in this many
-/// periods ([`ring_turn`]).
-const PERIODS_PER_TURN: u32 = 12;
+/// How long the running line takes to go round once, however long the command has run: a line
+/// that slowed with the command's age looked stopped after the hour.
+const TURN_PERIOD: Duration = Duration::from_secs(4);
+
+/// How long the whole line takes to fade out and back in (`TabRunning::Breathe`).
+const BREATHE_PERIOD: Duration = Duration::from_millis(2500);
+
+/// How far back round the tile the running line's tail reaches from its head, in degrees, and how
+/// much of that is the head's own soft rise.
+const TAIL_DEGREES: f64 = 200.0;
+const TAIL_SOFT: f64 = 8.0;
+
+/// How strong the line that stands under the tail is (`TabRunning::TailRing`).
+const RING_STRENGTH: f64 = 0.16;
+
+/// How much of the running line shows `behind` degrees back from its head (`0.0..=360.0`): nothing
+/// at the head's very tip, all of it [`TAIL_SOFT`] back, then a tail that thins out to nothing at
+/// [`TAIL_DEGREES`]; over a faint line all the way round where `ring` stands under it.
+pub fn tail_strength(behind: f64, ring: bool) -> f64 {
+    let tail = if behind <= TAIL_SOFT {
+        behind / TAIL_SOFT
+    } else if behind < TAIL_DEGREES {
+        let left = (TAIL_DEGREES - behind) / (TAIL_DEGREES - TAIL_SOFT);
+        left * left
+    } else {
+        0.0
+    };
+    if ring {
+        RING_STRENGTH + (1.0 - RING_STRENGTH) * tail
+    } else {
+        tail
+    }
+}
 
 /// How the running ring turns now.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2634,18 +2681,19 @@ pub struct Turn {
     pub phase: f64,
 }
 
-/// The turn of the running ring for a command that has run `elapsed`: one whole turn per twelve
-/// periods of the command's duration counter (`bt_core::counter_period` — a second, from an hour
-/// on a minute), so twelve seconds a turn at first and twelve minutes after the hour, always
-/// at the same even pace; `phase` is where in the turn the command's age puts it. The ring is
-/// handed to the window server to turn at that pace ([`Clock::delay`] wakes the bar only where the
-/// period changes), not stepped from here. Under Reduce Motion it does not turn: `None`, the ring
-/// stands still at the top.
-pub fn ring_turn(elapsed: Duration, reduce_motion: bool) -> Option<Turn> {
+/// The turn of the running ring for a command that has run `elapsed`: one even pace from start to
+/// end ([`TURN_PERIOD`], or [`BREATHE_PERIOD`] for a line that breathes); `phase` is where in the
+/// turn the command's age puts it, so a row drawn again keeps its line where it was. The ring is
+/// handed to the window server to turn at that pace, not stepped from here. Under Reduce Motion it
+/// does not turn: `None`, the ring stands still at the top.
+pub fn ring_turn(elapsed: Duration, reduce_motion: bool, running: TabRunning) -> Option<Turn> {
     if reduce_motion {
         return None;
     }
-    let period = bt_core::counter_period(elapsed) * PERIODS_PER_TURN;
+    let period = match running {
+        TabRunning::Tail | TabRunning::TailRing => TURN_PERIOD,
+        TabRunning::Breathe => BREATHE_PERIOD,
+    };
     let whole = period.as_secs_f64();
     Some(Turn {
         period,
@@ -2658,10 +2706,10 @@ pub fn ring_turn(elapsed: Duration, reduce_motion: bool) -> Option<Turn> {
 /// rectangle `half_width` and `half_height` out from its centre with corners rounded to `radius`,
 /// and the way starts at the middle of the top side and runs clockwise.
 ///
-/// The line running round a tile's edge while a command runs is the edge seen through a wedge
-/// that turns about the tile's centre. A wedge turned at an even rate would race through the
-/// corners (the edge is farther off there) at twice the pace it keeps along the sides; turned by
-/// this angle at an even rate in `fraction`, its middle keeps an even pace along the edge.
+/// The line running round a tile's edge while a command runs is the edge seen through a tail that
+/// turns about the tile's centre. A tail turned at an even rate would race through the corners (the
+/// edge is farther off there) at twice the pace it keeps along the sides; turned by this angle at
+/// an even rate in `fraction`, its head keeps an even pace along the edge.
 pub fn edge_angle(half_width: f64, half_height: f64, radius: f64, fraction: f64) -> f64 {
     use std::f64::consts::{FRAC_PI_2, PI, TAU};
     enum Piece {
@@ -2712,15 +2760,28 @@ pub fn edge_angle(half_width: f64, half_height: f64, radius: f64, fraction: f64)
     if angle < 0.0 { angle + TAU } else { angle }
 }
 
+/// One turn of the line round a tile's edge, in `steps` runs: the angles [`edge_angle`] gives from
+/// the top round to the top again. The last is a whole turn and not the top's own `0`: between two
+/// angles the window server turns evenly, and from just short of a turn to `0` it would whip the line
+/// all the way back at the end of every turn.
+pub fn edge_turn(half_width: f64, half_height: f64, radius: f64, steps: usize) -> Vec<f64> {
+    (0..=steps)
+        .map(|step| {
+            if step == steps {
+                std::f64::consts::TAU
+            } else {
+                edge_angle(half_width, half_height, radius, step as f64 / steps as f64)
+            }
+        })
+        .collect()
+}
+
 /// What the bar's one delayed wake is set from ([`Clock::delay`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Clock {
     /// The window is on screen (its occlusion state): an occluded or minimized window's bar
     /// changes nothing anybody sees.
     pub visible: bool,
-    pub reduce_motion: bool,
-    /// How long each tab's running command has run, for every tab with one.
-    pub running: Vec<Duration>,
     /// How long the command of the tab whose summary card is open has run, when it runs.
     pub card: Option<Duration>,
     /// The open card carries a map of its tab's panes: each pane's picture is taken afresh every
@@ -2730,30 +2791,21 @@ pub struct Clock {
 
 impl Clock {
     /// When the bar must look again, `None` for never: the nearest moment something it shows
-    /// changes with time — where a running ring's turn changes pace (`bt_core::counter_tier_end`:
-    /// the hour, where it slows to a twelfth), the open card's running time changes
-    /// (`bt_core::next_tick`, the duration counter's own clock) or the open card's map is due its
-    /// panes' pictures ([`MAP_REFRESH`]).
+    /// changes with time — the open card's running time changes (`bt_core::next_tick`, the duration
+    /// counter's own clock) or the open card's map is due its panes' pictures ([`MAP_REFRESH`]).
     ///
-    /// **Three arms, one wake.** A ring turns by itself between its pace changes, so it asks for no
-    /// wake per step; the rings need the one at the hour only while the window is visible and
-    /// Reduce Motion is off (a ring that is not turning has no pace to change). The card's
-    /// seconds are text, not motion, so they go on under Reduce Motion — still only while the
+    /// **Two arms, one wake.** A ring turns by itself at one pace, so it asks for no wake at all.
+    /// The card's seconds are text, not motion, so they go on under Reduce Motion — only while the
     /// window is visible. So do the map's pictures: they are what the panes show, not an
     /// animation. **A map's wake stops when the card does** (`map` is false without a card) and
-    /// when the window is not on screen. No running command before its hour and no card: no wake,
-    /// the bar is idle.
+    /// when the window is not on screen. No card: no wake, the bar is idle.
     pub fn delay(&self) -> Option<Duration> {
         if !self.visible {
             return None;
         }
-        let rings = self
-            .running
-            .iter()
-            .filter(|_| !self.reduce_motion)
-            .filter_map(|&elapsed| bt_core::counter_tier_end(elapsed));
-        rings
-            .chain(self.card.map(bt_core::next_tick))
+        self.card
+            .map(bt_core::next_tick)
+            .into_iter()
             .chain(self.map.then_some(MAP_REFRESH))
             .min()
     }
@@ -3277,12 +3329,12 @@ mod tests {
         let fit = |inset: f64, radius: f64| Fit { inset, radius };
         assert_eq!(
             Fit::of(0.0),
-            fit(EDGE, TAB_RADIUS),
+            fit(EDGE, BUTTON_RADIUS),
             "square: the tabs' look"
         );
         assert_eq!(
             Fit::of(12.0),
-            fit(EDGE, TAB_RADIUS),
+            fit(EDGE, BUTTON_RADIUS),
             "small: still the tabs' look"
         );
         assert_eq!(Fit::of(20.0), fit(EDGE, 12.0), "the radius gives way first");
@@ -3304,7 +3356,7 @@ mod tests {
         }
         .layout();
         assert_eq!((square.new_tab, square.warning), (964.0, Some(932.0)));
-        assert_eq!(square.fit.radius, TAB_RADIUS);
+        assert_eq!(square.fit.radius, BUTTON_RADIUS);
         let round = Bar {
             warning: true,
             corner: 30.0,
@@ -3350,7 +3402,7 @@ mod tests {
             gap >= top - 1e-9,
             "pinches to {gap} below the top gap {top}"
         );
-        let pinched = narrowest(EDGE, TAB_RADIUS);
+        let pinched = narrowest(EDGE, BUTTON_RADIUS);
         assert!(pinched < top - 1.0, "the tabs' radius pinched: {pinched}");
     }
 
@@ -3859,10 +3911,10 @@ mod tests {
 
     #[test]
     fn a_chip_stands_like_a_row_with_its_close_and_key_at_the_right() {
-        // The narrowest chip: 8 in, the tile, 6, and the title to 8 from the end at rest.
+        // The narrowest chip: 6.5 in, the tile, 6, and the title to 8 from the end at rest.
         let rest = Row::chip(MIN_WIDTH, Some(TILE_WIDTH), 1000.0, false);
         assert_eq!(rest.lead, Some(Span::new(ROW_LEAD, TILE_WIDTH)));
-        assert_eq!(rest.title, Span::new(36.0, 76.0));
+        assert_eq!(rest.title, Span::new(34.5, 77.5));
         // Under the pointer or with ⌘ held the title gives 32 to `×` and the key.
         let crowded = Row::chip(MIN_WIDTH, Some(TILE_WIDTH), 1000.0, true);
         assert_eq!(crowded.title.end(), MIN_WIDTH - CHIP_CROWDED);
@@ -4512,93 +4564,113 @@ mod tests {
         assert!(width >= 36.0, "{width} pt for the title");
     }
 
-    /// One turn per twelve counter periods: twelve seconds, and twelve minutes from the hour on,
-    /// where the counter moves once a minute; the phase is the command's age within the turn;
-    /// still under Reduce Motion.
+    /// One even pace however long the command has run; the phase is the command's age within the
+    /// turn; still under Reduce Motion.
     #[test]
-    fn the_ring_turns_at_the_counters_pace() {
+    fn the_ring_keeps_one_pace() {
         let secs = Duration::from_secs;
-        let turn = |elapsed, reduce| ring_turn(elapsed, reduce).expect("a turning ring");
-        assert_eq!(turn(Duration::ZERO, false).period, secs(12));
-        assert_eq!(turn(secs(3599), false).period, secs(12));
-        assert_eq!(turn(secs(3600), false).period, secs(720), "twelve minutes");
-        assert_eq!(turn(secs(86_400), false).period, secs(720));
-        assert_eq!(turn(Duration::ZERO, false).phase, 0.0);
-        assert_eq!(turn(secs(3), false).phase, 0.25, "a quarter in");
-        assert_eq!(turn(secs(12), false).phase, 0.0, "a whole turn");
-        assert_eq!(turn(Duration::from_millis(1_500), false).phase, 0.125);
-        assert_eq!(turn(secs(3600), false).phase, 0.0, "the hour starts a turn");
-        assert_eq!(turn(secs(3600 + 180), false).phase, 0.25);
-        let almost = turn(Duration::from_millis(11_999), false).phase;
+        let turn = |elapsed| ring_turn(elapsed, false, TabRunning::Tail).expect("a turning ring");
+        assert_eq!(turn(Duration::ZERO).period, secs(4));
+        assert_eq!(
+            turn(secs(86_400)).period,
+            secs(4),
+            "a day on, the same pace"
+        );
+        assert_eq!(turn(Duration::ZERO).phase, 0.0);
+        assert_eq!(turn(secs(1)).phase, 0.25, "a quarter in");
+        assert_eq!(turn(secs(4)).phase, 0.0, "a whole turn");
+        let almost = turn(Duration::from_millis(3_999)).phase;
         assert!((0.0..1.0).contains(&almost), "{almost}");
-        assert_eq!(ring_turn(secs(5), true), None, "Reduce Motion: still");
+        assert_eq!(
+            ring_turn(secs(5), true, TabRunning::Tail),
+            None,
+            "Reduce Motion: still"
+        );
+        let breath = ring_turn(secs(1), false, TabRunning::Breathe).expect("a breathing line");
+        assert_eq!(breath.period, Duration::from_millis(2500));
+        assert_eq!(breath.phase, 0.4);
     }
 
-    fn clock(visible: bool, reduce_motion: bool, running: &[u64], card: Option<u64>) -> Clock {
+    /// The line only ever goes forward: every step of a turn is ahead of the last, and the turn ends
+    /// a whole turn from where it began, so that the next one starts where it stands.
+    #[test]
+    fn a_turn_only_goes_forward() {
+        let turn = edge_turn(13.0, 11.0, 7.0, 64);
+        assert_eq!(turn.len(), 65);
+        assert_eq!(turn[0], 0.0);
+        assert_eq!(turn[64], std::f64::consts::TAU);
+        for pair in turn.windows(2) {
+            assert!(pair[1] > pair[0], "{pair:?}");
+        }
+    }
+
+    /// The tail: a soft head, all of it just behind, thinning out to nothing; the ring under it
+    /// never goes out.
+    #[test]
+    fn the_tail_fades_back_from_its_head() {
+        let tail = |behind| tail_strength(behind, false);
+        assert_eq!(tail(0.0), 0.0, "the very tip");
+        assert_eq!(tail(4.0), 0.5);
+        assert_eq!(tail(8.0), 1.0, "the bright part");
+        assert!(tail(100.0) > tail(150.0), "thinning out");
+        assert_eq!(tail(200.0), 0.0, "its end");
+        assert_eq!(tail(300.0), 0.0, "ahead of the head");
+        assert_eq!(tail_strength(300.0, true), 0.16, "the line under it");
+        assert_eq!(tail_strength(8.0, true), 1.0);
+    }
+
+    /// A corner's curve: on the superellipse, meeting the sides where a circle's would, and squarer
+    /// than a circle between.
+    #[test]
+    fn a_corner_runs_on_its_curve() {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        let n = 2.0_f64.powf(CORNER_SHAPE);
+        for step in 0..=16 {
+            let (x, y) = corner_point(f64::from(step) * PI / 8.0);
+            let sum = x.abs().powf(n) + y.abs().powf(n);
+            assert!((sum - 1.0).abs() < 1e-9, "{step}: {sum}");
+        }
+        let (x, y) = corner_point(0.0);
+        assert!((x - 1.0).abs() < 1e-9 && y.abs() < 1e-9);
+        let (x, y) = corner_point(FRAC_PI_2);
+        assert!(x.abs() < 1e-6 && (y - 1.0).abs() < 1e-9);
+        let (x, y) = corner_point(-FRAC_PI_4);
+        assert!(
+            x > FRAC_PI_4.cos() && y < -FRAC_PI_4.cos(),
+            "squarer than a circle"
+        );
+    }
+
+    fn clock(visible: bool, card: Option<u64>) -> Clock {
         Clock {
             visible,
-            reduce_motion,
-            running: running
-                .iter()
-                .map(|&ms| Duration::from_millis(ms))
-                .collect(),
             card: card.map(Duration::from_millis),
             map: false,
         }
     }
 
-    /// The bar's clock: set only while something on a visible bar changes with time — a ring at
-    /// the hour where its pace changes (it turns by itself between), the open card's seconds at
-    /// the counter's tick.
+    /// The bar's clock: set only while something on a visible bar changes with time — the open
+    /// card's seconds at the counter's tick. A ring turns by itself and asks for nothing.
     #[test]
-    fn the_clock_wakes_for_a_rings_pace_and_a_cards_seconds() {
+    fn the_clock_wakes_for_a_cards_seconds() {
         let ms = Duration::from_millis;
         let hour = 3_600_000;
-        assert_eq!(clock(true, false, &[], None).delay(), None, "nothing runs");
+        assert_eq!(clock(true, None).delay(), None, "no card");
         assert_eq!(
-            clock(true, false, &[2_400], None).delay(),
-            Some(ms(hour - 2_400)),
-            "a ring turns by itself: the next wake is the hour's"
-        );
-        assert_eq!(
-            clock(true, false, &[2_400, 900_000], None).delay(),
-            Some(ms(hour - 900_000)),
-            "the nearest of the running tabs"
-        );
-        assert_eq!(
-            clock(true, false, &[hour + 20_000], None).delay(),
-            None,
-            "past the hour the pace never changes again"
-        );
-        assert_eq!(
-            clock(false, false, &[2_400], Some(2_400)).delay(),
+            clock(false, Some(2_400)).delay(),
             None,
             "an occluded window"
         );
         assert_eq!(
-            clock(true, true, &[2_400], None).delay(),
-            None,
-            "Reduce Motion: no ring turns, no pace to change"
-        );
-        assert_eq!(
-            clock(true, true, &[2_400], Some(2_400)).delay(),
+            clock(true, Some(2_400)).delay(),
             Some(ms(600)),
-            "but the open card's seconds, which are text, go on"
+            "the open card's seconds"
         );
+        assert_eq!(clock(true, Some(4_900)).delay(), Some(ms(100)));
         assert_eq!(
-            clock(true, false, &[1_200], Some(4_900)).delay(),
-            Some(ms(100)),
-            "the card's tick is nearer than the hour"
-        );
-        assert_eq!(
-            clock(true, false, &[hour - 40], Some(4_900)).delay(),
-            Some(ms(40)),
-            "the hour, when it is nearer than the card's tick"
-        );
-        assert_eq!(
-            clock(true, false, &[hour + 20_000], Some(hour + 20_000)).delay(),
+            clock(true, Some(hour + 20_000)).delay(),
             Some(Duration::from_secs(40)),
-            "an hour on, the card's counter still moves once a minute"
+            "an hour on, the card's counter moves once a minute"
         );
     }
 
@@ -4607,37 +4679,27 @@ mod tests {
     #[test]
     fn the_clock_wakes_a_mapped_card_for_its_pictures() {
         let ms = Duration::from_millis;
-        let mapped = |visible, reduce_motion, running: &[u64], card| Clock {
+        let mapped = |visible, card| Clock {
             map: true,
-            ..clock(visible, reduce_motion, running, card)
+            ..clock(visible, card)
         };
         assert_eq!(
-            mapped(true, false, &[], None).delay(),
+            mapped(true, None).delay(),
             Some(MAP_REFRESH),
             "a card with a map and nothing else running"
         );
         assert_eq!(
-            mapped(true, true, &[], None).delay(),
-            Some(MAP_REFRESH),
-            "Reduce Motion: pictures are not an animation"
-        );
-        assert_eq!(
-            mapped(false, false, &[], None).delay(),
+            mapped(false, None).delay(),
             None,
             "a window nobody sees takes none"
         );
         assert_eq!(
-            clock(true, false, &[], None).delay(),
+            clock(true, None).delay(),
             None,
             "no card, no map: the bar is idle again"
         );
         assert_eq!(
-            mapped(true, false, &[3_600_000 - 40], None).delay(),
-            Some(ms(40)),
-            "the hour, when it is nearer"
-        );
-        assert_eq!(
-            mapped(true, false, &[1_200], Some(4_900)).delay(),
+            mapped(true, Some(4_900)).delay(),
             Some(ms(100)),
             "the counter's tick, when it is nearer"
         );
@@ -4786,7 +4848,7 @@ mod tests {
             ]
         );
         let remote = Card {
-            title: "⇄ prod".into(),
+            title: "prod".into(),
             remote: Some(("prod".into(), "/var/www".into())),
             directory: Some("/Users/me".into()),
             command: Some(CardCommand::Failed {
@@ -4798,7 +4860,7 @@ mod tests {
         assert_eq!(
             card_lines(&remote),
             [
-                ("⇄ prod".to_owned(), Tone::Title),
+                ("prod".to_owned(), Tone::Title),
                 ("prod:/var/www".to_owned(), Tone::Dim),
                 ("Exit 1 · r$ false".to_owned(), Tone::Error),
             ]
@@ -5087,11 +5149,11 @@ mod tests {
         assert_eq!(
             column.rows,
             [
-                Rect::new(8.0, 46.0, 184.0, 28.0),
-                Rect::new(8.0, 76.0, 184.0, 28.0),
-                Rect::new(8.0, 106.0, 184.0, 28.0),
+                Rect::new(8.0, 46.0, 184.0, 30.0),
+                Rect::new(8.0, 78.0, 184.0, 30.0),
+                Rect::new(8.0, 110.0, 184.0, 30.0),
             ],
-            "28 high, 2 apart, 8 in from the sides, 6 under the title row"
+            "30 high, 2 apart, 8 in from the sides, 6 under the title row"
         );
         assert!(!column.overflow && !column.fade_top && !column.fade_bottom);
         assert_eq!(column.warning, None);
@@ -5236,14 +5298,14 @@ mod tests {
 
     #[test]
     fn the_counts_follow_the_last_row_or_stand_at_the_foot() {
-        // Three rows in a tall window: two gaps under the last row's end (6 + 88 + 6 = 100).
+        // Three rows in a tall window: two gaps under the last row's end (6 + 94 + 6 = 106).
         let short = Side {
             tally: true,
             ..side(600.0, 3)
         }
         .layout();
         let tally = short.counts.expect("counts");
-        assert_eq!(tally.rect, Rect::new(8.0, 40.0 + 100.0 + 4.0, 184.0, 28.0));
+        assert_eq!(tally.rect, Rect::new(8.0, 40.0 + 106.0 + 4.0, 184.0, 30.0));
         assert_eq!(tally.corner, None);
         assert_eq!(
             short.list,
@@ -5264,7 +5326,7 @@ mod tests {
         );
         assert_eq!(long.list.y + long.list.height + 2.0 * GAP, tally.rect.y);
         assert_eq!(tally.corner, Some(12.5), "the window corner's centre");
-        // With the warning in the corner the counts keep the rows' radius.
+        // With the warning in the corner the counts keep the buttons' radius.
         let warned = Side {
             tally: true,
             warning: true,
@@ -5302,7 +5364,7 @@ mod tests {
         assert_eq!(detail_height(AGENT_ROW, true, 2), 90.0);
         assert_eq!(detail_height(AGENT_ROW, false, 5), 74.0, "cut at two lines");
         // A plain row of the list, the same way.
-        assert_eq!(detail_height(TAB_HEIGHT, true, 1), 59.0);
+        assert_eq!(detail_height(TAB_HEIGHT, true, 1), 61.0);
         // A question takes one line where it fits, two where it does not, none when absent.
         assert_eq!(ask_lines(None, 100.0), 0);
         assert_eq!(ask_lines(Some(80.0), 100.0), 1);
@@ -5329,7 +5391,7 @@ mod tests {
     #[test]
     fn a_single_tab_is_a_row_like_the_rest() {
         let column = side(600.0, 1).layout();
-        assert_eq!(column.rows, [Rect::new(8.0, 46.0, 184.0, 28.0)]);
+        assert_eq!(column.rows, [Rect::new(8.0, 46.0, 184.0, 30.0)]);
         assert_eq!(column.slot_at(300.0), 0);
     }
 
@@ -5364,11 +5426,11 @@ mod tests {
             column.headers,
             [
                 Header {
-                    rect: Rect::new(8.0, 116.0, 184.0, 24.0),
+                    rect: Rect::new(8.0, 120.0, 184.0, 24.0),
                     first_row: 2
                 },
                 Header {
-                    rect: Rect::new(8.0, 212.0, 184.0, 24.0),
+                    rect: Rect::new(8.0, 220.0, 184.0, 24.0),
                     first_row: 4
                 },
             ],
@@ -5377,7 +5439,7 @@ mod tests {
         let tops: Vec<f64> = column.rows.iter().map(|row| row.y).collect();
         assert_eq!(
             tops,
-            [46.0, 76.0, 142.0, 172.0, 238.0],
+            [46.0, 78.0, 146.0, 178.0, 246.0],
             "rows are the tabs' only; a header and a gap come between groups"
         );
         assert_eq!(
@@ -5402,21 +5464,21 @@ mod tests {
     #[test]
     fn a_point_over_a_header_is_over_the_first_row_below_it() {
         let column = headed();
-        // Rows: 46..74, 76..104, 142..170, 172..200, 238..266.
+        // Rows: 46..76, 78..108, 146..176, 178..208, 246..276.
         assert_eq!(column.slot_at(60.0), 0);
-        assert_eq!(column.slot_at(75.9), 0, "the gap after a row is the row's");
-        assert_eq!(column.slot_at(76.0), 1);
-        assert_eq!(column.slot_at(105.0), 1);
+        assert_eq!(column.slot_at(77.9), 0, "the gap after a row is the row's");
+        assert_eq!(column.slot_at(78.0), 1);
+        assert_eq!(column.slot_at(109.0), 1);
         assert_eq!(
-            column.slot_at(110.0),
+            column.slot_at(114.0),
             2,
             "the gap above a header is the next group's"
         );
-        assert_eq!(column.slot_at(116.0), 2, "the header's top");
-        assert_eq!(column.slot_at(139.9), 2, "the header's foot");
-        assert_eq!(column.slot_at(150.0), 2);
-        assert_eq!(column.slot_at(172.0), 3);
-        assert_eq!(column.slot_at(220.0), 4, "the second header");
+        assert_eq!(column.slot_at(120.0), 2, "the header's top");
+        assert_eq!(column.slot_at(143.9), 2, "the header's foot");
+        assert_eq!(column.slot_at(156.0), 2);
+        assert_eq!(column.slot_at(178.0), 3);
+        assert_eq!(column.slot_at(230.0), 4, "the second header");
         assert_eq!(
             column.slot_at(500.0),
             4,
@@ -5433,13 +5495,13 @@ mod tests {
             44.0,
             "above the first row, as without groups"
         );
-        assert_eq!(column.between(1), 74.0);
+        assert_eq!(column.between(1), 76.0);
         assert_eq!(
             column.between(2),
             column.headers[0].rect.y - GAP,
             "a gap before the group's first row: above its header"
         );
-        assert_eq!(column.between(3), 170.0);
+        assert_eq!(column.between(3), 176.0);
         assert_eq!(column.between(4), column.headers[1].rect.y - GAP);
         assert_eq!(
             column.between(5),
@@ -5495,18 +5557,18 @@ mod tests {
             Entry::Tab,
         ];
         let column = tall.layout_with(&entries);
-        // 232 high from the list's top, a list of 116.
+        // 242 high from the list's top, a list of 116.
         assert!(column.overflow);
-        assert_eq!(column.max_scroll, 116.0);
+        assert_eq!(column.max_scroll, 126.0);
         assert_eq!(column.revealing(0), 0.0);
-        assert_eq!(column.revealing(4), 116.0, "the last row brings the end");
+        assert_eq!(column.revealing(4), 126.0, "the last row brings the end");
         let down = Side {
             scroll: 100.0,
             ..tall
         }
         .layout_with(&entries);
         assert_eq!(down.rows[0].y, 46.0 - 100.0);
-        assert_eq!(down.headers[0].rect.y, 116.0 - 100.0);
+        assert_eq!(down.headers[0].rect.y, 120.0 - 100.0);
         assert_eq!(down.between(2), column.between(2) - 100.0);
         assert_eq!(
             down.revealing(0),
@@ -5602,7 +5664,7 @@ mod tests {
                 column.fit,
                 Fit {
                     inset: EDGE,
-                    radius: TAB_RADIUS
+                    radius: BUTTON_RADIUS
                 },
                 "corner {corner}"
             );
@@ -5612,7 +5674,7 @@ mod tests {
 
     #[test]
     fn the_list_scrolls_within_its_ends_and_fades_where_rows_run_under() {
-        // 30 rows in a 316 pt list: 6 + 30 × 30 − 2 + 6 = 910 of content.
+        // 30 rows in a 316 pt list: 6 + 30 × 32 − 2 + 6 = 970 of content.
         let at = |scroll: f64| {
             Side {
                 scroll,
@@ -5623,17 +5685,17 @@ mod tests {
         let top = at(0.0);
         assert_eq!(top.list.height, 316.0);
         assert!(top.overflow);
-        assert_eq!(top.max_scroll, 594.0);
+        assert_eq!(top.max_scroll, 654.0);
         assert!(!top.fade_top && top.fade_bottom);
         assert!(!at(1.0).fade_top, "a point's remainder lights nothing");
         assert!(at(1.5).fade_top);
         let middle = at(100.0);
         assert!(middle.fade_top && middle.fade_bottom);
-        assert_eq!(middle.rows[1].y, 46.0 + 30.0 - 100.0, "rows move with it");
+        assert_eq!(middle.rows[1].y, 46.0 + 32.0 - 100.0, "rows move with it");
         let end = at(1000.0);
-        assert_eq!(end.scroll, 594.0, "clamped to the end");
+        assert_eq!(end.scroll, 654.0, "clamped to the end");
         assert!(end.fade_top && !end.fade_bottom);
-        assert!(at(592.5).fade_bottom && !at(593.5).fade_bottom);
+        assert!(at(652.5).fade_bottom && !at(653.5).fade_bottom);
         assert_eq!(at(-5.0).scroll, 0.0);
         assert_eq!(
             end.rows[29].y + end.rows[29].height,
@@ -5655,9 +5717,9 @@ mod tests {
     #[test]
     fn selecting_a_row_scrolls_it_into_view_with_a_margin() {
         let column = side(364.0, 30).layout();
-        assert_eq!(column.revealing(29), 594.0, "the last one: the list's end");
-        // Row 10 spans 306..334 of the content; brought to 24 from the foot of 316.
-        assert_eq!(column.revealing(10), 334.0 - 316.0 + REVEAL_MARGIN);
+        assert_eq!(column.revealing(29), 654.0, "the last one: the list's end");
+        // Row 10 spans 326..356 of the content; brought to 24 from the foot of 316.
+        assert_eq!(column.revealing(10), 356.0 - 316.0 + REVEAL_MARGIN);
         assert_eq!(column.revealing(8), 0.0, "in view already");
         assert_eq!(column.revealing(0), 0.0);
         let scrolled = Side {
@@ -5666,8 +5728,8 @@ mod tests {
         }
         .layout();
         assert_eq!(scrolled.revealing(15), 300.0, "in view");
-        assert_eq!(scrolled.revealing(10), 306.0 - REVEAL_MARGIN);
-        assert_eq!(scrolled.revealing(20), 634.0 - 316.0 + REVEAL_MARGIN);
+        assert_eq!(scrolled.revealing(9), 294.0 - REVEAL_MARGIN);
+        assert_eq!(scrolled.revealing(20), 676.0 - 316.0 + REVEAL_MARGIN);
         assert_eq!(side(564.0, 3).layout().revealing(2), 0.0, "nothing scrolls");
     }
 
@@ -5680,7 +5742,7 @@ mod tests {
         .layout();
         assert_eq!(column.wheeled(30.0), 130.0);
         assert_eq!(column.wheeled(-500.0), 0.0);
-        assert_eq!(column.wheeled(5000.0), 594.0);
+        assert_eq!(column.wheeled(5000.0), 654.0);
         assert_eq!(side(564.0, 3).layout().wheeled(40.0), 0.0);
     }
 
@@ -5752,20 +5814,20 @@ mod tests {
             assert_eq!(column.slot_at(y), expected, "y = {y}");
         }
         // The two points between rows belong to the row above, as in the strip.
-        assert_eq!(column.slot_at(74.5), 0);
-        assert_eq!(column.slot_at(76.0), 1);
+        assert_eq!(column.slot_at(76.5), 0);
+        assert_eq!(column.slot_at(78.0), 1);
     }
 
     #[test]
     fn a_carried_pane_over_a_row_means_that_tab_and_between_rows_a_new_one() {
         let column = side(600.0, 4).layout();
-        // Row 1 spans 76..104: the middle 64% is 81.04..98.96.
-        assert_eq!(column.pane_over(90.0), PaneOver::OnTab { index: 1 });
-        assert_eq!(column.pane_over(81.0), PaneOver::Between { gap: 1 });
-        assert_eq!(column.pane_over(81.2), PaneOver::OnTab { index: 1 });
-        assert_eq!(column.pane_over(99.1), PaneOver::Between { gap: 2 });
+        // Row 1 spans 78..108: the middle 64% is 83.4..102.6.
+        assert_eq!(column.pane_over(93.0), PaneOver::OnTab { index: 1 });
+        assert_eq!(column.pane_over(83.3), PaneOver::Between { gap: 1 });
+        assert_eq!(column.pane_over(83.5), PaneOver::OnTab { index: 1 });
+        assert_eq!(column.pane_over(102.7), PaneOver::Between { gap: 2 });
         assert_eq!(
-            column.pane_over(75.0),
+            column.pane_over(77.0),
             PaneOver::Between { gap: 1 },
             "the gap"
         );
@@ -5814,11 +5876,11 @@ mod tests {
     #[test]
     fn the_line_for_a_new_tab_runs_in_the_gap_between_rows() {
         let column = side(600.0, 4).layout();
-        // Rows are 46, 76, 106, 136, 28 high: the line is the 2 above a row, and below the last.
+        // Rows are 46, 78, 110, 142, 30 high: the line is the 2 above a row, and below the last.
         assert_eq!(column.between(0), 44.0);
-        assert_eq!(column.between(1), 74.0);
-        assert_eq!(column.between(3), 134.0);
-        assert_eq!(column.between(4), 164.0, "under the last row");
+        assert_eq!(column.between(1), 76.0);
+        assert_eq!(column.between(3), 140.0);
+        assert_eq!(column.between(4), 172.0, "under the last row");
         for gap in 0..=4 {
             // It stands in the gap the pane means (`Between { gap }`) and over no row.
             let line = column.between(gap);
@@ -5845,19 +5907,19 @@ mod tests {
 
     #[test]
     fn a_rows_parts_make_room_for_the_deck_and_for_the_close_button() {
-        // The tile alone, a title of 50.4 pt: 8 + 22 + 6 in, up to the 8 at the row's end.
+        // The tile alone, a title of 50.4 pt: 6.5 + 22 + 6 in, up to the 8 at the row's end.
         let width = SIDE_WIDTH - 2.0 * EDGE;
         let row = Row::of(width, Some(TILE_WIDTH), 50.4, false);
-        assert_eq!(row.lead, Some(Span::new(8.0, 22.0)));
-        assert_eq!(row.title, Span::new(36.0, 51.0), "the text, rounded up");
+        assert_eq!(row.lead, Some(Span::new(6.5, 22.0)));
+        assert_eq!(row.title, Span::new(34.5, 51.0), "the text, rounded up");
         let long = Row::of(width, Some(TILE_WIDTH), 500.0, false);
         assert_eq!(long.title.end(), width - ROW_END, "cut at the row's end");
         // × or ⌘ showing: the title ends where the hint's box begins.
         let crowded = Row::of(width, Some(TILE_WIDTH), 500.0, true);
-        assert_eq!(crowded.title, Span::new(36.0, 118.0));
+        assert_eq!(crowded.title, Span::new(34.5, 119.5));
         assert_eq!(crowded.title.end(), crowded.key.x);
         assert!(crowded.title.end() <= crowded.close.x);
-        assert_eq!(crowded.close, Rect::new(160.0, 4.0, 20.0, 20.0));
+        assert_eq!(crowded.close, Rect::new(160.0, 5.0, 20.0, 20.0));
         assert_eq!(crowded.key, Span::new(154.0, 26.0));
         // The ⌘ hint's box is the bar's: as wide as a chip's padding, the same inset from the
         // end, so the hint that fits a chip fits a row; and it ends where the × does.
@@ -5866,23 +5928,27 @@ mod tests {
         assert_eq!(crowded.key.end(), crowded.close.x + crowded.close.width);
         // A deck of two edges takes its steps from the title.
         let deck = Row::of(width, Some(lead_width(TILE_WIDTH, 2)), 500.0, false);
-        assert_eq!(deck.lead, Some(Span::new(8.0, 30.0)));
-        assert_eq!(deck.title, Span::new(44.0, 132.0));
+        assert_eq!(deck.lead, Some(Span::new(6.5, 30.0)));
+        assert_eq!(deck.title, Span::new(42.5, 133.5));
         assert_eq!(deck.title.end(), long.title.end(), "the same end");
         // Icons off: the indicator's room, kept while it shows nothing; or no element at all.
         assert_eq!(
             Row::of(width, Some(INDICATOR_SIDE), 500.0, false).title.x,
-            26.0
+            24.5
         );
         let bare = Row::of(width, None, 500.0, false);
-        assert_eq!((bare.lead, bare.title), (None, Span::new(8.0, 168.0)));
+        assert_eq!((bare.lead, bare.title), (None, Span::new(6.5, 169.5)));
         // The title's room is the chip's rule: one copy.
         assert_eq!(
-            title_row(168.0, 500.0, Some(22.0)).2,
+            title_row(169.5, 500.0, Some(22.0)).2,
             long.title.width,
             "the strip's title and the column's take the same room"
         );
-        assert_eq!(row.host_mark, Rect::new(2.0, 7.0, 2.5, 14.0));
+        assert_eq!(row.host_mark, Rect::new(2.0, 7.0, 2.5, 16.0));
+        assert!(
+            row.host_mark.x + row.host_mark.width < ROW_LEAD,
+            "the stripe stops short of the icon"
+        );
         // The name field covers the lead and the longest title: the same ends.
         assert_eq!(
             Row::field(width).x,

@@ -418,15 +418,14 @@ static SHELL: Icon = Icon {
     tint: Tint::Foreground,
 };
 
-/// A server rack. The `⇄` stays in the title, so the mark is not shown twice.
+/// A globe, in a finer line than the other kinds': its three curves in a square of 12 would close
+/// up at theirs. The circle is four curves, a path knows no arcs.
 static REMOTE: Icon = Icon {
     name: "Remote session",
     art: Art::Path(Shape {
-        d: "M1.5 1.25h9V5h-9ZM1.5 7h9v3.75h-9ZM3.75 3.125h.01M3.75 8.875h.01",
+        d: "M6 1.25C8.62 1.25 10.75 3.38 10.75 6C10.75 8.62 8.62 10.75 6 10.75C3.38 10.75 1.25 8.62 1.25 6C1.25 3.38 3.38 1.25 6 1.25ZM1.25 6h9.5M6 1.25c-2.6 2.9-2.6 6.6 0 9.5M6 1.25c2.6 2.9 2.6 6.6 0 9.5",
         view_box: ViewBox::square(12.0),
-        paint: Paint::Stroke {
-            width: STROKE_WIDTH,
-        },
+        paint: Paint::Stroke { width: 1.0 },
     }),
     brand: None,
     tint: Tint::Info,
@@ -690,7 +689,13 @@ mod tests {
                 (Kind::Agent(_), Paint::Fill) => {}
                 (_, Paint::Stroke { width }) => {
                     assert!(!matches!(kind, Kind::Agent(_)) && kind != Kind::Task);
-                    assert_eq!(width, STROKE_WIDTH);
+                    // The globe's three curves would close up at the others' line.
+                    let line = if kind == Kind::Remote {
+                        1.0
+                    } else {
+                        STROKE_WIDTH
+                    };
+                    assert_eq!(width, line, "{}", icon.name);
                     assert_eq!(shape.view_box, ViewBox::square(12.0), "{}", icon.name);
                     // The outline stays inside the box, caps included.
                     let half = width / 2.0;

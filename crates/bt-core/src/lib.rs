@@ -121,16 +121,17 @@ pub use settings::{
     PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode, RemoteStatsSettings, RestoreWindows,
     SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar, Settings,
     SettingsEdit, ShellIntegration, Shortcut, ShortcutError, SmoothScroll, SplitStyle, TabDetails,
-    TabPosition, UnfocusedCaret, bare_host, expand_home, format_size, host_mark, parse_size,
+    TabPosition, TabRunning, UnfocusedCaret, bare_host, expand_home, format_size, host_mark,
+    parse_size,
 };
 pub use shell::{
     ButtonState, DockContext, DockEnvironment, DockFault, DockState, DockStatus,
     EnvironmentRequest, FIRST_BLOCK, FooterPort, Highlight, HighlightColor, HighlightStyle,
-    ProgramBar, ProgramTone, Reconnect, RemoteKind, RemoteLink, RemoteSetupFault, RemoteStats,
-    RemoteTarget, STATS_HISTORY, ShellEnvironment, ShellPhase, ShellState, StatsForm, Transfer,
-    TransferAction, TransferControls, TransferTone, TtyModes, counter_period, counter_tier_end,
+    PaneTitle, ProgramBar, ProgramTone, Reconnect, RemoteKind, RemoteLink, RemoteSetupFault,
+    RemoteStats, RemoteTarget, STATS_HISTORY, ShellEnvironment, ShellPhase, ShellState, StatsForm,
+    Transfer, TransferAction, TransferControls, TransferTone, TtyModes, counter_period,
     decode_percent, finished_counter, first_command_begun, first_command_ended, next_tick,
-    running_counter,
+    running_counter, tilde,
 };
 pub use wake::Wake;
 

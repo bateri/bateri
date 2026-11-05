@@ -160,6 +160,12 @@ pub fn shell() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// [`shell`]'s name: `zsh`, what a pane's title says while the shell sits at its prompt.
+pub fn shell_name() -> Option<String> {
+    let shell = shell()?;
+    Some(shell.file_name()?.to_string_lossy().into_owned())
+}
+
 /// The shell in the user's passwd entry (`pw_shell`); `None` if it cannot be read.
 fn passwd_shell() -> Option<String> {
     passwd_field(|entry| entry.pw_shell)

@@ -50,7 +50,7 @@ use super::{
 use crate::app;
 use crate::groups::{GroupId, group_place};
 use crate::moves::Move;
-use crate::tabs::{self, DRAG_SLOP, Indicator, TAB_RADIUS};
+use crate::tabs::{self, BUTTON_RADIUS, DRAG_SLOP, Indicator};
 
 /// The name's type size, in the button and in the list's rows; the keys' and the rows' hint.
 pub(super) const NAME_TEXT: f64 = 12.5;
@@ -359,7 +359,7 @@ impl GroupButton {
             palette.button
         };
         let bounds = self.bounds();
-        rounded(bounds, TAB_RADIUS, fill, Some(palette.button_line));
+        rounded(bounds, BUTTON_RADIUS, fill, Some(palette.button_line));
         let named = look.name.is_some();
         let x = if named { STACK_X_NAMED } else { STACK_X_LOOSE };
         let at = NSPoint::new(x, (bounds.size.height - STACK) / 2.0);

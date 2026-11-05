@@ -8,7 +8,7 @@
 //! - **The events** come from the pane: the remote edge (a generation started or ended),
 //!   visibility (`SplitView::apply_visibility`), the settings, interaction (the view's keys,
 //!   presses, wheel and mouse moves, the window becoming key), Forget Password and the close.
-//! - **The door** (`⇄ rasp` is clickable) is not here: the remote edge tells the session
+//! - **The door** (`rasp` is clickable) is not here: the remote edge tells the session
 //!   ([`TerminalPane::sync_server_door`]), from the same gate as everything bateri does on a
 //!   server ([`TerminalPane::server_target`]).
 //! - **Zero frames when idle**: no timer wakes the link; a frame is asked only by a value that
