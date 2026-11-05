@@ -48,6 +48,7 @@
 mod census;
 #[cfg(target_os = "macos")]
 mod coretext;
+mod features;
 #[cfg(target_os = "linux")]
 mod freetype;
 mod raster;
@@ -57,6 +58,7 @@ mod text;
 
 use std::collections::{HashMap, HashSet};
 
+pub use features::{FontFeature, font_features};
 use raster::DrawResult;
 pub use raster::RuleKind;
 use rules::Faces;
@@ -423,8 +425,8 @@ pub struct Atlas {
     /// cell and placed into the slot at `rules::slot_offset`, so a
     /// box-drawing line still tiles the grid when the slot is larger.
     cell_buffer: Vec<u8>,
-    /// The (family, point size, scale, spacing) it was built with. The criterion of
-    /// [`Atlas::ensure`].
+    /// The (family, point size, scale, spacing, features) it was built with.
+    /// The criterion of [`Atlas::ensure`].
     key: Key,
     /// What the chain said about the requested family; `None` → the requested
     /// one opened or no family was requested.
@@ -523,6 +525,10 @@ struct Key {
     point_size: f64,
     scale: f64,
     spacing: Spacing,
+    /// The OpenType features the faces were given, sorted by tag, one entry
+    /// per tag (see [`normalized`]): the order a caller lists them in is no
+    /// reason to rebuild.
+    features: Vec<(String, bool)>,
 }
 
 impl Key {
@@ -531,12 +537,37 @@ impl Key {
     /// no closeness between them to interpret. The family name as is — even if
     /// `"menlo"` and `"Menlo"` open the same font they are separate keys; the
     /// cost is a single rebuild.
-    fn is(&self, family: Option<&str>, point_size: f64, scale: f64, spacing: Spacing) -> bool {
+    ///
+    /// The features are compared as the sorted list the key holds
+    /// ([`normalized`] makes it), so the caller's order does not matter.
+    fn is(
+        &self,
+        family: Option<&str>,
+        point_size: f64,
+        scale: f64,
+        spacing: Spacing,
+        features: &[(String, bool)],
+    ) -> bool {
         self.family.as_deref() == family
             && self.point_size == point_size
             && self.scale == scale
             && self.spacing == spacing
+            && self.features == features
     }
+}
+
+/// `features` as the key holds them: sorted by tag, one entry per tag (the
+/// last one listed wins, as it does in CoreText).
+fn normalized(features: &[(String, bool)]) -> Vec<(String, bool)> {
+    let mut sorted: Vec<(String, bool)> = Vec::with_capacity(features.len());
+    for (tag, on) in features {
+        match sorted.iter_mut().find(|(held, _)| held == tag) {
+            Some(slot) => slot.1 = *on,
+            None => sorted.push((tag.clone(), *on)),
+        }
+    }
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
 }
 
 impl Atlas {
@@ -555,8 +586,23 @@ impl Atlas {
     /// [`Atlas::font_issue`] reports it. A terminal cannot open without a
     /// font; a misspelled name should not close the window.
     pub fn new(family: Option<&str>, point_size: f64, scale: f64, spacing: Spacing) -> Self {
+        Self::with_features(family, point_size, scale, spacing, &[])
+    }
+
+    /// [`Atlas::new`] with OpenType `features` (tag → on or off) given to
+    /// every face, the small one included. The list is part of the key
+    /// ([`Atlas::ensure_with`]): another list is another atlas. An empty list
+    /// is [`Atlas::new`] exactly.
+    pub fn with_features(
+        family: Option<&str>,
+        point_size: f64,
+        scale: f64,
+        spacing: Spacing,
+        features: &[(String, bool)],
+    ) -> Self {
+        let features = normalized(features);
         let (faces, font_issue) =
-            Faces::from_chain(family, effective_point_size(point_size, scale));
+            Faces::from_chain(family, effective_point_size(point_size, scale), &features);
         // The metric comes **only from the regular face**: the cell grid cannot
         // vary with the face. A bold glyph is rasterized into the same slot and
         // may be clipped by a pixel — every terminal does it this way.
@@ -586,6 +632,11 @@ impl Atlas {
             family,
             effective_point_size(point_size * CONTEXT_SCALE, scale),
         );
+        let small = if features.is_empty() {
+            small
+        } else {
+            Backend::with_features(&small, &features)
+        };
         // The letter spacing opens the small class **by the same ratio**: the
         // context line is the grid's footer and its letters must not sit
         // tighter than the grid's. The line spacing is not asked here: it
@@ -646,6 +697,7 @@ impl Atlas {
                 point_size,
                 scale,
                 spacing,
+                features,
             },
             font_issue,
             grid,
@@ -682,10 +734,35 @@ impl Atlas {
         scale: f64,
         spacing: Spacing,
     ) -> bool {
-        if self.key.is(family, point_size, scale, spacing) {
+        self.ensure_with(family, point_size, scale, spacing, &[])
+    }
+
+    /// [`Atlas::ensure`] with the OpenType features of
+    /// [`Atlas::with_features`]: the atlas is rebuilt when the list changed
+    /// too, whatever order it is given in. An atlas built with features and
+    /// asked for none is rebuilt, so a caller that has features passes them
+    /// every time.
+    #[must_use = "if true the atlas was rebuilt: the slot mapping and texture size may have changed and the texture must be reallocated too"]
+    pub fn ensure_with(
+        &mut self,
+        family: Option<&str>,
+        point_size: f64,
+        scale: f64,
+        spacing: Spacing,
+        features: &[(String, bool)],
+    ) -> bool {
+        // The list is normalized only when there is something to normalize:
+        // this is asked every frame and an empty list costs nothing.
+        let same = if features.is_empty() {
+            self.key.is(family, point_size, scale, spacing, &[])
+        } else {
+            self.key
+                .is(family, point_size, scale, spacing, &normalized(features))
+        };
+        if same {
             return false;
         }
-        *self = Self::new(family, point_size, scale, spacing);
+        *self = Self::with_features(family, point_size, scale, spacing, features);
         true
     }
 

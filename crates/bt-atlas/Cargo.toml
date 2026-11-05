@@ -7,8 +7,10 @@ license.workspace = true
 
 [features]
 # Test support: exports the backend's sample characters (`bt_atlas::fixture`)
-# to other crates' tests; `bt-gpu` enables it as a dev-dependency.
-fixture = []
+# to other crates' tests; `bt-gpu` enables it as a dev-dependency. It also
+# opens the binding the test fonts are registered with
+# (`fixture::register_test_fonts`); the product graph never sees it.
+fixture = ["objc2-core-text/CTFontManager"]
 
 # CoreText is the macOS backend's font system (`src/coretext.rs`); no other
 # platform sees it.
@@ -16,6 +18,11 @@ fixture = []
 objc2-core-foundation = { workspace = true }
 objc2-core-graphics = { workspace = true }
 objc2-core-text = { workspace = true }
+
+# This crate's own tests register the fonts of `tests/fonts` for the process;
+# the binding is test-only (the product build never sees it).
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-text = { workspace = true, features = ["CTFontManager"] }
 
 # FreeType + fontconfig (+ harfrust for clusters) are the Linux backend's font
 # system (`src/freetype.rs`); the decision and the linking are in the workspace

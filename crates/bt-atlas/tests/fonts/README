@@ -1,0 +1,18 @@
+Test fonts for font shaping. They are used only by tests, are
+registered for the test process only (`coretext::fixture::register_test_fonts`)
+and are not part of the app bundle. The font files are unmodified copies.
+
+Both are licensed under the SIL Open Font License 1.1: the license texts are
+OFL-ObelMono.txt and OFL-JetBrainsMono.txt, the Obel Mono authors list is
+AUTHORS-ObelMono.txt.
+
+- `ObelMono[wght].ttf`, `ObelMono-Italic[wght].ttf` — Obel Mono 1.002,
+  variable fonts from the ObelMono-1.002-ttf release archive (`variable/`),
+  https://typographic.systems/obel-mono. Masking rules in `ccmp`, switched on
+  by `ss01` ("Mask secrets"); no `calt` or `liga`.
+  sha256 15e4340c4173bd563966dd1b6254e83d726feec96278d9ba59b2a81b739d9596
+  and 2b5de9a8ceaf2afe5eec9cfa00984a91bbb86f8d7c272ace0f9fb4fb6d9a0b84.
+- `JetBrainsMono[wght].ttf` — JetBrains Mono 2.305, variable font,
+  JetBrains/JetBrainsMono `fonts/variable/JetBrainsMono[wght].ttf` at master
+  19371302b95d. Ligatures in `calt`.
+  sha256 3cfafa86e28b87184d592fef82846e8c10cb48653c62efcda34f082da225ec34.

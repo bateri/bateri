@@ -23,6 +23,8 @@
 //! veil, the tab bar's place and icons). Typing, deleting and arrival effects, and everything
 //! that decides what a session does, are chosen and written, never previewed.
 
+use std::sync::OnceLock;
+
 use bt_core::{
     CaretShape, ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, Erase,
     IconColors, KeepRunning, Keypress, Osc52, ReduceMotion, RemoteStatsMode, RestoreWindows,
@@ -346,6 +348,24 @@ fn theme_label(token: &str) -> String {
     }
 }
 
+/// The Font page's choices: the default chain (`""`), then the monospaced
+/// families installed on this machine that the font chain opens without a
+/// warning — the list the settings window shows, so no row names a font that
+/// is not here and answers `font "X" not found` when chosen. Taken **once**
+/// per process: `choices` asks for it every time a page opens and the list
+/// opens every installed family to answer. The value in effect is added when it
+/// is not in the list ([`Setting::choices`]).
+fn font_families() -> Vec<String> {
+    static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
+    FAMILIES
+        .get_or_init(|| {
+            std::iter::once(String::new())
+                .chain(bt_gpu::monospaced_families())
+                .collect()
+        })
+        .clone()
+}
+
 fn family_label(token: &str) -> String {
     if token.is_empty() {
         "System Mono".to_owned()
@@ -500,19 +520,7 @@ static CATALOG: [Setting; 38] = [
         // The empty family is the default chain; the model writes it as `family = ""`.
         read: |s| s.font.family.clone().unwrap_or_default(),
         write: |t| Some(SettingsEdit::FontFamily(t.to_owned())),
-        tokens: || {
-            [
-                "",
-                "SF Mono",
-                "Menlo",
-                "Monaco",
-                "Courier New",
-                "JetBrains Mono",
-                "Fira Code",
-            ]
-            .map(str::to_owned)
-            .to_vec()
-        },
+        tokens: font_families,
         label: family_label,
     },
     number!(
@@ -989,12 +997,20 @@ mod tests {
         assert_eq!(tokens, ["1000", "2500", "10000", "50000", "100000"]);
         assert!(lines[1].current);
         assert!(!lines[2].current);
-        settings.font.family = Some("Iosevka".into());
+        // The list is the machine's installed monospaced families, so the test
+        // names only the first row and the value it adds: a family no machine has.
+        settings.font.family = Some("Zz Not Installed 7".into());
         let families = find("font.family").unwrap().choices(&settings);
         // Next to the default, which opens the list.
         assert_eq!(families[0].token, "");
-        assert_eq!(families[1].token, "Iosevka");
+        assert_eq!(families[1].token, "Zz Not Installed 7");
         assert!(families[1].current);
+        // The default chain is chosen when no family is written.
+        settings.font.family = None;
+        let families = find("font.family").unwrap().choices(&settings);
+        assert_eq!(families[0].token, "");
+        assert!(families[0].current);
+        assert_eq!(families.iter().filter(|c| c.token.is_empty()).count(), 1);
     }
 
     #[test]

@@ -11,16 +11,17 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
 use objc2_core_foundation::{
-    CFAttributedString, CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString, CFType,
-    CGAffineTransform, CGPoint, CGRect, CGSize,
+    CFArray, CFAttributedString, CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString,
+    CFType, CGAffineTransform, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontUIFontType, CTLine,
-    CTRun, kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontSymbolicTrait,
-    kCTFontTraitsAttribute, kCTFontWeightTrait,
+    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontTableOptions,
+    CTFontUIFontType, CTLine, CTRun, kCTFontAttributeName, kCTFontFamilyNameAttribute,
+    kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue,
+    kCTFontSymbolicTrait, kCTFontTraitsAttribute, kCTFontWeightTrait,
 };
 
 use crate::raster::DrawResult;
@@ -153,6 +154,50 @@ impl FontSystem for CoreText {
         // SAFETY: `font` was just created and is alive in this scope.
         let returned = unsafe { font.symbolic_traits() };
         returned.contains(wanted).then_some(font)
+    }
+
+    fn table(font: &Self::Font, tag: [u8; 4]) -> Option<Vec<u8>> {
+        // SAFETY: `font` is alive; a pure read that copies the table out (the
+        // font's own bytes, not a synthesised table: no options).
+        let data = unsafe { font.table(u32::from_be_bytes(tag), CTFontTableOptions::NoOptions) }?;
+        Some(data.to_vec())
+    }
+
+    fn with_features(font: &Self::Font, features: &[(String, bool)]) -> Self::Font {
+        if features.is_empty() {
+            return font.clone();
+        }
+        // SAFETY: the three keys are constants CoreText exports, alive for the
+        // whole program.
+        let (tag_key, value_key, settings_key) = unsafe {
+            (
+                kCTFontOpenTypeFeatureTag,
+                kCTFontOpenTypeFeatureValue,
+                kCTFontFeatureSettingsAttribute,
+            )
+        };
+        // One `{ tag, value }` dictionary per feature, the OpenType form
+        // CoreText documents for the feature settings attribute; a value of
+        // zero switches the feature off, one on.
+        let settings: Vec<CFRetained<CFDictionary<CFString, CFType>>> = features
+            .iter()
+            .map(|(tag, on)| {
+                let tag = CFString::from_str(tag);
+                let value = CFNumber::new_i32(i32::from(*on));
+                CFDictionary::from_slices(&[tag_key, value_key], &[&**tag, &**value])
+            })
+            .collect();
+        let settings = CFArray::from_retained_objects(&settings);
+        let attributes = CFDictionary::from_slices(&[settings_key], &[&*settings]);
+        // SAFETY: `font` is alive; the descriptor is its own.
+        let descriptor = unsafe { font.font_descriptor() };
+        // SAFETY: the dictionary has the shape CoreText expects —
+        // `kCTFontFeatureSettingsAttribute` → an array of tag/value
+        // dictionaries.
+        let descriptor = unsafe { descriptor.copy_with_attributes(attributes.as_opaque()) };
+        // SAFETY: the descriptor is alive; a null `matrix` keeps the
+        // descriptor's own, and the size is the font's.
+        unsafe { CTFont::with_font_descriptor(&descriptor, font.size(), ptr::null()) }
     }
 
     fn is_monospaced(font: &Self::Font) -> bool {
@@ -947,6 +992,61 @@ pub mod fixture {
     /// Two columns in Unicode but its ink fits one cell: Menlo's own `☕`,
     /// whose advance is the cell's (a wide request answers `Whole`).
     pub const ONE_CELL_WIDE_CHAR: char = '☕';
+
+    /// The test font whose rules mask a secret (`ss01`) and that has no
+    /// ligatures: registered by [`register_test_fonts`].
+    pub const OBEL_MONO: &str = "Obel Mono";
+
+    /// The test font whose ligatures sit in `calt`: registered by
+    /// [`register_test_fonts`].
+    pub const JETBRAINS_MONO: &str = "JetBrains Mono";
+
+    /// Registers the fonts of `tests/fonts` (Obel Mono, regular and italic,
+    /// and JetBrains Mono) for **this process only**, once however many tests
+    /// ask: a second registration of the same file is an error, and the lib
+    /// tests run in parallel threads. Nothing is installed on the machine —
+    /// no installed font carries a shaping rule every Mac has — and a font
+    /// opened from an unregistered file would not find its italic.
+    pub fn register_test_fonts() {
+        use std::path::Path;
+        use std::sync::Once;
+
+        use objc2_core_foundation::{CFString, CFURL, CFURLPathStyle};
+        use objc2_core_text::{CTFontManagerRegisterFontsForURL, CTFontManagerScope};
+
+        static REGISTER: Once = Once::new();
+        REGISTER.call_once(|| {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts");
+            for file in [
+                "ObelMono[wght].ttf",
+                "ObelMono-Italic[wght].ttf",
+                "JetBrainsMono[wght].ttf",
+            ] {
+                let path = dir.join(file);
+                let string = CFString::from_str(&path.to_string_lossy());
+                let url = CFURL::with_file_system_path(
+                    None,
+                    Some(&string),
+                    CFURLPathStyle::CFURLPOSIXPathStyle,
+                    false,
+                )
+                .expect("a file URL");
+                // SAFETY: `url` is alive; a null `error` is allowed.
+                let registered = unsafe {
+                    CTFontManagerRegisterFontsForURL(
+                        &url,
+                        CTFontManagerScope::Process,
+                        std::ptr::null_mut(),
+                    )
+                };
+                assert!(
+                    registered,
+                    "the test font {} did not register",
+                    path.display()
+                );
+            }
+        });
+    }
 
     /// The family name a font reports — diagnostics in test messages only.
     #[cfg(test)]

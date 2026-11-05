@@ -112,6 +112,34 @@ fn set_font_changes_the_metrics_on_the_next_ask() {
 }
 
 #[test]
+fn a_feature_choice_is_a_font_change_that_leaves_the_cell_alone() {
+    let r = renderer();
+    let base = r.cell_metrics(1.0);
+    let off = FontOptions {
+        // The default chain's table: the family in effect when none is written.
+        features: [(String::new(), [("calt".to_owned(), false)].into())].into(),
+        ..FontOptions::default()
+    };
+    assert!(r.set_font(&off), "a feature choice is a change");
+    assert!(!r.set_font(&off), "the same request is not a change");
+    // The atlas is asked with the list; the grid does not move.
+    assert_eq!(r.cell_metrics(1.0), base);
+    // Another family's table is not this family's choice.
+    let other = FontOptions {
+        features: [(
+            "some other family".to_owned(),
+            [("calt".to_owned(), false)].into(),
+        )]
+        .into(),
+        ..FontOptions::default()
+    };
+    assert!(r.set_font(&other));
+    assert_eq!(r.cell_metrics(1.0), base);
+    assert!(r.set_font(&FontOptions::default()));
+    assert_eq!(r.cell_metrics(1.0), base);
+}
+
+#[test]
 fn missing_family_becomes_a_notice_after_the_atlas_opens() {
     let r = renderer();
     assert_eq!(

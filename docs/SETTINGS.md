@@ -335,6 +335,13 @@ line_height = 1.0
 # spacing, 1.2 opens the columns a little. Letters keep their size and sit in
 # the middle of the cell; below 1 they overflow onto the neighbouring column.
 letter_spacing = 1.0
+# OpenType features of a font, one table per family: the family's name (case
+# does not matter; "" is the default font) and a `tag = true|false` line for
+# each feature to change. `ss01` or `cv02` does another thing in every font,
+# so a choice belongs to its family; a tag the font lacks changes nothing, and
+# a feature left out stays as the font ships it.
+# [font.features."JetBrains Mono"]
+# calt = false
 
 [clipboard]
 # "copy" | "off". Lets programs in the terminal, also over ssh, copy text to
@@ -1325,6 +1332,7 @@ letter_spacing = 1.0
 | `size` | number, greater than `0` | `13` | size in points |
 | `line_height` | number, `0.5` – `2` | `1.0` | line spacing multiplier |
 | `letter_spacing` | number, `0.5` – `2` | `1.0` | letter spacing multiplier |
+| `features` | tables of `tag = true\|false`, one per family | none | OpenType feature choices |
 
 - `family` is a **family name**, the name shown in Font Book (`"JetBrains
   Mono"`, `"Menlo"`); case does not matter. The PostScript name of a single
@@ -1363,6 +1371,14 @@ letter_spacing = 1.0
   is a separate piece of work.
 - `family = ""`, or the key being absent, means the default font and gives no
   warning.
+- `[font.features."Family"]` holds the OpenType feature choices of one family,
+  one `tag = true` or `tag = false` line each (`ss01`, `cv02`, `calt`, `zero`).
+  The family is matched without regard to case and `""` is the default font. A
+  choice belongs to its family because a tag does another thing in every font
+  (`ss01` is the stylistic set the designer numbered first). A feature that is
+  not written stays as the font ships it. A tag is four letters or digits; a
+  line that is not (`ss01 = "yes"`, `toolong = true`) is ignored and the title
+  bar says which.
 - `size` can be an integer or a decimal (`13`, `13.5`). Zero, a negative
   value, `nan`, `inf` or a non-number falls back to the default (`13` at
   launch, the current size when saving) and gives a warning.

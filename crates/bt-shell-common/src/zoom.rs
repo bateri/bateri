@@ -114,6 +114,7 @@ mod tests {
             size,
             line_height: 1.0,
             letter_spacing: 1.0,
+            features: Default::default(),
         }
     }
 
@@ -139,6 +140,7 @@ mod tests {
             size: 13.0,
             line_height: 1.0,
             letter_spacing: 1.0,
+            features: Default::default(),
         };
         assert_eq!(zoom.after_reload(&font(13.0), &other), zoom);
         assert_eq!(zoom.after_reload(&font(13.0), &font(13.0)), zoom);

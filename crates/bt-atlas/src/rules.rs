@@ -101,10 +101,26 @@ pub enum FontIssue {
 }
 
 impl Faces {
-    /// Opens from the chain ([`open_chain`]) and derives the three faces.
-    pub(crate) fn from_chain(family: Option<&str>, size: f64) -> (Self, Option<FontIssue>) {
+    /// Opens from the chain ([`open_chain`]), derives the three faces and
+    /// then gives each of the four the OpenType `features`.
+    ///
+    /// **In that order**: a face derived from a font that carries features
+    /// comes out without them, so a bold key would be drawn open under a
+    /// regular one that is masked. An empty list leaves every face exactly
+    /// the font the chain opened.
+    pub(crate) fn from_chain(
+        family: Option<&str>,
+        size: f64,
+        features: &[(String, bool)],
+    ) -> (Self, Option<FontIssue>) {
         let (regular, issue) = open_chain(family, size);
-        (Self::derive(regular), issue)
+        let mut faces = Self::derive(regular);
+        if !features.is_empty() {
+            for font in &mut faces.fonts {
+                *font = Backend::with_features(font, features);
+            }
+        }
+        (faces, issue)
     }
 
     /// Derives from the given regular face; [`FontSystem::derive`] answers

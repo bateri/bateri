@@ -610,8 +610,14 @@ fn line_of_entry(
         return None;
     };
     let (key, item) = table.get_key_value(name)?;
-    let start = key.span()?.start;
-    let end = item.span()?.end;
+    entry_line(text, key.span()?.start, item.span()?.end)
+}
+
+/// The bytes of the line an entry takes whose key starts at `start` and whose value ends at
+/// `end`, from the start of its line to the end of the line the value ends on, the comment
+/// after the value and the line break included — `None` when something else stands before
+/// the key on its line.
+pub(super) fn entry_line(text: &str, start: usize, end: usize) -> Option<Range<usize>> {
     let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
     if !text[line_start..start]
         .chars()
@@ -624,7 +630,7 @@ fn line_of_entry(
 }
 
 /// `text` without the bytes of `ranges`.
-fn without_ranges(text: &str, mut ranges: Vec<Range<usize>>) -> String {
+pub(super) fn without_ranges(text: &str, mut ranges: Vec<Range<usize>>) -> String {
     ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
     let mut out = text.to_owned();
     for range in ranges {

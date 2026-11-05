@@ -1809,6 +1809,11 @@ pub struct Renderer {
     /// without a settings file see the same font, and the default size has no
     /// second owner.
     font: RefCell<FontOptions>,
+    /// The OpenType features of [`Renderer::font`]'s family in effect
+    /// (`FontOptions::active_features`), kept next to it so the per-frame
+    /// [`Renderer::cell_metrics`] asks the atlas without building the list
+    /// again: the third part of the atlas's key.
+    font_features: RefCell<Vec<(String, bool)>>,
     /// Frames the GPU finished **without error**; `make smoke`'s `frames=`.
     frames: Cell<u64>,
     /// The last **submitted** frame's background, glyph and rule counts
@@ -1849,6 +1854,7 @@ impl Renderer {
             gpu,
             state: RefCell::new(State::default()),
             font: RefCell::new(FontOptions::default()),
+            font_features: RefCell::new(Vec::new()),
             frames: Cell::new(0),
             last_counts: Cell::new([0; 3]),
             in_flight: RefCell::new(VecDeque::new()),
@@ -1904,6 +1910,7 @@ impl Renderer {
     /// read inside the same borrow, so no `ensure` can slip between them.
     pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
         let font = self.font.borrow();
+        let features = self.font_features.borrow();
         let family = font.family.as_deref();
         let mut state = self.state.borrow_mut();
         let spacing = Spacing {
@@ -1911,12 +1918,15 @@ impl Renderer {
             letter: font.letter_spacing,
         };
         let entry = state.atlas.get_or_insert_with(|| WgpuAtlas {
-            atlas: Atlas::new(family, font.size, scale, spacing),
+            atlas: Atlas::with_features(family, font.size, scale, spacing, &features),
             mask: None,
             color: None,
             fx_bind: None,
         });
-        if entry.atlas.ensure(family, font.size, scale, spacing) {
+        if entry
+            .atlas
+            .ensure_with(family, font.size, scale, spacing, &features)
+        {
             entry.drop_textures();
         }
         CellMetrics::from_atlas(entry.atlas.metrics(), entry.atlas.context_cell_w(), scale)
@@ -1930,6 +1940,7 @@ impl Renderer {
             return false;
         }
         current.clone_from(font);
+        *self.font_features.borrow_mut() = font.active_features();
         true
     }
 

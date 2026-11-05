@@ -25,12 +25,14 @@
 //! The diagnostic type and the TOML helpers are shared with the theme file's
 //! parser (`theme`): so that the two files speak the same error language.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use toml_edit::{Document, Item, TableLike};
 
 use crate::session::{Osc52, TerminalOptions};
 
+mod font_features;
 mod keys;
 
 pub use keys::{
@@ -100,6 +102,39 @@ pub struct FontOptions {
     /// glyph keeps its size, overflowing onto the neighbouring column instead
     /// of being clipped — the line height's rule on the other axis.
     pub letter_spacing: f64,
+    /// The OpenType feature choices (`[font.features."Family"]`, one
+    /// `tag = true|false` line each), by family. The key is the family name
+    /// trimmed and lowercased (the lookup ignores case) and `""` is the default
+    /// chain. A choice belongs to its family because `ss01` does another
+    /// thing in every font. Read it through [`FontOptions::active_features`] /
+    /// [`FontOptions::feature`], which ask for the family in effect.
+    pub features: BTreeMap<String, BTreeMap<String, bool>>,
+}
+
+impl FontOptions {
+    /// The choices of the family in effect: the file's table of the
+    /// family (`family` unset → the default chain's `""`), none when it has none.
+    fn family_features(&self) -> Option<&BTreeMap<String, bool>> {
+        self.features.get(&font_features::family_key(
+            self.family.as_deref().unwrap_or(""),
+        ))
+    }
+
+    /// What the file says of one feature (`ss01`) for the family in effect:
+    /// `Some(true)` on, `Some(false)` off, `None` when it says nothing (the
+    /// font's own default).
+    pub fn feature(&self, tag: &str) -> Option<bool> {
+        self.family_features()?.get(tag).copied()
+    }
+
+    /// The feature list of the family in effect, sorted by tag: what the font
+    /// is opened with. **The one reader** — the atlas, the palette and the
+    /// settings window all ask here. Empty when the file chooses nothing.
+    pub fn active_features(&self) -> Vec<(String, bool)> {
+        self.family_features()
+            .map(|tags| tags.iter().map(|(tag, on)| (tag.clone(), *on)).collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Default for FontOptions {
@@ -111,6 +146,7 @@ impl Default for FontOptions {
             size: 13.0,
             line_height: 1.0,
             letter_spacing: 1.0,
+            features: BTreeMap::new(),
         }
     }
 }
@@ -1912,6 +1948,15 @@ pub enum SettingsEdit {
     RemoteStats(RemoteStatsMode),
     /// Seconds.
     StatsInterval(u8),
+    /// One feature choice of `family` (`ss01 = true` under `[font.features."Family"]`):
+    /// `Some` writes the line, `None` removes it (the font's own default again). The family
+    /// is found ignoring case and written as given when its table is new. Everything else in
+    /// the file — comments, other families, unknown keys — stays where it is.
+    FontFeature {
+        family: String,
+        tag: String,
+        on: Option<bool>,
+    },
     /// Settings ▸ Keyboard: the `[keys]` line of the command `name`. `None` removes the line (the
     /// command is back to its default); an empty list writes `""` (no shortcut); one shortcut a
     /// string, two a list. The name is the shell layer's: it is written as given.
@@ -2021,6 +2066,9 @@ impl SettingsEdit {
             // The key is the command's name, which a constant cannot hold: the writers
             // ([`keys::with_shortcut`], [`keys::without_shortcuts`]) take it from the variant.
             Self::Shortcut { .. } | Self::DefaultShortcuts { .. } => ("keys", "", "keys"),
+            // The key is the feature's tag, under a table named for the family: the writer
+            // ([`font_features::with_feature`]) takes both from the variant.
+            Self::FontFeature { .. } => ("font", "features", "font.features"),
         }
     }
 
@@ -2066,6 +2114,8 @@ impl SettingsEdit {
             // The line's value; a removal writes none and never asks.
             Self::Shortcut { shortcuts, .. } => keys::value_of(shortcuts.as_deref()),
             Self::DefaultShortcuts { .. } => String::new().into(),
+            // The line's value; a removal writes none and never asks.
+            Self::FontFeature { on, .. } => on.unwrap_or_default().into(),
             Self::PreviewMaxSize(bytes) | Self::PreviewLimit(bytes) => format_size(*bytes).into(),
             Self::PreviewReadOnly(on)
             | Self::DownloadNotify(on)
@@ -2253,6 +2303,13 @@ line_height = 1.0
 # spacing, 1.2 opens the columns a little. Letters keep their size and sit in
 # the middle of the cell; below 1 they overflow onto the neighbouring column.
 letter_spacing = 1.0
+# OpenType features of a font, one table per family: the family's name (case
+# does not matter; "" is the default font) and a `tag = true|false` line for
+# each feature to change. `ss01` or `cv02` does another thing in every font,
+# so a choice belongs to its family; a tag the font lacks changes nothing, and
+# a feature left out stays as the font ships it.
+# [font.features."JetBrains Mono"]
+# calt = false
 
 [clipboard]
 # "copy" | "off". Lets programs in the terminal, also over ssh, copy text to
@@ -2801,6 +2858,10 @@ stats_interval = 3
                     parsed.settings.font.letter_spacing =
                         letter_spacing(text, item, fallback.font.letter_spacing, diagnostics);
                 }
+                if let Some(item) = font.get("features") {
+                    parsed.settings.font.features =
+                        font_features::read(text, item, &fallback.font.features, diagnostics);
+                }
             }
             None if root.contains_key("font") => {
                 parsed.settings.font.clone_from(&fallback.font);
@@ -3222,6 +3283,9 @@ stats_interval = 3
             }
             SettingsEdit::DefaultShortcuts { names } => {
                 return keys::without_shortcuts(text, names);
+            }
+            SettingsEdit::FontFeature { family, tag, on } => {
+                return font_features::with_feature(text, family, tag, *on);
             }
             _ => {}
         }
@@ -5124,6 +5188,7 @@ mod tests {
                 size: 13.0,
                 line_height: 1.0,
                 letter_spacing: 1.0,
+                features: BTreeMap::new(),
             }
         );
         assert_eq!(
@@ -5133,6 +5198,7 @@ mod tests {
                 size: 14.5,
                 line_height: 1.0,
                 letter_spacing: 1.0,
+                features: BTreeMap::new(),
             }
         );
         // An integer is a point size too: the first thing the user will write is
@@ -5195,6 +5261,7 @@ mod tests {
                 size: 18.0,
                 line_height: 1.0,
                 letter_spacing: 1.0,
+                features: BTreeMap::new(),
             },
             ..Settings::default()
         };
@@ -8002,6 +8069,27 @@ cursor = \"spring\"
             }
             SettingsEdit::DefaultShortcuts { names } => {
                 settings.keys.retain(|entry| !names.contains(&entry.name));
+            }
+            SettingsEdit::FontFeature { family, tag, on } => {
+                let family = family.trim().to_lowercase();
+                match on {
+                    Some(on) => {
+                        settings
+                            .font
+                            .features
+                            .entry(family)
+                            .or_default()
+                            .insert(tag, on);
+                    }
+                    None => {
+                        if let Some(tags) = settings.font.features.get_mut(&family) {
+                            tags.remove(&tag);
+                            if tags.is_empty() {
+                                settings.font.features.remove(&family);
+                            }
+                        }
+                    }
+                }
             }
         }
         settings

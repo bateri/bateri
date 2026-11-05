@@ -114,6 +114,22 @@ pub(crate) trait FontSystem {
         target: &mut [u8],
     ) -> DrawResult;
 
+    /// The raw bytes of the font's `tag` table (`*b"GSUB"`), `None` when the
+    /// font has no such table or the backend cannot read tables. What the
+    /// platformless feature reader (`crate::features`) parses.
+    fn table(_font: &Self::Font, _tag: [u8; 4]) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// `font` with OpenType `features` (tag → on or off) applied to every
+    /// line shaped in it; an empty list is `font` itself. A tag the font
+    /// lacks is ignored. **Applied after [`FontSystem::derive`]**: deriving a
+    /// face from a font that carries features drops them. A backend that does
+    /// not shape by the font's rules keeps this default and answers the font.
+    fn with_features(font: &Self::Font, _features: &[(String, bool)]) -> Self::Font {
+        font.clone()
+    }
+
     /// Does the backend shape and draw **proportional** text (`crate::text`)?
     /// A backend that does not keeps the defaults below, which all answer
     /// "no": the caller asks this first, so the defaults are never a silent

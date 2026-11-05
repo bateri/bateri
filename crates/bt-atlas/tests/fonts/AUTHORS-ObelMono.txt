@@ -1,0 +1,4 @@
+# The official list of Obel Mono project authors, for copyright purposes.
+# Names are added as: Name or Organization <email address>
+
+Cody Collier <hello@typographic.systems>
