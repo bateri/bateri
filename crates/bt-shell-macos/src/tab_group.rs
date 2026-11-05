@@ -449,8 +449,10 @@ impl GroupHeader {
         let ended = |field: &NSTextField, text: &str, from: f64| -> f64 {
             field.setStringValue(&NSString::from_str(text));
             field.setTextColor(Some(&Tint::of(palette.dim, 1.0).color()));
-            let width = field.intrinsicContentSize().width.ceil();
-            let height = field.intrinsicContentSize().height;
+            // The width it draws in: the type's own width is 4 points narrower, and a label
+            // aligned to the right loses the left of what it says.
+            let fit = field.fittingSize();
+            let (width, height) = (fit.width.ceil(), fit.height);
             field.setFrame(NSRect::new(
                 NSPoint::new(from - width, mid - height / 2.0),
                 NSSize::new(width, height),
@@ -635,4 +637,20 @@ fn draw_dot(indicator: Indicator, at: NSPoint, palette: Palette) {
     let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(at, NSSize::new(DOT, DOT)));
     Tint::of(role, 1.0).color().setFill();
     path.fill();
+}
+
+#[cfg(test)]
+mod tests {
+    /// The labels at a header's right end, a closed group's count and the key under ⌃⌘, are as
+    /// wide as they draw: a frame the type's own width leaves the left of the number cut off.
+    /// A source scan.
+    #[test]
+    fn the_labels_at_a_headers_right_end_are_as_wide_as_they_draw() {
+        let source = include_str!("tab_group.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let at = source.find("let ended =").expect("the right end's labels");
+        let body = &source[at..at + source[at..].find("\n        };\n").expect("its end")];
+        assert!(body.contains("field.fittingSize()"), "{body}");
+        assert!(!body.contains("intrinsicContentSize"), "{body}");
+    }
 }

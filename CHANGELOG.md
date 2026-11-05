@@ -17,6 +17,7 @@ of every installed copy. A version without a section is not released.
 ### Fixed
 
 - A program with a lot of output keeps what bateri knows about it through later updates of kablo: its folder, its blocks and that a command is running. The first update to this version cannot do that yet, and 0.24.1's check covers it.
+- The number of tabs on a closed group in the sidebar is no longer cut off on its left.
 
 ## [0.24.1] - 2026-11-05
 
