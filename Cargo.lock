@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "git+https://github.com/bateri/kablo?rev=b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5#b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5"
+source = "git+https://github.com/bateri/kablo?rev=806a5eb694d4f537bb8a205762d53434363fceeb#806a5eb694d4f537bb8a205762d53434363fceeb"
 dependencies = [
  "base64",
  "bitflags",
@@ -128,7 +128,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bateri"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "bt-shell-macos",
 ]
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "bt-atlas"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "fontconfig",
  "freetype-rs",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "bt-core"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "alacritty_terminal",
  "cursor-icon",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "bt-gpu"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "bt-atlas",
  "bt-core",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "bt-shell-common"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "bt-core",
  "bt-gpu",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "bt-shell-macos"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "block2",
  "bt-core",
@@ -907,16 +907,16 @@ dependencies = [
 
 [[package]]
 name = "kablo-bateri"
-version = "0.6.0"
-source = "git+https://github.com/bateri/kablo?rev=b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5#b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5"
+version = "0.6.1"
+source = "git+https://github.com/bateri/kablo?rev=806a5eb694d4f537bb8a205762d53434363fceeb#806a5eb694d4f537bb8a205762d53434363fceeb"
 dependencies = [
  "kablo-proto",
 ]
 
 [[package]]
 name = "kablo-proto"
-version = "0.6.0"
-source = "git+https://github.com/bateri/kablo?rev=b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5#b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5"
+version = "0.6.1"
+source = "git+https://github.com/bateri/kablo?rev=806a5eb694d4f537bb8a205762d53434363fceeb#806a5eb694d4f537bb8a205762d53434363fceeb"
 
 [[package]]
 name = "kurbo"
@@ -2095,7 +2095,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "git+https://github.com/bateri/kablo?rev=b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5#b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5"
+source = "git+https://github.com/bateri/kablo?rev=806a5eb694d4f537bb8a205762d53434363fceeb#806a5eb694d4f537bb8a205762d53434363fceeb"
 dependencies = [
  "arrayvec",
  "bitflags",
