@@ -15,6 +15,7 @@ of every installed copy. A version without a section is not released.
 ### Fixed
 
 - A tab of this computer no longer shows up as a server, with a dot and another name (`zsh MacBookPro`). A computer's name can follow the network it is on, and bateri took the old name in a shell's title for another computer. Only a real connection says a pane is on a server now.
+- A program that ran through an update no longer gets a dock over it when its window comes back. When a program had printed so much that the start of its output was gone, the new kablo could not tell a command was running, and bateri took the pane for a shell waiting at its prompt. It now asks the system what is in front of the terminal.
 
 ## [0.24.0] - 2026-11-05
 

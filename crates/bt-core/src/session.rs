@@ -13173,6 +13173,18 @@ impl Session {
         marked
     }
 
+    /// A job outside the shell's group holds the terminal, as the owner read it after the past of
+    /// a terminal shown again ([`Self::replaying`]). Where the marks no longer say a command runs
+    /// it opens one ([`crate::shell::ShellLog::program_in_front`]; `directory` is the shell's), and
+    /// `true` says the title changed.
+    pub fn note_program_in_front(&self, directory: Option<String>) -> bool {
+        let opened = lock(&self.shell).program_in_front(directory.as_deref());
+        if opened {
+            self.request_frame();
+        }
+        opened
+    }
+
     /// Whether the title was written since the remote state was set and has
     /// the `user@host: dir` shape (`shell::title_directory`) — a remote shell's
     /// prompt title. Takes the title's leaf lock only when it was written.
@@ -14776,6 +14788,68 @@ mod tests {
         );
         assert!(shell.dock_editable, "the line is the dock's to edit");
         drop(shell);
+        terminal.session.shutdown();
+    }
+
+    /// A past whose start is gone can hold no mark of the command that runs: the owner says what
+    /// holds the terminal, and the pane stops reading as a shell at its prompt.
+    #[test]
+    fn a_program_the_past_has_no_marks_of_is_a_command_once_the_owner_says_so() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_over(Some(Arc::clone(&past)));
+        terminal.session.set_shell_name(Some("zsh".to_owned()));
+        let picture: &[u8] = b"a program's screen\r\n";
+        past.extend(picture.len() as u64);
+        past.close();
+        terminal.terminal.write_all(picture).expect("written");
+        wait_text(&terminal.session, "screen");
+        wait_until("the past read", Duration::from_secs(8), || {
+            !terminal.session.replaying()
+        });
+        // What the person saw: no command, so the dock stays over the program.
+        assert_eq!(terminal.session.running_command(), None);
+        assert_eq!(terminal.session.pane_title().whole(), "zsh");
+        assert_eq!(
+            terminal
+                .session
+                .note_raw(|_| unreachable!("a stream has no master")),
+            None,
+            "with no command the dock cannot step aside"
+        );
+
+        *lock(&terminal.ops.reading) = Some(TtyReading {
+            modes: TtyModes {
+                canonical: false,
+                echo: false,
+            },
+            foreground: Some(77),
+        });
+        assert!(
+            terminal
+                .session
+                .note_program_in_front(Some("/work/api".to_owned()))
+        );
+        let command = terminal.session.running_command().expect("a command runs");
+        assert_eq!(terminal.session.pane_title().whole(), "api");
+        assert_eq!(
+            terminal
+                .session
+                .note_raw(|_| unreachable!("a stream has no master")),
+            Some(command),
+            "the dock steps aside for a program that reads the keyboard"
+        );
+        assert!(!terminal.session.note_program_in_front(None), "told once");
+
+        // The program ends and its shell speaks: a prompt like any.
+        terminal
+            .terminal
+            .write_all(b"\x1b]133;D;0;bt_block=7\x07\x1b]133;A;bt_block=8\x07\x1b]133;B\x07$ ")
+            .expect("written");
+        wait_until("the prompt", Duration::from_secs(8), || {
+            terminal.session.running_command().is_none()
+        });
+        assert_eq!(terminal.session.pane_title().whole(), "zsh api");
         terminal.session.shutdown();
     }
 

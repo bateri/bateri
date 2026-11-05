@@ -4009,6 +4009,22 @@ impl TerminalPane {
             self.after_on_main(tries + 1, REPLAY_POLL, Self::replay_polled);
             return;
         }
+        // The marks of a command that started long ago can be gone with the start of the past
+        // (the relay was replaced and built its picture from what it still keeps), and the pane
+        // would read as a shell at its prompt, dock and all, over the program. What holds this
+        // computer's terminal says it. A server's shell is the server's to say.
+        if session.reader_alive()
+            && !self.shows_kept_terminal()
+            && let Some(&parent) = self.ivars().shell_parent.get()
+            && jobs::job_in_foreground(parent, session.child_pid(), &SystemTable)
+            && session.note_program_in_front(jobs::shell_directory(
+                parent,
+                session.child_pid(),
+                &SystemTable,
+            ))
+        {
+            self.host().title_changed(self.ivars().id);
+        }
         // The edges the past raised were not told ([`bt_core::Silence`]): a command that runs
         // now is news to the tab (its ring, its program's icon) and the probes that start from
         // it — the remote session, the program in front — run once, as for any command that
@@ -8572,6 +8588,22 @@ mod tests {
     /// a view are told the way to it, the three actions of the session reach them, and the view's
     /// end — all of its ends go through `view_gone` — cuts what is under way. A source scan,
     /// because the panes need a window server.
+    /// A terminal shown again whose past no longer holds the marks of the command that runs: the
+    /// process table is asked before the probes run, since they start from the running command
+    /// (a program that reads the keyboard is what takes the dock down). A source scan.
+    #[test]
+    fn a_program_in_front_of_a_terminal_shown_again_is_a_command_before_the_probes_run() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn replay_polled(").expect("the poll");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        let front = body.find("note_program_in_front(").expect("asked");
+        let probes = body.find("Wake::command_started(").expect("the probes");
+        assert!(front < probes, "{body}");
+        assert!(body.contains("job_in_foreground("), "{body}");
+        assert!(body.contains("!self.shows_kept_terminal()"), "{body}");
+    }
+
     #[test]
     fn the_folder_is_offered_when_the_session_is_made_and_the_views_end_cuts_its_transfers() {
         let pane = include_str!("pane.rs");

@@ -284,6 +284,15 @@ pub fn job_in_foreground(parent: ShellParent, child: u32, table: &impl ProcessTa
         .is_some_and(|groups| groups.foreground != 0 && groups.foreground != groups.own)
 }
 
+/// The working directory of the shell that holds the terminal; `None` if the table cannot say.
+pub fn shell_directory(
+    parent: ShellParent,
+    child: u32,
+    table: &impl ProcessTable,
+) -> Option<String> {
+    table.cwd(shell_pid(parent, child, table)?)
+}
+
 /// The PTY's two terminal modes that say whether a remote session is past its
 /// login ([`bt_core::TtyModes`]): `tcgetattr` on the master's copy
 /// (`bt_core::Session::with_pty_fd`). On macOS and Linux the master's
@@ -1938,6 +1947,16 @@ pub(crate) mod tests {
             foreground(ShellParent::Login, 100, &login_shell(101)),
             Foreground::Idle
         );
+    }
+
+    #[test]
+    fn the_directory_of_the_shell_is_read_past_login() {
+        let table = login_shell(101).in_dir(101, "/work/api");
+        assert_eq!(
+            shell_directory(ShellParent::Login, 100, &table).as_deref(),
+            Some("/work/api")
+        );
+        assert_eq!(shell_directory(ShellParent::Login, 900, &table), None);
     }
 
     #[test]

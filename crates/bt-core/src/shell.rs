@@ -3506,6 +3506,24 @@ impl ShellLog {
         (running || (self.ours && self.command_open)).then_some(self.command)
     }
 
+    /// A program holds the terminal, and nothing read of the stream says a command started: the
+    /// marks went with the start of a past the server no longer keeps (its relay was replaced and
+    /// built its picture from what is left). Without a command the pane reads as a shell at its
+    /// prompt, dock and all, over the program. The command it opens is closed as any other, by the
+    /// shell's next marks; `directory` is the shell's, and a directory it said itself stays. `true`
+    /// if it was news.
+    pub(crate) fn program_in_front(&mut self, directory: Option<&str>) -> bool {
+        if self.running_command().is_some() || self.context.remote.is_some() {
+            return false;
+        }
+        if self.context.cwd.is_empty()
+            && let Some(directory) = directory
+        {
+            directory.clone_into(&mut self.context.cwd);
+        }
+        self.apply(Mark::CommandStart).started
+    }
+
     /// Whether the running command's program reads the keyboard itself
     /// ([`Self::raw`]) — the dock steps aside for it. The single reading of
     /// the bit: the running generation is the marked one and no remote session
@@ -10279,6 +10297,37 @@ mod tests {
             .whole(),
             "proj"
         );
+    }
+
+    #[test]
+    fn a_program_in_front_opens_a_command_only_where_none_is_known() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert_eq!(
+            log.running_command(),
+            None,
+            "no marks: nothing runs, as far as they say"
+        );
+        assert!(log.program_in_front(Some("/work/api")));
+        let command = log.running_command().expect("a command runs");
+        assert_eq!(log.context.cwd, "/work/api");
+        // Told again, or told with marks that already say it: no new command, no other place.
+        assert!(!log.program_in_front(Some("/elsewhere")));
+        assert_eq!(log.running_command(), Some(command));
+        assert_eq!(log.context.cwd, "/work/api");
+        // The program ends: the shell's marks close it, and the next prompt is a prompt.
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(7),
+        });
+        log.apply(Mark::PromptStart {
+            id: Some(8),
+            click_events: false,
+        });
+        assert_eq!(log.running_command(), None);
+        assert!(log.at_prompt());
+        // A command the marks opened is not opened twice.
+        log.apply(Mark::CommandStart);
+        assert!(!log.program_in_front(None));
     }
 
     #[test]
