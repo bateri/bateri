@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "git+https://github.com/bateri/kablo?rev=71c9157e5196a2728b5a120b7d609b81a120cbd6#71c9157e5196a2728b5a120b7d609b81a120cbd6"
+source = "git+https://github.com/bateri/kablo?rev=694697fb5475aec4700197ed77f5ac56388bce16#694697fb5475aec4700197ed77f5ac56388bce16"
 dependencies = [
  "base64",
  "bitflags",
@@ -908,7 +908,7 @@ dependencies = [
 [[package]]
 name = "kablo-bateri"
 version = "0.6.0"
-source = "git+https://github.com/bateri/kablo?rev=71c9157e5196a2728b5a120b7d609b81a120cbd6#71c9157e5196a2728b5a120b7d609b81a120cbd6"
+source = "git+https://github.com/bateri/kablo?rev=694697fb5475aec4700197ed77f5ac56388bce16#694697fb5475aec4700197ed77f5ac56388bce16"
 dependencies = [
  "kablo-proto",
 ]
@@ -916,7 +916,7 @@ dependencies = [
 [[package]]
 name = "kablo-proto"
 version = "0.6.0"
-source = "git+https://github.com/bateri/kablo?rev=71c9157e5196a2728b5a120b7d609b81a120cbd6#71c9157e5196a2728b5a120b7d609b81a120cbd6"
+source = "git+https://github.com/bateri/kablo?rev=694697fb5475aec4700197ed77f5ac56388bce16#694697fb5475aec4700197ed77f5ac56388bce16"
 
 [[package]]
 name = "kurbo"
@@ -2095,7 +2095,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "git+https://github.com/bateri/kablo?rev=71c9157e5196a2728b5a120b7d609b81a120cbd6#71c9157e5196a2728b5a120b7d609b81a120cbd6"
+source = "git+https://github.com/bateri/kablo?rev=694697fb5475aec4700197ed77f5ac56388bce16#694697fb5475aec4700197ed77f5ac56388bce16"
 dependencies = [
  "arrayvec",
  "bitflags",
