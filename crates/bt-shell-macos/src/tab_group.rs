@@ -99,9 +99,9 @@ pub(super) struct HeaderIvars {
     hovered: Cell<bool>,
     /// The pointer is over the `+` itself: the stronger fill.
     over_plus: Cell<bool>,
-    /// The texts of the tooltips on the header ([`GroupHeader::place_tips`]), kept for as long as
-    /// they are on it: the view does not keep them.
-    tips: RefCell<Vec<Retained<NSString>>>,
+    /// The tooltips on the header ([`GroupHeader::place_tips`]): where each is and its text, kept
+    /// for as long as it is on the view, which does not keep it.
+    tips: RefCell<Vec<(NSRect, Retained<NSString>)>>,
     pressed: Cell<Option<Press>>,
     /// Where the press that is `pressed` went down, in the window's space: how far the pointer
     /// has gone from it says whether it is a drag.
@@ -500,35 +500,52 @@ impl GroupHeader {
         self.setNeedsDisplay(true);
     }
 
-    /// The tooltips: the header's, which opens or closes the group, and while the `+` shows, the
-    /// `+`'s beside it, which adds a tab. One tooltip for the whole header would name the
-    /// header's verb over the `+` too.
+    /// The tooltips: the header's, which opens or closes the group, and the `+`'s beside it, which
+    /// adds a tab. One tooltip for the whole header would name the header's verb over the `+` too.
+    /// The `+` shows only while the pointer is over the header, and its tooltip is there whether
+    /// it shows or not: a tooltip put where the pointer already is is not shown until the pointer
+    /// leaves it and comes back. Nothing changes while the places and the words stay.
     fn place_tips(&self, heading: &Heading) {
-        self.removeAllToolTips();
+        let naming = self.ivars().look.get().is_some_and(|look| look.naming);
         let mut header = NSRect::new(NSPoint::new(0.0, 0.0), self.bounds().size);
-        let mut tips = Vec::new();
-        if self.plus_shown() {
+        let mut wanted = Vec::new();
+        if !naming {
             let plus = self.plus_rect();
             header.size.width = plus.origin.x;
-            tips.push((plus, NSString::from_str("New Tab in Group")));
+            wanted.push((plus, "New Tab in Group"));
         }
         let verb = if heading.collapsed {
             "Open group"
         } else {
             "Close group"
         };
-        tips.push((header, NSString::from_str(verb)));
-        let owners = tips
+        wanted.push((header, verb));
+        let same = {
+            let tips = self.ivars().tips.borrow();
+            tips.len() == wanted.len()
+                && tips
+                    .iter()
+                    .zip(&wanted)
+                    .all(|((rect, words), (place, text))| {
+                        rect == place && words.to_string() == *text
+                    })
+        };
+        if same {
+            return;
+        }
+        self.removeAllToolTips();
+        let tips = wanted
             .into_iter()
-            .map(|(rect, words)| {
+            .map(|(rect, text)| {
+                let words = NSString::from_str(text);
                 // SAFETY: an owner that does not answer `view:stringForToolTip:point:userData:`
                 // is shown by its description, which a string's is; it is kept in `tips` for as
                 // long as the tooltip is on the view, and the data is null.
                 unsafe { self.addToolTipRect_owner_userData(rect, &words, std::ptr::null_mut()) };
-                words
+                (rect, words)
             })
             .collect();
-        self.ivars().tips.replace(owners);
+        self.ivars().tips.replace(tips);
     }
 
     /// The arrow: its two pictures at the left, and which of them shows.
@@ -683,6 +700,10 @@ mod tests {
         let body = &source[at..at + source[at..].find("\n    }\n").expect("its end")];
         assert!(body.contains("\"New Tab in Group\""), "{body}");
         assert!(body.contains("header.size.width = plus.origin.x"), "{body}");
+        assert!(
+            !body.contains("plus_shown"),
+            "there before the pointer is: {body}"
+        );
         assert!(
             !source.contains("setToolTip("),
             "one tooltip for the whole header"
