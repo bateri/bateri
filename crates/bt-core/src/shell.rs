@@ -1657,32 +1657,6 @@ pub(crate) struct Here<'a> {
     /// the server's shell sets no title, and a program there that saved it brings it back as it
     /// leaves (`CSI 23 t`), so it is known by what it says.
     pub(crate) before_remote: Option<&'a str>,
-    /// This computer's name ([`local_host`]).
-    pub(crate) host: Option<&'a str>,
-}
-
-/// This computer's name, as a shell's `%m` or `\h` says it; asked each time, because a Mac's name
-/// follows the network it is on and a prompt reads the name of the moment.
-pub(crate) fn local_host() -> Option<String> {
-    let mut name = [0u8; 256];
-    // SAFETY: the buffer is writable for the length given.
-    let done = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
-    if done != 0 {
-        return None;
-    }
-    let end = name.iter().position(|&byte| byte == 0)?;
-    std::str::from_utf8(&name[..end]).ok().map(str::to_owned)
-}
-
-/// Whether two names are one computer's: the short name and the whole one are the same computer.
-fn same_host(one: &str, other: &str) -> bool {
-    let short = |name: &'_ str| {
-        name.split('.')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-    };
-    short(one) == short(other)
 }
 
 /// The last component of a directory; the home directory itself is `~`, and `~` and `/` stay as
@@ -1716,9 +1690,10 @@ fn folder_of(dir: &str, home: Option<&Path>) -> String {
 /// it runs: a tab's tile carries that as a dot, since the dock goes away on the alternate screen
 /// (vim on the remote). With nothing but the shell having spoken the place is the server's name,
 /// `{host}` (`{host}:{port}` for a port the user named), then the folder a stock title says, none at
-/// the server's home; the shell's name stands before it when it is known. **A stock title naming
-/// another computer** is the same name without a remote session (a pane showing a server's terminal
-/// says it through the stream).
+/// the server's home; the shell's name stands before it when it is known. **Only a remote session
+/// says a pane is on another computer.** The name in a stock title says nothing of it: a computer's
+/// name follows the network it is on, so a shell at its prompt can name this computer in a way it
+/// no longer answers to.
 ///
 /// Pure and fed from four slots; the reader is [`crate::Session::pane_title`]. The home directory is
 /// an argument, because this crate reads no environment — the application supplies the value
@@ -1752,17 +1727,13 @@ pub(crate) fn title_of(
         };
     }
     let stock = osc_title.and_then(stock_title);
-    if let Some((host, dir)) = stock
-        && here.host.is_some_and(|here| !same_host(here, host))
-    {
-        return away(host, dir, here.server_shell.or(here.shell));
-    }
     if let (Some(title), None) = (osc_title, stock) {
         return PaneTitle::only(title.to_owned());
     }
-    let folder = stock
-        .map(|(_, dir)| dir)
-        .or(cwd.filter(|cwd| !cwd.is_empty()))
+    // The shell's own word first: a stock title can be one a server left when its session ended.
+    let folder = cwd
+        .filter(|cwd| !cwd.is_empty())
+        .or(stock.map(|(_, dir)| dir))
         .map(|dir| folder_of(dir, home));
     match (here.shell, folder) {
         (Some(shell), place) => PaneTitle {
@@ -10274,7 +10245,6 @@ mod tests {
             server_shell: None,
             server_prompt: false,
             before_remote: None,
-            host: Some("MacBookPro.local"),
         };
         let at = |osc, cwd| title_of(osc, cwd, Some(home), None, here);
         let stock = at(Some("someone@MacBookPro:~/Projects/bateri-term"), None);
@@ -10312,19 +10282,48 @@ mod tests {
     }
 
     #[test]
-    fn a_stock_title_of_another_computer_says_that_computer() {
+    fn a_stock_title_names_no_other_computer_without_a_remote_session() {
+        let prompt = Here {
+            shell: Some("zsh"),
+            ..Here::default()
+        };
+        // This computer under the name it had on another network: the same pane, at its prompt.
+        let renamed = title_of(Some("me@MacBookPro:~/work/api"), None, None, None, prompt);
+        assert_eq!(renamed.whole(), "zsh api");
+        assert_eq!(renamed.server, None, "no dot on a tab of this computer");
+        // While a command runs: the folder alone, and still no other computer.
+        let running = title_of(
+            Some("me@MacBookPro:~/work/api"),
+            None,
+            None,
+            None,
+            Here::default(),
+        );
+        assert_eq!((running.whole().as_str(), running.server), ("api", None));
+        // A server's title left behind when its session ended: the shell knows where it is.
+        let left = title_of(
+            Some("deploy@web-01:/var/www"),
+            Some("/Users/me/work/api"),
+            None,
+            None,
+            prompt,
+        );
+        assert_eq!(left.whole(), "zsh api");
+    }
+
+    #[test]
+    fn a_stock_title_of_a_remote_session_says_that_computer() {
         let here = Here {
             shell: None,
             server_shell: Some("zsh"),
             server_prompt: false,
             before_remote: None,
-            host: Some("MacBookPro"),
         };
         let title = title_of(
             Some("me@proAlfred:~/work/api"),
             Some("/tmp"),
             None,
-            None,
+            Some("proAlfred"),
             here,
         );
         assert_eq!(title.who, "zsh");
@@ -10332,7 +10331,7 @@ mod tests {
         assert_eq!(title.server.as_deref(), Some("proAlfred"));
         assert_eq!(title.group_seed(), "proAlfred");
         assert_eq!(
-            title_of(Some("me@proAlfred:~"), None, None, None, here).whole(),
+            title_of(Some("me@proAlfred:~"), None, None, Some("proAlfred"), here).whole(),
             "zsh proAlfred"
         );
         // A remote session says its target's name, and the folder its shell says.

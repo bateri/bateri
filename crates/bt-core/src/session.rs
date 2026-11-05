@@ -10353,7 +10353,6 @@ impl Session {
                 log.title_before_remote.clone(),
             )
         };
-        let host = crate::shell::local_host();
         crate::shell::title_of(
             osc.as_deref(),
             Some(&cwd),
@@ -10364,7 +10363,6 @@ impl Session {
                 server_shell: server_shell.as_deref(),
                 server_prompt,
                 before_remote: before.as_deref(),
-                host: host.as_deref(),
             },
         )
     }
