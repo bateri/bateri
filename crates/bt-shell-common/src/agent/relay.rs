@@ -12,8 +12,9 @@
 //!
 //! **No byte the program chose is ever read by a shell.** The line the login shell reads (which may
 //! be fish, whose single quotes are not `sh`'s) holds fixed text and the words as hex (`x` and the
-//! hex of its bytes, [`hex_word`]); the `bateri` there turns them back into words (`--hex`) before
-//! it reads a command.
+//! hex of its bytes, [`hex_word`]); the `bateri` there turns them back into words (`--hex`, or
+//! `--hex-here` where the machine is this computer, which is the app's own and not its server)
+//! before it reads a command.
 //!
 //! **This is the one place the app runs a program for another** (the contract's "the app writes no
 //! bytes to a shell and runs no program" is kept for `own` and `screen`; `full` is a person saying
@@ -59,9 +60,21 @@ const OPEN_WAIT: Duration = Duration::from_secs(30);
 /// What a machine that has not been set up says when the command is not there.
 pub fn not_set_up(server: &str) -> String {
     if server == LOCAL_SERVER {
-        "the bateri command is not set up on this computer (it is off in the settings, or no terminal of this computer has run yet)".to_owned()
+        "the bateri command is not set up on the computer of the bateri app (@local): it is off in the settings, or no terminal of that computer has run yet".to_owned()
     } else {
         format!("bateri is not set up on {server}: open a terminal on it in bateri first")
+    }
+}
+
+/// What tells the `bateri` command of a machine that its words are written in hex, and whose app
+/// wrote them: the app of another machine, of which a server is the server (`--hex`), or this
+/// computer's own, which the command runs for on the computer itself (`--hex-here`): the one
+/// starts what has no program with the bootstrap a server is set up with, the other has none.
+fn hex_flag(server: &str) -> &'static str {
+    if server == LOCAL_SERVER {
+        "--hex-here"
+    } else {
+        "--hex"
     }
 }
 
@@ -74,9 +87,9 @@ fn quote(word: &str) -> String {
 
 /// The line the login shell of the other machine reads, whatever shell that is: a `sh` that looks
 /// for the command where the files of that machine are (under the home, [`paths`]; `missing` is
-/// what it says, on stderr, with status 127, when it is nowhere) and runs it with the `words`, in
-/// hex.
-fn login_line(missing: &str, words: &[String]) -> String {
+/// what it says, on stderr, with status 127, when it is nowhere) and runs it with `flag` ([`hex_flag`])
+/// and the `words`, in hex.
+fn login_line(missing: &str, flag: &str, words: &[String]) -> String {
     let hex: String = words
         .iter()
         .map(|word| format!(" {}", hex_word(word)))
@@ -100,7 +113,7 @@ fn login_line(missing: &str, words: &[String]) -> String {
         paths::COMMAND
     );
     let search = format!(
-        "[ -x \"$HOME/{command}\" ] && exec \"$HOME/{command}\" --hex \"$@\"; echo \"bateri: {missing}\" >&2; exit 127"
+        "[ -x \"$HOME/{command}\" ] && exec \"$HOME/{command}\" {flag} \"$@\"; echo \"bateri: {missing}\" >&2; exit 127"
     );
     format!("exec sh -c {} sh{hex}", quote(&search))
 }
@@ -108,8 +121,8 @@ fn login_line(missing: &str, words: &[String]) -> String {
 /// The program to run on the other machine, as its `argv`: a `sh` that hands over to the login
 /// shell, which reads [`login_line`]. The program is not run by a shell that reads it as one line:
 /// the words reach the `sh` as they are.
-pub fn command(missing: &str, words: &[String]) -> Command {
-    let login = login_line(missing, words);
+pub fn command(missing: &str, flag: &str, words: &[String]) -> Command {
+    let login = login_line(missing, flag, words);
     let argv = [
         "sh",
         "-c",
@@ -239,7 +252,7 @@ pub fn run(
 ) -> Result<Relayed, String> {
     let job = words.first().map_or("a command", String::as_str);
     let started = served.run(
-        command(&not_set_up(server), words),
+        command(&not_set_up(server), hex_flag(server), words),
         // The connection is made (and asked for) by whoever found the server.
         Ask::Never,
         OPEN_WAIT,
@@ -344,7 +357,7 @@ mod tests {
             "-",
             "ünï",
         ]);
-        let line = login_line("not here", &odd);
+        let line = login_line("not here", "--hex", &odd);
         // A backslash or a quote of the words would be read differently by fish and by sh: the
         // line has the quotes of the fixed text and nothing else of the kind.
         assert_eq!(line.matches('\\').count(), line.matches("'\\''").count());
@@ -356,14 +369,33 @@ mod tests {
         assert!(line.contains(" x73656e64 x7039 x "), "{line}");
         // The line is the same fixed text for any words.
         assert_eq!(
-            login_line("not here", &words(&["a"])).replace(" x61", ""),
-            login_line("not here", &words(&[])),
+            login_line("not here", "--hex", &words(&["a"])).replace(" x61", ""),
+            login_line("not here", "--hex", &words(&[])),
+        );
+    }
+
+    #[test]
+    fn the_words_for_this_computer_are_marked_as_its_own_apps_and_a_servers_are_not() {
+        let (_root, home) = home_with_bateri("which-app", ".local/share", "echo \"[$*]\"");
+        let list = ["split", "--", "zsh"];
+        for (server, flag) in [("prod", "--hex"), ("@local", "--hex-here")] {
+            let relayed = run(&at(&home), server, &words(&list), &Gone::new()).expect("ran");
+            assert_eq!(
+                relayed.stdout,
+                format!("[{flag}{}]\n", hex(&list)),
+                "{server}"
+            );
+        }
+        // Fixed text: the words are in hex after it, whatever they are.
+        assert_eq!(
+            login_line("x", hex_flag("@local"), &words(&["--hex"])),
+            login_line("x", "--hex-here", &words(&["--hex"]))
         );
     }
 
     #[test]
     fn the_program_is_five_words_and_the_login_shell_reads_the_last() {
-        let argv: Vec<String> = command("none", &words(&["capture", "p9"]))
+        let argv: Vec<String> = command("none", "--hex", &words(&["capture", "p9"]))
             .argv
             .iter()
             .map(|word| String::from_utf8_lossy(word).into_owned())
@@ -373,7 +405,10 @@ mod tests {
             argv[..4],
             ["sh", "-c", "exec \"${SHELL:-/bin/sh}\" -lc \"$1\"", "sh"]
         );
-        assert_eq!(argv[4], login_line("none", &words(&["capture", "p9"])));
+        assert_eq!(
+            argv[4],
+            login_line("none", "--hex", &words(&["capture", "p9"]))
+        );
     }
 
     #[test]
@@ -404,9 +439,19 @@ mod tests {
             vec!["bateri: bateri is not set up on prod: open a terminal on it in bateri first"]
         );
         assert_eq!(relayed.stdout, "");
+        // Shown to a program on a server: "this computer" would be read as that server.
         let this = not_set_up("@local");
-        assert!(this.contains("this computer"), "{this}");
-        assert!(!this.contains("Mac"), "{this}");
+        assert!(
+            this.contains("the computer of the bateri app (@local)"),
+            "{this}"
+        );
+        assert!(
+            !this.contains("this computer") && !this.contains("Mac"),
+            "{this}"
+        );
+        // The line the login shell reads keeps all of it (nothing in it is a quote or a `$`).
+        let line = login_line(&this, "--hex-here", &words(&[]));
+        assert!(line.contains(&this), "{line}");
     }
 
     #[test]
@@ -420,6 +465,7 @@ mod tests {
             .run(
                 command(
                     &format!("\"; touch {}; echo \"", marker.display()),
+                    "--hex",
                     &words(&["send", "p9"]),
                 ),
                 Ask::Never,
@@ -469,7 +515,7 @@ mod tests {
             "-lc\n"
         );
         let line = std::fs::read_to_string(root.0.join("line")).expect("line");
-        assert_eq!(line, login_line(&not_set_up("prod"), &words(&odd)));
+        assert_eq!(line, login_line(&not_set_up("prod"), "--hex", &words(&odd)));
         assert!(!root.0.join("never").exists());
         assert!(!home.join("never").exists());
     }

@@ -567,9 +567,7 @@ mod tests {
         /// A rig whose folder is the one of a server, made by the script that makes it, and whose
         /// way is an ssh that runs the commands here.
         pub(super) fn server(name: &str, waits: Waits) -> Self {
-            Self::build(name, waits, |home| {
-                let folder = crate::kablo::install::prepare_stage(&Sh(home.to_owned()), "c148d55a")
-                    .expect("a folder");
+            Self::server_over(name, waits, |home| {
                 let ssh = home.join("ssh");
                 crate::child::tests::write_program(&ssh, &fake_ssh(home));
                 let argv = vec![
@@ -577,10 +575,24 @@ mod tests {
                     "-T".into(),
                     "host".into(),
                 ];
+                Served::fake(argv)
+            })
+        }
+
+        /// A rig whose way is the server `served` makes of this computer, its folder made by the
+        /// script that makes it.
+        pub(super) fn server_over(
+            name: &str,
+            waits: Waits,
+            served: impl FnOnce(&Path) -> Served,
+        ) -> Self {
+            Self::build(name, waits, |home| {
+                let folder = crate::kablo::install::prepare_stage(&Sh(home.to_owned()), "c148d55a")
+                    .expect("a folder");
                 let dir = folder.dir().to_string_lossy().into_owned();
                 let way = Way::Server(crate::stage::Server::new(
                     dir,
-                    Arc::new(Fixed(Served::fake(argv))),
+                    Arc::new(Fixed(served(home))),
                 ));
                 (folder, way)
             })

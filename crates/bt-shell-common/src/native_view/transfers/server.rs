@@ -489,6 +489,45 @@ mod tests {
         rig.nothing_more();
     }
 
+    /// The same over the real kablo: the script runs as a program kablo starts for the stream, not
+    /// as the child of a stand-in for ssh.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_file_is_poured_and_a_file_comes_through_a_real_kablo() {
+        let Some(here) = crate::kablo::local::tests::Here::new("transfer-real") else {
+            return;
+        };
+        let rig = Rig::server_over("server-real", Waits::default(), |_| here.served());
+        let file = bytes(3 * 1024 * 1024 + 17);
+        let handle = rig.give(&file);
+        rig.files.stage(1, &handle, 0, PIPE);
+        assert_eq!(rig.next(), Told::PipeReady(1));
+        let program = read_pipe(rig.pipe());
+        assert_eq!(rig.next(), Told::Staged(1, Ok(file.len() as u64)));
+        assert!(
+            program.join().expect("the program") == file,
+            "the same bytes"
+        );
+        wait_until("the transfer to be over", || {
+            rig.files.open_transfers() == 0
+        });
+        assert_eq!(rig.left_in_folder(), Vec::<String>::new());
+
+        let file = bytes(3 * 1024 * 1024 + 5);
+        let (handle, target) = rig.place("out.bin");
+        rig.files.fetch(2, &handle, 0, file.len() as u64, PIPE);
+        assert_eq!(rig.next(), Told::PipeReady(2));
+        let program = fill(&rig, file.clone());
+        assert_eq!(rig.next(), Told::Fetched(2, Ok(file.len() as u64)));
+        program.join().expect("the program");
+        assert!(fs::read(&target).expect("the saved file") == file);
+        assert_eq!(rig.parts(), Vec::<String>::new());
+        assert_eq!(rig.left_in_folder(), Vec::<String>::new());
+        wait_until("the transfer to be over", || {
+            rig.files.open_transfers() == 0
+        });
+    }
+
     #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_stage_that_begins_at_an_offset_pours_the_rest_of_the_file() {

@@ -185,4 +185,4 @@ pub fn new_session(launch: &bt_core::ChildLaunch, history: u32) -> (NewSession, 
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

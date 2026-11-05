@@ -42,7 +42,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
-- `bateri split` with no program, run where the bateri app does not answer (a terminal that belongs to no pane of this computer, a plain ssh shell), is an error now: it used to open a terminal nobody could see.
+- `bateri split` with no program, run where the bateri app does not answer (a terminal that belongs to no pane of this computer, a plain ssh shell), is an error now: it used to open a terminal nobody could see. `bateri split -S @local` from a program on a server, with no program to run, is an error that says to name one.
 - A tab title about as wide as its room no longer shakes and flickers at its fade. Every title in the tab list also starts at the same place now, whether it fits or not.
 - A program's view on a server comes back by itself after the connection drops, as when the computer sleeps. It used to leave an empty pane with the program still running behind it, until you quit the program and started it again.
 - If the program ended while the connection was gone, its view closes and nothing is typed at the prompt that took its place.

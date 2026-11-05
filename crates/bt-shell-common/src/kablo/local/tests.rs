@@ -198,7 +198,53 @@ impl Drop for Ground {
                     .status();
             }
         }
+        self.reap();
         let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Ground {
+    /// What is left of this ground's sessions. An ended session is kept for a client that has
+    /// been told how it ended, so the warden of a terminal a test ended stays; it is this
+    /// ground's by its socket directory (`--dir`), which no other ground has, and its relay and
+    /// program hang up with it.
+    fn reap(&self) {
+        let Ok(listing) = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,command="])
+            .output()
+        else {
+            return;
+        };
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        let rows: Vec<(u32, u32, &str)> = listing
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                let pid = words.next()?.parse().ok()?;
+                let ppid = words.next()?.parse().ok()?;
+                Some((pid, ppid, line))
+            })
+            .collect();
+        let dir = self.sockets.to_string_lossy();
+        let wardens: Vec<u32> = rows
+            .iter()
+            .filter(|(_, _, line)| {
+                line.contains(" warden --id ")
+                    && line
+                        .split_whitespace()
+                        .skip_while(|word| *word != "--dir")
+                        .nth(1)
+                        == Some(dir.as_ref())
+            })
+            .map(|(pid, _, _)| *pid)
+            .collect();
+        for (pid, ppid, _) in &rows {
+            if wardens.contains(pid) || (wardens.contains(ppid) && *pid > 1) {
+                // SAFETY: a signal to a warden found by this ground's own socket directory, or
+                // to a child of one.
+                unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
     }
 }
 
@@ -1765,7 +1811,7 @@ fn a_real_kablo_counts_for_the_window() {
 
 /// This Mac's connection to a real kablo with one terminal on it, so that the service has the
 /// connection up for the programs and connections tests ask it for.
-struct Here {
+pub(crate) struct Here {
     ground: Ground,
     service: Service,
     mac: Arc<RealMac>,
@@ -1773,7 +1819,7 @@ struct Here {
 }
 
 impl Here {
-    fn new(name: &str) -> Option<Here> {
+    pub(crate) fn new(name: &str) -> Option<Here> {
         Here::logging_in_with(name, None)
     }
 
@@ -1820,6 +1866,11 @@ impl Here {
             mac,
             _terminal: terminal,
         })
+    }
+
+    /// This computer as a server a job runs programs on, over the real kablo.
+    pub(crate) fn served(&self) -> crate::kablo::served::Served {
+        crate::kablo::served::Served::new(self.service.backend(), super::host())
     }
 
     fn run(&self, words: &[&str]) -> Result<crate::kablo::remote::RemoteCommand, String> {
@@ -2501,6 +2552,72 @@ mod relayed {
                 "{server}: {said:?}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_split_for_this_computer_starts_the_program_it_names_and_is_told_when_it_names_none() {
+        let Some(mut here) = Here::new("relay-split") else {
+            return;
+        };
+        real_bateri(&here);
+        let home = here.ground.home.clone();
+        // This computer is the app's own, not its server: a shell bateri has an integration for,
+        // named alone, is the program asked for, and a bootstrap left in the home is not run.
+        let shells = home.join("shells");
+        std::fs::create_dir_all(&shells).expect("a directory");
+        let shell = shells.join("zsh");
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\n: > '{}'\nexec cat\n",
+                home.join("shell.ran").display()
+            ),
+        )
+        .expect("a shell");
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).expect("exec");
+        let boot = home.join(".local/share/bateri/shell/boot.sh");
+        std::fs::create_dir_all(boot.parent().expect("a directory")).expect("shell directory");
+        std::fs::write(
+            &boot,
+            format!("touch '{}'\nexec cat\n", home.join("boot.ran").display()),
+        )
+        .expect("a bootstrap");
+
+        let said = relayed(answer(
+            &here,
+            CommandLevel::Full,
+            CommandLevel::Own,
+            &relay("@local", &["split", "--", &shell.display().to_string()]),
+            &Gone::new(),
+        ));
+        assert_eq!(said.status, 0, "{said:?}");
+        assert_eq!(said.stdout, "p1\n", "{said:?}");
+        here.ground
+            .made
+            .push(SessionId::new("p1").expect("a terminal name"));
+        let started = Instant::now();
+        while !home.join("shell.ran").exists() && started.elapsed() < Duration::from_secs(30) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(home.join("shell.ran").exists(), "the shell did not start");
+        assert!(!home.join("boot.ran").exists(), "the bootstrap ran");
+
+        // No program: nothing is started, and the program that asked is told what to do.
+        let said = relayed(answer(
+            &here,
+            CommandLevel::Full,
+            CommandLevel::Own,
+            &relay("@local", &["split"]),
+            &Gone::new(),
+        ));
+        assert_eq!(said.status, 1, "{said:?}");
+        assert_eq!(said.stdout, "", "{said:?}");
+        let text = said.stderr.join("\n");
+        assert!(text.contains("needs a program"), "{text}");
+        assert!(!text.contains("bateri terminal"), "{text}");
+        assert!(!home.join(".local/share/bateri/terminals/p2").exists());
+        assert!(!home.join("boot.ran").exists(), "the bootstrap ran");
     }
 
     #[test]
