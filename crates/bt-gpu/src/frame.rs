@@ -449,6 +449,22 @@ pub(crate) struct GlyphCell {
     /// time (`slots::fan`, `Atlas::intern`), like `ch`: this list does not see
     /// the atlas.
     pub(crate) cluster: Option<ClusterId>,
+    /// The boundary's column and row, in the list's own coordinates (the
+    /// grid's, the fill band's or the dock's); what the shaping pass reads a
+    /// row of cells by — `pos` is pixels, shifted by margins and scrolling,
+    /// and says nothing about which cell is next to which.
+    pub(crate) col: u16,
+    pub(crate) row: u16,
+    /// The glyph the font's own rules draw this cell as when it is not the
+    /// character's own (`Atlas::shape_row`; a masked letter, an alternate),
+    /// `None` for a character drawn as itself.
+    ///
+    /// Written **after** the list is built, by [`Frame::shape_grid`] and
+    /// [`Frame::shape_dock`]: the sink does not see the atlas (the reason is
+    /// above). It lives on the cell, not in a side table, because the typing
+    /// effects copy cells: an arrival is the dock's glyph itself and so carries
+    /// the answer, where a table by position would have to be found again.
+    pub(crate) glyph: Option<u32>,
 }
 
 /// Moves a cluster id from the `from` table to the `to` table: lists
@@ -1096,6 +1112,15 @@ struct Margins {
 /// measured number.
 const REACH_SLACK_PX: f32 = 0.5;
 
+/// One shaped glyph of the previous dock, by the place it stood
+/// ([`Frame::recalled`]).
+struct Remembered {
+    row: u16,
+    col: u16,
+    ch: char,
+    glyph: u32,
+}
+
 #[derive(Default)]
 pub(crate) struct Frame {
     /// The command blocks' stripes in the left margin; through the **same**
@@ -1417,6 +1442,11 @@ pub(crate) struct Frame {
     /// bit for bit.
     dock_bg: Vec<Instance>,
     dock_glyphs: Vec<GlyphCell>,
+    /// The shaped glyphs of the **previous** content frame's dock, by place:
+    /// what a ghost is born from. A deleted character is not in this frame's
+    /// dock any more, and it is the glyph that was on screen — a masked dot,
+    /// not the letter — that has to fade out ([`Frame::recalled`]).
+    dock_memory: Vec<Remembered>,
     dock_rules: Vec<RuleCell>,
     /// The clusters' tables: they live and are cleared
     /// **together with** the lists, so a motion frame (which keeps the lists)
@@ -1606,6 +1636,16 @@ impl Frame {
         // screen.
         self.dock = None;
         self.dock_bg.clear();
+        self.dock_memory.clear();
+        self.dock_memory
+            .extend(self.dock_glyphs.iter().filter_map(|cell| {
+                Some(Remembered {
+                    row: cell.row,
+                    col: cell.col,
+                    ch: cell.ch,
+                    glyph: cell.glyph?,
+                })
+            }));
         self.dock_glyphs.clear();
         self.dock_rules.clear();
         self.clusters.clear();
@@ -1854,6 +1894,9 @@ impl Frame {
                 rgba: cell.fg.to_array(),
                 wide: cell.wide,
                 cluster: cell.cluster,
+                col: cell.col,
+                row: cell.row,
+                glyph: None,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -2559,7 +2602,42 @@ impl Frame {
             // The context row (small class) carries no clusters: the
             // boundary pushes no clustered cell there.
             cluster: cell.cluster,
+            col: cell.col,
+            row: cell.row,
+            glyph: None,
         })
+    }
+
+    /// Lets `shape` decide, for the grid's and the fill band's cells, which
+    /// ones the font's own rules draw as another glyph ([`GlyphCell::glyph`]).
+    ///
+    /// The cells are complete here and the atlas is not in `Frame` (the
+    /// reason is [`GlyphCell`]'s doc), so the caller that holds both brings
+    /// the shaper. Each list is its own surface: a row of the band is never the
+    /// continuation of a row of the grid.
+    pub(crate) fn shape_grid(&mut self, mut shape: impl FnMut(&mut [GlyphCell])) {
+        shape(&mut self.glyphs);
+        shape(&mut self.fill_glyphs);
+    }
+
+    /// The dock's twin of [`Frame::shape_grid`], run **before** the typing
+    /// effects are written: an arrival is a copy of the dock's glyph and
+    /// carries the answer from here. It shapes the whole list, arrivals
+    /// included — [`Frame::set_dock_fx`] takes the in-flight ones out of the
+    /// list to be drawn, and a letter's neighbours must not be shaped as if
+    /// it had not been typed.
+    pub(crate) fn shape_dock(&mut self, shape: impl FnOnce(&mut [GlyphCell])) {
+        shape(&mut self.dock_glyphs);
+    }
+
+    /// The glyph the previous dock drew at `cell`'s place for its character:
+    /// what a ghost born of that cell keeps drawing as.
+    pub(crate) fn recalled(&self, cell: &Cell) -> Option<u32> {
+        let ch = cell.ch?;
+        self.dock_memory
+            .iter()
+            .find(|held| (held.row, held.col, held.ch) == (cell.row, cell.col, ch))
+            .map(|held| held.glyph)
     }
 
     /// Finishes the in-flight arrivals **whose static glyph cannot be found**
@@ -2631,8 +2709,14 @@ impl Frame {
                 Kind::Ghost => {
                     if let Some(glyph) = self.dock_glyph(fx.cell) {
                         let cluster = copy_cluster(glyph.cluster, table, &mut self.fx_clusters);
-                        self.dock_ghosts
-                            .push(fx_cell(GlyphCell { cluster, ..glyph }));
+                        // The glyph the cell was drawn as when it was born
+                        // ([`GlyphFx::recall`]): without it a masked
+                        // character would fade out as the open letter.
+                        self.dock_ghosts.push(fx_cell(GlyphCell {
+                            cluster,
+                            glyph: fx.glyph,
+                            ..glyph
+                        }));
                     }
                 }
                 Kind::Arrival => {
@@ -3028,6 +3112,9 @@ impl Frame {
                     rgba: rule.rgba,
                     wide: false,
                     cluster: None,
+                    col: 0,
+                    row: 0,
+                    glyph: None,
                 },
                 rule: Some(rule.kind),
                 t: scene.mark,
@@ -3812,6 +3899,9 @@ impl Frame {
                 rgba: cell.fg.to_array(),
                 wide: cell.wide,
                 cluster: cell.cluster,
+                col: cell.col,
+                row: cell.row,
+                glyph: None,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -6973,6 +7063,9 @@ mod tests {
                 rgba: CURSOR.to_array(),
                 wide: false,
                 cluster: None,
+                col: 2,
+                row: 0,
+                glyph: None,
             }
         );
 
@@ -7045,6 +7138,7 @@ mod tests {
             effect: 1,
             t: 0.5,
             seed: 0.0,
+            glyph: None,
         }
     }
 

@@ -3176,6 +3176,9 @@ fn a_wide_cell_becomes_two_quads() {
         rgba: [1.0, 1.0, 1.0, 1.0],
         wide: true,
         cluster: None,
+        col: 0,
+        row: 0,
+        glyph: None,
     }];
     tex.prepare(&glyphs, &Clusters::default());
     assert_eq!(
@@ -3214,6 +3217,9 @@ fn a_wide_cell_that_fits_one_cell_stays_one_quad() {
         rgba: [1.0, 1.0, 1.0, 1.0],
         wide: true,
         cluster: None,
+        col: 0,
+        row: 0,
+        glyph: None,
     }];
     tex.prepare(&glyphs, &Clusters::default());
     assert_eq!(
@@ -3345,6 +3351,9 @@ fn a_color_glyph_goes_to_the_color_list() {
         rgba: [1.0, 1.0, 1.0, 1.0],
         wide: true,
         cluster: None,
+        col: 0,
+        row: 0,
+        glyph: None,
     }];
     tex.prepare(&glyphs, &Clusters::default());
     // If no colour font carrying the character is installed the test has no subject — but the
@@ -3464,6 +3473,7 @@ fn effect(cell: Cell, kind: Kind, effect: u32, t: f32) -> Fx {
         effect,
         t,
         seed: 0.0,
+        glyph: None,
     }
 }
 

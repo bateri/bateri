@@ -26,7 +26,7 @@ use objc2_core_text::{
 
 use crate::raster::DrawResult;
 use crate::rules::{Face, InkRect, Metrics, RawMetrics};
-use crate::system::FontSystem;
+use crate::system::{FontSystem, RunGlyph};
 use crate::text::{Family, ShapedLine, ShapedRun, TextBitmap};
 
 /// Order of preference. A name that cannot be found is skipped **silently**:
@@ -713,6 +713,65 @@ impl FontSystem for CoreText {
             descent,
             leading,
         })
+    }
+
+    /// The glyphs of one `CTLine`, each with the UTF-16 index it came from
+    /// and whether it is the asked font's own (`CFEqual` on the run's font).
+    /// The line is shaped with the features the font carries, so a mask rule
+    /// or an alternate letter arrives here as a different glyph number.
+    fn shape_run(font: &Self::Font, text: &str) -> Option<Vec<RunGlyph>> {
+        // SAFETY: the key is a constant CoreText exports, alive for the whole
+        // program.
+        let font_key = unsafe { kCTFontAttributeName };
+        let line = line_of(font, text)?;
+        // SAFETY: `line` is alive; per the documentation the array's elements
+        // are `CTRun`.
+        let runs = unsafe { line.glyph_runs() };
+        // SAFETY: the function's documentation gives the element type as
+        // `CTRun`.
+        let runs = unsafe { runs.cast_unchecked::<CTRun>() };
+        let mut shaped = Vec::new();
+        for run in runs.iter() {
+            // SAFETY: `run` is alive; a pure read.
+            let count = usize::try_from(unsafe { run.glyph_count() }).unwrap_or(0);
+            if count == 0 {
+                continue;
+            }
+            let mut glyphs = vec![0 as CGGlyph; count];
+            let mut indices: Vec<CFIndex> = vec![0; count];
+            // A zero length copies from the start to the run's end; both
+            // buffers hold `count` elements, the run's own glyph count.
+            let whole = CFRange {
+                location: 0,
+                length: 0,
+            };
+            // SAFETY: the buffers are `count` long and alive for both calls.
+            unsafe {
+                run.glyphs(whole, NonNull::from(&mut glyphs[..]).cast::<CGGlyph>());
+                run.string_indices(whole, NonNull::from(&mut indices[..]).cast::<CFIndex>());
+            }
+            // SAFETY: `run` is alive; the attribute dictionary is the line's
+            // as it falls to the run, its keys are `CFString`.
+            let attributes = unsafe { run.attributes() };
+            // SAFETY: the keys of CoreText's attribute dictionary are
+            // `CFString`; the value's type is checked below with `downcast`.
+            let attributes = unsafe { attributes.cast_unchecked::<CFString, CFType>() };
+            let base = attributes
+                .get(font_key)
+                .and_then(|used| used.downcast::<CTFont>().ok())
+                .is_some_and(|used| Self::same_font(&used, font));
+            shaped.extend(
+                glyphs
+                    .into_iter()
+                    .zip(indices)
+                    .map(|(glyph, index)| RunGlyph {
+                        glyph: u32::from(glyph),
+                        index: usize::try_from(index).unwrap_or(usize::MAX),
+                        base,
+                    }),
+            );
+        }
+        Some(shaped)
     }
 
     /// The line's own carets (`CTLineGetOffsetForStringIndex`), at the

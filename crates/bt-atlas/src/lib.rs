@@ -53,6 +53,7 @@ mod features;
 mod freetype;
 mod raster;
 mod rules;
+mod shaping;
 mod system;
 mod text;
 
@@ -104,10 +105,10 @@ impl Default for Spacing {
 #[doc(hidden)]
 pub use system::fixture;
 
-/// What holds a slot in the atlas: a character, a rule line or a grapheme
-/// sequence.
+/// What holds a slot in the atlas: a character, a rule line, a grapheme
+/// sequence or a glyph the font's own rules chose.
 ///
-/// The three live in the same grid because all three are rasterized into
+/// The four live in the same grid because all four are rasterized into
 /// slots **one cell in size**: emoji and wide glyphs have joined the
 /// same union by being split into two halves ([`Half`]) and into the colour
 /// plane ([`Plane`]), i.e. no separate texture or separate packer was born.
@@ -117,6 +118,12 @@ pub use system::fixture;
 /// `👍🏽`, VS16 `❤️`); that is how `Sprite` stays `Copy + Hash` and the slot
 /// key carries no string. If the sequence does not shape into a single glyph
 /// the answer is the base character's ([`Atlas::slot`]).
+///
+/// [`Sprite::Glyph`] is a glyph **number** of the regular face's font, what
+/// [`Atlas::shape_row`] answered where the font's rules drew something other
+/// than the character's own glyph (a masked letter, an alternate). It is a
+/// sprite of its own because a character cannot name it: the same `a` is two
+/// glyphs in two cells, and the key has to say which one is in the slot.
 ///
 /// Procedurally drawn characters (block, Braille) **did not get a third
 /// variant**: they are characters and live as `Char`. Opening a `Sprite::Box`
@@ -130,6 +137,7 @@ pub enum Sprite {
     Char(char),
     Rule(RuleKind),
     Cluster(u32),
+    Glyph(u32),
 }
 
 /// The **half** of a glyph in the cell grid — the fourth axis of the slot key
@@ -512,6 +520,8 @@ pub struct Atlas {
     clusters: Vec<Box<str>>,
     /// String → identity; the reverse direction of [`Atlas::clusters`].
     cluster_ids: HashMap<Box<str>, u32>,
+    /// The rows the font's rules were asked about ([`Atlas::shape_row`]).
+    shaped: shaping::Cache,
 }
 
 /// The atlas's key: if any one of these four changes, the metric, the raster
@@ -714,6 +724,7 @@ impl Atlas {
             tofu: tofu_slot(metrics, slot_metrics),
             clusters: Vec::new(),
             cluster_ids: HashMap::new(),
+            shaped: shaping::Cache::default(),
         }
     }
 
@@ -938,7 +949,7 @@ impl Atlas {
         // line is `Normal` but `wide` never arrives there (an invariant of
         // `bt_core::dock`), i.e. this arm only closes the context line.
         let want = match (sprite, size) {
-            (Sprite::Rule(_), _) | (_, SizeClass::Small) => Half::Whole,
+            (Sprite::Rule(_) | Sprite::Glyph(_), _) | (_, SizeClass::Small) => Half::Whole,
             _ => want,
         };
         let (face, size) = match (sprite, size) {
@@ -946,7 +957,9 @@ impl Atlas {
             // A small procedural character lands here too: the face is regular
             // anyway and the class stays `Small`, so its key never collides
             // with the large class's sprite (two cells, two measures).
-            (Sprite::Char(_), SizeClass::Small) => (Face::Regular, SizeClass::Small),
+            (Sprite::Char(_) | Sprite::Glyph(_), SizeClass::Small) => {
+                (Face::Regular, SizeClass::Small)
+            }
             // Unicode carries the thin/heavy distinction **in the character
             // itself** (`─` U+2500 thin, `━` U+2501 heavy), i.e. SGR bold
             // thickening the line would encode the information twice. A side
@@ -962,7 +975,9 @@ impl Atlas {
             (Sprite::Char(ch), SizeClass::Normal) if raster::is_procedural(ch) => {
                 (Face::Regular, SizeClass::Normal)
             }
-            (Sprite::Char(_), SizeClass::Normal) => (self.faces.effective(face), SizeClass::Normal),
+            (Sprite::Char(_) | Sprite::Glyph(_), SizeClass::Normal) => {
+                (self.faces.effective(face), SizeClass::Normal)
+            }
             // The cluster's face is **regular**: the shaped glyph comes from the
             // colour emoji font and there is no bold/italic there, i.e. four
             // faces would hold a byte-for-byte identical bitmap in four separate
@@ -1042,7 +1057,9 @@ impl Atlas {
         // rules stay lazy but their places are guaranteed.
         let cap = match sprite {
             Sprite::Rule(_) => self.capacity(),
-            Sprite::Char(_) | Sprite::Cluster(_) => self.capacity().saturating_sub(RULE_RESERVE),
+            Sprite::Char(_) | Sprite::Cluster(_) | Sprite::Glyph(_) => {
+                self.capacity().saturating_sub(RULE_RESERVE)
+            }
         };
         // **A wide request wants two slots and wants both at once.** The number
         // comes from `want`, not from the gate: the gate only runs during
@@ -1243,6 +1260,27 @@ impl Atlas {
             // procedural gate is not applied to it (a sequence is not a block or
             // line character) and the candidate again goes to the cascade from
             // the class's own font.
+            // A glyph the font's rules chose: drawn **by number** from the
+            // face's font, positioned as a character is. It has no fallback —
+            // a glyph number means something in one font only — and no ink
+            // gate: the character's own base glyph is not gated either.
+            Sprite::Glyph(id) => {
+                let (cell, _) = self.glyph_box(size);
+                let font = match size {
+                    SizeClass::Normal => self.faces.get(face),
+                    SizeClass::Small => &self.small,
+                };
+                let drawn = raster::draw_glyph(
+                    font,
+                    id,
+                    self.slot_metrics,
+                    cell,
+                    0.0,
+                    0.0,
+                    &mut self.buffer,
+                );
+                (drawn, Half::Whole, Plane::Mask)
+            }
             Sprite::Cluster(id) => {
                 let Some(text) = self.clusters.get(id as usize) else {
                     // The identity is not in this atlas's interner: the caller

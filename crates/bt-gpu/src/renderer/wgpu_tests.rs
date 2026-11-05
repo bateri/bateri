@@ -963,6 +963,7 @@ fn fx(cell: Cell, kind: Kind, effect: u32, t: f32) -> Fx {
         effect,
         t,
         seed: 3.0,
+        glyph: None,
     }
 }
 

@@ -13,6 +13,7 @@
 //! the same bits) and [`InkRect`] where it says `CGRect` (a copy of four
 //! `f64`s, no rounding).
 
+use crate::shaping;
 use crate::system::{Backend, Font, FontSystem};
 
 /// Font face — a **typographic concept**, not an SGR flag.
@@ -77,6 +78,10 @@ pub(crate) struct Faces {
     /// the slot waste that [`Faces::effective`] closes would silently stay
     /// open.
     acquired: [bool; 4],
+    /// Whether the faces are shaped by the font's own rules
+    /// ([`crate::shaping::opens`]); decided once, from the regular face as
+    /// the chain opened it, before any feature is given.
+    shaping: bool,
 }
 
 /// The outcome of the requested family that has to be told to the user.
@@ -114,10 +119,14 @@ impl Faces {
         features: &[(String, bool)],
     ) -> (Self, Option<FontIssue>) {
         let (regular, issue) = open_chain(family, size);
+        let shaping = shaping::opens(&regular, features);
         let mut faces = Self::derive(regular);
-        if !features.is_empty() {
+        faces.shaping = shaping;
+        if shaping {
+            // The forced-off list rides along with whatever the user chose.
+            let all = shaping::applied(features);
             for font in &mut faces.fonts {
-                *font = Backend::with_features(font, features);
+                *font = Backend::with_features(font, &all);
             }
         }
         (faces, issue)
@@ -156,7 +165,16 @@ impl Faces {
                 missing.join(", ")
             );
         }
-        Self { fonts, acquired }
+        Self {
+            fonts,
+            acquired,
+            shaping: false,
+        }
+    }
+
+    /// Whether the faces are shaped by the font's own rules.
+    pub(crate) fn shaping(&self) -> bool {
+        self.shaping
     }
 
     pub(crate) fn get(&self, face: Face) -> &Font {

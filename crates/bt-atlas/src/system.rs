@@ -14,6 +14,24 @@ use crate::raster::DrawResult;
 use crate::rules::{Face, InkRect, Metrics, RawMetrics};
 use crate::text::{Family, ShapedLine, TextBitmap};
 
+/// One glyph of a run shaped by [`FontSystem::shape_run`], in the order the
+/// shaper returned them.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the CoreText backend shapes a run")
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RunGlyph {
+    pub glyph: u32,
+    /// The UTF-16 index of the first character that produced the glyph (what
+    /// CoreText reports; the caller converts it to a character index).
+    pub index: usize,
+    /// Whether the glyph is the font asked for's own. A character the font
+    /// lacks arrives in a run of the font the cascade chose and its glyph
+    /// number means nothing in this one.
+    pub base: bool,
+}
+
 /// The primitives a platform's font stack answers.
 ///
 /// Glyph numbers are a concrete `u32`: every backend's glyph index widens to
@@ -128,6 +146,15 @@ pub(crate) trait FontSystem {
     /// not shape by the font's rules keeps this default and answers the font.
     fn with_features(font: &Self::Font, _features: &[(String, bool)]) -> Self::Font {
         font.clone()
+    }
+
+    /// Shapes `text` as one line in `font` — the font's own rules, with the
+    /// features the font carries ([`FontSystem::with_features`]) — and gives
+    /// every glyph with the character it came from. `None` when the backend
+    /// does not shape by the font's rules; the caller then draws every
+    /// character as itself.
+    fn shape_run(_font: &Self::Font, _text: &str) -> Option<Vec<RunGlyph>> {
+        None
     }
 
     /// Does the backend shape and draw **proportional** text (`crate::text`)?

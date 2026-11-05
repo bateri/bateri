@@ -184,7 +184,9 @@ impl Core {
                 .snapshot(&self.renderer, &mut shot.chain, tile);
         }
         let size = self.surface.size()?;
-        let clear = compose_still(shot, &self.session, &self.view(), size);
+        let clear = compose_still(shot, &self.session, &self.view(), size, &|cells| {
+            self.renderer.shape(cells);
+        });
         let rgba = self
             .renderer
             .snapshot(&mut shot.chain, clear, &shot.frame, size, tile)
@@ -263,7 +265,9 @@ impl Stage {
             focused: false,
             caret_focused: false,
         };
-        let clear = compose_still(&mut self.shot, session, &view, size);
+        let clear = compose_still(&mut self.shot, session, &view, size, &|cells| {
+            self.renderer.shape(cells);
+        });
         let rgba = self
             .renderer
             .snapshot(&mut self.shot.chain, clear, &self.shot.frame, size, tile)
@@ -280,7 +284,13 @@ impl Stage {
 /// colour the pass clears to — the content frame ([`Core::tick`])'s
 /// composition at rest, in the order the content frame has, which is required:
 /// each step leans on the one before it (the module header).
-fn compose_still(shot: &mut Shot, session: &Session, view: &View, size: (u32, u32)) -> LinearRgba {
+fn compose_still(
+    shot: &mut Shot,
+    session: &Session,
+    view: &View,
+    size: (u32, u32),
+    shape: &dyn Fn(&mut [GlyphCell]),
+) -> LinearRgba {
     let viewport_height = size.1 as f32;
     let theme = session.theme();
     let frame = &mut shot.frame;
@@ -316,6 +326,9 @@ fn compose_still(shot: &mut Shot, session: &Session, view: &View, size: (u32, u3
         &shot.search,
         view.focused,
     );
+    // The same order as the content frame: the font's own rules once the
+    // cells are in, the dock shaping its own list inside `place_dock`.
+    frame.shape_grid(|cells| shape(cells));
     place_edge(
         frame,
         view.edge,
@@ -343,6 +356,7 @@ fn compose_still(shot: &mut Shot, session: &Session, view: &View, size: (u32, u3
         &mut motion,
         // No typing effects: the dock at rest, every letter in its place.
         None,
+        shape,
         &theme,
     );
     let Placed { caret, band_target } =
@@ -468,7 +482,7 @@ mod tests {
     fn composed_until(session: &Session, shot: &mut Shot, cells: usize) -> LinearRgba {
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let clear = compose_still(shot, session, &view(), (128, 128));
+            let clear = compose_still(shot, session, &view(), (128, 128), &|_| {});
             if shot.frame.bg_count() >= cells {
                 return clear;
             }
@@ -496,7 +510,7 @@ mod tests {
         // Until the program's six cells are the ones in the frame (the red three come first).
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         let clear = loop {
-            let clear = compose_still(&mut shot, &session, &view(), (128, 128));
+            let clear = compose_still(&mut shot, &session, &view(), (128, 128), &|_| {});
             if session.alt_screen() && shot.frame.bg_count() >= 6 {
                 break clear;
             }
@@ -611,7 +625,7 @@ mod tests {
         );
         // And taking it was the test's: a still plants none either.
         let mut again = Shot::default();
-        compose_still(&mut again, &session, &view(), (128, 128));
+        compose_still(&mut again, &session, &view(), (128, 128), &|_| {});
         assert!(!session.take_damage(), "a still planted damage");
 
         // **The same frame**: drawn through the still's path at the frame's

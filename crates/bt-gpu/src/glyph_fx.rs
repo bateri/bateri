@@ -154,6 +154,11 @@ pub(crate) struct Fx {
     /// order, not the position: when the window slides the row changes and the
     /// fragments' pattern must not.
     pub(crate) seed: f32,
+    /// The glyph the font's own rules drew the cell as, when it was not the
+    /// character's own — a ghost's: the cell is gone from the dock, so the
+    /// answer is read once, at birth ([`GlyphFx::recall`]). An arrival's is on
+    /// the dock's glyph it copies.
+    pub(crate) glyph: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -161,6 +166,9 @@ struct Entry {
     fx: Fx,
     elapsed: f32,
     duration: f32,
+    /// Born in the edit being applied and not yet asked for its glyph
+    /// ([`GlyphFx::recall`]).
+    fresh: bool,
 }
 
 /// In-flight effects.
@@ -283,10 +291,24 @@ impl GlyphFx {
                     // audit: the seed is only a pattern; kept small so that it is represented
                     // exactly in `f32`.
                     seed: (self.serial % 1024) as f32,
+                    glyph: None,
                 },
                 elapsed: 0.0,
                 duration,
+                fresh: true,
             });
+        }
+    }
+
+    /// Gives the ghosts born in the edit just applied the glyph they were
+    /// drawn as: `recall` answers it for a cell from the dock **before** the
+    /// edit. Asked once per entry, at birth — a ghost lives for frames and
+    /// the dock it came from does not.
+    pub(crate) fn recall(&mut self, recall: impl Fn(&Cell) -> Option<u32>) {
+        for entry in &mut self.entries {
+            if std::mem::take(&mut entry.fresh) && entry.fx.kind == Kind::Ghost {
+                entry.fx.glyph = recall(&entry.fx.cell);
+            }
         }
     }
 
@@ -447,6 +469,41 @@ mod tests {
         fx.iter()
             .map(|fx| (fx.cell.row, fx.cell.col, fx.kind))
             .collect()
+    }
+
+    #[test]
+    fn a_ghost_asks_for_its_glyph_once_at_birth_and_an_arrival_never() {
+        let mut fx = GlyphFx::default();
+        fx.apply(
+            arrive(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase(7, 'c'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        // The dock before this edit drew the `c` at column 7 as glyph 900 and
+        // the `a` at column 4 as 901.
+        let before = |cell: &Cell| match (cell.col, cell.ch) {
+            (7, Some('c')) => Some(900),
+            (4, Some('a')) => Some(901),
+            _ => None,
+        };
+        fx.recall(before);
+        let glyphs: Vec<_> = fx.iter().map(|fx| (fx.kind, fx.glyph)).collect();
+        assert_eq!(
+            glyphs,
+            [(Kind::Arrival, None), (Kind::Ghost, Some(900))],
+            "a ghost keeps the glyph it was drawn as; an arrival is the dock's own cell"
+        );
+        // The dock moved on: a later ask must not overwrite what the ghost
+        // was born with.
+        fx.recall(|_| Some(1));
+        assert_eq!(fx.iter().last().map(|fx| fx.glyph), Some(Some(900)));
     }
 
     #[test]

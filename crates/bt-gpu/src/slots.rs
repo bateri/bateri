@@ -49,6 +49,76 @@ pub(crate) fn slot_layout(metrics: Metrics, plane: Plane) -> (usize, usize) {
     }
 }
 
+/// The most blank cells a row of text is held across: a blank is a space in
+/// the row's text, so the font's rules see the distance between two words,
+/// but a long stretch of blanks is the end of the context and a new row.
+const RUN_GAP: u16 = 8;
+
+/// The longest row of text asked of the shaper in one piece. A line longer
+/// than this is two rows; the cut is the same on every frame, so the answer
+/// is stable.
+const RUN_MAX: usize = 256;
+
+/// Whether the shaper may decide this cell: a character in the display font,
+/// one column wide and not an emoji sequence — those are drawn as they were
+/// ([`fan`]).
+fn shapable(cell: &GlyphCell) -> bool {
+    cell.size == SizeClass::Normal && !cell.wide && cell.cluster.is_none()
+}
+
+/// Writes [`GlyphCell::glyph`] for a list of cells: which of them the font's
+/// own rules draw as a glyph other than their character's.
+///
+/// The text is built from the cells themselves — `bt-core` gives a blank
+/// cell as no glyph at all, so the columns between two glyphs are filled
+/// with spaces — one row per run of cells on the same screen row in the same
+/// face; the colour does not cut a run (an `ls` listing is one line of text
+/// in many colours) and a face does, which is why a key half bold and half
+/// regular is only masked where a face is whole. A font without rules
+/// (`Atlas::shapes`) leaves every cell as it was and builds nothing.
+pub(crate) fn shape_cells(atlas: &mut Atlas, cells: &mut [GlyphCell]) {
+    if !atlas.shapes() {
+        return;
+    }
+    let mut text = String::new();
+    let mut shaped = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        let first = cells[start];
+        if !shapable(&first) {
+            start += 1;
+            continue;
+        }
+        text.clear();
+        text.push(first.ch);
+        let (mut end, mut next, mut chars) = (start + 1, first.col.saturating_add(1), 1);
+        while let Some(cell) = cells.get(end) {
+            let blanks = cell.col.saturating_sub(next);
+            if !shapable(cell)
+                || (cell.row, cell.face) != (first.row, first.face)
+                || cell.col < next
+                || blanks > RUN_GAP
+                || chars + usize::from(blanks) + 1 > RUN_MAX
+            {
+                break;
+            }
+            text.extend(std::iter::repeat_n(' ', usize::from(blanks)));
+            text.push(cell.ch);
+            chars += usize::from(blanks) + 1;
+            next = cell.col.saturating_add(1);
+            end += 1;
+        }
+        atlas.shape_row(first.face, &text, &mut shaped);
+        for cell in &mut cells[start..end] {
+            cell.glyph = shaped
+                .get(usize::from(cell.col - first.col))
+                .copied()
+                .flatten();
+        }
+        start = end;
+    }
+}
+
 /// Fills the frame's glyph lists: glyphs **and** rules into `mask` (one list,
 /// one draw call: glyphs first, rules after — a strikeout must cross **over**
 /// its letter), colour glyphs into `color`. Both lists are cleared first.
@@ -251,10 +321,17 @@ pub(crate) fn fan(
     // from the same sprite. Falling back to the base character is not written
     // twice: an id missing from the table is `Char`, and a cluster that does
     // not shape or fails the gate is `Atlas::slot`'s own answer.
-    let sprite = glyph
-        .cluster
-        .and_then(|id| clusters.get(id))
-        .map_or(Sprite::Char(glyph.ch), |text| atlas.intern(text));
+    //
+    // **A glyph the font's own rules chose beats the character** — the
+    // shaping pass ([`shape_cells`]) only writes it on a single-cell,
+    // clusterless cell, and the typing effects' copies carry it along.
+    let sprite = match glyph.glyph {
+        Some(id) if !glyph.wide && glyph.cluster.is_none() => Sprite::Glyph(id),
+        _ => glyph
+            .cluster
+            .and_then(|id| clusters.get(id))
+            .map_or(Sprite::Char(glyph.ch), |text| atlas.intern(text)),
+    };
     let (uv0, placed) = slot_uv(
         atlas,
         upload,

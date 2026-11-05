@@ -139,7 +139,7 @@ use bt_core::{
 
 use crate::arrival::{RISE_PT, Scene};
 use crate::blink::Blink;
-use crate::frame::{ContextStrip, Frame};
+use crate::frame::{ContextStrip, Frame, GlyphCell};
 use crate::glyph_fx::GlyphFx;
 use crate::metrics::CellMetrics;
 use crate::motion::Motion;
@@ -1402,6 +1402,10 @@ impl Core {
             &self.search.borrow(),
             self.focused.get(),
         );
+        // **The font's own rules, once the cells are all in** (a masked key,
+        // an alternate letter): the atlas that knows them is the renderer's,
+        // and the dock below shapes its own list for the same reason.
+        frame.shape_grid(|cells| self.renderer.shape(cells));
         // The gate's operand rises here: damage was found, the frame will be
         // drawn. Before `frames` and independent of it — it does not wait for
         // the GPU to finish (see `Core::content_frames`).
@@ -1480,6 +1484,7 @@ impl Core {
             },
             &mut motion,
             Some(&mut glyph_fx),
+            &|cells| self.renderer.shape(cells),
             &theme,
         );
         drop(glyph_fx);
@@ -2351,6 +2356,7 @@ fn place_dock(
     bufs: DockBufs<'_>,
     motion: &mut Motion,
     fx: Option<&mut GlyphFx>,
+    shape: &dyn Fn(&mut [GlyphCell]),
     theme: &Theme,
 ) -> Option<(DockCaret, LinearRgba)> {
     let mut dock_caret = None;
@@ -2396,6 +2402,10 @@ fn place_dock(
         // the buttons' fills all go through `dock_pos`, and the zone's start
         // is only known from this dock call.
         frame.set_context_trailing(dock.trailing, view.context.offset_px);
+        // **The font's own rules, before the effects copy a cell**: an
+        // arrival is the dock's glyph and a ghost is born of the dock
+        // before this one, so both read the answer from here.
+        frame.shape_dock(shape);
         // No mark → the input's first row is outside the vertical window.
         // **The mark is pushed with the cells, before the effects**: the
         // arrival scene hides it and turns it into an effect in
@@ -2434,6 +2444,9 @@ fn place_dock(
                 // `dock()`: an effect the scroll pushes out of the window
                 // drops.
                 fx.apply(edit, *motion, cursor.input_rows, frame.dock_clusters());
+                // A ghost is the cell **before** the edit: the glyph it was
+                // drawn as is in the previous dock, which `clear` kept.
+                fx.recall(|cell| frame.recalled(cell));
             }
             frame.suppress_dock(fx);
             frame.set_dock_fx(fx.iter(), fx.clusters(), theme.cursor_linear());

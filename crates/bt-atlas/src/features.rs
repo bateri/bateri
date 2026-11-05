@@ -30,13 +30,6 @@ pub struct FontFeature {
 /// The features a shaper switches on without being asked. A font with
 /// rules under none of these shapes like a font without rules unless the
 /// user turns something on.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the question of [`has_default_rules`], asked by the shaping gate"
-    )
-)]
 const DEFAULT_ON: [&[u8; 4]; 5] = [b"ccmp", b"calt", b"liga", b"clig", b"rlig"];
 
 /// The size a font is opened at only to read its tables: the tables do not
@@ -67,13 +60,6 @@ pub fn font_features(family: Option<&str>) -> Vec<FontFeature> {
 /// Does the font have a rule that runs without the user asking for it
 /// (`ccmp`, `calt`, `liga`, `clig`, `rlig`)? A font without any is not
 /// shaped until the user selects a feature.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the shaping gate asks it; the font's tests do today"
-    )
-)]
 pub(crate) fn has_default_rules(gsub: &[u8]) -> bool {
     tags(gsub).any(|tag| DEFAULT_ON.iter().any(|on| **on == tag.tag))
 }

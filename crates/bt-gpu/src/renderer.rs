@@ -1888,6 +1888,31 @@ impl Renderer {
         self.gpu.target(edge)
     }
 
+    /// Writes which of `cells` the font's own rules draw as another glyph
+    /// ([`GlyphCell::glyph`]). A list is shaped once, after it is built and
+    /// before anything copies its cells (the typing effects do): the atlas
+    /// holds the font and the shaped rows' cache, `Frame` holds neither.
+    ///
+    /// Nothing is written before the atlas exists — the first frame's
+    /// metrics open it — and a font without rules is not asked.
+    pub(crate) fn shape(&self, cells: &mut [GlyphCell]) {
+        if let Some(entry) = self.state.borrow_mut().atlas.as_mut() {
+            slots::shape_cells(&mut entry.atlas, cells);
+        }
+    }
+
+    /// How many rows the shaper has been asked to shape since the atlas was
+    /// built: the proof a font without rules is never asked and a row seen
+    /// twice is asked once.
+    #[cfg(test)]
+    pub(crate) fn shape_calls(&self) -> usize {
+        self.state
+            .borrow()
+            .atlas
+            .as_ref()
+            .map_or(0, |entry| entry.atlas.shape_calls())
+    }
+
     /// Brings the atlas to the requested font at `scale` and returns the grid
     /// geometry: cell size and gutter ([`CellMetrics::from_atlas`]).
     ///
@@ -3377,6 +3402,8 @@ fn pipeline_over(
 
 #[cfg(test)]
 mod picture_tests;
+#[cfg(test)]
+mod shaping_tests;
 pub(crate) mod shrink;
 #[cfg(test)]
 pub(crate) mod tests;
