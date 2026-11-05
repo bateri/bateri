@@ -20,9 +20,9 @@
 //!
 //! Then **what they are**: one table row per terminal the server has (`ID TAB LABEL PROGRAM STATE
 //! AGE QUIET SIZE OPENED BY DIRECTORY`), every column of it from the server's own statement
-//! ([`kablo_proto::v1::Status`]) so that it reads the same with the Mac away; `TAB` is the id of
+//! ([`kablo_proto::v1::Status`]) so that it reads the same with the bateri app away; `TAB` is the id of
 //! its tab. A terminal in no tab says `none` there (it is in the list of what runs in the
-//! background) and one whose pane is waiting for the Mac says `waiting`.
+//! background) and one whose pane is waiting for the bateri app says `waiting`.
 //!
 //! **What an agent is not told.** A pane that is not a terminal of this server — a local shell,
 //! another server's terminal — is `another machine` and nothing more: no id, no label, no title,
@@ -198,7 +198,7 @@ pub struct Row {
     pub status: Status,
     /// The terminal that opened it, when one did.
     pub opened_by: Option<String>,
-    /// Its pane waits for the Mac: it was opened while the Mac was away.
+    /// Its pane waits for the bateri app: it was opened while the bateri app was away.
     pub waiting: bool,
 }
 
@@ -209,14 +209,14 @@ pub struct Scene {
     pub caller: Option<String>,
     /// The terminal the user is typing in, when it is one of this server's.
     pub typing: Option<String>,
-    /// The windows, or `None` when the Mac is not connected and nothing of the layout is known.
+    /// The windows, or `None` when the bateri app is not connected and nothing of the layout is known.
     pub windows: Option<Vec<Window>>,
     pub terminals: Vec<Row>,
 }
 
 /// The table's rows: each terminal the server said it has, with the terminal that opened it as
 /// the server's records say (a terminal with no record, or opened from none, has no opener) and
-/// whether its pane waits for the Mac (`waits`).
+/// whether its pane waits for the bateri app (`waits`).
 pub fn rows(
     terminals: Vec<Status>,
     records: &[(Terminal, Record)],
@@ -434,7 +434,8 @@ impl Scene {
             (None, None) => {}
         }
         match &self.windows {
-            None => out.push_str("The Mac is not connected, so what is on screen is not known.\n"),
+            None => out
+                .push_str("The bateri app is not connected, so what is on screen is not known.\n"),
             Some(windows) if windows.is_empty() => out.push_str("No windows are open.\n"),
             Some(windows) => {
                 for window in windows {
@@ -501,7 +502,7 @@ impl Scene {
 
     // ─── JSON ────────────────────────────────────────────────────────────
 
-    /// The scene as JSON: an object with `caller`, `typing`, `windows` (`null` when the Mac is
+    /// The scene as JSON: an object with `caller`, `typing`, `windows` (`null` when the bateri app is
     /// not connected) and `terminals`, a window or a terminal to a line.
     pub fn json(&self) -> String {
         let mut out = String::from("{\"caller\":");

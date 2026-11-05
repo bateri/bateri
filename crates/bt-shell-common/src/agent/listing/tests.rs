@@ -605,7 +605,7 @@ fn with_the_mac_away_the_table_stands_alone() {
     let expected = "\
 You are p4.
 
-The Mac is not connected, so what is on screen is not known.
+The bateri app is not connected, so what is on screen is not known.
 
 ID  TAB      LABEL  PROGRAM  STATE    AGE  QUIET  SIZE    OPENED BY  DIRECTORY
 p4  -        -      zsh      running  -    -      120x30  -          -

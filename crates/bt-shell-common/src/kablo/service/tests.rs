@@ -3130,6 +3130,66 @@ fn a_letter_that_is_dropped_hangs_up_so_that_the_program_is_not_left_waiting() {
 }
 
 #[test]
+fn the_conversation_of_a_letter_is_over_when_the_program_hangs_up_on_it() {
+    let (rig, _holder, _terminal) = mail_rig("letter-gone");
+    let stream = program_opens(&rig, None);
+    rig.world.bridge().sender_data(stream, b"wait p9@prod\n");
+    rig.world.bridge().sender_eof(stream);
+    let letter = rig.world.letter();
+    let (over, hears) = std::sync::mpsc::channel();
+    letter.gone().when_over(move || {
+        let _ = over.send(());
+    });
+    assert!(
+        hears.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the program is still waiting for its answer"
+    );
+    // The program is ended (`^C`) while the application works on the answer.
+    rig.world.bridge().sender_close(stream);
+    hears
+        .recv_timeout(Duration::from_secs(10))
+        .expect("what waits for the end of the conversation is told");
+    // Told of a conversation that is over already, at once.
+    let (late, hears) = std::sync::mpsc::channel();
+    letter.gone().when_over(move || {
+        let _ = late.send(());
+    });
+    assert!(hears.try_recv().is_ok());
+    letter.answer(b"too late\n".to_vec());
+    assert_eq!(rig.world.bridge().breaches(), 0);
+}
+
+#[test]
+fn the_conversation_of_a_letter_is_over_when_it_is_answered_or_given_up() {
+    let (rig, _holder, _terminal) = mail_rig("letter-answered");
+    let told = |letter: &Letter| {
+        let (over, hears) = std::sync::mpsc::channel();
+        letter.gone().when_over(move || {
+            let _ = over.send(());
+        });
+        hears
+    };
+    let stream = program_opens(&rig, None);
+    rig.world.bridge().sender_eof(stream);
+    let letter = rig.world.letter();
+    let hears = told(&letter);
+    letter.answer(b"ok\n".to_vec());
+    hears
+        .recv_timeout(Duration::from_secs(10))
+        .expect("answered");
+
+    let stream = program_opens(&rig, None);
+    rig.world.bridge().sender_eof(stream);
+    let letter = rig.world.letter();
+    let hears = told(&letter);
+    drop(letter);
+    hears
+        .recv_timeout(Duration::from_secs(10))
+        .expect("given up");
+    until("the hang up", || rig.world.bridge().app_closed(stream));
+}
+
+#[test]
 fn a_letter_can_be_answered_from_another_thread() {
     fn is_send<T: Send>() {}
     is_send::<Letter>();

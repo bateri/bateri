@@ -31,10 +31,10 @@ pub fn opener(program: Option<&str>, terminal: &str) -> String {
 }
 
 /// The place the words say: the server as the user typed it, without its user and port, or "this
-/// Mac" for the empty name this Mac's account has.
+/// computer" for the empty name this computer's account has.
 fn place(host: &str) -> String {
     if host.is_empty() {
-        return "this Mac".to_owned();
+        return "this computer".to_owned();
     }
     bt_core::bare_host(host)
         .chars()
@@ -43,7 +43,7 @@ fn place(host: &str) -> String {
 }
 
 /// "Claude opened 3 terminals on rasp": `program` is what ran in the terminal that asked (the
-/// agent), `host` the server as the user typed it (empty: this Mac).
+/// agent), `host` the server as the user typed it (empty: this computer).
 pub fn opened(program: Option<&str>, host: &str, count: u32) -> String {
     let host = place(host);
     let things = if count == 1 {
@@ -86,12 +86,12 @@ mod tests {
     }
 
     #[test]
-    fn this_mac_has_no_host_name_to_say() {
+    fn this_computer_has_no_host_name_to_say() {
         assert_eq!(
             opened(Some("claude"), "", 2),
-            "Claude opened 2 terminals on this Mac"
+            "Claude opened 2 terminals on this computer"
         );
-        assert_eq!(notified(None, ""), "A program on this Mac");
+        assert_eq!(notified(None, ""), "A program on this computer");
     }
 
     #[test]

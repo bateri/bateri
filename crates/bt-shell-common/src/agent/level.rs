@@ -19,7 +19,7 @@
 //! says, not by how short an id is). "Reaches another machine" is starting a terminal on it and
 //! typing into or reading one of its panes.
 //!
-//! Everything here is a pure function so that the table is tested row by row; the Mac asks it and
+//! Everything here is a pure function so that the table is tested row by row; the bateri app asks it and
 //! carries the answer out, and nothing asks the user.
 
 pub use bt_core::CommandLevel;
@@ -121,7 +121,7 @@ pub const fn shown(level: CommandLevel, panes: Panes) -> bool {
 
 /// The one line a refusal says, for the host the command ran on: what is refused, the level it
 /// ran at and the setting that changes it. `host` is the server as the user typed it, or `None`
-/// for this Mac.
+/// for this computer.
 pub fn refusal(level: CommandLevel, why: Why, host: Option<&str>) -> String {
     let (place, setting) = match host {
         Some(host) => (
@@ -129,7 +129,7 @@ pub fn refusal(level: CommandLevel, why: Why, host: Option<&str>) -> String {
             format!("`commands` in the [remote] hosts entry for {host}"),
         ),
         None => (
-            "on this Mac".to_owned(),
+            "on this computer".to_owned(),
             "`level` in the [commands] section".to_owned(),
         ),
     };

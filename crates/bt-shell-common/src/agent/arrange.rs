@@ -14,10 +14,10 @@
 //!
 //! It holds at every level, `full` too, and looks at the **target's window**. A layout command
 //! (`zoom`, `swap`, `move`, `resize`) whose tab is not on screen changes nothing anyone types
-//! into and is free. Everything here is a pure function; the Mac reads the keyboard and carries
+//! into and is free. Everything here is a pure function; the bateri app reads the keyboard and carries
 //! the answer out.
 
-/// Where the keyboard is, as the Mac reads it.
+/// Where the keyboard is, as the bateri app reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Keyboard {
     /// bateri is the application in front.

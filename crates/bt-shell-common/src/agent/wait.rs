@@ -1,10 +1,10 @@
 //! The requests that wait for their anchor to have a pane.
 //!
-//! A terminal an agent started beside a terminal that no tab of this Mac shows (the Mac does not
-//! show the agent's own terminal: it is in the list of what runs in the background, or on another
-//! Mac) has no place yet. The terminal runs on, in that list; the request is kept here, in memory,
+//! A terminal an agent started beside a terminal that no tab of this computer shows (the bateri app
+//! does not show the agent's own terminal: it is in the list of what runs in the background, or on
+//! another computer) has no place yet. The terminal runs on, in that list; the request is kept here, in memory,
 //! and when a pane starts to show the anchor — opened from the list, restored, moved here from
-//! another Mac, any way a pane comes to show a terminal — the pane goes beside it as the agent
+//! another computer, any way a pane comes to show a terminal — the pane goes beside it as the agent
 //! asked ([`super::serve::settle_waiting`]).
 //!
 //! In memory, because the terminal is in the list either way and a request kept across a restart

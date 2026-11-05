@@ -530,12 +530,11 @@ pub trait Backend: Send + Sync + 'static {
         Vec::new()
     }
 
-    /// How a program on this Mac reaches the server the `ssh` arguments `args` name (`bateri
-    /// split -S prod`): the server, bateri's level for it and the words of the `ssh` command that
-    /// ride the connection bateri keeps to it. The same gate as the server's own pane
-    /// ([`Backend::route`]); `ask` is how a password is asked for when the connection must be
-    /// made. It **waits** for that password, so it is called on a thread of its own and never on
-    /// the main one. The `Err` is a line for the program that asked. It also sets the server up
+    /// How a program reaches the server the `ssh` arguments `args` name (`bateri split -S prod`):
+    /// the server and bateri's level for it, over the connection bateri keeps to it. The same
+    /// gate as the server's own pane ([`Backend::route`]); `ask` is how a password is asked for
+    /// when the connection must be made. It **waits** for that password, so it is called on a
+    /// thread of its own and never on the main one. The `Err` is a line for the program that asked. It also sets the server up
     /// as a terminal does, once a run — kablo, the files, the command — and renews the terminals
     /// kablo there ran before it (`live` gives the ledger's terminals of an account).
     fn reach(
@@ -588,9 +587,6 @@ pub struct Reached {
     pub server: KabloHost,
     /// What the `bateri` command may do on it.
     pub level: bt_core::CommandLevel,
-    /// The `ssh` command's words after the program: options, then the destination. One word to
-    /// a line of the reply, so none has a line break.
-    pub argv: Vec<String>,
 }
 
 /// What a [`Service::survey`] came back with.
@@ -653,9 +649,58 @@ pub struct Letter {
     tx: Sender<Msg>,
     talk: Talk,
     answered: bool,
+    gone: Gone,
+}
+
+/// Whether the program a [`Letter`] came from is still in the conversation: it is over when the
+/// program hung up on it (a `^C` on `bateri wait`), when the answer was read, or when the
+/// connection to the server went. What the application started for the program stops with it.
+#[derive(Clone, Default)]
+pub struct Gone(Arc<Mutex<GoneState>>);
+
+#[derive(Default)]
+struct GoneState {
+    over: bool,
+    then: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+impl Gone {
+    /// A conversation that is going on.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Runs `then` when the conversation is over, on whichever thread ends it; at once, on this
+    /// one, when it is over already.
+    pub fn when_over(&self, then: impl FnOnce() + Send + 'static) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.over {
+            drop(state);
+            then();
+        } else {
+            state.then.push(Box::new(then));
+        }
+    }
+
+    /// The conversation is over: what waited for that runs.
+    pub fn end(&self) {
+        let then = {
+            let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            state.over = true;
+            std::mem::take(&mut state.then)
+        };
+        for then in then {
+            then();
+        }
+    }
 }
 
 impl Letter {
+    /// The conversation the letter is of, which says when the program is gone from it.
+    pub fn gone(&self) -> Gone {
+        self.gone.clone()
+    }
+
     /// Says `bytes` to the program and ends the conversation. Nothing happens
     /// when the connection to the server went meanwhile: the program saw that.
     pub fn answer(mut self, bytes: Vec<u8>) {
@@ -1199,6 +1244,7 @@ impl Service {
             takes: BTreeMap::new(),
             ending: Vec::new(),
             drafts: BTreeMap::new(),
+            letters: BTreeMap::new(),
             opening: Vec::new(),
             pipes: BTreeMap::new(),
             collisions: BTreeMap::new(),
@@ -1762,6 +1808,8 @@ struct Core {
     /// What programs on the servers are saying to the application, until each has said
     /// all it had ([`Letter`]).
     drafts: BTreeMap<(String, Talk), Draft>,
+    /// The conversations whose letter is out, until each is over ([`Gone`]).
+    letters: BTreeMap<(String, Talk), Gone>,
     /// The programs and connections callers asked for that wait for their account's connection
     /// ([`Streams`]).
     opening: Vec<pipes::StreamOpen>,
@@ -2035,11 +2083,13 @@ impl Core {
                     client.say(talk, &bytes);
                     client.finish(talk);
                 }
+                self.conversation_over(&account, talk);
             }
             Msg::Hang { account, talk } => {
                 if let Some(client) = self.hub.client_mut(&account) {
                     client.hang_up(talk);
                 }
+                self.conversation_over(&account, talk);
             }
             Msg::Here(pending) => self.here(pending),
             Msg::Local(ask) => self.local(ask, now),
@@ -2269,8 +2319,10 @@ impl Core {
                                 self.stream_exited(&account, talk, exit);
                             }
                             // Over before it said all it had: nothing was handed to anybody.
+                            // Over after: what the application started for the letter stops.
                             Event::TalkOver { talk, over } => {
                                 self.drafts.remove(&(account.clone(), talk));
+                                self.conversation_over(&account, talk);
                                 self.stream_over(&account, talk, &over);
                             }
                             _ => {}
@@ -2496,6 +2548,13 @@ impl Core {
         }
     }
 
+    /// The conversation of a letter is over, however: what waits for that runs.
+    fn conversation_over(&mut self, account: &str, talk: Talk) {
+        if let Some(gone) = self.letters.remove(&(account.to_owned(), talk)) {
+            gone.end();
+        }
+    }
+
     /// The program has said all it had: the application gets it, whole.
     fn said_all(&mut self, account: &str, talk: Talk) {
         let Some(draft) = self.drafts.remove(&(account.to_owned(), talk)) else {
@@ -2506,6 +2565,9 @@ impl Core {
             .get(account)
             .map(|entry| (entry.server.host.clone(), entry.server.argv.clone()))
             .unwrap_or_default();
+        let gone = Gone::new();
+        self.letters
+            .insert((account.to_owned(), talk), gone.clone());
         self.shared.backend.mail(Letter {
             account: account.to_owned(),
             from: draft.from,
@@ -2515,6 +2577,7 @@ impl Core {
             tx: self.shared.tx.clone(),
             talk,
             answered: false,
+            gone,
         });
     }
 

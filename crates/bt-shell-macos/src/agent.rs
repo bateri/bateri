@@ -1,6 +1,6 @@
 //! What a program on a server asks of the app, and the panes that come of it.
 //!
-//! `bateri split` on a server starts a terminal there (kablo's, numbered `p9`) and asks the Mac
+//! `bateri split` on a server starts a terminal there (kablo's, numbered `p9`) and asks the bateri app
 //! where its pane goes, over the conversation kablo gives the app ([`Letter`]). The decision is
 //! `bt-shell-common`'s ([`bt_shell_common::agent::serve`], with the rule of where a pane lands
 //! in [`bt_shell_common::agent::place`]); this module lends it the windows ([`Shell`]) and
@@ -22,10 +22,10 @@
 //!   with the terminal it shows.
 //! - **A pane that cannot be placed waits; a place that is not there is refused.** The terminal
 //!   runs on the server and is in the list of what runs in the background; a request whose
-//!   anchor is on no tab of this Mac is kept here ([`Queue`]) until a pane shows the anchor — a pane opened
+//!   anchor is on no tab of this computer is kept here ([`Queue`]) until a pane shows the anchor — a pane opened
 //!   from that list, restored, moved here, any way ([`terminal_shown`]) — and then goes beside
 //!   it. A restart loses the pairing and not the terminal.
-//! - **What was left while the Mac was away** is read when a connection to the server comes up
+//! - **What was left while the bateri app was away** is read when a connection to the server comes up
 //!   ([`notes`]) and placed the same way, a terminal that ended meanwhile excepted unless it was
 //!   asked to stay.
 //! - **The user is told once.** Panes that open while bateri is behind are one notification
@@ -34,7 +34,7 @@
 //! - **`ls` is what is on screen and what the server has, side by side.** The windows, tabs and
 //!   split trees are read where they stand when the server's list arrives ([`windows_of`]); the
 //!   terminals are the server's own words, asked for now ([`hold_service::survey`]), so the
-//!   answer is the same table the command prints without a Mac, with the tabs filled in.
+//!   answer is the same table the command prints without the bateri app, with the tabs filled in.
 //! - **Nothing asks the user; the machine's level decides.** What the command may do is the
 //!   server's [`CommandLevel`] ([`bt_shell_common::agent::level`]), read from the settings when
 //!   the request arrives: `off` refuses everything, `own` shows and changes what is the
@@ -47,7 +47,7 @@
 //!   behind, or into a window other than the one being typed in; otherwise they are refused (77)
 //!   or, for `--focus`, the pane is made and the answer says the keyboard stayed ([`arrange`]).
 //! - **`notify` is one notification and a tick.** The notification when bateri is behind, or in
-//!   front with no tab of this Mac showing the program (then nothing else could show it); the tab
+//!   front with no tab of this computer showing the program (then nothing else could show it); the tab
 //!   the program runs in is marked as having news unless it is the one on screen.
 //!
 //! Everything here runs on the main thread: the service's thread hands a letter over by hopping
@@ -123,7 +123,7 @@ fn state<R>(edit: impl FnOnce(&mut State) -> R) -> R {
 // ─── The doors ───────────────────────────────────────────────────────────
 
 /// A program on a server said something to the app (`Backend::mail`, on the service's thread):
-/// the main queue takes it. Nobody to take it hangs up, which the command reads as no Mac.
+/// the main queue takes it. Nobody to take it hangs up, which the command reads as no bateri app.
 pub(crate) fn letter(letter: Letter) {
     DispatchQueue::main().exec_async(move || {
         // audit: a block running on the main queue is on the main thread by definition.
@@ -230,7 +230,7 @@ pub(crate) fn seen() {
 
 // ─── A letter ────────────────────────────────────────────────────────────
 
-/// What the `bateri` command may do on the machine of `account` just now: this Mac's own level, or
+/// What the `bateri` command may do on the machine of `account` just now: this computer's own level, or
 /// the host's entry. Read each time it is needed — a request that waited has the level of the
 /// moment it is placed, not of the moment it was asked.
 fn command_level(app: &AppDelegate, account: &str, host: &str) -> CommandLevel {
@@ -279,7 +279,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
     world.finish();
 }
 
-/// What a server left while the Mac was away.
+/// What a server left while the bateri app was away.
 fn read(app: &AppDelegate, server: &Server, notes: Vec<Note>) {
     let mut world = World::new(app);
     let read = serve::settle_notes(
@@ -333,7 +333,7 @@ enum Dest {
     Window,
 }
 
-/// The pane of this Mac a request is placed by: the anchor, with its tab and the name the server
+/// The pane of this computer a request is placed by: the anchor, with its tab and the name the server
 /// knows it by.
 struct Beside<'a> {
     tab: &'a TerminalTab,
@@ -341,7 +341,7 @@ struct Beside<'a> {
     name: &'a Anchor,
 }
 
-/// The Mac's windows, lent to the decision.
+/// The bateri app's windows, lent to the decision.
 struct World<'a> {
     app: &'a AppDelegate,
     opened: Vec<Opened>,
@@ -460,7 +460,7 @@ impl<'a> World<'a> {
         let window = into.window().ok_or("the tab has no window")?;
         let name = place.terminal.to_string();
         let terminal = SessionId::new(&name).map_err(|e| e.to_string())?;
-        // A pane of this Mac is an ordinary one that is born with the identity its terminal was
+        // A pane of this computer is an ordinary one that is born with the identity its terminal was
         // written in the ledger for; a server's is the pipe to a terminal there.
         let uuid = local::is_account(&target.account).then(crate::pane::new_pane_uuid);
         let start = if uuid.is_some() {
@@ -523,7 +523,7 @@ impl<'a> World<'a> {
             },
         };
         // A terminal a pane is about to show is no longer one that was asked to end. For this
-        // Mac the ledger is told which pane the terminal is for before the pane exists, so that
+        // computer the ledger is told which pane the terminal is for before the pane exists, so that
         // the pane finds it when it starts; one that is not started yet is made under its name.
         if let Some(uuid) = &uuid {
             if place.fresh.is_some() {
@@ -614,8 +614,8 @@ fn standing(window: &TerminalWindow, tab: &TerminalTab) -> (Option<Id>, Option<I
     )
 }
 
-/// What `pane` shows of the account `account`: a terminal a server keeps, or — for this Mac's
-/// account — the terminal of this Mac that carries the pane ([`hold_service::shown_local`]). The
+/// What `pane` shows of the account `account`: a terminal a server keeps, or — for this computer's
+/// account — the terminal of this computer that carries the pane ([`hold_service::shown_local`]). The
 /// service's own [`hold_service::shown`] is a server's alone.
 fn shown_in(pane: &TerminalPane, account: &str) -> Option<Shown> {
     if local::is_account(account) {
@@ -624,11 +624,11 @@ fn shown_in(pane: &TerminalPane, account: &str) -> Option<Shown> {
     hold_service::shown(pane.uuid()).filter(|shown| shown.account == account)
 }
 
-/// A pane of this Mac found by the terminal it shows: its tab, the pane, and what the service
+/// A pane of this computer found by the terminal it shows: its tab, the pane, and what the service
 /// says it shows.
 type Found = (Retained<TerminalTab>, Retained<TerminalPane>, Shown);
 
-/// The pane of this Mac that shows `terminal` of the server `account` (for this Mac's account,
+/// The pane of this computer that shows `terminal` of the server `account` (for this computer's account,
 /// the pane the terminal carries), with its tab and what the service says it shows. Any window,
 /// any tab, on screen or not.
 fn find_pane(app: &AppDelegate, account: &str, terminal: &str) -> Option<Found> {
@@ -645,7 +645,7 @@ fn find_pane(app: &AppDelegate, account: &str, terminal: &str) -> Option<Found> 
 }
 
 /// The pane that shows the terminal `address` names — a terminal of the machine that asked, or
-/// of another written with its machine (`p9@prod`, this Mac `p9@local`), as `ls` prints them. A
+/// of another written with its machine (`p9@prod`, this computer `p9@local`), as `ls` prints them. A
 /// terminal of another machine is a pane the level lets the machine change (`screen` and up: it
 /// is not its own), found among the panes on screen by the host the pane shows
 /// ([`bt_core::bare_host`]); one name that two accounts of a host both have is a mistake the
@@ -684,8 +684,8 @@ fn find_address(
     Ok(found.drain(..).next())
 }
 
-/// The panes of this Mac that show the terminal `name` of `machine` (a host as `ls` writes it, or
-/// this Mac): one for each account that has one.
+/// The panes of this computer that show the terminal `name` of `machine` (a host as `ls` writes it, or
+/// this computer): one for each account that has one.
 fn panes_named(app: &AppDelegate, machine: &str, name: &str) -> Vec<Found> {
     let mut found = Vec::new();
     for tab in app.tabs() {
@@ -780,12 +780,12 @@ impl Shell for World<'_> {
         opener: Option<&str>,
     ) -> Placing {
         let Some((tab, pane, shown)) = find_pane(self.app, &server.account, anchor.name()) else {
-            // A server's anchor may come later (a pane shows it, any way); this Mac's terminals
+            // A server's anchor may come later (a pane shows it, any way); this computer's terminals
             // are its panes' and nothing else shows one.
             if local::is_account(&server.account) {
                 return Placing::Refused(Failure::new(
                     Kind::Unknown,
-                    format!("no pane of this Mac shows {anchor} to go beside"),
+                    format!("no pane of this computer shows {anchor} to go beside"),
                 ));
             }
             return Placing::NoAnchor;
@@ -962,7 +962,7 @@ fn pane_of(pane: &TerminalPane, account: &str, level: CommandLevel) -> Pane {
         return Pane::Elsewhere;
     }
     // A pane that shows a terminal of another server is told by that server; any other pane
-    // (a shell of this Mac) is this Mac's, by the number its terminal has when it has one
+    // (a shell of this computer) is this computer's, by the number its terminal has when it has one
     // (`p3@local`) and by nothing else when it has not.
     match hold_service::shown(pane.uuid()) {
         Some(shown) => Pane::Remote {
@@ -1128,7 +1128,7 @@ fn notify(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str>
 /// `OSC 9` / `OSC 777` alike. The tab it runs in (`at`: the tab and the pane) is marked as having
 /// news unless the user is looking at it. With bateri behind, the words come as a notification;
 /// one with a `replacing` name takes the place of the last one of that name. In front, the tab is
-/// what shows it — and when no tab of this Mac shows the program, the notification is shown in
+/// what shows it — and when no tab of this computer shows the program, the notification is shown in
 /// front instead, the one kind of notification that is
 /// ([`uploader::deliver_notification_in_front`]).
 pub(crate) fn notice(
@@ -1252,10 +1252,11 @@ mod tests {
         // and the letter is answered from there.
         let relay = body("pub(super) fn relay(");
         let thread = relay.find("thread::Builder::new()").expect(relay);
-        assert!(!relay[..thread].contains("run::execute("), "{relay}");
+        assert!(!relay[..thread].contains("run::serve("), "{relay}");
+        assert!(relay[thread..].contains("run::serve("), "{relay}");
         assert!(relay[thread..].contains("letter.answer("), "{relay}");
-        let relayed = body("fn relayed(");
-        assert!(relayed.contains("run::execute("), "{relayed}");
+        // It ends with the conversation: the program that asked hung up.
+        assert!(relay[thread..].contains("letter.gone()"), "{relay}");
         let place = body("pub(super) fn place_on(");
         let thread = place.find("thread::Builder::new()").expect(place);
         let route = place.find("backend.route(").expect(place);
@@ -1274,12 +1275,12 @@ mod tests {
         assert!(put.contains("account:target.account.clone()"), "{put}");
     }
 
-    /// A pane of this Mac is an ordinary pane born with the identity its terminal was written in
+    /// A pane of this computer is an ordinary pane born with the identity its terminal was written in
     /// the ledger for (`register_local`), or made under the number it was told (`expect_name`);
     /// it holds no pipe to a server (no `Held`, no `ssh-hold`), and an anchor that no pane shows
     /// is refused and not kept waiting. A source scan, like the one above.
     #[test]
-    fn a_pane_of_this_mac_is_registered_before_it_exists_and_holds_no_pipe() {
+    fn a_pane_of_this_computer_is_registered_before_it_exists_and_holds_no_pipe() {
         let source = include_str!("agent.rs");
         let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
         let body = |signature: &str| {
@@ -1291,7 +1292,7 @@ mod tests {
         let pipe = put.find("pipe_installed(").expect(put);
         assert!(
             local < pipe,
-            "the server's pipe is not looked at for this Mac: {put}"
+            "the server's pipe is not looked at for this computer: {put}"
         );
         assert!(put.contains("hold_service::register_local("), "{put}");
         assert!(put.contains("hold_service::expect_name("), "{put}");

@@ -10,7 +10,7 @@ use crate::child::PaneRuns;
 pub use kablo_bateri::message::*;
 
 /// What the pane a request asks for runs: no `fresh` is a program the command started in the
-/// terminal, `fresh` is a shell for the Mac to start, the one named or the user's.
+/// terminal, `fresh` is a shell for the bateri app to start, the one named or the user's.
 pub fn runs(place: &Place) -> PaneRuns {
     match (&place.fresh, &place.shell) {
         (None, _) => PaneRuns::Program {

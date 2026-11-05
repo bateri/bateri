@@ -1004,8 +1004,7 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
         "{error}"
     );
 
-    // Opened once, the words of the command are those of the server's own commands: no terminal,
-    // no password, no second master, and the destination last.
+    // Opened once, the server is reached: no terminal, no password, no second master.
     let mut state = ssh_wrap::HostState::default();
     state.note(Fact::Touched, "u@h:22", 1);
     std::fs::write(&world.state, state.render()).expect("state");
@@ -1014,17 +1013,6 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
         .expect("reached");
     assert_eq!(reached.server.key, "u@h:22");
     assert_eq!(reached.level, CommandLevel::Own);
-    assert_eq!(
-        reached.argv[..5],
-        ["-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no"]
-    );
-    assert_eq!(reached.argv.last().map(String::as_str), Some("rasp"));
-    assert!(
-        reached
-            .argv
-            .iter()
-            .all(|word| !word.chars().any(char::is_control))
-    );
 
     // The gate of the server's own pane: a server kablo cannot be kept on, a call that is not a
     // plain interactive one, a package that is not there.
@@ -1071,7 +1059,6 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
     let calls = world.calls().len();
     let reached = off.reach(&args, Ask::Never, &|_| Vec::new()).expect("said");
     assert_eq!(reached.level, CommandLevel::Off);
-    assert!(reached.argv.is_empty());
     assert_eq!(
         world.calls().len(),
         calls + 1,

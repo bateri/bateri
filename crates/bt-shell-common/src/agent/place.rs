@@ -10,7 +10,7 @@
 //!
 //! The answer says **how** the pane landed, not only where ([`Landed`]), since the agent and the
 //! listing read it: as asked, beside the group the anchor is part of (the anchor was too small),
-//! in a new tab (no room), or still waiting for a tab (decided by the Mac, which knows whether
+//! in a new tab (no room), or still waiting for a tab (decided by the bateri app, which knows whether
 //! the anchor is in any tab at all).
 //!
 //! A zoomed tab keeps its zoom: the pane is put in the tree as always and is born behind the

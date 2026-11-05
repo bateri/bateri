@@ -444,6 +444,19 @@ struct RealMac {
     home: PathBuf,
     sockets: PathBuf,
     streams: std::sync::OnceLock<crate::kablo::service::Streams>,
+    stand_in: StandIn,
+}
+
+/// What a test makes of this Mac to stand in for what it is not: the login shell of the machine,
+/// and the server `prod`, which is this Mac under another name.
+#[derive(Default)]
+struct StandIn {
+    /// The shell the programs the server runs are told to be logged in with (`SHELL`).
+    shell: Option<PathBuf>,
+    /// What the commands of `prod` may do; unset, `prod` is not a server.
+    level: Mutex<Option<bt_core::CommandLevel>>,
+    /// Whether each call to reach `prod` could ask for a password.
+    asked: Mutex<Vec<bool>>,
 }
 
 impl Backend for RealMac {
@@ -477,7 +490,36 @@ impl Backend for RealMac {
         command
             .env(sockdir_variable(), &self.sockets)
             .env("KABLO_TEST_END_KEEP_MS", "200");
+        // The programs the server runs find the files of this machine in the test's home.
+        command.env("HOME", &self.home);
+        if let Some(shell) = &self.stand_in.shell {
+            command.env("SHELL", shell);
+        }
         start(command)
+    }
+
+    fn reach(
+        &self,
+        args: &[String],
+        ask: crate::ssh_route::Ask,
+        _: &dyn Fn(&str) -> Vec<SessionId>,
+    ) -> Result<crate::kablo::service::Reached, String> {
+        self.stand_in
+            .asked
+            .lock()
+            .expect("lock")
+            .push(matches!(ask, crate::ssh_route::Ask::Sheet(_)));
+        let level = *self.stand_in.level.lock().expect("lock");
+        match (args.first().map(String::as_str), level) {
+            (Some("prod"), Some(level)) => Ok(crate::kablo::service::Reached {
+                server: super::host(),
+                level,
+            }),
+            (name, _) => Err(format!(
+                "{} is not a server bateri keeps terminals on",
+                name.unwrap_or("the server")
+            )),
+        }
     }
 
     fn serving(&self, streams: crate::kablo::service::Streams) {
@@ -625,6 +667,7 @@ fn a_pane_over_a_real_kablo_shows_what_the_program_writes_types_into_it_is_sized
         home: ground.home.clone(),
         sockets: ground.sockets.clone(),
         streams: Default::default(),
+        stand_in: Default::default(),
     };
     let ledger = Arc::new(Ledger::memory());
     let service =
@@ -804,6 +847,7 @@ fn a_pane_over_a_real_kablo_is_found_and_read_by_its_childs_pid_behind_login_too
         home: ground.home.clone(),
         sockets: ground.sockets.clone(),
         streams: Default::default(),
+        stand_in: Default::default(),
     };
     let ledger = Arc::new(Ledger::memory());
     let service =
@@ -949,6 +993,7 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
         home: ground.home.clone(),
         sockets: ground.sockets.clone(),
         streams: Default::default(),
+        stand_in: Default::default(),
     });
     let ledger = Arc::new(Ledger::memory());
 
@@ -1280,6 +1325,7 @@ fn measure_file_receive_direct_pty_and_kablo() {
             home: ground.home.clone(),
             sockets: ground.sockets.clone(),
             streams: Default::default(),
+            stand_in: Default::default(),
         };
         let ledger = Arc::new(Ledger::memory());
         let service = Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger))
@@ -1664,14 +1710,13 @@ fn measure_file_receive_over_ssh() {
     service.stop();
 }
 
-/// The two contracts the window keeps with the `bateri` command of kablo that two repositories
-/// write — the counter (`kablo bateri --next-number`, which numbers the terminals the window
-/// opens) and the words of a relayed command (`--hex`, in the line the window builds) — against
-/// the real kablo, not a stand-in: what kablo's own tests prove of its half, this proves of the
-/// window's.
+/// The contract the window keeps with the `bateri` command of kablo that two repositories write —
+/// the counter (`kablo bateri --next-number`, which numbers the terminals the window opens) —
+/// against the real kablo, not a stand-in: what kablo's own tests prove of its half, this proves of
+/// the window's. (The words of a relayed command are the other: the tests of the relay below.)
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn a_real_kablo_counts_for_the_window_and_reads_the_words_of_a_relayed_command_whole() {
+fn a_real_kablo_counts_for_the_window() {
     let Some(bundle) = release() else {
         eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
         return;
@@ -1714,29 +1759,6 @@ fn a_real_kablo_counts_for_the_window_and_reads_the_words_of_a_relayed_command_w
         std::fs::read_to_string(ground.home.join(".local/share/bateri/next")).expect("the counter"),
         "3\n"
     );
-
-    // The line the window sends another machine reaches `bin/bateri` there, which starts that
-    // machine's kablo with the words as they were, whatever the characters in them: kablo reads
-    // them (hex) and says which one it does not know, in the words it was given.
-    let word = "a b'c\"d$HOME`x`\\z";
-    let line = crate::agent::relay::remote_line(
-        &crate::agent::relay::not_set_up("there"),
-        &[word.to_owned()],
-    );
-    let mut command = crate::agent::relay::local_command(&ground.home, &line);
-    command
-        .env_clear()
-        .env("HOME", &ground.home)
-        .env("SHELL", "/bin/sh")
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env(sockdir_variable(), &ground.sockets);
-    let said = crate::agent::relay::execute(command, Duration::from_secs(30), 1 << 16)
-        .expect("the line ran");
-    assert_eq!(said.status, 64, "{said:?}");
-    assert_eq!(
-        said.stderr.first().map(String::as_str),
-        Some(&*format!("bateri: no command '{word}'"))
-    );
 }
 
 // ─── programs and connections over a real kablo ──────────────────────────
@@ -1746,11 +1768,17 @@ fn a_real_kablo_counts_for_the_window_and_reads_the_words_of_a_relayed_command_w
 struct Here {
     ground: Ground,
     service: Service,
+    mac: Arc<RealMac>,
     _terminal: bt_core::Stream,
 }
 
 impl Here {
     fn new(name: &str) -> Option<Here> {
+        Here::logging_in_with(name, None)
+    }
+
+    /// As [`Here::new`], where the person logs in with `shell`.
+    fn logging_in_with(name: &str, shell: Option<PathBuf>) -> Option<Here> {
         let Some(bundle) = release() else {
             eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
             return None;
@@ -1764,15 +1792,19 @@ impl Here {
         let kablo =
             kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
                 .expect("a path");
-        let backend = RealMac {
+        let mac = Arc::new(RealMac {
             bundle,
             home: ground.home.clone(),
             sockets: ground.sockets.clone(),
             streams: Default::default(),
-        };
+            stand_in: StandIn {
+                shell,
+                ..StandIn::default()
+            },
+        });
         let ledger = Arc::new(Ledger::memory());
-        let service = Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger))
-            .expect("a service");
+        let service =
+            Service::start(&service_dir, mac.clone(), Arc::clone(&ledger)).expect("a service");
         let options = plain_options("sleep 600", &ground.home);
         let (spec, size) = new_session(&options.child_launch(), 1000);
         let pane = options.pane_uuid.clone().expect("a pane");
@@ -1785,6 +1817,7 @@ impl Here {
         Some(Here {
             ground,
             service,
+            mac,
             _terminal: terminal,
         })
     }
@@ -2379,4 +2412,597 @@ fn a_forward_over_a_real_kablo_carries_both_ways_and_ends_with_its_connections()
         error,
         format!("bind [127.0.0.1]:{taken_port}: Address already in use")
     );
+}
+
+// ─── a relayed command over a real kablo ─────────────────────────────────
+
+mod relayed {
+    use super::*;
+    use crate::agent::message::{Kind, Relay, Reply};
+    use crate::agent::relay::serve;
+    use crate::kablo::service::Gone;
+    use crate::ssh_route::Ask;
+    use bt_core::CommandLevel;
+
+    /// Writes the `bateri` command of the machine the `home` is the home of, as a program with
+    /// `body` to run in place of kablo's.
+    fn stub_bateri(home: &Path, body: &str) {
+        let at = home.join(".local/share/bateri/shell/bin/bateri");
+        std::fs::create_dir_all(at.parent().expect("a directory")).expect("bin");
+        std::fs::write(&at, format!("#!/bin/sh\n{body}\n")).expect("the command");
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).expect("exec");
+    }
+
+    /// The `bateri` command kablo's installation writes (`ensure_here`), which starts kablo.
+    fn real_bateri(here: &Here) {
+        let bundle = release().expect("a release");
+        ensure_here(&LocalChannel::new(here.ground.home.clone()), &bundle, true)
+            .expect("kablo and its command");
+    }
+
+    fn relay(server: &str, words: &[&str]) -> Relay {
+        Relay {
+            server: server.to_owned(),
+            words: words.iter().map(|word| (*word).to_owned()).collect(),
+        }
+    }
+
+    /// What the app answers a program that asked for `relay`, with `prod` a server whose commands
+    /// are at `prod_level` and this computer's at `local_level`.
+    fn answer(
+        here: &Here,
+        prod_level: CommandLevel,
+        local_level: CommandLevel,
+        relay: &Relay,
+        gone: &Gone,
+    ) -> Reply {
+        *here.mac.stand_in.level.lock().expect("lock") = Some(prod_level);
+        serve(
+            Some(here.service.backend()),
+            Ask::Never,
+            local_level,
+            &|_| Vec::new(),
+            relay,
+            gone,
+        )
+    }
+
+    fn relayed(reply: Reply) -> crate::agent::message::Relayed {
+        match reply {
+            Reply::Relayed(relayed) => relayed,
+            other => panic!("not a relayed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn the_words_of_a_relayed_command_reach_kablos_bateri_whole_for_a_server_and_for_this_computer()
+    {
+        let Some(here) = Here::new("relay-words") else {
+            return;
+        };
+        real_bateri(&here);
+        // Kablo reads the words (hex) and says which one it does not know, in the words it was
+        // given: nothing a shell on the way reads changed them.
+        let word = "a b'c\"d$HOME`x`\\z\nand a line";
+        for server in ["prod", "@local"] {
+            let reply = answer(
+                &here,
+                CommandLevel::Full,
+                CommandLevel::Own,
+                &relay(server, &[word]),
+                &Gone::new(),
+            );
+            let said = relayed(reply);
+            assert_eq!(said.status, 64, "{server}: {said:?}");
+            assert_eq!(
+                said.stderr[..2],
+                ["bateri: no command 'a b'c\"d$HOME`x`\\z", "and a line'"],
+                "{server}: {said:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_relayed_command_runs_with_the_path_of_a_login_shell_for_a_server_and_for_this_computer() {
+        let shells = TempRoot::new("relay-login-shell");
+        let shell = shells.0.join("login-shell");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\nPATH=\"$HOME/login-bin:$PATH\"\nexport PATH\nexec /bin/sh \"$@\"\n",
+        )
+        .expect("a shell");
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).expect("exec");
+        let Some(here) = Here::logging_in_with("relay-path", Some(shell)) else {
+            return;
+        };
+        stub_bateri(&here.ground.home, "echo \"$PATH\"");
+        for server in ["prod", "@local"] {
+            let reply = answer(
+                &here,
+                CommandLevel::Full,
+                CommandLevel::Own,
+                &relay(server, &["capture", "p9"]),
+                &Gone::new(),
+            );
+            let said = relayed(reply);
+            let path = said.stdout.trim_end();
+            // (`path_helper` of the login shell puts the entries where it likes: it is there.)
+            assert!(
+                path.split(':')
+                    .any(|entry| entry == format!("{}/login-bin", here.ground.home.display())),
+                "{server}: {said:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_relayed_command_ends_on_the_server_when_the_conversation_does() {
+        let Some(here) = Here::new("relay-gone") else {
+            return;
+        };
+        let pid_file = here.ground.home.join("pid");
+        stub_bateri(
+            &here.ground.home,
+            &format!("echo $$ > '{}'; exec sleep 600", pid_file.display()),
+        );
+        for server in ["prod", "@local"] {
+            let _ = std::fs::remove_file(&pid_file);
+            let gone = Gone::new();
+            let waiting = {
+                let backend = here.service.backend();
+                let gone = gone.clone();
+                let ask = relay(server, &["wait", "p9"]);
+                let prod = *here.mac.stand_in.level.lock().expect("lock");
+                thread::spawn(move || {
+                    let _ = prod;
+                    serve(
+                        Some(backend),
+                        Ask::Never,
+                        CommandLevel::Own,
+                        &|_| Vec::new(),
+                        &ask,
+                        &gone,
+                    )
+                })
+            };
+            *here.mac.stand_in.level.lock().expect("lock") = Some(CommandLevel::Full);
+            let started = Instant::now();
+            while !pid_file.exists() && started.elapsed() < Duration::from_secs(30) {
+                thread::sleep(Duration::from_millis(20));
+            }
+            let pid = std::fs::read_to_string(&pid_file)
+                .expect("the command started")
+                .trim()
+                .to_owned();
+            assert!(alive(&pid), "{server}: the command is not running");
+            // The program that asked hung up (`^C` on `bateri wait`).
+            gone.end();
+            let _ = waiting.join().expect("the relay ended");
+            let ended = Instant::now();
+            while alive(&pid) && ended.elapsed() < Duration::from_secs(10) {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(!alive(&pid), "{server}: the command is still running");
+        }
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_relayed_command_that_prints_more_than_four_mib_is_ended_and_the_answer_says_so() {
+        let Some(here) = Here::new("relay-loud") else {
+            return;
+        };
+        let pid_file = here.ground.home.join("pid");
+        stub_bateri(
+            &here.ground.home,
+            &format!("echo $$ > '{}'; exec yes x", pid_file.display()),
+        );
+        for server in ["prod", "@local"] {
+            let reply = answer(
+                &here,
+                CommandLevel::Full,
+                CommandLevel::Own,
+                &relay(server, &["capture", "p9"]),
+                &Gone::new(),
+            );
+            match reply {
+                Reply::Failed(failed) => {
+                    assert_eq!(failed.kind, Kind::Failed);
+                    assert_eq!(
+                        failed.text,
+                        format!("bateri capture on {server} printed more than 4 MiB and was ended")
+                    );
+                }
+                other => panic!("{server}: {other:?}"),
+            }
+            // The command is ended on the server too, not left to print to nobody.
+            let pid = std::fs::read_to_string(&pid_file)
+                .expect("the command started")
+                .trim()
+                .to_owned();
+            let waited = Instant::now();
+            while alive(&pid) && waited.elapsed() < Duration::from_secs(10) {
+                thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!alive(&pid), "{server}: the command is still running");
+        }
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn commands_that_are_off_are_refused_before_anything_runs_and_nobody_is_asked_for_a_password() {
+        let Some(here) = Here::new("relay-off") else {
+            return;
+        };
+        let marker = here.ground.home.join("ran");
+        stub_bateri(
+            &here.ground.home,
+            &format!("echo ran > '{}'", marker.display()),
+        );
+        // The server's commands are off.
+        let refused = |reply: Reply| match reply {
+            Reply::Failed(failed) => {
+                assert_eq!(failed.kind, Kind::Refused, "{failed:?}");
+                failed.text
+            }
+            other => panic!("not refused: {other:?}"),
+        };
+        let text = refused(answer(
+            &here,
+            CommandLevel::Off,
+            CommandLevel::Full,
+            &relay("prod", &["capture", "p9"]),
+            &Gone::new(),
+        ));
+        assert!(text.contains("off"), "{text}");
+        // This computer's are.
+        refused(answer(
+            &here,
+            CommandLevel::Full,
+            CommandLevel::Off,
+            &relay("@local", &["capture", "p9"]),
+            &Gone::new(),
+        ));
+        assert!(!marker.exists(), "something ran");
+        // A name that is no server bateri keeps terminals on.
+        match answer(
+            &here,
+            CommandLevel::Full,
+            CommandLevel::Full,
+            &relay("elsewhere", &["capture", "p9"]),
+            &Gone::new(),
+        ) {
+            Reply::Failed(failed) => {
+                assert!(
+                    failed
+                        .text
+                        .contains("elsewhere is not a server bateri keeps"),
+                    "{failed:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!marker.exists(), "something ran");
+        // A program in no pane (a cron job) is asked of nobody: every server was reached with a
+        // call that cannot open a sheet (this computer needs no login).
+        assert_eq!(
+            *here.mac.stand_in.asked.lock().expect("lock"),
+            [false, false]
+        );
+    }
+
+    /// A real sshd (the container of kablo's `tests/e2e`, started by hand with a key of the
+    /// trial's own), as the one server of the service: the bridge is `ssh <destination> kablo
+    /// attach`, and `prod` is that server.
+    struct Sshd {
+        /// The words before the command: ssh's options and the destination.
+        ssh: Vec<String>,
+        version: String,
+        streams: std::sync::OnceLock<crate::kablo::service::Streams>,
+    }
+
+    impl Sshd {
+        fn command(&self) -> Command {
+            let mut command = Command::new("ssh");
+            command.args(&self.ssh);
+            command
+        }
+
+        /// Runs `script` on the server, with `input` for its standard input.
+        fn run(&self, script: &str, input: &[u8]) -> (Option<i32>, String) {
+            let mut child = self
+                .command()
+                .arg(script)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("ssh");
+            let mut stdin = child.stdin.take().expect("stdin");
+            let input = input.to_vec();
+            let writer = thread::spawn(move || {
+                let _ = stdin.write_all(&input);
+            });
+            let output = child.wait_with_output().expect("ssh");
+            let _ = writer.join();
+            // The person's startup files talk before the script does (the container's .bashrc).
+            let said = String::from_utf8_lossy(&output.stdout);
+            let said: Vec<&str> = said
+                .lines()
+                .filter(|line| !line.starts_with("kablo-e2e: noise"))
+                .collect();
+            (output.status.code(), said.join("\n"))
+        }
+    }
+
+    impl Backend for Sshd {
+        fn pane(&self, _: &Peer) -> Option<PaneInfo> {
+            None
+        }
+
+        fn route(&self, _: &[String]) -> Option<KabloHost> {
+            None
+        }
+
+        fn master(&self, _: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
+            Ok(None)
+        }
+
+        fn master_made(&self, _: &KabloHost, _: u8) -> Result<(), Refusal> {
+            Ok(())
+        }
+
+        fn install(&self, _: &KabloHost, _: &[SessionId]) -> Result<Installed, Refusal> {
+            Ok(Installed {
+                target: kablo_proto::install::Target::LinuxAarch64,
+                version: self.version.clone(),
+                path: kablo_proto::install::install_path(&self.version)
+                    .map_err(|_| Refusal::plain())?,
+                fresh: false,
+            })
+        }
+
+        fn version(&self) -> Option<String> {
+            Some(self.version.clone())
+        }
+
+        fn carry(&self, _: &KabloHost, installed: &Installed) -> io::Result<Carried> {
+            let mut command = self.command();
+            command.arg(format!("\"$HOME/{}\" attach", installed.path));
+            start(command)
+        }
+
+        fn serving(&self, streams: crate::kablo::service::Streams) {
+            let _ = self.streams.set(streams);
+        }
+
+        fn command(
+            &self,
+            server: &KabloHost,
+            command: kablo_proto::v1::stream::Command,
+            _: Ask,
+            wait: Duration,
+        ) -> Result<crate::kablo::remote::RemoteCommand, String> {
+            self.streams
+                .get()
+                .ok_or_else(|| "the service is not running".to_owned())?
+                .command(&server.key, command, wait)
+        }
+
+        fn reach(
+            &self,
+            args: &[String],
+            _: Ask,
+            _: &dyn Fn(&str) -> Vec<SessionId>,
+        ) -> Result<crate::kablo::service::Reached, String> {
+            match args.first().map(String::as_str) {
+                Some("prod") => Ok(crate::kablo::service::Reached {
+                    server: super::host(),
+                    level: CommandLevel::Full,
+                }),
+                other => Err(format!("{other:?} is not a server")),
+            }
+        }
+    }
+
+    /// The commands a person's `bateri` is, over a real sshd with a login shell of its own: the
+    /// words arrive whole, the command runs with what the login shell sets, one that is not set up
+    /// says so, and it ends on the server when the conversation does.
+    ///
+    /// By hand: start the container of kablo's `tests/e2e` (`docker run -d --rm -p 127.0.0.1::22
+    /// kablo-e2e`), put a key of the trial's own in `/home/tester/.ssh/authorized_keys`, and name
+    /// the port and the private key in `BT_SSHD_PORT` and `BT_SSHD_KEY`; it uses nothing else of
+    /// the person's ssh.
+    #[test]
+    #[ignore = "needs a real sshd: BT_SSHD_PORT and BT_SSHD_KEY name the container of kablo's tests/e2e"]
+    fn a_relayed_command_runs_over_a_real_sshd_under_the_login_shell_and_ends_with_the_conversation()
+     {
+        let (Some(port), Some(key)) = (
+            std::env::var_os("BT_SSHD_PORT"),
+            std::env::var_os("BT_SSHD_KEY"),
+        ) else {
+            eprintln!("SKIPPED: BT_SSHD_PORT and BT_SSHD_KEY are not set");
+            return;
+        };
+        let Some(bundle) = release() else {
+            eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+            return;
+        };
+        let version = bundle.version().to_owned();
+        let mut ssh: Vec<String> = [
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-o",
+            "ConnectTimeout=5",
+            "-p",
+        ]
+        .iter()
+        .map(|word| (*word).to_owned())
+        .collect();
+        ssh.push(port.to_string_lossy().into_owned());
+        ssh.push("-i".to_owned());
+        ssh.push(key.to_string_lossy().into_owned());
+        ssh.push("tester@127.0.0.1".to_owned());
+        let sshd = Arc::new(Sshd {
+            ssh,
+            version: version.clone(),
+            streams: Default::default(),
+        });
+        let path = kablo_proto::install::install_path(&version).expect("a path");
+        // kablo for the server, and the files of a server bateri has set up: the writer's own.
+        let artifact = bundle
+            .artifact(kablo_proto::install::Target::LinuxAarch64)
+            .expect("a kablo for the server");
+        let (status, _) = sshd.run(
+            &format!(
+                "mkdir -p \"$(dirname \"$HOME/{path}\")\" && cat > \"$HOME/{path}.new\" && chmod 755 \"$HOME/{path}.new\" && mv -f \"$HOME/{path}.new\" \"$HOME/{path}\""
+            ),
+            &std::fs::read(&artifact.path).expect("the binary"),
+        );
+        assert_eq!(status, Some(0), "kablo put on the server");
+        let (status, _) = sshd.run("sh", crate::ssh_wrap::files_script(Some(&path)).as_bytes());
+        assert_eq!(status, Some(0), "the files of the server");
+
+        let ground = Ground::new("sshd");
+        let service_dir = ground.root.join("svc");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&service_dir)
+            .expect("the service's directory");
+        let ledger = Arc::new(Ledger::memory());
+        let service =
+            Service::start(&service_dir, sshd.clone(), Arc::clone(&ledger)).expect("a service");
+        // A terminal on the server keeps the connection up.
+        let options = plain_options("sleep 600", &ground.home);
+        let (mut spec, size) = new_session(&options.child_launch(), 1000);
+        spec.argv = ["/bin/sleep", "600"]
+            .iter()
+            .map(|arg| arg.as_bytes().to_vec())
+            .collect();
+        // What is a path of this Mac is none on the server.
+        spec.cwd = Some(b"/tmp".to_vec());
+        spec.env.retain(|(name, _)| name != b"PWD");
+        spec.env.push((b"PATH".to_vec(), b"/usr/bin:/bin".to_vec()));
+        let pane = options.pane_uuid.clone().expect("a pane");
+        let _terminal = service
+            .open_local(&pane, spec, size, Duration::from_secs(60))
+            .expect("a terminal on the server");
+        let served = |relay: &Relay, gone: &Gone| {
+            serve(
+                Some(service.backend()),
+                Ask::Never,
+                CommandLevel::Own,
+                &|_| Vec::new(),
+                relay,
+                gone,
+            )
+        };
+
+        // The words arrive whole through sshd, the user's login shell and kablo's own command.
+        let word = "a b'c\"d$HOME`x`\\z\nand a line";
+        let said = relayed(served(&relay("prod", &[word]), &Gone::new()));
+        assert_eq!(said.status, 64, "{said:?}");
+        let lines: Vec<&String> = said
+            .stderr
+            .iter()
+            .filter(|line| !line.contains("noise from .bashrc"))
+            .collect();
+        assert_eq!(
+            lines[..2],
+            ["bateri: no command 'a b'c\"d$HOME`x`\\z", "and a line'"],
+            "{said:?}"
+        );
+
+        // The command runs under the login shell of the person: `bash -lc`, `/etc/profile`.
+        let (status, _) = sshd.run(
+            "cat > \"$HOME/.local/share/bateri/shell/bin/bateri\" && chmod 755 \"$HOME/.local/share/bateri/shell/bin/bateri\"",
+            b"#!/bin/sh\necho \"$SHELL\"\necho \"$PATH\"\n",
+        );
+        assert_eq!(status, Some(0));
+        let said = relayed(served(&relay("prod", &["capture", "p9"]), &Gone::new()));
+        let out: Vec<&str> = said
+            .stdout
+            .lines()
+            .filter(|l| !l.contains("noise"))
+            .collect();
+        assert_eq!(out.first(), Some(&"/bin/bash"), "{said:?}");
+        assert!(
+            out.get(1)
+                .is_some_and(|path| path.contains("/usr/local/games")),
+            "the PATH a login shell sets: {said:?}"
+        );
+
+        // A server bateri has not set up says so.
+        let (status, _) = sshd.run("rm -rf \"$HOME/.local/share/bateri\"", b"");
+        assert_eq!(status, Some(0));
+        let said = relayed(served(&relay("prod", &["capture", "p9"]), &Gone::new()));
+        assert_eq!(said.status, 127, "{said:?}");
+        assert!(
+            said.stderr.iter().any(|line| line
+                == "bateri: bateri is not set up on prod: open a terminal on it in bateri first"),
+            "{said:?}"
+        );
+
+        // `bateri wait` ended by a `^C`: the conversation is over, and so is the command.
+        let (status, _) = sshd.run(
+            "mkdir -p \"$HOME/.local/share/bateri/shell/bin\" && cat > \"$HOME/.local/share/bateri/shell/bin/bateri\" && chmod 755 \"$HOME/.local/share/bateri/shell/bin/bateri\"",
+            b"#!/bin/sh\necho $$ > \"$HOME/relay.pid\"\nexec sleep 600\n",
+        );
+        assert_eq!(status, Some(0));
+        let gone = Gone::new();
+        let waiting = {
+            let (backend, gone) = (service.backend(), gone.clone());
+            thread::spawn(move || {
+                serve(
+                    Some(backend),
+                    Ask::Never,
+                    CommandLevel::Own,
+                    &|_| Vec::new(),
+                    &relay("prod", &["wait", "p9"]),
+                    &gone,
+                )
+            })
+        };
+        let mut pid = String::new();
+        let started = Instant::now();
+        while pid.is_empty() && started.elapsed() < Duration::from_secs(30) {
+            thread::sleep(Duration::from_millis(100));
+            pid = sshd
+                .run("cat \"$HOME/relay.pid\" 2>/dev/null", b"")
+                .1
+                .trim()
+                .to_owned();
+        }
+        assert!(!pid.is_empty(), "the command did not start");
+        let there = |pid: &str| {
+            sshd.run(&format!("kill -0 {pid} && echo yes"), b"")
+                .1
+                .trim()
+                == "yes"
+        };
+        assert!(there(&pid), "the command is not running on the server");
+        gone.end();
+        let _ = waiting.join().expect("the relay ended");
+        let ended = Instant::now();
+        while there(&pid) && ended.elapsed() < Duration::from_secs(15) {
+            thread::sleep(Duration::from_millis(200));
+        }
+        assert!(!there(&pid), "the command is still running on the server");
+        service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+        service.stop();
+    }
 }

@@ -1,10 +1,10 @@
-//! What the command on a server left for the Mac while it was away, and how the Mac reads it.
+//! What the command on a server left for the bateri app while it was away, and how the bateri app reads it.
 //!
-//! `bateri split` on a server with no Mac connected cannot ask where the pane goes. The terminal
-//! starts anyway and the same `place` message the Mac would have been asked waits in a file,
-//! `~/.local/share/bateri/placing/pN` (the command's own state, under `$HOME`: the Mac's `sh -c` and
+//! `bateri split` on a server with no bateri app connected cannot ask where the pane goes. The terminal
+//! starts anyway and the same `place` message the bateri app would have been asked waits in a file,
+//! `~/.local/share/bateri/placing/pN` (the command's own state, under `$HOME`: the bateri app's `sh -c` and
 //! a cron job have no login shell's environment). When a connection to the server comes up and the
-//! server has said what it keeps, the Mac reads the files in one `sh` run on the account's main
+//! server has said what it keeps, the bateri app reads the files in one `sh` run on the account's main
 //! connection ([`READ`]) and **removes them as it reads**: a note is read once, and a terminal that
 //! ended or that somebody else took by then is simply not placed (the terminal stays in the list of
 //! what runs in the background, which is where a terminal with no pane is found anyway).
@@ -67,7 +67,7 @@ done
 exit 0
 "#;
 
-/// A note: the pane the Mac was asked for, as the command wrote it.
+/// A note: the pane the bateri app was asked for, as the command wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
     pub terminal: Terminal,
@@ -268,11 +268,11 @@ mod tests {
 
     #[test]
     fn a_note_of_the_version_before_is_removed_and_not_read() {
-        // Written by a script that spoke version 1, left on the server while the Mac was away.
+        // Written by a script that spoke version 1, left on the server while the bateri app was away.
         let old = "bateri 1\nplace\nterminal p1\nanchor p4\n";
         let ok = place_text("p2", "p1", "");
         let (printed, root) = read("old", &[("p1", old.as_bytes()), ("p2", ok.as_bytes())]);
-        // The Mac takes the note off the server (so it is not read again) and finds no request
+        // The bateri app takes the note off the server (so it is not read again) and finds no request
         // in it: the terminal has no pane and `ls` lists it as such.
         assert!(
             !root.0.join(".local/share/bateri/placing/p1").exists(),

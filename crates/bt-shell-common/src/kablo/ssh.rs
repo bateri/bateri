@@ -588,11 +588,7 @@ impl Backend for SshBackend {
         // Nothing is done for a server whose commands are off, a connection included: the
         // caller refuses, naming the setting.
         if level == CommandLevel::Off {
-            return Ok(Reached {
-                server,
-                level,
-                argv: Vec::new(),
-            });
+            return Ok(Reached { server, level });
         }
         let target = self.target(&server);
         let route = match &self.masters {
@@ -601,17 +597,9 @@ impl Backend for SshBackend {
                 .map_err(|denied| denied.text())?,
             None => self.route_of(&target),
         };
-        let mut argv = ssh_argv_for(&target, &route);
-        if argv.iter().any(|word| word.chars().any(char::is_control)) {
-            return Err(format!("the connection to {name} cannot be written down"));
-        }
+        let argv = ssh_argv_for(&target, &route);
         self.install_for_reach(&server, &argv, live);
-        argv.remove(0);
-        Ok(Reached {
-            server,
-            level,
-            argv,
-        })
+        Ok(Reached { server, level })
     }
 
     fn serving(&self, streams: Streams) {

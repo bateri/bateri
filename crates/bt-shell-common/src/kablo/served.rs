@@ -80,13 +80,18 @@ impl Served {
     /// of its own and never on the main one. `wait` is how long the connection and the server's
     /// answer may take. The `Err` is a line for the person who asked.
     pub fn sh(&self, script: &str, ask: Ask, wait: Duration) -> Result<RemoteCommand, String> {
-        let runs = self.runs()?;
         let words = ["sh", "-c", script];
-        runs.run(
+        self.run(
             Command::new(words.iter().map(|word| word.as_bytes().to_vec()).collect()),
             ask,
             wait,
         )
+    }
+
+    /// Runs `command` as it is: its words are the program's `argv`, and nothing reads them on the
+    /// way. Waits as [`Served::sh`] does.
+    pub fn run(&self, command: Command, ask: Ask, wait: Duration) -> Result<RemoteCommand, String> {
+        self.runs()?.run(command, ask, wait)
     }
 
     /// A TCP connection the server makes to `host:port` (as seen from the server). Waits as
@@ -168,7 +173,51 @@ pub(crate) mod fake {
         }
     }
 
+    /// A server that is a directory here: the program is run with the `argv` it was given, with
+    /// `home` for its home and `shell` for the shell the person logs in with.
+    struct Home {
+        home: std::path::PathBuf,
+        shell: std::path::PathBuf,
+    }
+
+    impl Runs for Home {
+        fn run(&self, command: Command, _: Ask, _: Duration) -> Result<RemoteCommand, String> {
+            let words: Vec<String> = command
+                .argv
+                .iter()
+                .map(|word| String::from_utf8_lossy(word).into_owned())
+                .collect();
+            let (program, args) = words.split_first().ok_or("no program")?;
+            let child = Process::new(program)
+                .args(args)
+                .current_dir(&self.home)
+                .env("HOME", &self.home)
+                .env("SHELL", &self.shell)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            Ok(RemoteCommand::local(child))
+        }
+
+        fn connect(&self, _: &str, _: u16, _: Ask, _: Duration) -> Result<RemoteStream, String> {
+            Err("a directory makes no connections".to_owned())
+        }
+    }
+
     impl Served {
+        /// A server that is the directory `home`, where the person logs in with `shell`.
+        pub(crate) fn at_home(home: &std::path::Path, shell: &std::path::Path) -> Self {
+            Self {
+                runs: Some(Arc::new(Home {
+                    home: home.to_owned(),
+                    shell: shell.to_owned(),
+                })),
+            }
+        }
+
         /// A server that refuses everything it is asked, with `why`.
         pub(crate) fn refusing(why: &str) -> Self {
             Self {

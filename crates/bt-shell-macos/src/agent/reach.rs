@@ -2,22 +2,21 @@
 //! (`bateri send p9@prod`): how it reaches the machine, and the pane that shows the terminal once
 //! it runs there.
 //!
-//! A program on this Mac starts the terminal itself, over the `ssh` this answers with, and asks for
-//! the pane afterwards (a `place` whose `server` is the same name). A program on a server has no
-//! `ssh` to run: it is answered `relay` and sends the command it means, which **this runs** — the
-//! one place a window runs a program, for a server given `full` ([`relay`]). All of
-//! them ask here again whether the machine is one bateri keeps terminals on: nothing the command says
-//! is trusted, and the level of the machine that asked (`full`, [`serve::serve`]) was judged before
-//! any got this far.
+//! Every program is answered `relay` and sends the command it means, which **this runs** over the
+//! connection bateri keeps to that machine — the one place the app runs a program for another, for
+//! a server given `full` ([`relay`]) — and says how it ended; a program on a computer that asks
+//! for its own machine is answered `here`, and does it itself. The terminal a `split` started is
+//! asked for afterwards (a `place` whose `server` is the same name). All of them ask here again
+//! whether the machine is one bateri keeps terminals on: nothing the command says is trusted, and
+//! the level of the machine that asked (`full`, [`serve::serve`]) was judged before any got this
+//! far.
 //!
 //! They wait for something the main thread must not: `ssh -G` runs a program, the connection may
 //! need a password the person types into the sheet of the pane the program runs in, and a relayed
 //! `wait` lasts as long as the job. They run on a thread of their own ([`std::thread`]) and the
-//! letter, which is `Send`, is answered from there (the conversation waits for the application's
-//! answer for as long as it takes); the pane is made on the main queue, where the windows are.
+//! letter, which is `Send`, is answered from there (the conversation waits for the app's answer for
+//! as long as it takes); the pane is made on the main queue, where the windows are.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use bt_core::CommandLevel;
@@ -37,12 +36,11 @@ use crate::app::{self, AppDelegate};
 use crate::hold_service;
 use crate::ssh_route::Ask;
 
-/// `ssh`: the words of the `ssh` command that ride the connection bateri keeps to the server
-/// `name`, one `arg` line each; to a program on a server, which cannot run it, the word `relay`
-/// once the connection is made (the window runs what the program means to, [`relay`]); the machine
-/// that asks is no other machine, and the word is `here` (the command does it itself). The sheet
-/// that asks for a password opens on the pane the program runs in; run in no pane (a cron job)
-/// nothing asks, and a server that wants one is refused.
+/// `ssh`: how the server `name` is reached — `relay`, the word for the app running what the program
+/// means over the connection bateri keeps to it ([`relay`]); when the machine that asks is no other
+/// machine, `here` (the command does it itself). The sheet that asks for a password opens on the
+/// pane the program runs in; run in no pane (a cron job) nothing asks, and a server that wants one
+/// is refused.
 pub(super) fn ssh(
     app: &AppDelegate,
     letter: Letter,
@@ -52,15 +50,16 @@ pub(super) fn ssh(
 ) {
     let relayed = !local::is_account(&server.account);
     // The machine that asks is no other machine: there is nothing to reach, and the command does
-    // it itself (`here`), on this Mac as on the server (`serve` judged that it may, with no level).
+    // it itself (`here`), on this computer as on the server (`serve` judged that it may, with no
+    // level).
     if (!relayed && name == LOCAL_SERVER) || (relayed && server.host_name() == Some(name.as_str()))
     {
         letter.answer(Reply::Text(Reach::Here.text()).encode().into_bytes());
         return;
     }
     if name == LOCAL_SERVER {
-        // This Mac needs no connection for a program on a server, which has it run there; it is
-        // as `commands` lets it be.
+        // This computer needs no login for a program on a server, which has it run here; it is as
+        // `commands` lets it be.
         let reply = match app.settings().commands_level {
             CommandLevel::Off => Reply::Failed(Failure::new(
                 Kind::Refused,
@@ -90,7 +89,7 @@ pub(super) fn ssh(
                 ask,
                 &hold_service::terminals_of,
             );
-            letter.answer(reached_reply(reached, relayed).encode().into_bytes());
+            letter.answer(reached_reply(reached).encode().into_bytes());
         });
     if let Err(error) = started {
         eprintln!("bateri: no thread to reach a server: {error}");
@@ -98,68 +97,22 @@ pub(super) fn ssh(
 }
 
 /// What a server reached, or not, says to the program that asked.
-fn reached_reply(reached: Result<Reached, String>, relayed: bool) -> Reply {
+fn reached_reply(reached: Result<Reached, String>) -> Reply {
     let reached = match reached {
         Ok(reached) => reached,
         Err(text) => return Reply::Failed(Failure::new(Kind::Failed, text)),
     };
     if reached.level == CommandLevel::Off {
-        return Reply::Failed(refused_off(&reached.server));
+        return Reply::Failed(run::refused_off(&reached.server));
     }
-    if relayed {
-        return Reply::Text(Reach::Relay.text());
-    }
-    let mut words = String::new();
-    for word in &reached.argv {
-        words.push_str("arg ");
-        words.push_str(word);
-        words.push('\n');
-    }
-    Reply::Text(words)
-}
-
-/// A server whose `commands` are off: refused, with the setting that changes it.
-fn refused_off(server: &KabloHost) -> Failure {
-    Failure::new(
-        Kind::Refused,
-        level::refusal(
-            CommandLevel::Off,
-            Why::Off,
-            (!server.host.is_empty()).then_some(server.host.as_str()),
-        ),
-    )
-}
-
-/// How many relayed commands run at once: each holds a thread, a process and a connection until the
-/// job it waits for ends, and a program that asks for more is not asking for a person's work.
-const MOST_RELAYS: usize = 8;
-
-static RELAYS: AtomicUsize = AtomicUsize::new(0);
-
-/// One of the places for a running relay, given back when it drops.
-struct Slot;
-
-impl Slot {
-    fn take() -> Option<Slot> {
-        RELAYS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |running| {
-                (running < MOST_RELAYS).then_some(running + 1)
-            })
-            .ok()
-            .map(|_| Slot)
-    }
-}
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        RELAYS.fetch_sub(1, Ordering::AcqRel);
-    }
+    Reply::Text(Reach::Relay.text())
 }
 
 /// `relay`: the `bateri` command a program on a `full` server means for another machine — a server
-/// or this Mac — run there, and how it ended. The machine is found again here (the connection
-/// bateri keeps, or a shell on this Mac), the command is built from its words
-/// ([`run::remote_line`]) and nothing else of what the program said is run.
+/// or this computer — run there, and how it ended. The machine is found again here (the connection
+/// bateri keeps), the command is built from its words ([`run::command`]) and nothing else of what
+/// the program said is run. It lasts as long as the job it waits for, and ends with the
+/// conversation ([`run::serve`]).
 pub(super) fn relay(
     app: &AppDelegate,
     letter: Letter,
@@ -167,14 +120,6 @@ pub(super) fn relay(
     from: Option<&str>,
     relay: Relay,
 ) {
-    let Some(slot) = Slot::take() else {
-        refuse(
-            letter,
-            Kind::Failed,
-            "too many commands are relayed at once: wait for one to end",
-        );
-        return;
-    };
     let ask = from
         .and_then(|from| find_pane(app, &server.account, from))
         .map_or(Ask::Never, |(_, pane, _)| pane.command_ask(&relay.server));
@@ -183,8 +128,15 @@ pub(super) fn relay(
     let started = thread::Builder::new()
         .name("bateri relay".into())
         .spawn(move || {
-            let _slot = slot;
-            let reply = relayed(backend.as_deref(), ask, local_level, &relay);
+            let gone = letter.gone();
+            let reply = run::serve(
+                backend,
+                ask,
+                local_level,
+                &hold_service::terminals_of,
+                &relay,
+                &gone,
+            );
             letter.answer(reply.encode().into_bytes());
         });
     if let Err(error) = started {
@@ -192,52 +144,8 @@ pub(super) fn relay(
     }
 }
 
-/// The reply to a relay: the command run on the machine it names, or why it was not.
-fn relayed(
-    backend: Option<&dyn bt_shell_common::kablo::service::Backend>,
-    ask: Ask,
-    local_level: CommandLevel,
-    relay: &Relay,
-) -> Reply {
-    let line = run::remote_line(&run::not_set_up(&relay.server), &relay.words);
-    let command = if relay.server == LOCAL_SERVER {
-        if local_level == CommandLevel::Off {
-            return Reply::Failed(Failure::new(
-                Kind::Refused,
-                level::refusal(CommandLevel::Off, Why::Off, None),
-            ));
-        }
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return Reply::Failed(Failure::new(Kind::Failed, "this Mac has no home directory"));
-        };
-        run::local_command(&home, &line)
-    } else {
-        let Some(backend) = backend else {
-            return Reply::Failed(Failure::new(
-                Kind::Failed,
-                "this bateri keeps no connection to servers",
-            ));
-        };
-        match backend.reach(
-            std::slice::from_ref(&relay.server),
-            ask,
-            &hold_service::terminals_of,
-        ) {
-            Err(text) => return Reply::Failed(Failure::new(Kind::Failed, text)),
-            Ok(reached) if reached.level == CommandLevel::Off => {
-                return Reply::Failed(refused_off(&reached.server));
-            }
-            Ok(reached) => run::ssh_command("ssh", &reached.argv, &line),
-        }
-    };
-    match run::execute(command, run::TIME, run::OUTPUT) {
-        Ok(relayed) => Reply::Relayed(relayed),
-        Err(text) => Reply::Failed(Failure::new(Kind::Failed, text)),
-    }
-}
-
 /// A `place` whose terminal runs on `place.server`: the server is found on a thread, then the
-/// pane is made on the main queue beside the anchor — a terminal of this Mac.
+/// pane is made on the main queue beside the anchor — a terminal of this computer.
 pub(super) fn place_on(letter: Letter, server: Server, from: Option<String>, place: Place) {
     let Some(name) = place.server.clone() else {
         refuse(
@@ -308,7 +216,7 @@ fn placed(
         argv: host.argv.clone(),
     };
     if target.level == CommandLevel::Off {
-        letter.answer(Reply::Failed(refused_off(&host)).encode().into_bytes());
+        letter.answer(Reply::Failed(run::refused_off(&host)).encode().into_bytes());
         return;
     }
     let mut world = World::new(app);
