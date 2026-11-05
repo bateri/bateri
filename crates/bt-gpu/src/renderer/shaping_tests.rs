@@ -85,8 +85,8 @@ fn frame_of(r: &Renderer, surface: Surface, text: &str, bold: bool, shaped: bool
     }
     if shaped {
         match surface {
-            Surface::Dock => frame.shape_dock(|cells| r.shape(cells)),
-            _ => frame.shape_grid(|cells| r.shape(cells)),
+            Surface::Dock => frame.shape_dock(|cells, above| r.shape(cells, above)),
+            _ => frame.shape_grid(|cells, above| r.shape(cells, above)),
         }
     }
     frame
@@ -116,13 +116,20 @@ impl std::fmt::Debug for Pixels {
 
 /// The pixels of column `col` of the surface's row, top to bottom.
 fn column(r: &Renderer, frame: &Frame, surface: Surface, col: usize) -> Pixels {
+    place(r, frame, surface, 0, col)
+}
+
+/// The pixels of the cell at `row` and `col` of the grid or the band, top to
+/// bottom (the dock's rows are read at the glyph, [`shaped_places`]).
+fn place(r: &Renderer, frame: &Frame, surface: Surface, row: usize, col: usize) -> Pixels {
     let pixels = r.render_offscreen(EDGE as u32, BACKGROUND, frame);
     let (cw, ch) = r.cell_metrics(1.0).cell_px();
     let (cw, ch) = (usize::from(cw), usize::from(ch));
     let top = if surface == Surface::Dock {
+        assert_eq!(row, 0, "the dock's second row is read at the glyph");
         EDGE - ch
     } else {
-        0
+        row * ch
     };
     Pixels(
         (0..ch)
@@ -305,7 +312,7 @@ fn a_wide_character_and_a_blank_stay_where_the_grid_put_them() {
             });
         }
         if shaped {
-            frame.shape_grid(|cells| r.shape(cells));
+            frame.shape_grid(|cells, above| r.shape(cells, above));
         }
         frame
     };
@@ -337,14 +344,14 @@ fn dock_after_a_delete(r: &Renderer, gone: usize) -> (Frame, Cell) {
         .map(|(at, c)| glyph_cell(u16::try_from(at).expect("a short row"), c, None))
         .collect();
     cells.iter().for_each(|&cell| frame.push_dock(cell));
-    frame.shape_dock(|cells| r.shape(cells));
+    frame.shape_dock(|cells, above| r.shape(cells, above));
     // The next content frame, with the character gone.
     frame.clear(grid(cw, ch), CaretStyle::default());
     cells
         .iter()
         .filter(|cell| usize::from(cell.col) != gone)
         .for_each(|&cell| frame.push_dock(cell));
-    frame.shape_dock(|cells| r.shape(cells));
+    frame.shape_dock(|cells, above| r.shape(cells, above));
     (frame, cells[gone])
 }
 
@@ -406,7 +413,7 @@ fn an_arrival_carries_the_glyph_and_ends_as_the_static_one() {
         .map(|(at, c)| glyph_cell(u16::try_from(at).expect("a short row"), c, None))
         .collect();
     cells.iter().for_each(|&cell| frame.push_dock(cell));
-    frame.shape_dock(|cells| on.shape(cells));
+    frame.shape_dock(|cells, above| on.shape(cells, above));
     let arrival = Fx {
         cell: cells[col],
         kind: Kind::Arrival,
@@ -428,4 +435,226 @@ fn an_arrival_carries_the_glyph_and_ends_as_the_static_one() {
         "at t = 1 the arrival differs from the static glyph"
     );
     let _ = WHITE;
+}
+
+/// One row of a wrapped line for [`wrapped_frame`].
+#[derive(Clone, Copy)]
+struct Line<'a> {
+    text: &'a str,
+    /// Whether the terminal wrapped onto this row from the one above it.
+    continues: bool,
+    bold: bool,
+}
+
+fn line(text: &str, continues: bool) -> Line<'_> {
+    Line {
+        text,
+        continues,
+        bold: false,
+    }
+}
+
+/// The first and the second part of [`KEY`]: the second is what a narrow
+/// grid wraps onto the next row.
+const HEAD: &str = "sk-ant-";
+const TAIL: &str = "abc123";
+
+/// `lines` as rows of one surface, as `Session` hands them over, and `lead`
+/// as the text above the first row, shaped by `r`. The dock's rows start
+/// after the mark.
+fn wrapped_frame(r: &Renderer, surface: Surface, lines: &[Line<'_>], lead: &str) -> Frame {
+    let (cw, ch) = r.cell_metrics(1.0).cell_px();
+    let mut frame = Frame::default();
+    frame.clear(grid(cw, ch), CaretStyle::default());
+    let margin = if surface == Surface::Dock {
+        bt_core::DOCK_TEXT_COL
+    } else {
+        0
+    };
+    let cells = lines.iter().enumerate().flat_map(|(row, line)| {
+        line.text.chars().enumerate().map(move |(at, c)| Cell {
+            row: u16::try_from(row).expect("a few rows"),
+            bold: line.bold,
+            continues: line.continues,
+            ..glyph_cell(margin + u16::try_from(at).expect("a short row"), c, None)
+        })
+    });
+    let rows = u16::try_from(lines.len()).expect("a few rows");
+    match surface {
+        Surface::Grid => cells.for_each(|cell| frame.push(cell)),
+        Surface::Band => {
+            frame.set_fill_rows(rows);
+            cells.for_each(|cell| frame.push_fill(cell));
+            frame.set_origin_rows(f32::from(rows));
+        }
+        Surface::Dock => cells.for_each(|cell| frame.push_dock(cell)),
+    }
+    let mut leads = frame.take_leads();
+    match surface {
+        Surface::Grid => leads.grid = lead.to_owned(),
+        Surface::Band => leads.fill = lead.to_owned(),
+        Surface::Dock => frame.put_dock_lead(lead.to_owned()),
+    }
+    frame.put_leads(leads);
+    match surface {
+        Surface::Dock => frame.shape_dock(|cells, above| r.shape(cells, above)),
+        _ => frame.shape_grid(|cells, above| r.shape(cells, above)),
+    }
+    frame
+}
+
+#[test]
+fn a_key_the_terminal_wrapped_is_masked_in_both_rows() {
+    let on = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    for surface in [Surface::Grid, Surface::Band] {
+        let whole = frame_of(&on, surface, KEY, false, true);
+        let wrapped = wrapped_frame(&on, surface, &[line(HEAD, false), line(TAIL, true)], "");
+        let places = shaped_places(&wrapped, surface);
+        assert_eq!(places, shaped_places(&whole, surface), "{surface:?}");
+        assert!(
+            places[HEAD.len()..].iter().any(Option::is_some),
+            "{surface:?}: nothing on the second row is masked"
+        );
+        for at in 0..KEY.len() {
+            let (row, col) = if at < HEAD.len() {
+                (0, at)
+            } else {
+                (1, at - HEAD.len())
+            };
+            assert_eq!(
+                place(&on, &wrapped, surface, row, col),
+                column(&on, &whole, surface, at),
+                "{surface:?}: character {at} is drawn another way wrapped"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_line_break_and_a_new_face_end_what_the_font_reads() {
+    let on = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    for surface in SURFACES {
+        let alone = shaped_places(&frame_of(&on, surface, TAIL, false, true), surface);
+        assert!(alone.iter().all(Option::is_none), "{surface:?}: {alone:?}");
+        // The second row begins a line of its own: the rows above are not its text.
+        let broken = wrapped_frame(&on, surface, &[line(HEAD, false), line(TAIL, false)], "");
+        assert_eq!(shaped_places(&broken, surface)[HEAD.len()..], alone[..]);
+        // The row wraps on from a row of another face: a bold tail is read as itself.
+        let bold = Line {
+            bold: true,
+            ..line(TAIL, true)
+        };
+        let faced = wrapped_frame(&on, surface, &[line(HEAD, false), bold], "");
+        let alone = shaped_places(&frame_of(&on, surface, TAIL, true, true), surface);
+        assert_eq!(shaped_places(&faced, surface)[HEAD.len()..], alone[..]);
+    }
+}
+
+#[test]
+fn a_row_that_begins_mid_line_is_masked_from_the_text_above_it() {
+    let on = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    for surface in SURFACES {
+        let whole = frame_of(&on, surface, KEY, false, true);
+        let expected = shaped_places(&whole, surface)[HEAD.len()..].to_vec();
+        assert!(expected.iter().any(Option::is_some));
+        // The first row on screen is the tail: the head is scrolled away, in
+        // the lead.
+        let tail = wrapped_frame(&on, surface, &[line(TAIL, true)], HEAD);
+        assert_eq!(shaped_places(&tail, surface), expected, "{surface:?}");
+        if surface != Surface::Dock {
+            for at in HEAD.len()..KEY.len() {
+                assert_eq!(
+                    column(&on, &tail, surface, at - HEAD.len()),
+                    column(&on, &whole, surface, at),
+                    "{surface:?}: character {at}"
+                );
+            }
+        }
+        // No lead, or a row that does not continue it: nothing above it.
+        let bare = wrapped_frame(&on, surface, &[line(TAIL, true)], "");
+        assert!(shaped_places(&bare, surface).iter().all(Option::is_none));
+        let apart = wrapped_frame(&on, surface, &[line(TAIL, false)], HEAD);
+        assert!(shaped_places(&apart, surface).iter().all(Option::is_none));
+    }
+}
+
+#[test]
+fn the_grid_reads_the_band_above_it_as_its_text_and_each_list_answers_for_its_own_cells() {
+    let on = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    let (cw, ch) = on.cell_metrics(1.0).cell_px();
+    let mut frame = Frame::default();
+    frame.clear(grid(cw, ch), CaretStyle::default());
+    frame.set_fill_rows(1);
+    for (at, c) in HEAD.chars().enumerate() {
+        frame.push_fill(glyph_cell(u16::try_from(at).expect("short"), c, None));
+    }
+    for (at, c) in TAIL.chars().enumerate() {
+        frame.push(Cell {
+            continues: true,
+            ..glyph_cell(u16::try_from(at).expect("short"), c, None)
+        });
+    }
+    frame.set_origin_rows(1.0);
+    // What `Session::frame` writes: the grid's first row runs on from the
+    // band's rows, which are the band's own cells.
+    let mut leads = frame.take_leads();
+    leads.grid = HEAD.to_owned();
+    frame.put_leads(leads);
+    frame.shape_grid(|cells, above| on.shape(cells, above));
+    let whole = shaped_places(
+        &frame_of(&on, Surface::Grid, KEY, false, true),
+        Surface::Grid,
+    );
+    assert_eq!(shaped_places(&frame, Surface::Grid), whole[HEAD.len()..]);
+    assert_eq!(shaped_places(&frame, Surface::Band), whole[..HEAD.len()]);
+}
+
+#[test]
+fn a_start_further_back_than_the_bound_is_the_fonts_own_result() {
+    let on = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    // The key began 400 characters before the row: more than is handed over.
+    let far = format!("{HEAD}{}", "q".repeat(400));
+    for surface in SURFACES {
+        let near = wrapped_frame(&on, surface, &[line(TAIL, true)], HEAD);
+        assert!(
+            shaped_places(&near, surface).iter().any(Option::is_some),
+            "{surface:?}: the head in reach masks the tail"
+        );
+        let beyond = wrapped_frame(&on, surface, &[line(TAIL, true)], &far);
+        let unrelated = wrapped_frame(&on, surface, &[line(TAIL, true)], "qqqqq");
+        assert_eq!(
+            shaped_places(&beyond, surface),
+            shaped_places(&unrelated, surface),
+            "{surface:?}: the head out of reach still masks the tail"
+        );
+    }
+}
+
+#[test]
+fn rows_that_were_not_wrapped_are_what_they_were_and_a_font_without_rules_reads_nothing() {
+    let on = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    for surface in [Surface::Grid, Surface::Band] {
+        let one = frame_of(&on, surface, KEY, false, true);
+        let two = wrapped_frame(&on, surface, &[line(KEY, false), line(KEY, false)], "");
+        let (once, twice) = (shaped_places(&one, surface), shaped_places(&two, surface));
+        assert_eq!(twice, [once.clone(), once].concat(), "{surface:?}");
+        for at in 0..KEY.len() {
+            assert_eq!(
+                place(&on, &two, surface, 1, at),
+                column(&on, &one, surface, at),
+                "{surface:?}: column {at} of the second row"
+            );
+        }
+    }
+    let menlo = plain_renderer();
+    for surface in SURFACES {
+        let frame = wrapped_frame(
+            &menlo,
+            surface,
+            &[line(HEAD, false), line(TAIL, true)],
+            HEAD,
+        );
+        assert!(shaped_places(&frame, surface).iter().all(Option::is_none));
+    }
+    assert_eq!(menlo.shape_calls(), 0, "the shaper was asked for Menlo");
 }

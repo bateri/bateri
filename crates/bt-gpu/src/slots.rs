@@ -59,11 +59,39 @@ const RUN_GAP: u16 = 8;
 /// is stable.
 const RUN_MAX: usize = 256;
 
+/// How much of the text before a wrapped row is handed to the shaper with
+/// it: a secret that began further back than this is not found by the
+/// font, which then draws what it would draw on its own.
+const CONTEXT_MAX: usize = 200;
+
 /// Whether the shaper may decide this cell: a character in the display font,
 /// one column wide and not an emoji sequence — those are drawn as they were
 /// ([`fan`]).
 fn shapable(cell: &GlyphCell) -> bool {
     cell.size == SizeClass::Normal && !cell.wide && cell.cluster.is_none()
+}
+
+/// The text that came before the run being built, when the row it starts in
+/// continues the line above it: `expect` is the row that would continue it.
+struct Carry {
+    expect: u16,
+    /// The face the text was in; `None` for the text read from above the
+    /// list, whose face is not known (it is taken to be the run's own).
+    face: Option<Face>,
+    text: String,
+}
+
+/// What stands above a list of cells, for the shaper ([`shape_cells`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Above<'a> {
+    /// The text above the list's first row when that row continues a line
+    /// that began off the list (scrolled out of the grid, or above the
+    /// band's own top); empty when it does not.
+    pub(crate) lead: &'a str,
+    /// The column text starts at on every row of the list: `0` for the grid
+    /// and the band, the mark's width for the dock. Blanks left of it are
+    /// the surface's own and are not part of the line.
+    pub(crate) margin: u16,
 }
 
 /// Writes [`GlyphCell::glyph`] for a list of cells: which of them the font's
@@ -74,22 +102,52 @@ fn shapable(cell: &GlyphCell) -> bool {
 /// with spaces — one row per run of cells on the same screen row in the same
 /// face; the colour does not cut a run (an `ls` listing is one line of text
 /// in many colours) and a face does, which is why a key half bold and half
-/// regular is only masked where a face is whole. A font without rules
-/// (`Atlas::shapes`) leaves every cell as it was and builds nothing.
-pub(crate) fn shape_cells(atlas: &mut Atlas, cells: &mut [GlyphCell]) {
+/// regular is only masked where a face is whole.
+///
+/// **A line the terminal wrapped is one line to the font**: a row that
+/// continues the one above it ([`GlyphCell::continues`]) is shaped with the
+/// text before it, so a key that overflows into the next row is masked in
+/// both. `above` carries the text before the list's first row when that
+/// row continues a line that began off the list; only the row's own cells
+/// take the answer. A font without rules (`Atlas::shapes`) leaves every cell
+/// as it was and builds nothing.
+pub(crate) fn shape_cells(atlas: &mut Atlas, cells: &mut [GlyphCell], above: Above<'_>) {
     if !atlas.shapes() {
         return;
     }
     let mut text = String::new();
     let mut shaped = Vec::new();
+    let mut carry = (!above.lead.is_empty()).then(|| Carry {
+        expect: 0,
+        face: None,
+        text: tail(above.lead, CONTEXT_MAX).to_owned(),
+    });
     let mut start = 0;
     while start < cells.len() {
         let first = cells[start];
         if !shapable(&first) {
+            // A wide character or an emoji ends the context: the font never
+            // saw it, and the text across it is not one the user wrote.
+            carry = None;
             start += 1;
             continue;
         }
+        // What stands before the run: the wrapped line's earlier text and the
+        // blanks this row opens with.
         text.clear();
+        let mut before = 0;
+        if first.continues
+            && let Some(held) = carry.as_ref().filter(|held| {
+                held.expect == first.row && held.face.is_none_or(|f| f == first.face)
+            })
+        {
+            text.push_str(&held.text);
+            text.extend(std::iter::repeat_n(
+                ' ',
+                usize::from(first.col.saturating_sub(above.margin)),
+            ));
+            before = text.chars().count();
+        }
         text.push(first.ch);
         let (mut end, mut next, mut chars) = (start + 1, first.col.saturating_add(1), 1);
         while let Some(cell) = cells.get(end) {
@@ -111,11 +169,25 @@ pub(crate) fn shape_cells(atlas: &mut Atlas, cells: &mut [GlyphCell]) {
         atlas.shape_row(first.face, &text, &mut shaped);
         for cell in &mut cells[start..end] {
             cell.glyph = shaped
-                .get(usize::from(cell.col - first.col))
+                .get(before + usize::from(cell.col - first.col))
                 .copied()
                 .flatten();
         }
+        carry = Some(Carry {
+            expect: first.row.saturating_add(1),
+            face: Some(first.face),
+            text: tail(&text, CONTEXT_MAX).to_owned(),
+        });
         start = end;
+    }
+}
+
+/// The last `max` characters of `text`.
+fn tail(text: &str, max: usize) -> &str {
+    let count = text.chars().count();
+    match text.char_indices().nth(count.saturating_sub(max)) {
+        Some((at, _)) => &text[at..],
+        None => "",
     }
 }
 

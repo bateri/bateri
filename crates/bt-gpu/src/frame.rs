@@ -35,8 +35,8 @@ use std::mem::offset_of;
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{
     Block, ButtonState, CaretShape, CaretStyle, Cell, ClusterId, Clusters, ContentEdge, DockButton,
-    LinearRgba, Picture, Pictures, SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle,
-    UnfocusedCaret,
+    Leads, LinearRgba, Picture, Pictures, SearchRun, SelectionRun, TrackBlock, TrackMark,
+    UnderlineStyle, UnfocusedCaret,
 };
 use pencere_view::bands;
 
@@ -45,6 +45,7 @@ use crate::arrival::{Scene, WAVE_REACH_PT};
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::metrics::CellMetrics;
 use crate::scrollbar::{HAIRLINE_ALPHA, Look, ScrollbarLayout, TRACK_ALPHA};
+use crate::slots::Above;
 
 /// Identical to `shaders/cell_bg.wgsl` -> `Instance`, field by field.
 ///
@@ -465,6 +466,10 @@ pub(crate) struct GlyphCell {
     /// effects copy cells: an arrival is the dock's glyph itself and so carries
     /// the answer, where a table by position would have to be found again.
     pub(crate) glyph: Option<u32>,
+    /// The boundary's `Cell::continues`: this cell's row runs on from the row
+    /// above it as one logical line. What lets the shaping pass read the
+    /// rows a wrap split as the text they are ([`slots::shape_cells`]).
+    pub(crate) continues: bool,
 }
 
 /// Moves a cluster id from the `from` table to the `to` table: lists
@@ -1463,6 +1468,11 @@ pub(crate) struct Frame {
     clusters: Clusters,
     dock_clusters: Clusters,
     fx_clusters: Clusters,
+    /// The text above the first row of each list, when that row continues a
+    /// wrapped line that began off it ([`Leads`]); what the shaping pass is
+    /// given with the cells. Taken out for `frame()` and `dock()` to write,
+    /// like the cluster tables.
+    leads: Leads,
     /// The pictures the screen shows, for the grid and for the fill band
     /// ([`Frame::pictures`]). Filled by `frame()` like the cluster table
     /// ([`Frame::take_pictures`]) and positioned only when a plan is made
@@ -1636,6 +1646,9 @@ impl Frame {
         // screen.
         self.dock = None;
         self.dock_bg.clear();
+        self.leads.grid.clear();
+        self.leads.fill.clear();
+        self.leads.dock.clear();
         self.dock_memory.clear();
         self.dock_memory
             .extend(self.dock_glyphs.iter().filter_map(|cell| {
@@ -1897,6 +1910,7 @@ impl Frame {
                 col: cell.col,
                 row: cell.row,
                 glyph: None,
+                continues: cell.continues,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -2605,6 +2619,7 @@ impl Frame {
             col: cell.col,
             row: cell.row,
             glyph: None,
+            continues: cell.continues,
         })
     }
 
@@ -2615,9 +2630,10 @@ impl Frame {
     /// reason is [`GlyphCell`]'s doc), so the caller that holds both brings
     /// the shaper. Each list is its own surface: a row of the band is never the
     /// continuation of a row of the grid.
-    pub(crate) fn shape_grid(&mut self, mut shape: impl FnMut(&mut [GlyphCell])) {
-        shape(&mut self.glyphs);
-        shape(&mut self.fill_glyphs);
+    pub(crate) fn shape_grid(&mut self, mut shape: impl FnMut(&mut [GlyphCell], Above<'_>)) {
+        let above = |lead| Above { lead, margin: 0 };
+        shape(&mut self.glyphs, above(&self.leads.grid));
+        shape(&mut self.fill_glyphs, above(&self.leads.fill));
     }
 
     /// The dock's twin of [`Frame::shape_grid`], run **before** the typing
@@ -2626,8 +2642,14 @@ impl Frame {
     /// included — [`Frame::set_dock_fx`] takes the in-flight ones out of the
     /// list to be drawn, and a letter's neighbours must not be shaped as if
     /// it had not been typed.
-    pub(crate) fn shape_dock(&mut self, shape: impl FnOnce(&mut [GlyphCell])) {
-        shape(&mut self.dock_glyphs);
+    pub(crate) fn shape_dock(&mut self, shape: impl FnOnce(&mut [GlyphCell], Above<'_>)) {
+        // The rows of the input start after the mark: that indent is the
+        // dock's, not text.
+        let above = Above {
+            lead: &self.leads.dock,
+            margin: bt_core::DOCK_TEXT_COL,
+        };
+        shape(&mut self.dock_glyphs, above);
     }
 
     /// The glyph the previous dock drew at `cell`'s place for its character:
@@ -3115,6 +3137,7 @@ impl Frame {
                     col: 0,
                     row: 0,
                     glyph: None,
+                    continues: false,
                 },
                 rule: Some(rule.kind),
                 t: scene.mark,
@@ -3902,6 +3925,7 @@ impl Frame {
                 col: cell.col,
                 row: cell.row,
                 glyph: None,
+                continues: cell.continues,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -4291,6 +4315,29 @@ impl Frame {
 
     pub(crate) fn put_clusters(&mut self, clusters: Clusters) {
         self.clusters = clusters;
+    }
+
+    /// Takes the text above the grid's and the band's first rows **out** for
+    /// `frame()` to write, for [`Frame::take_clusters`]'s reason;
+    /// [`Frame::put_leads`] puts it back.
+    pub(crate) fn take_leads(&mut self) -> Leads {
+        std::mem::take(&mut self.leads)
+    }
+
+    pub(crate) fn put_leads(&mut self, leads: Leads) {
+        // The dock's text is written by its own call, later in the frame.
+        self.leads.grid = leads.grid;
+        self.leads.fill = leads.fill;
+    }
+
+    /// The twin of [`Frame::take_leads`] for the text above the dock's first
+    /// drawn row.
+    pub(crate) fn take_dock_lead(&mut self) -> String {
+        std::mem::take(&mut self.leads.dock)
+    }
+
+    pub(crate) fn put_dock_lead(&mut self, lead: String) {
+        self.leads.dock = lead;
     }
 
     /// Takes the pictures' list **out** for `frame()` to fill, for
@@ -7066,6 +7113,7 @@ mod tests {
                 col: 2,
                 row: 0,
                 glyph: None,
+                continues: false,
             }
         );
 

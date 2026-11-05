@@ -664,6 +664,7 @@ fn screen(session: &bt_core::Session) -> String {
         &mut bt_core::TrackMarks::default(),
         &mut bt_core::Clusters::default(),
         &mut bt_core::Pictures::default(),
+        &mut bt_core::Leads::default(),
         bt_core::ScrollGlide::default(),
         bt_core::DockBudget {
             share: 0.5,

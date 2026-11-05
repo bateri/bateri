@@ -59,6 +59,7 @@ use bt_core::ScrollGlide;
 use super::*;
 use crate::renderer::shrink::Chain;
 use crate::renderer::ui::UiList;
+use crate::slots::Above;
 
 /// What a still keeps between calls: the frame and the buffers that composing
 /// it fills, and the textures the reduction runs through ([`Chain`]).
@@ -184,8 +185,8 @@ impl Core {
                 .snapshot(&self.renderer, &mut shot.chain, tile);
         }
         let size = self.surface.size()?;
-        let clear = compose_still(shot, &self.session, &self.view(), size, &|cells| {
-            self.renderer.shape(cells);
+        let clear = compose_still(shot, &self.session, &self.view(), size, &|cells, above| {
+            self.renderer.shape(cells, above);
         });
         let rgba = self
             .renderer
@@ -265,8 +266,8 @@ impl Stage {
             focused: false,
             caret_focused: false,
         };
-        let clear = compose_still(&mut self.shot, session, &view, size, &|cells| {
-            self.renderer.shape(cells);
+        let clear = compose_still(&mut self.shot, session, &view, size, &|cells, above| {
+            self.renderer.shape(cells, above);
         });
         let rgba = self
             .renderer
@@ -289,7 +290,7 @@ fn compose_still(
     session: &Session,
     view: &View,
     size: (u32, u32),
-    shape: &dyn Fn(&mut [GlyphCell]),
+    shape: &dyn Fn(&mut [GlyphCell], Above<'_>),
 ) -> LinearRgba {
     let viewport_height = size.1 as f32;
     let theme = session.theme();
@@ -298,6 +299,7 @@ fn compose_still(
     shot.fill.clear();
     let mut clusters = frame.take_clusters();
     let mut pictures = frame.take_pictures();
+    let mut leads = frame.take_leads();
     let cursor = session.frame(
         |cell| frame.push(cell),
         |cell| shot.fill.push(cell),
@@ -307,6 +309,7 @@ fn compose_still(
         &mut shot.marks,
         &mut clusters,
         &mut pictures,
+        &mut leads,
         // No share of a notch's glide: it moves the window the frame path
         // is scrolling, and a still is at rest.
         ScrollGlide::default(),
@@ -317,6 +320,7 @@ fn compose_still(
     );
     frame.put_clusters(clusters);
     frame.put_pictures(pictures);
+    frame.put_leads(leads);
     push_lists(
         frame,
         &cursor,
@@ -328,7 +332,7 @@ fn compose_still(
     );
     // The same order as the content frame: the font's own rules once the
     // cells are in, the dock shaping its own list inside `place_dock`.
-    frame.shape_grid(|cells| shape(cells));
+    frame.shape_grid(|cells, above| shape(cells, above));
     place_edge(
         frame,
         view.edge,
@@ -482,7 +486,7 @@ mod tests {
     fn composed_until(session: &Session, shot: &mut Shot, cells: usize) -> LinearRgba {
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let clear = compose_still(shot, session, &view(), (128, 128), &|_| {});
+            let clear = compose_still(shot, session, &view(), (128, 128), &|_, _| {});
             if shot.frame.bg_count() >= cells {
                 return clear;
             }
@@ -510,7 +514,7 @@ mod tests {
         // Until the program's six cells are the ones in the frame (the red three come first).
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         let clear = loop {
-            let clear = compose_still(&mut shot, &session, &view(), (128, 128), &|_| {});
+            let clear = compose_still(&mut shot, &session, &view(), (128, 128), &|_, _| {});
             if session.alt_screen() && shot.frame.bg_count() >= 6 {
                 break clear;
             }
@@ -625,7 +629,7 @@ mod tests {
         );
         // And taking it was the test's: a still plants none either.
         let mut again = Shot::default();
-        compose_still(&mut again, &session, &view(), (128, 128), &|_| {});
+        compose_still(&mut again, &session, &view(), (128, 128), &|_, _| {});
         assert!(!session.take_damage(), "a still planted damage");
 
         // **The same frame**: drawn through the still's path at the frame's

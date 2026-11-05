@@ -1400,6 +1400,7 @@ pub(crate) mod tests {
             &mut bt_core::TrackMarks::default(),
             &mut bt_core::Clusters::default(),
             &mut bt_core::Pictures::default(),
+            &mut bt_core::Leads::default(),
             ScrollGlide::default(),
             bt_core::DockBudget {
                 share: 0.5,
@@ -2666,6 +2667,7 @@ pub(crate) mod tests {
             &mut bt_core::TrackMarks::default(),
             &mut bt_core::Clusters::default(),
             &mut bt_core::Pictures::default(),
+            &mut bt_core::Leads::default(),
             ScrollGlide::default(),
             bt_core::DockBudget {
                 share: 0.5,
@@ -2683,6 +2685,7 @@ pub(crate) mod tests {
             cursor.caret_in_dock,
             &mut Vec::new(),
             &mut bt_core::Clusters::default(),
+            &mut String::new(),
             |_| (),
             |_| (),
         );

@@ -145,6 +145,7 @@ use crate::metrics::CellMetrics;
 use crate::motion::Motion;
 use crate::renderer::ui::{UiContext, UiPage};
 use crate::scrollbar::{Look, Mode, Scrollbar, ScrollbarLayout};
+use crate::slots::Above;
 use crate::stats::Stats;
 use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
@@ -1348,6 +1349,8 @@ impl Core {
         // The pictures too are outside `Frame` for the call, and for the same
         // reason; `clear` above emptied the list.
         let mut pictures = frame.take_pictures();
+        // And the text above each list's first row, written beside the cells.
+        let mut leads = frame.take_leads();
         let cursor = self.session.frame(
             |cell| frame.push(cell),
             |cell| fill.push(cell),
@@ -1357,6 +1360,7 @@ impl Core {
             &mut self.marks.borrow_mut(),
             &mut clusters,
             &mut pictures,
+            &mut leads,
             // The share **does not wake**: this tick draws the frame anyway
             // (`Session::frame`). If its generation changed it drops there.
             glide,
@@ -1378,6 +1382,7 @@ impl Core {
         // after frame would be drawn for shares hitting the clamp.
         frame.put_clusters(clusters);
         frame.put_pictures(pictures);
+        frame.put_leads(leads);
         motion.observe_scroll(
             cursor.scroll_generation,
             (cursor.display_offset, cursor.scroll_frac),
@@ -1405,7 +1410,7 @@ impl Core {
         // **The font's own rules, once the cells are all in** (a masked key,
         // an alternate letter): the atlas that knows them is the renderer's,
         // and the dock below shapes its own list for the same reason.
-        frame.shape_grid(|cells| self.renderer.shape(cells));
+        frame.shape_grid(|cells, above| self.renderer.shape(cells, above));
         // The gate's operand rises here: damage was found, the frame will be
         // drawn. Before `frames` and independent of it — it does not wait for
         // the GPU to finish (see `Core::content_frames`).
@@ -1484,7 +1489,7 @@ impl Core {
             },
             &mut motion,
             Some(&mut glyph_fx),
-            &|cells| self.renderer.shape(cells),
+            &|cells, above| self.renderer.shape(cells, above),
             &theme,
         );
         drop(glyph_fx);
@@ -2356,7 +2361,7 @@ fn place_dock(
     bufs: DockBufs<'_>,
     motion: &mut Motion,
     fx: Option<&mut GlyphFx>,
-    shape: &dyn Fn(&mut [GlyphCell]),
+    shape: &dyn Fn(&mut [GlyphCell], Above<'_>),
     theme: &Theme,
 ) -> Option<(DockCaret, LinearRgba)> {
     let mut dock_caret = None;
@@ -2374,6 +2379,7 @@ fn place_dock(
         let mut edit = None;
         // The twin of the grid's table, same reason.
         let mut dock_clusters = frame.take_dock_clusters();
+        let mut dock_lead = frame.take_dock_lead();
         // The handover's answer comes from `frame()`, the dock does not
         // recompute it: only `frame()` knows the three preconditions (a
         // window with a dock, the alternate screen, the mirror's freshness).
@@ -2393,10 +2399,12 @@ fn place_dock(
             cursor.caret_in_dock,
             bufs.selection,
             &mut dock_clusters,
+            &mut dock_lead,
             |cell| frame.push_dock(cell),
             |dock_edit| edit = Some(dock_edit),
         );
         frame.put_dock_clusters(dock_clusters);
+        frame.put_dock_lead(dock_lead);
         // **The trailing zone moves before anything reads a context
         // position**: the arrival's letters, the effects' static match and
         // the buttons' fills all go through `dock_pos`, and the zone's start

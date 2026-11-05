@@ -236,6 +236,37 @@ pub struct Cell {
     /// with the base character as today, so a cluster-less cell
     /// pays nothing and with clustering off the frame is bit for bit the same.
     pub cluster: Option<ClusterId>,
+    /// Whether the cell's row is the **continuation of the row above it**: the
+    /// terminal wrapped the line there (`WRAPLINE` on the row above's last
+    /// cell; in the dock, a row that began by running out of columns and not
+    /// by a line break). Every cell of such a row carries it.
+    ///
+    /// A font's rules read a line, and a line the terminal wrapped is one
+    /// line to the user: a secret that overflows into the next row is one
+    /// token, which is why the renderer shapes the two rows together
+    /// ([`Leads`] carries the text from before the list's first row).
+    pub continues: bool,
+}
+
+/// The text that stands **above the first row** of each surface when that row
+/// continues a wrapped line ([`Cell::continues`]): the rest of the line that
+/// began off the list — scrolled out of the grid, above the fill band, above
+/// the dock's window.
+///
+/// Empty when the first row does not continue a line. Bounded (a few
+/// hundred characters, a few rows): a line longer than that is read from where
+/// the bound cuts it, and the font then does what it would do on its own.
+/// A side table of the frame like [`Clusters`], and for the same reason: the
+/// list does not see the terminal, and this is read in the same `Term` lock
+/// round as the cells.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Leads {
+    /// Above the grid's first row ([`Session::frame`]).
+    pub grid: String,
+    /// Above the fill band's first row ([`Session::frame`]).
+    pub fill: String,
+    /// Above the dock's first drawn input row ([`Session::dock`]).
+    pub dock: String,
 }
 
 /// **For test literals only**: `bt-gpu`'s frame tests build the cell with
@@ -263,6 +294,7 @@ impl Default for Cell {
             strikeout: false,
             wide: false,
             cluster: None,
+            continues: false,
         }
     }
 }
@@ -3733,6 +3765,38 @@ fn block_start_near<T>(term: &Term<T>, line: i64, key: BlockKey, boundary: usize
         })
 }
 
+/// The most characters of context one surface carries ([`Leads`]).
+pub(crate) const LEAD_CHARS: usize = 256;
+
+/// Whether the row at `line` continues the one above it: that row's last cell
+/// carries `WRAPLINE`. The topmost row of the history continues nothing.
+fn continues_above<T>(term: &Term<T>, line: i32) -> bool {
+    line > term.topmost_line().0
+        && term.grid()[Line(line - 1)][Column(term.columns().saturating_sub(1))]
+            .flags
+            .contains(Flags::WRAPLINE)
+}
+
+/// The text of the rows above `line` that the logical line it continues began
+/// on, in reading order; empty when `line` does not continue one. Bounded in
+/// rows and in characters ([`Leads`]).
+fn lead_above<T>(term: &Term<T>, line: i32) -> String {
+    const MOST_ROWS: usize = 16;
+    let mut pieces = Vec::new();
+    let (mut at, mut chars) = (line, 0);
+    while pieces.len() < MOST_ROWS && chars < LEAD_CHARS && continues_above(term, at) {
+        at -= 1;
+        let (piece, _) = row_text(term, at);
+        chars += piece.chars().count();
+        pieces.push(piece);
+    }
+    pieces
+        .iter()
+        .rev()
+        .flat_map(|piece| piece.chars())
+        .collect()
+}
+
 /// Row `line`'s text, every cell as its character (a hidden one as a space, the spacers of a wide
 /// character skipped), and whether the row runs on into the next (a soft wrap). The trailing
 /// blanks are the caller's to trim.
@@ -6029,6 +6093,7 @@ impl Session {
         marks: &mut TrackMarks,
         clusters: &mut Clusters,
         pictures: &mut Pictures,
+        leads: &mut Leads,
         glide: ScrollGlide,
         budget: DockBudget,
     ) -> Cursor {
@@ -6633,6 +6698,13 @@ impl Session {
         }
         let clear_boundary = self.clear_boundary.load(Ordering::Relaxed);
 
+        // **The text before the grid's first row**, when that row continues a
+        // wrapped line: read in this lock round with the cells it belongs to.
+        leads.grid = lead_above(&*term, -offset);
+        leads.fill.clear();
+        // The row above the one being read, and whether this row continues it
+        // (`Cell::continues`): asked once per row, not per cell.
+        let mut above = (i32::MIN, false);
         for indexed in display_iter {
             let cell = indexed.cell;
             let flags = cell.flags;
@@ -6948,6 +7020,13 @@ impl Session {
                 // diverged the counter's margin and the drawing's width would come apart.
                 wide: flags.contains(Flags::WIDE_CHAR),
                 cluster: cell_cluster(self.cluster, cell, ch, clusters),
+                continues: {
+                    let line = indexed.point.line.0;
+                    if above.0 != line {
+                        above = (line, continues_above(&*term, line));
+                    }
+                    above.1
+                },
             };
             underline_link(&mut drawn, hovered);
             sink(drawn);
@@ -7187,6 +7266,10 @@ impl Session {
             let line = Line(i32::from(fill_row) - i32::from(channel) - offset)
                 .grid_clamp(&*term, Boundary::Grid);
             let cells = &term.grid()[line];
+            let continues = continues_above(&*term, line.0);
+            if fill_row == 0 {
+                leads.fill = lead_above(&*term, line.0);
+            }
             // **`zip`, not indexing** and the rationale is the panic ban:
             // `Row`'s `Index` panics out of bounds and `make audit` cannot see
             // indexing — what it looks for is `unwrap`/`expect`/`panic!`. Today there
@@ -7276,6 +7359,7 @@ impl Session {
                     // the screen.
                     wide: flags.contains(Flags::WIDE_CHAR),
                     cluster: cell_cluster(self.cluster, cell, ch, clusters),
+                    continues,
                 };
                 underline_link(&mut drawn, hovered);
                 fill_sink(drawn);
@@ -8062,6 +8146,7 @@ impl Session {
                                     // produces only digits, `.`, `m` and `s`.
                                     wide: false,
                                     cluster: None,
+                                    continues: false,
                                 });
                             }
                             counted_row = Some(row);
@@ -10974,6 +11059,10 @@ impl Session {
     /// and the selection can span several rows. The caller's buffer (the
     /// precedent of [`SelectionRuns`]), emptied and refilled on every call; its
     /// rows are inside the vertical window, dock-local.
+    ///
+    /// **`above` is the text before the first drawn row** when that row wraps
+    /// on from rows the vertical window has scrolled off ([`Leads::dock`]):
+    /// emptied and refilled on every call, bounded.
     // The arguments are separate numbers and buffers going through the frame's
     // single read (`frame()`'s answer, the caller's buffers, two sinks); gathering
     // them in a struct would create a type only for this call.
@@ -10987,6 +11076,7 @@ impl Session {
         caret_in_dock: bool,
         runs: &mut Vec<SelectionRun>,
         clusters: &mut Clusters,
+        above: &mut String,
         sink: impl FnMut(Cell),
         edits: impl FnMut(DockEdit),
     ) -> Dock {
@@ -11048,6 +11138,7 @@ impl Session {
             change.as_ref(),
             runs,
             clusters,
+            above,
             sink,
             |made| edit = Some(made),
         );
@@ -13655,6 +13746,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             )
@@ -13677,6 +13769,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -13701,6 +13794,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -14057,6 +14151,7 @@ mod tests {
                     &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     &mut Pictures::default(),
+                    &mut Leads::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 );
@@ -14932,6 +15027,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -15125,6 +15221,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 DockBudget { share, cols: 80 },
             );
@@ -15326,6 +15423,7 @@ mod tests {
                     &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     &mut Pictures::default(),
+                    &mut Leads::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 );
@@ -15442,6 +15540,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -15500,6 +15599,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -15548,6 +15648,7 @@ mod tests {
                     &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     &mut Pictures::default(),
+                    &mut Leads::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -15577,6 +15678,7 @@ mod tests {
                     &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     &mut Pictures::default(),
+                    &mut Leads::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -15660,6 +15762,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15710,6 +15813,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15732,6 +15836,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15770,6 +15875,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -15785,6 +15891,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15832,6 +15939,7 @@ mod tests {
                         &mut TrackMarks::default(),
                         &mut Clusters::default(),
                         &mut Pictures::default(),
+                        &mut Leads::default(),
                         ScrollGlide::default(),
                         BUDGET,
                     )
@@ -15847,6 +15955,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15884,6 +15993,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15913,6 +16023,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15953,6 +16064,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -15987,6 +16099,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16034,6 +16147,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16062,6 +16176,7 @@ mod tests {
             cursor.caret_in_dock,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |_| (),
             |_| (),
         );
@@ -16110,6 +16225,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16155,6 +16271,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16203,6 +16320,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -16246,6 +16364,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16299,6 +16418,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16353,6 +16473,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16405,6 +16526,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16464,6 +16586,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16492,6 +16615,7 @@ mod tests {
                     &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     &mut Pictures::default(),
+                    &mut Leads::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 );
@@ -16513,6 +16637,7 @@ mod tests {
                         &mut TrackMarks::default(),
                         &mut Clusters::default(),
                         &mut Pictures::default(),
+                        &mut Leads::default(),
                         ScrollGlide::default(),
                         BUDGET,
                     )
@@ -16529,6 +16654,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -16591,6 +16717,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -16915,6 +17042,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -17373,6 +17501,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -17416,6 +17545,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -17434,6 +17564,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -17566,6 +17697,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 budget,
             );
@@ -17715,6 +17847,7 @@ mod tests {
             cursor.caret_in_dock,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |cell| dock_cells.push(cell),
             |_| (),
         );
@@ -17951,6 +18084,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -17973,6 +18107,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -17993,6 +18128,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -18101,6 +18237,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -18134,6 +18271,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -20054,6 +20192,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -20069,6 +20208,7 @@ mod tests {
             cursor.caret_in_dock,
             &mut runs,
             &mut Clusters::default(),
+            &mut String::new(),
             |_| (),
             |_| (),
         );
@@ -20325,6 +20465,7 @@ mod tests {
             false,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |cell| chars.extend(cell.ch),
             |_| (),
         );
@@ -21023,6 +21164,7 @@ mod tests {
             cursor.caret_in_dock,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |cell| row.extend(cell.ch),
             |_| (),
         );
@@ -21111,6 +21253,7 @@ mod tests {
             false,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |_| count += 1,
             |_| (),
         );
@@ -21241,6 +21384,7 @@ mod tests {
                     &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     &mut Pictures::default(),
+                    &mut Leads::default(),
                     ScrollGlide::default(),
                     DockBudget { share, cols: 40 },
                 )
@@ -21314,6 +21458,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 DockBudget { share: 0.5, cols },
             );
@@ -21330,6 +21475,7 @@ mod tests {
                 cursor.caret_in_dock,
                 &mut Vec::new(),
                 &mut Clusters::default(),
+                &mut String::new(),
                 |cell| cells.push(cell),
                 |_| (),
             );
@@ -22096,6 +22242,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -22327,6 +22474,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         )
@@ -22914,6 +23062,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -22947,6 +23096,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -23259,6 +23409,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -23333,6 +23484,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -23377,6 +23529,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -24225,6 +24378,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             stale,
             BUDGET,
         );
@@ -24245,6 +24399,7 @@ mod tests {
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             live,
             BUDGET,
         );
@@ -24339,6 +24494,7 @@ mod tests {
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 glide,
                 BUDGET,
             );
@@ -24557,6 +24713,150 @@ mod tests {
         // Only the slide's extension: there is no band in a scrolled window.
         session.set_grid_top(2, 0);
         assert_eq!(fill_now(&session).0.fill, 0);
+    }
+
+    /// A ten-column, ten-row session that prints `script`'s output, ready when
+    /// `ready` says the frame shows its last line.
+    fn narrow_session(script: &str, ready: impl Fn(&[Cell]) -> bool) -> (Session, Arc<TestWake>) {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(sh(script), 10, Arc::clone(&wake));
+        wait_frame(&session, &wake, ready);
+        wait_settled(&session);
+        (session, wake)
+    }
+
+    /// The grid's cells, the band's cells and the text above each one's first
+    /// row ([`Leads`]).
+    fn with_leads(session: &Session) -> (Cursor, Vec<Cell>, Vec<Cell>, Leads) {
+        let (mut grid, mut fill) = (Vec::new(), Vec::new());
+        let mut leads = Leads::default();
+        let cursor = session.frame(
+            |cell| grid.push(cell),
+            |cell| fill.push(cell),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
+            &mut Clusters::default(),
+            &mut Pictures::default(),
+            &mut leads,
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        (cursor, grid, fill, leads)
+    }
+
+    /// Six rows of ten distinct characters, printed as one line the terminal
+    /// wraps.
+    const WRAPPED: [&str; 6] = [
+        "0123456789",
+        "abcdefghij",
+        "ABCDEFGHIJ",
+        "KLMNOPQRST",
+        "UVWXYZ0123",
+        "klmnopqrst",
+    ];
+
+    #[test]
+    fn a_row_the_terminal_wrapped_onto_continues_the_one_above_and_a_line_break_does_not() {
+        let (session, _wake) = narrow_session(
+            "printf '0123456789abcdefghijKLMNO\\nxy.'; sleep 5",
+            |cells| glyph_text(cells).contains("xy."),
+        );
+        let (_, cells, _, leads) = with_leads(&session);
+        let continues = |ch| {
+            cells
+                .iter()
+                .find(|cell| cell.ch == Some(ch))
+                .unwrap_or_else(|| panic!("{ch} was not drawn: {cells:?}"))
+                .continues
+        };
+        assert!(!continues('0'), "the first row begins the line");
+        assert!(continues('a'), "the second row ran out of columns");
+        assert!(continues('K'), "so did the third");
+        assert!(!continues('x'), "a line break begins a line");
+        assert_eq!(leads, Leads::default(), "nothing is above the window");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_grid_hands_down_the_start_of_a_line_scrolled_off_its_top() {
+        let line = WRAPPED.concat();
+        let (session, _wake) =
+            narrow_session(&format!("printf '{line}\\n'; seq 1 6; sleep 5"), |cells| {
+                row_text(cells, 8) == "6"
+            });
+        // At the bottom the window shows the line's last three rows and the
+        // numbers: its fourth row begins the window.
+        let (_, cells, _, leads) = with_leads(&session);
+        assert_eq!(row_text(&cells, 0), WRAPPED[3], "{cells:?}");
+        assert_eq!(leads.grid, WRAPPED[..3].concat());
+        // Scrolled up a row the window begins one row earlier.
+        assert_eq!(session.scroll_to(2.0, false), Some(true));
+        let (_, cells, _, leads) = with_leads(&session);
+        assert_eq!(row_text(&cells, 0), WRAPPED[2], "{cells:?}");
+        assert_eq!(leads.grid, WRAPPED[..2].concat());
+        // At the line's own start there is nothing above it.
+        assert_eq!(session.scroll_to(0.0, false), Some(true));
+        let (_, cells, _, leads) = with_leads(&session);
+        assert_eq!(row_text(&cells, 0), WRAPPED[0], "{cells:?}");
+        assert_eq!(leads.grid, "");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_band_and_the_grid_each_hand_down_what_is_above_their_first_row() {
+        let line = WRAPPED.concat();
+        let (session, _wake) =
+            narrow_session(&format!("printf '{line}\\n'; seq 1 6; sleep 5"), |cells| {
+                row_text(cells, 8) == "6"
+            });
+        // The two history rows nearest the grid are the band: the line's
+        // second and third rows. The grid's first row is its fourth.
+        session.set_grid_top(2, 2);
+        let (cursor, grid, fill, leads) = with_leads(&session);
+        assert_eq!(
+            fill_text(&cursor, &fill),
+            [WRAPPED[1], WRAPPED[2]],
+            "{fill:?}"
+        );
+        assert_eq!(row_text(&grid, 0), WRAPPED[3]);
+        assert!(fill.iter().all(|cell| cell.continues), "{fill:?}");
+        assert!(
+            grid.iter()
+                .filter(|cell| cell.row == 0)
+                .all(|cell| cell.continues)
+        );
+        assert_eq!(
+            leads.fill, WRAPPED[0],
+            "the band's top row runs on from one above it"
+        );
+        assert_eq!(
+            leads.grid,
+            WRAPPED[..3].concat(),
+            "the grid's first row runs on from the band's rows and the one above them"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_text_a_frame_hands_down_is_bounded() {
+        let text: String = (0..300u32)
+            .map(|at| char::from(b'a' + (at % 26) as u8))
+            .collect();
+        let (session, _wake) =
+            narrow_session(&format!("printf '{text}\\n'; seq 1 8; sleep 5"), |cells| {
+                row_text(cells, 8) == "8"
+            });
+        // Thirty rows of the line and eight numbers; the window shows the
+        // last ten rows: the line's last row, the numbers and the cursor's
+        // row. Scroll to the line's 25th row.
+        assert_eq!(session.scroll_to(24.0, false), Some(true));
+        let (_, cells, _, leads) = with_leads(&session);
+        assert_eq!(row_text(&cells, 0), &text[240..250], "{cells:?}");
+        // At most sixteen rows go back, whatever the line's length.
+        assert_eq!(leads.grid, text[80..240]);
+        session.shutdown();
     }
 
     /// The rows the drawing side adds to **both** of [`Session::set_grid_top`]'s
@@ -25811,6 +26111,7 @@ e\\314\\201.'; sleep 5";
                 &mut TrackMarks::default(),
                 &mut clusters,
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -27047,6 +27348,7 @@ e\\314\\201.'; sleep 5";
                         cursor.caret_in_dock,
                         &mut Vec::new(),
                         &mut Clusters::default(),
+                        &mut String::new(),
                         |_| (),
                         |_| (),
                     )
@@ -27309,6 +27611,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -27649,6 +27952,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -28199,6 +28503,7 @@ e\\314\\201.'; sleep 5";
                 &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 &mut Pictures::default(),
+                &mut Leads::default(),
                 glide,
                 BUDGET,
             );
@@ -28481,6 +28786,7 @@ e\\314\\201.'; sleep 5";
             marks,
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -28558,6 +28864,7 @@ e\\314\\201.'; sleep 5";
             &mut marks,
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -29397,6 +29704,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -29761,6 +30069,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -30458,6 +30767,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -30581,6 +30891,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -30743,6 +31054,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -30758,6 +31070,7 @@ e\\314\\201.'; sleep 5";
             cursor.caret_in_dock,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |cell| cells.push(cell),
             |_| (),
         );
@@ -31077,6 +31390,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut Pictures::default(),
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -33737,6 +34051,7 @@ e\\314\\201.'; sleep 5";
             &mut TrackMarks::default(),
             &mut Clusters::default(),
             &mut pictures,
+            &mut Leads::default(),
             ScrollGlide::default(),
             BUDGET,
         );

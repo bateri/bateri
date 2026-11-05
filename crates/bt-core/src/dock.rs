@@ -21,7 +21,9 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::cluster::{ClusterId, Clusters, Walk};
 use crate::color::{self, LinearRgba, Theme};
-use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, WORD_SEPARATORS};
+use crate::session::{
+    Cell, CellHalf, LEAD_CHARS, SelectKind, SelectionRun, UnderlineStyle, WORD_SEPARATORS,
+};
 
 use crate::settings::HostMark;
 use crate::shell::{
@@ -1474,10 +1476,15 @@ pub(crate) fn render_with(
     change: Option<&Change>,
     runs: &mut Vec<SelectionRun>,
     clusters: &mut Clusters,
+    above: &mut String,
     mut sink: impl FnMut(Cell),
     mut edits: impl FnMut(DockEdit),
 ) -> (Dock, usize, usize) {
     runs.clear();
+    // The text of the rows above the first drawn one when that row wraps on
+    // from them ([`crate::Leads::dock`]); the layout fills it while it walks
+    // them, so a shaper can see the whole word a wrap split.
+    above.clear();
     let input_rows = band.unwrap_or(0);
     // While an upload runs the line is in the color of the queue's host
     // (also after ssh closes, as long as the result row is shown).
@@ -1636,6 +1643,16 @@ pub(crate) fn render_with(
         })
     };
     let mut run: Option<SelectionRun> = None;
+    // Where the walk is: the row it is on, whether that row continues the one
+    // above it (it began by running out of columns, not at a line break), and
+    // where the last placed character ended — a `\n` between that end and
+    // the next row's first character is what makes the row a new line, and
+    // zero-width characters, which are never placed, can sit in between.
+    let mut walking = (usize::MAX, false, 0);
+    // The stream indices of the text above the window that the first drawn
+    // row continues: from the start of the line it belongs to up to the end of
+    // the last row before the window.
+    let mut chain = (0, 0);
 
     let end = dock_layout(
         stream,
@@ -1644,6 +1661,23 @@ pub(crate) fn render_with(
         state.cluster,
         |_| {},
         |placed| {
+            if placed.row != walking.0 {
+                let broke = self::stream(state)
+                    .skip(walking.2)
+                    .take(placed.index.saturating_sub(walking.2))
+                    .any(|ch| ch == '\n');
+                walking.0 = placed.row;
+                walking.1 = placed.row > 0 && !broke;
+                // A row above the window that does not continue ends the
+                // line the window's first row might continue.
+                if placed.row <= top && !walking.1 {
+                    chain = (placed.index, placed.index);
+                }
+            }
+            walking.2 = placed.end;
+            if placed.row < top {
+                chain.1 = placed.end;
+            }
             // A row outside the window (vertical window) and a degenerate
             // character that does not fit (a wide glyph in a one-column
             // window, [`layout`]'s "overflows" rule) are not drawn: one would
@@ -1670,6 +1704,7 @@ pub(crate) fn render_with(
             let is_selected = selectable_at(index).is_some_and(|at| selected.contains(&at));
             let mut lead = Cell {
                 row,
+                continues: walking.1,
                 // The cluster's text from the stream: clusters are rare and
                 // the stream short, so the walk has no second buffer
                 // ([`placed_cluster`]).
@@ -1755,6 +1790,10 @@ pub(crate) fn render_with(
         },
     );
     runs.extend(run);
+    // Bounded: a shaper reads a handful of characters back at most
+    // ([`crate::Leads`]).
+    let from = chain.0.max(chain.1.saturating_sub(LEAD_CHARS));
+    above.extend(self::stream(state).skip(from).take(chain.1 - from));
     // **The reconnect offer's placeholder**: when the line is
     // empty, after the caret — the suggestion's layer.
     // The gate is the same as ⏎'s (`Session::reconnect`): the visible hint
@@ -1939,6 +1978,7 @@ pub(crate) fn render(
         change,
         &mut Vec::new(),
         &mut Clusters::default(),
+        &mut String::new(),
         sink,
         edits,
     )
@@ -2464,6 +2504,7 @@ fn cell(
         wide,
         // The caller sets the cluster: this function sees a single character.
         cluster: None,
+        continues: false,
     }
 }
 
@@ -2737,6 +2778,7 @@ mod tests {
             None,
             &mut runs,
             &mut Clusters::default(),
+            &mut String::new(),
             |cell| cells.push(cell),
             |_| (),
         );
@@ -3064,6 +3106,7 @@ mod tests {
             None,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |cell| cells.push(cell),
             |_| (),
         );
@@ -4445,6 +4488,7 @@ mod tests {
                 Some(&Change::Insert { start: 0, end: 1 }),
                 &mut runs,
                 &mut Clusters::default(),
+                &mut String::new(),
                 |cell| cells.push(cell),
                 |edit| edits.push(edit),
             );
@@ -4711,6 +4755,7 @@ mod tests {
             None,
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |cell| cells.push(cell),
             |_| (),
         );
@@ -6168,10 +6213,120 @@ mod tests {
             change.as_ref(),
             &mut Vec::new(),
             &mut Clusters::default(),
+            &mut String::new(),
             |_| (),
             |edit| edits.push(edit),
         );
         edits
+    }
+
+    /// The input drawn into a `rows`-row window scrolled to row `scroll`: the
+    /// cells and the text before the first drawn row.
+    fn draw_window(state: &DockState, cols: u16, rows: u16, scroll: usize) -> (Vec<Cell>, String) {
+        let mut cells = Vec::new();
+        let mut above = String::new();
+        render_with(
+            state,
+            &DockContext::default(),
+            None,
+            &THEME,
+            crate::settings::MINIMUM_CONTRAST,
+            same(cols),
+            Some(rows),
+            Some(scroll),
+            false,
+            None,
+            None,
+            None,
+            &mut Vec::new(),
+            &mut Clusters::default(),
+            &mut above,
+            |cell| cells.push(cell),
+            |_| (),
+        );
+        (cells, above)
+    }
+
+    #[test]
+    fn a_row_the_input_wrapped_onto_continues_the_one_above_and_a_line_break_does_not() {
+        // Ten columns, the text starting at the third: eight characters a row.
+        // `abcdefgh` / `ijklmnop` / `qr` / `stu` (after a line break).
+        let state = live("", "abcdefghijklmnopqr\nstu", "", 0);
+        let (cells, above) = draw_window(&state, 10, 4, 0);
+        let continues = |ch| {
+            cells
+                .iter()
+                .find(|cell| cell.ch == Some(ch))
+                .unwrap_or_else(|| panic!("{ch} was not drawn: {cells:?}"))
+                .continues
+        };
+        assert!(!continues('a'), "the first row begins the line");
+        assert!(continues('i'), "a wrap");
+        assert!(continues('q'), "a wrap");
+        assert!(!continues('s'), "a line break begins a line");
+        assert_eq!(above, "", "nothing is above a window at the top");
+    }
+
+    #[test]
+    fn the_rows_above_the_window_are_the_text_before_the_first_drawn_row() {
+        // `abcdefgh` / `ijklmnop` / `qrstuvwx` / `yz`.
+        let state = live("", "abcdefghijklmnopqrstuvwxyz", "", 0);
+        for (top, first, before) in [
+            (0, 'a', ""),
+            (1, 'i', "abcdefgh"),
+            (2, 'q', "abcdefghijklmnop"),
+            (3, 'y', "abcdefghijklmnopqrstuvwx"),
+        ] {
+            let (cells, above) = draw_window(&state, 10, 1, top);
+            let head = cells
+                .iter()
+                .find(|cell| cell.ch.is_some())
+                .expect("a drawn cell");
+            assert_eq!(head.ch, Some(first), "row {top}");
+            assert_eq!(head.continues, top > 0, "row {top}");
+            assert_eq!(above, before, "row {top}");
+        }
+    }
+
+    #[test]
+    fn a_line_break_above_the_window_ends_the_text_it_hands_down() {
+        // `abc` / `defghijk` / `lmnopqrs` / `t`: the second row begins a line.
+        let state = live("", "abc\ndefghijklmnopqrst", "", 0);
+        for (top, before, continues) in [
+            (1, "", false),
+            (2, "defghijk", true),
+            (3, "defghijklmnopqrs", true),
+        ] {
+            let (cells, above) = draw_window(&state, 10, 1, top);
+            let head = cells
+                .iter()
+                .find(|cell| cell.ch.is_some())
+                .expect("a drawn cell");
+            assert_eq!(
+                (above.as_str(), head.continues),
+                (before, continues),
+                "row {top}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_text_above_the_window_is_bounded() {
+        let text: String = (0..700u32)
+            .map(|at| char::from(b'a' + (at % 26) as u8))
+            .collect();
+        let state = live("", &text, "", 0);
+        // Eight characters a row: row 80 begins at character 640.
+        let (cells, above) = draw_window(&state, 10, 1, 80);
+        assert_eq!(cells.iter().find_map(|cell| cell.ch), text.chars().nth(640));
+        assert_eq!(above.chars().count(), LEAD_CHARS);
+        assert_eq!(
+            above,
+            text.chars()
+                .skip(640 - LEAD_CHARS)
+                .take(LEAD_CHARS)
+                .collect::<String>()
+        );
     }
 
     type Placement = ((u16, u16), Vec<(u16, u16, char)>);
@@ -6711,6 +6866,7 @@ mod tests {
             change.as_ref(),
             &mut Vec::new(),
             &mut clusters,
+            &mut String::new(),
             |cell| cells.push(cell),
             |edit| edits.push(edit),
         );

@@ -1895,9 +1895,9 @@ impl Renderer {
     ///
     /// Nothing is written before the atlas exists — the first frame's
     /// metrics open it — and a font without rules is not asked.
-    pub(crate) fn shape(&self, cells: &mut [GlyphCell]) {
+    pub(crate) fn shape(&self, cells: &mut [GlyphCell], above: slots::Above<'_>) {
         if let Some(entry) = self.state.borrow_mut().atlas.as_mut() {
-            slots::shape_cells(&mut entry.atlas, cells);
+            slots::shape_cells(&mut entry.atlas, cells, above);
         }
     }
 
