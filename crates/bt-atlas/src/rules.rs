@@ -122,11 +122,9 @@ impl Faces {
         let shaping = shaping::opens(&regular, features);
         let mut faces = Self::derive(regular);
         faces.shaping = shaping;
-        if shaping {
-            // The forced-off list rides along with whatever the user chose.
-            let all = shaping::applied(features);
+        if shaping && !features.is_empty() {
             for font in &mut faces.fonts {
-                *font = Backend::with_features(font, &all);
+                *font = Backend::with_features(font, features);
             }
         }
         (faces, issue)

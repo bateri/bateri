@@ -32,7 +32,7 @@
 
 use std::mem::offset_of;
 
-use bt_atlas::{Face, RuleKind, SizeClass};
+use bt_atlas::{Face, RuleKind, Shaped, SizeClass};
 use bt_core::{
     Block, ButtonState, CaretShape, CaretStyle, Cell, ClusterId, Clusters, ContentEdge, DockButton,
     Leads, LinearRgba, Picture, Pictures, SearchRun, SelectionRun, TrackBlock, TrackMark,
@@ -465,11 +465,36 @@ pub(crate) struct GlyphCell {
     /// above). It lives on the cell, not in a side table, because the typing
     /// effects copy cells: an arrival is the dock's glyph itself and so carries
     /// the answer, where a table by position would have to be found again.
-    pub(crate) glyph: Option<u32>,
+    pub(crate) glyph: Option<Shaped>,
     /// The boundary's `Cell::continues`: this cell's row runs on from the row
     /// above it as one logical line. What lets the shaping pass read the
     /// rows a wrap split as the text they are ([`slots::shape_cells`]).
     pub(crate) continues: bool,
+}
+
+/// Takes the joined shape the cell at `(row, col)` draws a slice of back to
+/// the characters of its cells ([`Frame::unjoin_grid`]). A cell that is not
+/// part of one, or is not there, changes nothing.
+fn unjoin(cells: &mut [GlyphCell], row: u16, col: u16) {
+    let Some(shape) = cells
+        .iter()
+        .find(|cell| (cell.row, cell.col) == (row, col))
+        .and_then(|cell| cell.glyph)
+        .filter(|shape| shape.joined())
+    else {
+        return;
+    };
+    let first = col.saturating_sub(u16::from(shape.slice));
+    let covered = first..first + u16::from(shape.cells);
+    for cell in cells.iter_mut().filter(|cell| {
+        cell.row == row
+            && covered.contains(&cell.col)
+            && cell
+                .glyph
+                .is_some_and(|other| (other.glyph, other.cells) == (shape.glyph, shape.cells))
+    }) {
+        cell.glyph = None;
+    }
 }
 
 /// Moves a cluster id from the `from` table to the `to` table: lists
@@ -1123,7 +1148,7 @@ struct Remembered {
     row: u16,
     col: u16,
     ch: char,
-    glyph: u32,
+    glyph: Shaped,
 }
 
 #[derive(Default)]
@@ -2652,9 +2677,24 @@ impl Frame {
         shape(&mut self.dock_glyphs, above);
     }
 
+    /// Draws the ligature the grid's cursor is in as the characters it
+    /// stands for: while the cursor is on a cell of a joined shape, every
+    /// cell of that shape is shown as itself, so the cursor lands on one
+    /// character and the user sees what they are editing. The font's other
+    /// answers are not touched, and the row is not shaped again.
+    pub(crate) fn unjoin_grid(&mut self, row: u16, col: u16) {
+        unjoin(&mut self.glyphs, row, col);
+    }
+
+    /// The dock's twin of [`Frame::unjoin_grid`], for the dock's caret (a
+    /// cell of the dock's own rows and columns). The band has no cursor.
+    pub(crate) fn unjoin_dock(&mut self, row: u16, col: u16) {
+        unjoin(&mut self.dock_glyphs, row, col);
+    }
+
     /// The glyph the previous dock drew at `cell`'s place for its character:
     /// what a ghost born of that cell keeps drawing as.
-    pub(crate) fn recalled(&self, cell: &Cell) -> Option<u32> {
+    pub(crate) fn recalled(&self, cell: &Cell) -> Option<Shaped> {
         let ch = cell.ch?;
         self.dock_memory
             .iter()

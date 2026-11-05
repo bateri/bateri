@@ -12,7 +12,7 @@
 //! has its own counter): uvs are baked at list-building time from the atlas's
 //! own slot origins.
 
-use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, RuleKind, SizeClass, Sprite};
+use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, RuleKind, Shaped, SizeClass, Sprite};
 use bt_core::Clusters;
 
 use crate::frame::{FxCell, FxInstance, GlyphCell, GlyphInstance, RuleCell};
@@ -117,6 +117,7 @@ pub(crate) fn shape_cells(atlas: &mut Atlas, cells: &mut [GlyphCell], above: Abo
     }
     let mut text = String::new();
     let mut shaped = Vec::new();
+    let mut whole = Vec::new();
     let mut carry = (!above.lead.is_empty()).then(|| Carry {
         expect: 0,
         face: None,
@@ -167,11 +168,22 @@ pub(crate) fn shape_cells(atlas: &mut Atlas, cells: &mut [GlyphCell], above: Abo
             end += 1;
         }
         atlas.shape_row(first.face, &text, &mut shaped);
-        for cell in &mut cells[start..end] {
+        let run = &mut cells[start..end];
+        for cell in run.iter_mut() {
             cell.glyph = shaped
                 .get(before + usize::from(cell.col - first.col))
                 .copied()
                 .flatten();
+        }
+        // A ligature is drawn only where all of it is: every cell it covers
+        // is a cell of this run. One that began in the text before the row
+        // (the rows a wrap split) or is missing a cell is drawn as characters.
+        whole.clear();
+        whole.extend((0..run.len()).map(|at| complete(run, at)));
+        for (cell, whole) in run.iter_mut().zip(&whole) {
+            if !whole {
+                cell.glyph = None;
+            }
         }
         carry = Some(Carry {
             expect: first.row.saturating_add(1),
@@ -180,6 +192,22 @@ pub(crate) fn shape_cells(atlas: &mut Atlas, cells: &mut [GlyphCell], above: Abo
         });
         start = end;
     }
+}
+
+/// Whether the shape `run[at]` draws a slice of has every one of its cells in
+/// `run` (columns rise along it): always for a glyph of one cell.
+fn complete(run: &[GlyphCell], at: usize) -> bool {
+    let Some(shape) = run[at].glyph else {
+        return true;
+    };
+    let Some(first) = run[at].col.checked_sub(u16::from(shape.slice)) else {
+        return false;
+    };
+    (0..shape.cells).all(|slice| {
+        let col = first + u16::from(slice);
+        run.binary_search_by_key(&col, |cell| cell.col)
+            .is_ok_and(|found| run[found].glyph == Some(Shaped { slice, ..shape }))
+    })
 }
 
 /// The last `max` characters of `text`.
@@ -398,7 +426,7 @@ pub(crate) fn fan(
     // shaping pass ([`shape_cells`]) only writes it on a single-cell,
     // clusterless cell, and the typing effects' copies carry it along.
     let sprite = match glyph.glyph {
-        Some(id) if !glyph.wide && glyph.cluster.is_none() => Sprite::Glyph(id),
+        Some(shaped) if !glyph.wide && glyph.cluster.is_none() => Sprite::Glyph(shaped),
         _ => glyph
             .cluster
             .and_then(|id| clusters.get(id))

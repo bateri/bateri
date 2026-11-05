@@ -16,6 +16,7 @@
 //! is not touched, no damage is planted — the effect changes not the content but
 //! how the content is drawn.
 
+use bt_atlas::Shaped;
 use bt_core::{Cell, Clusters, DockEdit, EDIT_MAX, Erase, Keypress};
 
 use crate::frame::copy_cluster;
@@ -158,7 +159,7 @@ pub(crate) struct Fx {
     /// character's own — a ghost's: the cell is gone from the dock, so the
     /// answer is read once, at birth ([`GlyphFx::recall`]). An arrival's is on
     /// the dock's glyph it copies.
-    pub(crate) glyph: Option<u32>,
+    pub(crate) glyph: Option<Shaped>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -304,7 +305,7 @@ impl GlyphFx {
     /// drawn as: `recall` answers it for a cell from the dock **before** the
     /// edit. Asked once per entry, at birth — a ghost lives for frames and
     /// the dock it came from does not.
-    pub(crate) fn recall(&mut self, recall: impl Fn(&Cell) -> Option<u32>) {
+    pub(crate) fn recall(&mut self, recall: impl Fn(&Cell) -> Option<Shaped>) {
         for entry in &mut self.entries {
             if std::mem::take(&mut entry.fresh) && entry.fx.kind == Kind::Ghost {
                 entry.fx.glyph = recall(&entry.fx.cell);
@@ -489,21 +490,27 @@ mod tests {
         // The dock before this edit drew the `c` at column 7 as glyph 900 and
         // the `a` at column 4 as 901.
         let before = |cell: &Cell| match (cell.col, cell.ch) {
-            (7, Some('c')) => Some(900),
-            (4, Some('a')) => Some(901),
+            (7, Some('c')) => Some(Shaped::single(900)),
+            (4, Some('a')) => Some(Shaped::single(901)),
             _ => None,
         };
         fx.recall(before);
         let glyphs: Vec<_> = fx.iter().map(|fx| (fx.kind, fx.glyph)).collect();
         assert_eq!(
             glyphs,
-            [(Kind::Arrival, None), (Kind::Ghost, Some(900))],
+            [
+                (Kind::Arrival, None),
+                (Kind::Ghost, Some(Shaped::single(900)))
+            ],
             "a ghost keeps the glyph it was drawn as; an arrival is the dock's own cell"
         );
         // The dock moved on: a later ask must not overwrite what the ghost
         // was born with.
-        fx.recall(|_| Some(1));
-        assert_eq!(fx.iter().last().map(|fx| fx.glyph), Some(Some(900)));
+        fx.recall(|_| Some(Shaped::single(1)));
+        assert_eq!(
+            fx.iter().last().map(|fx| fx.glyph),
+            Some(Some(Shaped::single(900)))
+        );
     }
 
     #[test]

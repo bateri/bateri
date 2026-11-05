@@ -121,9 +121,11 @@ pub use system::fixture;
 ///
 /// [`Sprite::Glyph`] is a glyph **number** of the regular face's font, what
 /// [`Atlas::shape_row`] answered where the font's rules drew something other
-/// than the character's own glyph (a masked letter, an alternate). It is a
-/// sprite of its own because a character cannot name it: the same `a` is two
-/// glyphs in two cells, and the key has to say which one is in the slot.
+/// than the character's own glyph (a masked letter, an alternate, one cell's
+/// share of a ligature: [`Shaped`]). It is a sprite of its own because a
+/// character cannot name it: the same `a` is two glyphs in two cells, and the
+/// key has to say which one is in the slot — and, for a ligature, which
+/// slice of it.
 ///
 /// Procedurally drawn characters (block, Braille) **did not get a third
 /// variant**: they are characters and live as `Char`. Opening a `Sprite::Box`
@@ -137,7 +139,52 @@ pub enum Sprite {
     Char(char),
     Rule(RuleKind),
     Cluster(u32),
-    Glyph(u32),
+    Glyph(Shaped),
+}
+
+/// What the font's rules made of one cell's character: a glyph, and which
+/// slice of it this cell draws.
+///
+/// A glyph one cell wide is its own slice (`cells` of one). A ligature is
+/// drawn **one slice per cell it covers**: every cell keeps its own colour,
+/// selection and search highlight and the quad stays one cell, so neither the
+/// instance nor the shader knows a ligature exists. The slice is cut from the
+/// glyph as the right half of a wide character is cut from its glyph — drawn
+/// in a box of `cells` cells, shifted by a whole cell step per slice and
+/// clipped to the cell.
+///
+/// `lead` is how many cells **before** the glyph's own origin the shape
+/// begins: a font that draws `->` as an empty spacer glyph in the first cell
+/// and the arrow in the second (the arrow's ink reaches back over the first)
+/// answers `lead` of one on both; a font that draws it as one glyph two cells
+/// wide answers `lead` of zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Shaped {
+    /// The glyph's number in the face's font.
+    pub glyph: u32,
+    /// Which of its `cells` cells this one is, from the left.
+    pub slice: u8,
+    /// How many cells the shape covers.
+    pub cells: u8,
+    /// How many cells the shape begins before the glyph's origin.
+    pub lead: u8,
+}
+
+impl Shaped {
+    /// A glyph that covers its own cell and nothing else.
+    pub const fn single(glyph: u32) -> Self {
+        Self {
+            glyph,
+            slice: 0,
+            cells: 1,
+            lead: 0,
+        }
+    }
+
+    /// Whether the shape covers more than its own cell.
+    pub const fn joined(self) -> bool {
+        self.cells > 1
+    }
 }
 
 /// The **half** of a glyph in the cell grid — the fourth axis of the slot key
@@ -1264,21 +1311,43 @@ impl Atlas {
             // face's font, positioned as a character is. It has no fallback —
             // a glyph number means something in one font only — and no ink
             // gate: the character's own base glyph is not gated either.
-            Sprite::Glyph(id) => {
+            Sprite::Glyph(shaped) => {
                 let (cell, _) = self.glyph_box(size);
                 let font = match size {
                     SizeClass::Normal => self.faces.get(face),
                     SizeClass::Small => &self.small,
                 };
-                let drawn = raster::draw_glyph(
-                    font,
-                    id,
-                    self.slot_metrics,
-                    cell,
-                    0.0,
-                    0.0,
-                    &mut self.buffer,
-                );
+                let m = self.slot_metrics;
+                let drawn = if shaped.joined() {
+                    // One slice of a ligature: the shape is centred in a box of
+                    // its cells and this cell's share is cut out of it, by the
+                    // wide glyph's own mechanism (whole-pixel shift, the grid's
+                    // step) so the slices of one shape come out bit for bit
+                    // as one wide raster split at the cell edges.
+                    let step = f64::from(self.metrics.cell_px.0) * f64::from(shaped.slice);
+                    let drawn = raster::draw_slice(
+                        font,
+                        shaped,
+                        m,
+                        cell.cols(shaped.cells),
+                        step,
+                        &mut self.buffer,
+                    );
+                    // Below `1` the slot is wider than its cell: what lies
+                    // past a cell edge that has a neighbour belongs to the
+                    // neighbour's slice, or the seam would be painted twice.
+                    let edge = usize::from(self.slot_offset().0);
+                    let split = edge + usize::from(self.metrics.cell_px.0);
+                    if shaped.slice > 0 {
+                        clear_columns(&mut self.buffer, m, 1, 0..edge);
+                    }
+                    if shaped.slice + 1 < shaped.cells {
+                        clear_columns(&mut self.buffer, m, 1, split..usize::from(m.cell_px.0));
+                    }
+                    drawn
+                } else {
+                    raster::draw_glyph(font, shaped.glyph, m, cell, 0.0, 0.0, &mut self.buffer)
+                };
                 (drawn, Half::Whole, Plane::Mask)
             }
             Sprite::Cluster(id) => {

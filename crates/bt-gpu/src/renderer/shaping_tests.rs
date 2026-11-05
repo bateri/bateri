@@ -5,6 +5,7 @@
 //! The fonts are the repository's test fonts (`bt_atlas::fixture`): no
 //! installed font carries a rule every Mac has.
 
+use bt_atlas::Shaped;
 use bt_atlas::fixture::{JETBRAINS_MONO, OBEL_MONO, register_test_fonts};
 use bt_core::{CaretStyle, Cell, FontOptions};
 
@@ -21,10 +22,16 @@ const HEAT: bt_core::LinearRgba = bt_core::LinearRgba::from_srgb(0xff, 0x80, 0x2
 
 /// The renderer with `family` and its feature choices, the atlas opened.
 fn renderer_with(family: &str, features: &[(&str, bool)]) -> Renderer {
+    renderer_spaced(family, features, 1.0)
+}
+
+/// [`renderer_with`] at a letter spacing.
+fn renderer_spaced(family: &str, features: &[(&str, bool)], letter: f64) -> Renderer {
     register_test_fonts();
     let r = Renderer::new();
     let options = FontOptions {
         family: Some(family.to_owned()),
+        letter_spacing: letter,
         features: [(
             family.to_lowercase(),
             features
@@ -93,7 +100,7 @@ fn frame_of(r: &Renderer, surface: Surface, text: &str, bold: bool, shaped: bool
 }
 
 /// The glyphs of the frame's surface, as the shaper left them.
-fn shaped_places(frame: &Frame, surface: Surface) -> Vec<Option<u32>> {
+fn shaped_places(frame: &Frame, surface: Surface) -> Vec<Option<Shaped>> {
     let cells = match surface {
         Surface::Grid => frame.glyphs(),
         Surface::Band => frame.fill_glyphs(),
@@ -237,27 +244,6 @@ fn an_alternate_letter_draws_in_its_own_shape_and_the_rest_from_todays_slots() {
                 column(&on, &alternate, surface, col) != column(&off, &plain, surface, col),
                 changed,
                 "{surface:?}: column {col}"
-            );
-        }
-    }
-}
-
-#[test]
-fn a_ligature_font_draws_the_arrow_as_two_characters() {
-    let r = renderer_with(JETBRAINS_MONO, &[]);
-    for surface in SURFACES {
-        let text = "a->b != c";
-        let shaped = frame_of(&r, surface, text, false, true);
-        let unshaped = frame_of(&r, surface, text, false, false);
-        assert!(
-            shaped_places(&shaped, surface).iter().all(Option::is_none),
-            "{surface:?}: the font joined a pair into one glyph"
-        );
-        for col in 0..text.len() {
-            assert_eq!(
-                column(&r, &shaped, surface, col),
-                column(&r, &unshaped, surface, col),
-                "{surface:?}: column {col} moved"
             );
         }
     }
@@ -657,4 +643,209 @@ fn rows_that_were_not_wrapped_are_what_they_were_and_a_font_without_rules_reads_
         assert!(shaped_places(&frame, surface).iter().all(Option::is_none));
     }
     assert_eq!(menlo.shape_calls(), 0, "the shaper was asked for Menlo");
+}
+
+#[test]
+fn a_ligature_font_joins_its_pairs_unless_the_user_turned_it_off() {
+    let on = renderer_with(JETBRAINS_MONO, &[]);
+    let off = renderer_with(JETBRAINS_MONO, &[("calt", false)]);
+    // `a->b != c`: `->` is columns 1 and 2, `!=` columns 5 and 6.
+    let text = "a->b != c";
+    let joined_cols = [1, 2, 5, 6];
+    for surface in SURFACES {
+        let joined = frame_of(&on, surface, text, false, true);
+        let unshaped = frame_of(&on, surface, text, false, false);
+        let places = shaped_places(&joined, surface);
+        assert_eq!(places.len(), text.len(), "{surface:?}");
+        for (col, place) in places.iter().enumerate() {
+            let is_joined = joined_cols.contains(&col);
+            assert_eq!(place.is_some(), is_joined, "{surface:?}: column {col}");
+            assert_eq!(
+                column(&on, &joined, surface, col) != column(&on, &unshaped, surface, col),
+                is_joined,
+                "{surface:?}: column {col}"
+            );
+        }
+        // The cells of one pair are the two slices of one glyph.
+        let (first, second) = (places[1].expect("a slice"), places[2].expect("a slice"));
+        assert_eq!(
+            (first.glyph, first.slice, first.cells),
+            (second.glyph, 0, 2),
+            "{surface:?}"
+        );
+        assert_eq!((second.slice, second.cells), (1, 2), "{surface:?}");
+        // `calt` off, in the file: the characters.
+        let apart = frame_of(&off, surface, text, false, true);
+        assert!(
+            shaped_places(&apart, surface).iter().all(Option::is_none),
+            "{surface:?}: calt off still joins"
+        );
+        for col in 0..text.len() {
+            assert_eq!(
+                column(&off, &apart, surface, col),
+                column(&on, &unshaped, surface, col),
+                "{surface:?}: column {col}"
+            );
+        }
+    }
+}
+
+/// Whether every row of `frame`'s surface that is lit across most of `cells`
+/// cells is lit in one piece: a bar that crosses a cell's edge has no gap in
+/// it. `None` when no row is lit that wide.
+fn bars_are_unbroken(r: &Renderer, frame: &Frame, cells: usize) -> Option<bool> {
+    let pixels = r.render_offscreen(EDGE as u32, BACKGROUND, frame);
+    let (cw, ch) = r.cell_metrics(1.0).cell_px();
+    let (cw, ch) = (usize::from(cw), usize::from(ch));
+    let ground = pixel_at(&pixels, EDGE, EDGE - 1, EDGE - 1);
+    let mut wide = false;
+    for y in 0..ch {
+        let lit: Vec<usize> = (0..cw * cells)
+            .filter(|&x| pixel_at(&pixels, EDGE, x, y) != ground)
+            .collect();
+        if lit.len() < 2 * cw {
+            continue;
+        }
+        wide = true;
+        if lit[lit.len() - 1] - lit[0] + 1 != lit.len() {
+            return Some(false);
+        }
+    }
+    wide.then_some(true)
+}
+
+#[test]
+fn a_joined_bar_has_no_seam_at_the_cell_edge_whatever_the_letter_spacing() {
+    for letter in [1.0, 1.2, 0.9] {
+        let on = renderer_spaced(JETBRAINS_MONO, &[], letter);
+        let joined = frame_of(&on, Surface::Grid, "===", false, true);
+        assert!(
+            shaped_places(&joined, Surface::Grid)
+                .iter()
+                .all(Option::is_some),
+            "{letter}: the three cells are one shape"
+        );
+        assert_eq!(
+            bars_are_unbroken(&on, &joined, 3),
+            Some(true),
+            "{letter}: a bar of the joined shape has a gap"
+        );
+        // The same cells drawn as characters have gaps between the bars: the
+        // check sees a seam.
+        let apart = frame_of(&on, Surface::Grid, "===", false, false);
+        assert_eq!(
+            bars_are_unbroken(&on, &apart, 3),
+            Some(false),
+            "{letter}: three separate bars are not one"
+        );
+    }
+}
+
+#[test]
+fn each_cell_of_a_ligature_keeps_its_own_colour() {
+    let r = renderer_with(JETBRAINS_MONO, &[]);
+    let (cw, ch) = r.cell_metrics(1.0).cell_px();
+    let red = bt_core::LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    let blue = bt_core::LinearRgba::from_srgb(0x00, 0x00, 0xff);
+    let mut frame = Frame::default();
+    frame.clear(grid(cw, ch), CaretStyle::default());
+    let (cw, ch) = (usize::from(cw), usize::from(ch));
+    for (at, (c, fg)) in [('-', red), ('>', blue)].into_iter().enumerate() {
+        frame.push(Cell {
+            fg,
+            ..glyph_cell(u16::try_from(at).expect("two cells"), c, None)
+        });
+    }
+    frame.shape_grid(|cells, above| r.shape(cells, above));
+    assert!(frame.glyphs().iter().all(|cell| cell.glyph.is_some()));
+    let pixels = r.render_offscreen(EDGE as u32, BACKGROUND, &frame);
+    let ground = pixel_at(&pixels, EDGE, EDGE - 1, EDGE - 1);
+    let tones = |col: usize| -> Vec<(u8, u8, u8)> {
+        (0..ch)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .map(|(x, y)| pixel_at(&pixels, EDGE, col * cw + x, y))
+            .filter(|px| *px != ground)
+            .collect()
+    };
+    let (left, right) = (tones(0), tones(1));
+    assert!(!left.is_empty() && !right.is_empty(), "both cells have ink");
+    assert!(left.iter().all(|px| px.0 > px.2), "the first cell is red");
+    assert!(
+        right.iter().all(|px| px.2 > px.0),
+        "the second cell is blue"
+    );
+}
+
+#[test]
+fn the_cursor_on_a_ligature_shows_its_characters_and_leaves_the_rest() {
+    let r = renderer_with(JETBRAINS_MONO, &[]);
+    for surface in [Surface::Grid, Surface::Dock] {
+        let unshaped = frame_of(&r, surface, "a->b", false, false);
+        let unjoin = |frame: &mut Frame, col: u16| match surface {
+            Surface::Dock => frame.unjoin_dock(0, col),
+            _ => frame.unjoin_grid(0, col),
+        };
+        let reference = shaped_places(&frame_of(&r, surface, "a->b", false, true), surface);
+        assert!(reference[1].is_some() && reference[2].is_some());
+        // Either cell of the pair: both are the characters, the pixels are
+        // what no shaping draws.
+        for col in [1, 2] {
+            let mut frame = frame_of(&r, surface, "a->b", false, true);
+            unjoin(&mut frame, col);
+            assert!(
+                shaped_places(&frame, surface).iter().all(Option::is_none),
+                "{surface:?}: cursor on {col}"
+            );
+            for at in 0..4 {
+                assert_eq!(
+                    column(&r, &frame, surface, at),
+                    column(&r, &unshaped, surface, at),
+                    "{surface:?}: cursor on {col}, column {at}"
+                );
+            }
+        }
+        // Beside it, past the text: the pair stays joined.
+        for col in [0, 3, 9] {
+            let mut frame = frame_of(&r, surface, "a->b", false, true);
+            unjoin(&mut frame, col);
+            assert_eq!(
+                shaped_places(&frame, surface),
+                reference,
+                "{surface:?}: {col}"
+            );
+        }
+    }
+    // A masked letter is one cell: the cursor does not open it.
+    let obel = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    let mut frame = frame_of(&obel, Surface::Grid, KEY, false, true);
+    let before = shaped_places(&frame, Surface::Grid);
+    for col in 0..KEY.len() {
+        frame.unjoin_grid(0, u16::try_from(col).expect("a short key"));
+    }
+    assert_eq!(shaped_places(&frame, Surface::Grid), before);
+}
+
+#[test]
+fn a_pair_split_by_a_wrap_is_not_joined() {
+    let r = renderer_with(JETBRAINS_MONO, &[]);
+    for surface in [Surface::Grid, Surface::Band] {
+        // `-` ends one row and `>` begins the row the terminal wrapped onto.
+        let wrapped = wrapped_frame(&r, surface, &[line("a-", false), line(">b", true)], "");
+        assert!(
+            shaped_places(&wrapped, surface).iter().all(Option::is_none),
+            "{surface:?}"
+        );
+        // The same pair inside one row is joined.
+        let inside = wrapped_frame(&r, surface, &[line("a->b", false)], "");
+        assert!(shaped_places(&inside, surface)[1].is_some(), "{surface:?}");
+        // The row begins mid-line and the pair is the row's own.
+        let after = wrapped_frame(&r, surface, &[line("->b", true)], "xx");
+        assert!(shaped_places(&after, surface)[0].is_some(), "{surface:?}");
+        // The pair's first cell is in the text above the row.
+        let above = wrapped_frame(&r, surface, &[line(">b", true)], "a-");
+        assert!(
+            shaped_places(&above, surface).iter().all(Option::is_none),
+            "{surface:?}"
+        );
+    }
 }

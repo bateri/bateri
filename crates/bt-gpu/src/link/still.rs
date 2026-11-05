@@ -333,6 +333,9 @@ fn compose_still(
     // The same order as the content frame: the font's own rules once the
     // cells are in, the dock shaping its own list inside `place_dock`.
     frame.shape_grid(|cells, above| shape(cells, above));
+    if cursor.visible && !cursor.caret_in_dock {
+        frame.unjoin_grid(cursor.row, cursor.col);
+    }
     place_edge(
         frame,
         view.edge,

@@ -127,6 +127,32 @@ pub(crate) fn draw_glyph(
     Backend::draw_mask(font, glyph, m, x, baseline, target)
 }
 
+/// Draws one cell's slice of a ligature's glyph into `target`.
+///
+/// `bx` is the box of **all** the shape's cells ([`GlyphBox::cols`]); the
+/// shape is `lead + 1` of the glyph's advances wide (a glyph that is itself
+/// the whole shape has `lead` of zero and its own advance), centred in the box
+/// by the wide character's rule, and the glyph's origin sits `lead` advances
+/// into it. `x_offset` is the whole-pixel shift of this cell's slice, as for
+/// the right half of a wide glyph: the glyph is drawn in the one place and
+/// moved left past the cells before this one, so every slice has the same
+/// anti-aliasing phase.
+pub(crate) fn draw_slice(
+    font: &Font,
+    shaped: crate::Shaped,
+    m: Metrics,
+    bx: GlyphBox,
+    x_offset: f64,
+    target: &mut [u8],
+) -> DrawResult {
+    let baseline = f64::from(m.cell_px.1 - m.baseline_px);
+    let advance = Backend::advance(font, shaped.glyph);
+    let lead = f64::from(shaped.lead);
+    let start = rules::centre_shift(bx, advance * (lead + 1.0));
+    let x = start + advance * lead - x_offset;
+    Backend::draw_mask(font, shaped.glyph, m, x, baseline, target)
+}
+
 /// Draws the **colour** pixels of a glyph into `target` (`RGBA8`, sRGB,
 /// **straight** alpha).
 ///

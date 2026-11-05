@@ -1411,6 +1411,10 @@ impl Core {
         // an alternate letter): the atlas that knows them is the renderer's,
         // and the dock below shapes its own list for the same reason.
         frame.shape_grid(|cells, above| self.renderer.shape(cells, above));
+        // A ligature under the cursor is the characters it stands for.
+        if cursor.visible && !cursor.caret_in_dock {
+            frame.unjoin_grid(cursor.row, cursor.col);
+        }
         // The gate's operand rises here: damage was found, the frame will be
         // drawn. Before `frames` and independent of it — it does not wait for
         // the GPU to finish (see `Core::content_frames`).
@@ -2414,6 +2418,10 @@ fn place_dock(
         // arrival is the dock's glyph and a ghost is born of the dock
         // before this one, so both read the answer from here.
         frame.shape_dock(shape);
+        // A ligature under the dock's caret is the characters it stands for.
+        if let Some(caret) = dock.caret {
+            frame.unjoin_dock(caret.row, caret.col);
+        }
         // No mark → the input's first row is outside the vertical window.
         // **The mark is pushed with the cells, before the effects**: the
         // arrival scene hides it and turns it into an effect in
