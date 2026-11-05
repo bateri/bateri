@@ -7103,7 +7103,10 @@ impl TerminalPane {
         if let Some((_, target, _)) = self.server_target() {
             let shown = self.host().kept_terminal(self.uuid())?;
             let folder = self.host().stage_account(&shown.account)?;
-            let reach = Arc::new(bt_shell_common::stage::Through::new(self.masters(), target));
+            let reach = Arc::new(bt_shell_common::stage::Through::new(
+                self.served(&target),
+                target,
+            ));
             return bt_shell_common::stage::Offered::server(&folder, reach);
         }
         // A terminal a server keeps whose connection the pane has not found yet (a restarted

@@ -14,8 +14,9 @@
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use kablo_proto::v1::Exit;
 use kablo_proto::v1::stream::MAX_DATA;
@@ -120,7 +121,7 @@ pub(super) fn pipes(port: Arc<dyn Port>) -> (Handles, Far) {
 
 impl Handles {
     /// Waits for the server's answer to the open, up to `wait`. `Err` is why there is no stream.
-    pub(super) fn opened(self, wait: std::time::Duration) -> Result<Opened, String> {
+    pub(super) fn opened(self, wait: Duration) -> Result<Opened, String> {
         match self.answer.recv_timeout(wait) {
             Ok(Ok(())) => {}
             Ok(Err(text)) => return Err(text),
@@ -307,6 +308,52 @@ impl Write for Writer {
     }
 }
 
+impl Writer {
+    /// Hands over all of `bytes` as the server's window lets them go, looking at `stop` every
+    /// `look_again`. `Ok(false)` when `stop` was set first; `TimedOut` when the window took
+    /// nothing for `silent`; `BrokenPipe` when the stream is over (the server closed it, the
+    /// connection went, or the stream was ended from the other side).
+    pub fn write_all_within(
+        &mut self,
+        mut bytes: &[u8],
+        silent: Duration,
+        look_again: Duration,
+        stop: &AtomicBool,
+    ) -> io::Result<bool> {
+        let mut moved = Instant::now();
+        while !bytes.is_empty() {
+            if stop.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            let Some(input) = &self.input else {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "already closed"));
+            };
+            let size = bytes.len().min(MAX_DATA);
+            let (chunk, rest) = bytes.split_at(size);
+            match input.try_send(chunk.to_vec()) {
+                Ok(()) => {
+                    self.port.wrote();
+                    bytes = rest;
+                    moved = Instant::now();
+                }
+                Err(TrySendError::Full(_)) => {
+                    if moved.elapsed() > silent {
+                        return Err(io::ErrorKind::TimedOut.into());
+                    }
+                    std::thread::sleep(look_again);
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "the stream is over",
+                    ));
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
 impl Drop for Writer {
     fn drop(&mut self) {
         self.input = None;
@@ -318,6 +365,12 @@ impl Drop for Writer {
 pub struct End {
     shared: Arc<Shared>,
     hold: Arc<Hold>,
+}
+
+impl std::fmt::Debug for End {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("End").finish_non_exhaustive()
+    }
 }
 
 impl End {
@@ -455,5 +508,16 @@ impl Far {
                 Err(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod local;
+
+#[cfg(test)]
+impl RemoteCommand {
+    /// `child` (piped, and the leader of its own process group) as a program the server runs.
+    pub(crate) fn local(child: std::process::Child) -> RemoteCommand {
+        local::run(child)
     }
 }

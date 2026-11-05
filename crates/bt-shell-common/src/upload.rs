@@ -1,13 +1,12 @@
 //! Uploading a Finder drop to the remote directory: a file or folder dropped in
 //! a remote session goes, after confirmation, to the remote shell's directory
-//! through a `tar c | ssh … tar x` stream. Nothing is pasted on its own; the
-//! result line says where it went.
+//! through a `tar c` here and a `tar x` on the server, over the one connection kept to the
+//! server ([`Served`]). Nothing is pasted on its own; the result line says where it went.
 //!
 //! Three halves:
 //!
-//! - **Pure:** translating the ssh argv ([`ssh_argv`]), the remote scripts and
-//!   quoting, the probe's reply ([`parse_probe`]), the tar stream's header
-//!   reader ([`TarWatcher`]), the text of the line and the sheet. The tested half.
+//! - **Pure:** the remote scripts and quoting, the probe's reply ([`parse_probe`]), the tar
+//!   stream's header reader ([`TarWatcher`]), the text of the line and the sheet. The tested half.
 //! - **Process:** local measurement ([`measure`]), the probe ([`probe`]) and the
 //!   stream ([`transfer`]) — all on a background thread, results to the main queue.
 //! - **Queue** ([`Transfers`]): the main thread's state — order, progress, result
@@ -16,16 +15,17 @@
 //!   [`crate::download`]'s. AppKit-free; `uploader` sets up the sheet and the
 //!   dispatch.
 //!
-//! **No password can be asked.** An ssh born from the GUI has no controlling
-//! terminal; with `BatchMode=yes` and no key/agent it fails at once with a clear
-//! error instead of hanging. If the user has a `ControlMaster`, it rides on it,
-//! so even on a password host an open master connection is enough.
+//! **No password is asked on the stream.** The connection is the one the application keeps to
+//! the server: the probe, which the person started, may have a sheet ask for a login when the
+//! connection has to be made; the stream that follows asks nobody and says why when it cannot go on.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
+use kablo_proto::v1::Exit;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -35,7 +35,9 @@ use bt_core::{HostMark, RemoteKind, RemoteTarget, Transfer, TransferControls, Tr
 
 use crate::download::Conflict;
 use crate::jobs::SSH_VALUED;
-use crate::ssh_route::Route;
+use crate::kablo::remote::{End as ProgramEnd, RemoteCommand};
+use crate::kablo::served::Served;
+use crate::ssh_route::{Ask, Route};
 
 /// The shortest interval between progress reports — a **design constant**. Every
 /// report is a content frame (the line and the bar changed); reporting at display
@@ -65,7 +67,8 @@ const KEPT_FLAGS: &str = "46AaCgKkqXxYy";
 /// value is told by `jobs`'s table ([`SSH_VALUED`]); there is no second table.
 const KEPT_VALUED: &str = "BbcFIiJlmoPpS";
 
-/// The upload's ssh argv from the remote session's target (the script is appended).
+/// The ssh argv from the remote session's target, for the connection the service keeps to the
+/// server ([`crate::kablo::ssh`]).
 ///
 /// **Our options come first**, because ssh takes the **first** value of a config
 /// key: the user's `-o RequestTTY=force` must stay behind. `-T` (no tty: the
@@ -176,12 +179,8 @@ pub(crate) fn connection(target: &RemoteTarget) -> Connection {
     }
 }
 
-/// POSIX single quoting; an inner `'` as `'"'"'` — **produces no backslash**.
-///
-/// The remote command is first read by the user's **login shell** (it may be fish
-/// or csh too), and fish treats `\'` and `\\` as escapes inside single quotes; the
-/// `'\''` form would carry the backslash to the outer layer in nested quoting and
-/// break the command in fish. `"'"` reads the same in every shell.
+/// POSIX single quoting; an inner `'` as `'"'"'` — **produces no backslash**. The one quoting
+/// every script here goes by.
 pub(crate) fn sq(text: &str) -> String {
     let mut quoted = String::with_capacity(text.len() + 2);
     quoted.push('\'');
@@ -196,15 +195,9 @@ pub(crate) fn sq(text: &str) -> String {
     quoted
 }
 
-/// The remote command: the POSIX script wrapped in `sh -c`. The login shell only
-/// reads `sh -c '…'`, so the script's syntax is independent of the shell.
-pub(crate) fn remote_command(script: &str) -> String {
-    format!("sh -c {}", sq(script))
-}
-
 /// Whether this path can safely enter the remote script: **it must carry no
-/// backslash and no control character.** Both break the two-layer quoting (login
-/// shell + `sh -c`) in fish or csh; such a name is rejected openly on the sheet (a
+/// backslash and no control character.** The `sh`s servers have read a backslash and a control
+/// character in a quoted word differently; such a name is rejected openly on the sheet (a
 /// known limit) rather than silently written to the wrong place.
 pub(crate) fn is_safe(text: &str) -> bool {
     !text.chars().any(|c| c == '\\' || c.is_control())
@@ -340,13 +333,6 @@ fn cleanup_script(dir: &str, rel: &str) -> String {
 /// thread returns the queue refuses every drop and an update waits. Past this the
 /// connection is killed and the line says the partial file may remain.
 const CLEANUP_LIMIT: Duration = Duration::from_secs(10);
-
-/// How long a stopped upload waits for the server's last lines ([`Heard`]) — a
-/// **design constant**. ssh's pipes close the moment it is killed, and what it
-/// had passed on is read in a blink; but a session riding a `ControlMaster` hands
-/// its pipes to the master, which holds them until it lets go of the channel — on
-/// a dead link, minutes. A line still on its way then only ever means deleting less.
-const HEARING_LIMIT: Duration = Duration::from_secs(2);
 
 /// The most entries kept waiting for the remote listing ([`Heard`]) — a **design
 /// constant**: the listing trails the stream by what is in flight, a few thousand
@@ -868,9 +854,9 @@ pub enum End {
     Cancelled,
     /// The remote disk filled up.
     DiskFull,
-    /// The remote session (ssh) closed; pending items cancelled.
+    /// The remote session closed; pending items cancelled.
     Closed,
-    /// The stream failed; the last line from ssh or tar.
+    /// The stream failed; the last line from tar, or why the server's program ended.
     Failed(String),
 }
 
@@ -1270,14 +1256,8 @@ pub(crate) fn probe_failure(host: &str, code: Option<i32>, stderr: &str) -> Stri
     let last = last_line(stderr);
     match code {
         Some(NO_DIRECTORY) => format!("The remote folder on {host} can no longer be opened."),
-        _ if last.is_empty() => format!(
-            "ssh could not connect to {host} without asking for a password. Uploads need \
-             key-based login (ssh-agent) or an open ControlMaster connection."
-        ),
-        _ => format!(
-            "ssh could not connect to {host} without asking for a password. Uploads need \
-             key-based login (ssh-agent) or an open ControlMaster connection.\n\n{last}"
-        ),
+        _ if last.is_empty() => format!("{host} did not answer the upload's first question."),
+        _ => format!("{host} did not answer the upload's first question: {last}"),
     }
 }
 
@@ -1290,42 +1270,59 @@ pub(crate) fn last_line(text: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// Runs the remote script over ssh (without input): exit code, stdout, stderr.
-fn run_ssh(ssh: &[String], script: &str) -> std::io::Result<(Option<i32>, String, String)> {
-    let output = crate::ssh_route::command(&ssh[0])
-        .args(&ssh[1..])
-        .arg(remote_command(script))
-        .stdin(Stdio::null())
-        .output()?;
-    Ok((
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    ))
+/// How long the connection to the server and its first answer may take for a program that is
+/// run for a drop or a download — a **design constant**: the connection may have to be made
+/// first, and a person's login typed at a sheet is not counted here (the sheet is the caller's).
+pub(crate) const OPEN_WAIT: Duration = Duration::from_secs(30);
+
+/// Runs the remote script on the server (without input) and gathers it: exit code (`None`: it
+/// was ended by a signal, or the connection went), standard output, standard error. `Err` is why
+/// it could not be run at all.
+fn run_sh(
+    served: &Served,
+    ask: Ask,
+    script: &str,
+) -> Result<(Option<i32>, String, String), String> {
+    let RemoteCommand {
+        stdin,
+        mut stdout,
+        stderr,
+        end,
+    } = served.sh(script, ask, OPEN_WAIT)?;
+    drop(stdin);
+    let errors = collect_stderr(Some(stderr), None, None);
+    let mut out = Vec::new();
+    let _ = stdout.read_to_end(&mut out);
+    let err = errors.join().unwrap_or_default();
+    let code = match end.wait() {
+        Ok(Exit::Code(code)) => Some(code),
+        Ok(Exit::Signal(_)) | Err(_) => None,
+    };
+    Ok((code, String::from_utf8_lossy(&out).into_owned(), err))
 }
 
-/// Runs the remote script over ssh (without input) for at most `limit`: `true` if
-/// it exited with 0 in time. Past the limit the ssh is killed — **nothing waits on
-/// a dead link**; standard output and error go nowhere, so no pipe an open master
-/// connection still holds can keep us waiting either.
-fn run_ssh_within(ssh: &[String], script: &str, limit: Duration) -> bool {
-    let child = crate::ssh_route::command(&ssh[0])
-        .args(&ssh[1..])
-        .arg(remote_command(script))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
+/// Runs the remote script on the server (without input) for at most `limit`: `true` if it
+/// exited with 0 in time. Past the limit the program is ended — **nothing waits on a dead
+/// link**; what it says is not read.
+fn run_sh_within(served: &Served, script: &str, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    let Ok(command) = served.sh(script, Ask::Never, limit) else {
         return false;
     };
-    let deadline = Instant::now() + limit;
+    // Every handle stays until the program has ended: dropping the last of them ends it.
+    let RemoteCommand {
+        stdin,
+        stdout: _stdout,
+        stderr: _stderr,
+        end,
+    } = command;
+    drop(stdin);
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            _ => {
-                crate::program::end_group(&mut child);
+        match end.try_wait() {
+            Some(status) => return matches!(status, Ok(Exit::Code(0))),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            None => {
+                end.kill();
                 return false;
             }
         }
@@ -1333,9 +1330,11 @@ fn run_ssh_within(ssh: &[String], script: &str, limit: Duration) -> bool {
 }
 
 /// The work before the sheet, on a background thread: local measurement and the
-/// remote probe. `Err` → the error sheet's text.
+/// remote probe. `ask` is how the connection asks for a login when it has to be made first.
+/// `Err` → the error sheet's text.
 pub fn probe(
-    ssh: &[String],
+    served: &Served,
+    ask: Ask,
     host: &str,
     dir: Option<&str>,
     paths: &[String],
@@ -1354,8 +1353,8 @@ pub fn probe(
         ));
     }
     let names: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
-    let (code, out, err) = run_ssh(ssh, &probe_script(dir, &names))
-        .map_err(|error| format!("ssh could not be started: {error}"))?;
+    let (code, out, err) = run_sh(served, ask, &probe_script(dir, &names))
+        .map_err(|text| format!("Uploading to {host} could not start: {text}"))?;
     match parse_probe(&out) {
         Some(reply) if code == Some(0) => Ok((items, reply)),
         _ => Err(probe_failure(host, code, &err)),
@@ -1370,11 +1369,13 @@ pub struct Shared {
     pub(crate) disk_full: AtomicBool,
     pub(crate) bytes: AtomicU64,
     pub(crate) files: AtomicU64,
-    /// The pids of the two processes in the stream (local tar, ssh) — cancelling
-    /// **kills** them: on a slow connection the stream thread stays blocked writing
-    /// to ssh's input and never looks at the flag; once the process dies the write
-    /// returns with `EPIPE`.
+    /// The pids of the local processes in the stream — cancelling **kills** them: the stream
+    /// thread may be blocked writing to a pipe whose reader is slow and never looks at the flag;
+    /// once the process dies the write returns with `EPIPE`.
     pids: Mutex<Vec<u32>>,
+    /// The program on the server: cancelling ends it, and the write that waits on its window
+    /// returns with `BrokenPipe`.
+    remote: Mutex<Option<Arc<ProgramEnd>>>,
     /// Whether a progress report is waiting on the main queue (at most one).
     pub tick_pending: AtomicBool,
     /// The upload stopped (cancel, disk full) and a half-written file may remain on
@@ -1385,8 +1386,16 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Kills all processes (cancel and disk full).
+    /// Kills all processes, here and on the server (cancel and disk full).
     fn kill(&self) {
+        if let Some(end) = self
+            .remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            end.kill();
+        }
         for &pid in self
             .pids
             .lock()
@@ -1424,6 +1433,15 @@ impl Shared {
         pids.extend(children.iter().map(|child| child.id()));
         drop(pids);
         // If cancelled before starting (⌘. when its turn came), kill at once.
+        if self.cancel.load(Ordering::Acquire) {
+            self.kill();
+        }
+    }
+
+    /// The program on the server is part of the stream from here on.
+    pub(crate) fn track_remote(&self, end: &Arc<ProgramEnd>) {
+        *self.remote.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(end));
+        // If cancelled before starting (⌘. when its turn came), end it at once.
         if self.cancel.load(Ordering::Acquire) {
             self.kill();
         }
@@ -1515,11 +1533,12 @@ const LOCAL_TAR_FLAGS: [&str; 7] = [
     "-C",
 ];
 
-/// Uploads one item: `tar c` locally, `ssh … tar x` remotely, the bytes in between
+/// Uploads one item: `tar c` locally, `tar x` on the server, the bytes in between
 /// pass through us ([`TarWatcher`]). **On a background thread**; `tick` posts the
 /// progress report to the main queue (at most once per [`TICK`]).
 ///
-/// Cancel or disk full: both processes are killed and the file **being written** is
+/// Cancel or disk full: the local process is killed, the program on the server is ended and the
+/// file **being written** is
 /// deleted remotely — for a single file the file itself, for a folder only the one
 /// being written at that moment; finished ones stay. **Only when the server has
 /// said it reached that file** ([`Heard`]) and we were still in it, so the server
@@ -1529,23 +1548,21 @@ const LOCAL_TAR_FLAGS: [&str; 7] = [
 /// says a partial file may remain; the cleanup's connection is bounded
 /// ([`CLEANUP_LIMIT`]).
 pub fn transfer(
-    ssh: &[String],
+    served: &Served,
     local: &Local,
     dir: &str,
     shared: &Arc<Shared>,
     tick: impl Fn(),
 ) -> Outcome {
     let parent = local.path.parent().unwrap_or(Path::new("/"));
-    let remote = crate::ssh_route::command(&ssh[0])
-        .args(&ssh[1..])
-        .arg(remote_command(&extract_script(dir)))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut remote = match remote {
-        Ok(child) => child,
-        Err(error) => return Outcome::Failed(format!("ssh could not be started: {error}")),
+    let RemoteCommand {
+        stdin,
+        stdout,
+        stderr,
+        end,
+    } = match served.sh(&extract_script(dir), Ask::Never, OPEN_WAIT) {
+        Ok(command) => command,
+        Err(text) => return Outcome::Failed(text),
     };
     // `./name`: a name starting with `-` must not be taken for an option.
     let local_tar = Command::new("/usr/bin/tar")
@@ -1560,22 +1577,23 @@ pub fn transfer(
     let mut local_tar = match local_tar {
         Ok(child) => child,
         Err(error) => {
-            crate::program::end_group(&mut remote);
+            end.kill();
             return Outcome::Failed(format!("tar could not be started: {error}"));
         }
     };
-    shared.track(&[&local_tar, &remote]);
+    shared.track(&[&local_tar]);
+    shared.track_remote(&end);
 
     let heard = Arc::new(Mutex::new(Heard::default()));
-    let remote_out = hear(remote.stdout.take(), Arc::clone(&heard));
+    let remote_out = hear(stdout, Arc::clone(&heard));
     let remote_err = collect_stderr(
-        remote.stderr.take(),
+        Some(stderr),
         Some(Arc::clone(shared)),
         Some(Arc::clone(&heard)),
     );
     let local_err = collect_stderr(local_tar.stderr.take(), None, None);
     let mut watcher = TarWatcher::listing();
-    if let (Some(mut source), Some(mut sink)) = (local_tar.stdout.take(), remote.stdin.take()) {
+    if let (Some(mut source), Some(mut sink)) = (local_tar.stdout.take(), stdin) {
         let mut buffer = vec![0; 64 * 1024];
         let mut last = Instant::now();
         loop {
@@ -1602,27 +1620,13 @@ pub fn transfer(
         }
         // The input closes here: the remote tar must see the end of the stream.
     }
-    let remote_status = wait_untracked(&mut remote, shared);
+    let remote_status = end.wait();
     let local_status = wait_untracked(&mut local_tar, shared);
-    // Every line the server wrote before its end is heard before anything is
-    // decided — after a stop only for as long as [`HEARING_LIMIT`]: ssh was killed
-    // on purpose, and pipes a master connection holds may not close for minutes.
-    let stopped = shared.cancel.load(Ordering::Acquire) || shared.disk_full.load(Ordering::Acquire);
-    let (remote_err, local_err) = if stopped {
-        let deadline = Instant::now() + HEARING_LIMIT;
-        while !(remote_out.is_finished() && remote_err.is_finished()) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        // A stop's outcome reads no text: a reader still waiting is not waited
-        // for, it ends on its own with its pipe.
-        (String::new(), String::new())
-    } else {
-        let _ = remote_out.join();
-        (
-            remote_err.join().unwrap_or_default(),
-            local_err.join().unwrap_or_default(),
-        )
-    };
+    // Every line the server wrote before its end is heard before anything is decided: the
+    // streams are over when the program is (or was ended), and what came before is read first.
+    let _ = remote_out.join();
+    let remote_err = remote_err.join().unwrap_or_default();
+    let local_err = local_err.join().unwrap_or_default();
 
     let interrupted = if shared.disk_full.load(Ordering::Acquire) {
         Some(Outcome::DiskFull)
@@ -1640,7 +1644,7 @@ pub fn transfer(
         // be whole. Any other file may be one the server never reached.
         let clean = match watcher.current.take() {
             Some(partial) if caught_up => {
-                run_ssh_within(ssh, &cleanup_script(dir, &partial), CLEANUP_LIMIT)
+                run_sh_within(served, &cleanup_script(dir, &partial), CLEANUP_LIMIT)
             }
             // No file began: nothing can be half-written.
             None if watcher.files == 0 => true,
@@ -1660,16 +1664,19 @@ pub fn transfer(
         });
     }
     match remote_status {
-        Ok(status) if status.success() => Outcome::Done,
-        Ok(status) => {
+        Ok(Exit::Code(0)) => Outcome::Done,
+        Ok(Exit::Code(code)) => {
             let line = last_line(&remote_err);
             Outcome::Failed(if line.is_empty() {
-                format!("ssh exited with {}", status.code().unwrap_or(-1))
+                format!("tar on the server exited with {code}")
             } else {
                 line.to_owned()
             })
         }
-        Err(error) => Outcome::Failed(error.to_string()),
+        Ok(Exit::Signal(signal)) => {
+            Outcome::Failed(format!("tar on the server was ended by signal {signal}"))
+        }
+        Err(reason) => Outcome::Failed(reason),
     }
 }
 
@@ -1681,7 +1688,7 @@ pub fn transfer(
 /// text. A line that is not UTF-8 is read lossily: the reading must not stop
 /// while the process still writes — a listing goes on for every entry.
 pub(crate) fn collect_stderr(
-    stream: Option<std::process::ChildStderr>,
+    stream: Option<impl Read + Send + 'static>,
     disk: Option<Arc<Shared>>,
     listing: Option<Arc<Mutex<Heard>>>,
 ) -> thread::JoinHandle<String> {
@@ -1750,14 +1757,8 @@ pub(crate) fn collect_stderr(
 /// listing of GNU tar and busybox ([`Heard`]). Read whatever it is — a full pipe
 /// would stop the remote tar. A name that is not UTF-8 is read lossily and so
 /// never matches: the listing seems behind, which only deletes less.
-fn hear(
-    stream: Option<std::process::ChildStdout>,
-    listing: Arc<Mutex<Heard>>,
-) -> thread::JoinHandle<()> {
+fn hear(stream: impl Read + Send + 'static, listing: Arc<Mutex<Heard>>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let Some(stream) = stream else {
-            return;
-        };
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();
         loop {
@@ -1958,21 +1959,21 @@ struct Current {
 #[derive(Debug)]
 pub struct Started {
     pub id: u64,
-    pub ssh: Vec<String>,
+    pub served: Served,
     pub job: Job,
     pub shared: Arc<Shared>,
 }
 
-/// A tab's transfer queue — **bound to that tab's ssh connection**:
+/// A tab's transfer queue — **bound to that tab's remote session**:
 /// its generation is the remote session's command generation; if the generation
-/// changes (ssh closed) the pending items are cancelled.
+/// changes (the session closed) the pending items are cancelled.
 #[derive(Debug)]
 struct Queue {
     command: u64,
-    ssh: Vec<String>,
+    served: Served,
     /// The target as shown ([`bt_core::RemoteTarget::label`]): the sheets', the
     /// result texts' and the transfer line's name for it. Never read as a key —
-    /// the connection is [`Self::ssh`].
+    /// the connection is [`Self::served`].
     host: String,
     mark: HostMark,
     entries: Vec<Item>,
@@ -2236,7 +2237,7 @@ impl Transfers {
             .is_some_and(|queue| queue.ending.is_none())
     }
 
-    /// The remote session's generation (to tell that ssh closed).
+    /// The remote session's generation (to tell that the session closed).
     pub fn command(&self) -> Option<u64> {
         self.queue.as_ref().map(|queue| queue.command)
     }
@@ -2248,14 +2249,14 @@ impl Transfers {
     pub fn enqueue(
         &mut self,
         command: u64,
-        ssh: Vec<String>,
+        served: Served,
         host: String,
         mark: HostMark,
         jobs: Vec<Job>,
     ) -> bool {
         let queue = self.queue.get_or_insert_with(|| Queue {
             command,
-            ssh,
+            served,
             host,
             mark,
             entries: Vec::new(),
@@ -2321,7 +2322,7 @@ impl Transfers {
             });
             started.push(Started {
                 id: entry.id,
-                ssh: queue.ssh.clone(),
+                served: queue.served.clone(),
                 job: entry.job.clone(),
                 shared,
             });
@@ -2331,7 +2332,7 @@ impl Transfers {
 
     /// Starts the queue lane's next item at `now`: the stream thread's inputs. `None`
     /// if a queue lane item is already streaming or the queue is ending.
-    pub fn start_next(&mut self, now: Instant) -> Option<(Vec<String>, Job, Arc<Shared>)> {
+    pub fn start_next(&mut self, now: Instant) -> Option<(Served, Job, Arc<Shared>)> {
         let queue = self.queue.as_mut()?;
         if queue.queued().is_some() || queue.ending.is_some() {
             return None;
@@ -2348,7 +2349,7 @@ impl Transfers {
             lane: Lane::Queue,
             skip: false,
         });
-        Some((queue.ssh.clone(), entry.job.clone(), shared))
+        Some((queue.served.clone(), entry.job.clone(), shared))
     }
 
     /// The queue lane's streaming item's id.
@@ -2674,7 +2675,7 @@ impl Transfers {
     fn end(&mut self) -> Option<Ended> {
         let queue = self.queue.take()?;
         self.serial += 1;
-        // ssh closed but the streaming item finished over its own connection and
+        // The session closed but the streaming item finished over the server's connection and
         // nothing was waiting: everything arrived, the result is a success.
         let all_done = queue
             .entries
@@ -2757,8 +2758,8 @@ impl Transfers {
 
     /// The percentage for the title prefix: while an item streams, based
     /// on the whole queue's bytes, rounded down; `None` if nothing streams or it is
-    /// being cancelled. If ssh closed, the streaming items finish over their own
-    /// connections and the prefix stays with them.
+    /// being cancelled. If the session closed, the streaming items finish over the server's
+    /// connection and the prefix stays with them.
     pub fn percent(&self) -> Option<u8> {
         let queue = self.queue.as_ref()?;
         if queue.ending == Some(End::Cancelled) || queue.running.is_empty() {
@@ -3105,7 +3106,13 @@ mod tests {
     fn single_quotes_never_produce_a_backslash() {
         assert_eq!(sq("plain"), "'plain'");
         assert_eq!(sq("it's"), "'it'\"'\"'s'");
-        assert!(!remote_command(&probe_script(Some("/a'b"), &["c'd".into()])).contains('\\'));
+        assert!(
+            !crate::kablo::served::fake::remote_command(&probe_script(
+                Some("/a'b"),
+                &["c'd".into()]
+            ))
+            .contains('\\')
+        );
     }
 
     /// Runs the script **in two layers**: the login shell (`shell -c`) and the `sh -c`
@@ -3113,7 +3120,7 @@ mod tests {
     fn run_remote(shell: &str, script: &str, cwd: &Path) -> (Option<i32>, String) {
         let output = Command::new(shell)
             .arg("-c")
-            .arg(remote_command(script))
+            .arg(crate::kablo::served::fake::remote_command(script))
             .current_dir(cwd)
             .output()
             .expect("shell did not run");
@@ -3169,7 +3176,10 @@ mod tests {
         for (dir, tail) in [("~", None), ("~/my foo", Some("my foo"))] {
             let output = Command::new("/bin/sh")
                 .arg("-c")
-                .arg(remote_command(&probe_script(Some(dir), &[])))
+                .arg(crate::kablo::served::fake::remote_command(&probe_script(
+                    Some(dir),
+                    &[],
+                )))
                 .env("HOME", &home)
                 .output()
                 .expect("shell did not run");
@@ -3545,13 +3555,7 @@ mod tests {
 
     fn queue_of(jobs: Vec<Job>) -> Transfers {
         let mut uploads = Transfers::default();
-        assert!(uploads.enqueue(
-            7,
-            words(&["ssh", "prod"]),
-            "prod".into(),
-            HostMark::Production,
-            jobs
-        ));
+        assert!(uploads.enqueue(7, Served::none(), "prod".into(), HostMark::Production, jobs));
         uploads
     }
 
@@ -3663,7 +3667,7 @@ mod tests {
         let mut uploads = queue_of(vec![job("a", false, 1, 1)]);
         assert!(!uploads.enqueue(
             8,
-            vec![],
+            Served::none(),
             "prod".into(),
             HostMark::None,
             vec![job("b", false, 1, 1)]
@@ -3889,7 +3893,7 @@ mod tests {
         let first = uploads.finish(Outcome::Done).unwrap().serial;
         assert!(uploads.enqueue(
             7,
-            vec![],
+            Served::none(),
             "prod".into(),
             HostMark::None,
             vec![job("b", false, 1, 1)]
@@ -4189,7 +4193,7 @@ mod tests {
         assert!(transfers.can_accept(), "the lingering line refuses nothing");
         assert!(transfers.enqueue(
             7,
-            words(&["ssh", "prod"]),
+            Served::none(),
             "prod".into(),
             HostMark::Production,
             vec![download("b.log", Lane::Queue, 10)],
@@ -4205,7 +4209,7 @@ mod tests {
         let _ = transfers.finish_item(started[0].id, Outcome::Done, None);
         assert!(transfers.enqueue(
             7,
-            words(&["ssh", "prod"]),
+            Served::none(),
             "prod".into(),
             HostMark::Production,
             vec![download("p.log", Lane::Preview, 10)],
@@ -4393,7 +4397,7 @@ mod tests {
         let shared = Arc::new(Shared::default());
         let ticks = std::cell::Cell::new(0);
         let outcome = transfer(
-            &words(&["/bin/sh", "-c"]),
+            &Served::fake(words(&["/bin/sh", "-c"])),
             &item,
             target.to_str().unwrap(),
             &shared,
@@ -4411,7 +4415,7 @@ mod tests {
         );
         // If the remote tar fails, its line becomes the result.
         let outcome = transfer(
-            &words(&["/bin/sh", "-c"]),
+            &Served::fake(words(&["/bin/sh", "-c"])),
             &item,
             root.join("missing").to_str().unwrap(),
             &Arc::new(Shared::default()),
@@ -4544,9 +4548,9 @@ mod tests {
     /// A stand-in for ssh: `/bin/sh -c <fake> ssh <remote command>`. The stream's
     /// script (`tar -x`) runs `extract`, every other one (the cleanup) runs `other`;
     /// both find the remote command in `$1`.
-    fn fake_ssh(extract: &str, other: &str) -> Vec<String> {
+    fn fake_ssh(extract: &str, other: &str) -> Served {
         let fake = format!("case \"$1\" in *'tar -x'*) {extract} ;; *) {other} ;; esac");
-        words(&["/bin/sh", "-c", &fake, "ssh"])
+        Served::fake(words(&["/bin/sh", "-c", &fake, "ssh"]))
     }
 
     /// A server that takes the first blocks of the stream, lists `heard` the way GNU
@@ -4564,7 +4568,7 @@ mod tests {
     /// local side is far enough; the outcome, or `None` if it did not end within
     /// `limit`.
     fn cancelled_transfer(
-        ssh: Vec<String>,
+        ssh: Served,
         item: Local,
         dir: &Path,
         ready: impl Fn(&Shared) -> bool,
@@ -4695,52 +4699,6 @@ mod tests {
             shared.partial_left.load(Ordering::Acquire),
             "the cleanup never got through"
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn a_stop_does_not_wait_on_pipes_a_master_connection_still_holds() {
-        let root = scratch("held");
-        let target = root.join("dst");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(root.join("big.bin"), vec![b'z'; 4 << 20]).unwrap();
-        std::fs::write(target.join("big.bin"), b"half").unwrap();
-        // Over a `ControlMaster` the session's pipes outlive the killed ssh: here a
-        // process the fake leaves behind holds them.
-        let holder = root.join("holder");
-        let ssh = fake_ssh(
-            &format!(
-                "sleep 30 & echo $! > {}; {}",
-                sq(holder.to_str().unwrap()),
-                stalled_after(&["./big.bin"])
-            ),
-            "exec /bin/sh -c \"$1\"",
-        );
-        let (outcome, shared) = cancelled_transfer(
-            ssh,
-            measure(&root.join("big.bin")).unwrap(),
-            &target,
-            |shared| shared.progress().0 > 0,
-            HEARING_LIMIT + Duration::from_secs(8),
-        );
-        if let Some(pid) = std::fs::read_to_string(&holder)
-            .ok()
-            .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok())
-        {
-            // SAFETY: `kill(2)` takes only a pid and a signal: the test's own sleep.
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-        }
-        assert_eq!(
-            outcome,
-            Some(Outcome::Cancelled),
-            "the stop waited on the pipes"
-        );
-        // What had arrived was heard: the server's half-written copy is gone.
-        assert!(!target.join("big.bin").exists(), "the partial file stayed");
-        assert!(!shared.partial_left.load(Ordering::Acquire));
         let _ = std::fs::remove_dir_all(&root);
     }
 

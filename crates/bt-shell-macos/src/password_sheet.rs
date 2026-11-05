@@ -45,6 +45,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 
+use bt_shell_common::kablo::served::Served;
+
 use crate::pane::TerminalPane;
 use crate::preview::beep;
 use crate::remote_helper::Dial;
@@ -102,22 +104,34 @@ fn lead(question: &Question) -> Option<&'static str> {
 }
 
 impl TerminalPane {
-    /// A remote job's route gate: `job` `Some` — the user started it
-    /// and a sheet may ask; `holds` — the job already holds the pane's sheet
-    /// gate (the upload's probe, the download's count). `None` — a background
-    /// job, which never asks.
+    /// The server the pane's terminal is kept on, as a job runs programs on it over the
+    /// connection kept to it. None when no server keeps a terminal here (a plain `ssh` of the
+    /// user's own: bateri runs nothing on that machine).
+    pub(crate) fn served(&self, target: &bt_core::RemoteTarget) -> Served {
+        match (
+            self.host().connections(),
+            self.host().kept_terminal(self.uuid()),
+        ) {
+            (Some(backend), Some(shown)) => Served::new(backend, shown.server(target.port)),
+            _ => Served::none(),
+        }
+    }
+
+    /// How a remote job asks for a login when the connection has to be made first: `job` `Some`
+    /// — the user started it and a sheet may ask; `holds` — the job already holds the pane's
+    /// sheet gate (the upload's probe, the download's count). `None` — a background job, which
+    /// never asks.
+    pub(crate) fn login_ask(&self, host: &str, job: Option<(Job, bool)>) -> Ask {
+        match job {
+            Some((job, holds)) => Ask::Sheet(self.password_asker(host.to_owned(), job, holds)),
+            None => Ask::Never,
+        }
+    }
+
+    /// The helper session's dial for `target`, asking as [`TerminalPane::login_ask`] says.
     pub(crate) fn dial(&self, target: bt_core::RemoteTarget, job: Option<(Job, bool)>) -> Dial {
-        // The server the pane's terminal is kept on, and what connects to it for a program.
-        let served = self.host().connections().zip(
-            self.host()
-                .kept_terminal(self.uuid())
-                .map(|shown| shown.server(target.port)),
-        );
-        let Some((job, holds)) = job else {
-            return Dial::gated(served, self.masters(), target, Ask::Never);
-        };
-        let ask = Ask::Sheet(self.password_asker(target.host.clone(), job, holds));
-        Dial::gated(served, self.masters(), target, ask)
+        let ask = self.login_ask(&target.host, job);
+        Dial::new(self.served(&target), ask)
     }
 
     /// The password sheet for a program in this pane that wants to reach `host` (`bateri split

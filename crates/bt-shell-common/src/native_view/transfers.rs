@@ -499,6 +499,9 @@ mod tests {
     use super::super::files::{GivenFile, ViewFiles};
     use super::*;
     use crate::child::wait_until;
+    use crate::kablo::remote::RemoteCommand;
+    use crate::kablo::served::Served;
+    use crate::ssh_route::Ask;
     use crate::stage::{Folder, prepare_here};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::SystemTime;
@@ -575,7 +578,10 @@ mod tests {
                     "host".into(),
                 ];
                 let dir = folder.dir().to_string_lossy().into_owned();
-                let way = Way::Server(crate::stage::Server::new(dir, Arc::new(Fixed(Some(argv)))));
+                let way = Way::Server(crate::stage::Server::new(
+                    dir,
+                    Arc::new(Fixed(Served::fake(argv))),
+                ));
                 (folder, way)
             })
         }
@@ -586,7 +592,10 @@ mod tests {
                 let folder = crate::kablo::install::prepare_stage(&Sh(home.to_owned()), "c148d55a")
                     .expect("a folder");
                 let dir = folder.dir().to_string_lossy().into_owned();
-                let way = Way::Server(crate::stage::Server::new(dir, Arc::new(Fixed(None))));
+                let way = Way::Server(crate::stage::Server::new(
+                    dir,
+                    Arc::new(Fixed(Served::none())),
+                ));
                 (folder, way)
             })
         }
@@ -701,24 +710,25 @@ mod tests {
         }
     }
 
-    /// The connection a way reaches the server by: this argv, or none.
-    struct Fixed(Option<Vec<String>>);
+    /// The connection a way reaches the server by.
+    struct Fixed(Served);
 
     impl stage::Reach for Fixed {
-        fn argv(&self) -> Option<Vec<String>> {
-            self.0.clone()
+        fn run(&self, script: &str, wait: Duration) -> Result<RemoteCommand, String> {
+            self.0.sh(script, Ask::Never, wait)
         }
 
         fn key(&self) -> String {
-            format!("{:?}", self.0)
+            "fixed".to_owned()
         }
     }
 
     /// An ssh that runs its last word (the command) here, in `home`, and does what the file
-    /// `fake-mode` there says besides: `refuse` is a connection that cannot be made, `tee` keeps
-    /// what it is sent, `die-after:N` ends the connection after N bytes of the script's output (`dd` of a byte
-    /// at a time writes what it has read at once, which `head` does not),
-    /// `leave-after:N` after N bytes of what it is sent.
+    /// `fake-mode` there says besides: `refuse` is a connection that goes at once, `tee` keeps
+    /// what it is sent, `die-after:N` loses the connection (the process is killed, as a stream
+    /// that has no exit status) after N bytes of the script's output (`dd` of a byte at a time
+    /// writes what it has read at once, which `head` does not), `leave-after:N` after N bytes of
+    /// what it is sent.
     fn fake_ssh(home: &Path) -> String {
         format!(
             r#"#!/bin/sh
@@ -728,10 +738,10 @@ export HOME
 cd "$HOME" || exit 1
 mode=$(cat "$HOME/fake-mode" 2>/dev/null)
 case $mode in
-  refuse) exit 255;;
+  refuse) kill -9 $$;;
   tee) tee "$HOME/stdin-log" | sh -c "$last"; exit $?;;
-  die-after:*) sh -c "$last" | dd bs=1 count="${{mode#die-after:}}" 2>/dev/null; exit 255;;
-  leave-after:*) head -c "${{mode#leave-after:}}" | sh -c "$last"; exit 255;;
+  die-after:*) sh -c "$last" | dd bs=1 count="${{mode#die-after:}}" 2>/dev/null; kill -9 $$;;
+  leave-after:*) head -c "${{mode#leave-after:}}" | sh -c "$last"; kill -9 $$;;
   stall-after:*) sh -c "$last" | dd bs=1 count="${{mode#stall-after:}}" 2>/dev/null; sleep 60; exit 0;;
 esac
 exec sh -c "$last"

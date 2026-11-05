@@ -181,13 +181,13 @@ impl TerminalPane {
             .server_target()
             .filter(|(current, ..)| *current == command);
         let Some((command, target, _)) = target else {
-            reply(Err("The remote session ended".to_owned()), &[]);
+            reply(Err("The remote session ended".to_owned()));
             return;
         };
         self.remote_helper().borrow_mut().ask(Request {
             command,
             host: target.host.clone(),
-            // A background job: rides a live master or today's argv, never asks.
+            // A background job: asks nobody.
             dial: self.dial(target, None),
             query: Query::Load { detail },
             reply,

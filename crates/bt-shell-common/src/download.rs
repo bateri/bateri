@@ -23,9 +23,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use kablo_proto::v1::Exit;
+
+use crate::kablo::remote::RemoteCommand;
+use crate::kablo::served::Served;
 use crate::remote_files::{download_script, split_remote};
+use crate::ssh_route::Ask;
 use crate::upload::{
-    NO_DIRECTORY, Outcome, Shared, TICK, TarWatcher, collect_stderr, last_line, remote_command,
+    NO_DIRECTORY, OPEN_WAIT, Outcome, Shared, TICK, TarWatcher, collect_stderr, last_line,
     wait_untracked,
 };
 
@@ -46,7 +51,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// cache's sweep skips such folders: they are a stream in flight).
 pub const TEMP_PREFIX: &str = ".bateri-download-";
 
-/// Downloads the remote absolute path `remote` to `landing`: `ssh … tar c` remotely,
+/// Downloads the remote absolute path `remote` to `landing`: `tar c` on the server,
 /// `tar x` locally into a temporary folder next to `landing` (its folder is
 /// created here, when the stream starts — nothing is made on disk before the
 /// user confirmed), then `seal` (the
@@ -57,7 +62,7 @@ pub const TEMP_PREFIX: &str = ".bateri-download-";
 ///
 /// Returns the outcome and where the item landed (`Done` only).
 pub fn transfer(
-    ssh: &[String],
+    served: &Served,
     remote: &str,
     landing: &Path,
     conflict: Conflict,
@@ -92,7 +97,7 @@ pub fn transfer(
             );
         }
     };
-    let result = match stream(ssh, &script, &temp, shared, tick) {
+    let result = match stream(served, &script, &temp, shared, tick) {
         Outcome::Done => match land(&temp.join(name), landing, conflict, seal) {
             Ok(landed) => (Outcome::Done, Some(landed)),
             Err(reason) => (Outcome::Failed(reason), None),
@@ -120,7 +125,7 @@ fn make_temp(parent: &Path) -> std::io::Result<PathBuf> {
 /// The stream: the remote `tar c`'s output through [`TarWatcher`] into the local
 /// `tar x`. Cancel and disk full kill both processes ([`Shared`]).
 fn stream(
-    ssh: &[String],
+    served: &Served,
     script: &str,
     temp: &Path,
     shared: &Arc<Shared>,
@@ -137,28 +142,29 @@ fn stream(
         Ok(child) => child,
         Err(error) => return Outcome::Failed(format!("tar could not be started: {error}")),
     };
-    let remote = crate::ssh_route::command(&ssh[0])
-        .args(&ssh[1..])
-        .arg(remote_command(script))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut remote = match remote {
-        Ok(child) => child,
-        Err(error) => {
+    let RemoteCommand {
+        stdin,
+        stdout,
+        stderr,
+        end,
+    } = match served.sh(script, Ask::Never, OPEN_WAIT) {
+        Ok(command) => command,
+        Err(text) => {
             let _ = local_tar.kill();
             let _ = local_tar.wait();
-            return Outcome::Failed(format!("ssh could not be started: {error}"));
+            return Outcome::Failed(text);
         }
     };
-    shared.track(&[&remote, &local_tar]);
+    // The program on the server reads nothing.
+    drop(stdin);
+    shared.track(&[&local_tar]);
+    shared.track_remote(&end);
 
-    let remote_err = collect_stderr(remote.stderr.take(), None, None);
+    let remote_err = collect_stderr(Some(stderr), None, None);
     // The full disk is this Mac's: the local tar says so.
     let local_err = collect_stderr(local_tar.stderr.take(), Some(Arc::clone(shared)), None);
     let mut watcher = TarWatcher::default();
-    if let (Some(mut source), Some(mut sink)) = (remote.stdout.take(), local_tar.stdin.take()) {
+    if let (mut source, Some(mut sink)) = (stdout, local_tar.stdin.take()) {
         let mut buffer = vec![0; 64 * 1024];
         let mut last = Instant::now();
         loop {
@@ -168,6 +174,9 @@ fn stream(
             };
             watcher.feed(&buffer[..read]);
             if sink.write_all(&buffer[..read]).is_err() {
+                // The local tar stopped: the program on the server is not to go on for a reader
+                // that is gone.
+                end.kill();
                 break;
             }
             shared.bytes.store(watcher.bytes, Ordering::Release);
@@ -178,9 +187,10 @@ fn stream(
             }
         }
         // Both ends close here: the local tar sees the end of the stream, and if it
-        // stopped early ssh's next write fails instead of blocking on a full pipe.
+        // stopped early the server's next write finds the stream closed instead of waiting
+        // for a reader that is gone.
     }
-    let remote_status = wait_untracked(&mut remote, shared);
+    let remote_status = end.wait();
     let local_status = wait_untracked(&mut local_tar, shared);
     let remote_err = remote_err.join().unwrap_or_default();
     let local_err = local_err.join().unwrap_or_default();
@@ -193,22 +203,22 @@ fn stream(
     }
     // The remote side is the cause when it says why; a silent remote failure after a
     // local one is the consequence (the broken pipe).
-    let remote_failed = remote_status.as_ref().map_or_else(
-        |error| Some(error.to_string()),
-        |status| {
-            (!status.success()).then(|| match status.code() {
-                Some(NO_DIRECTORY) => "the remote folder can no longer be opened".to_owned(),
-                code => {
-                    let line = last_line(&remote_err);
-                    if line.is_empty() {
-                        format!("ssh exited with {}", code.unwrap_or(-1))
-                    } else {
-                        line.to_owned()
-                    }
-                }
+    let remote_failed = match &remote_status {
+        Ok(Exit::Code(0)) => None,
+        Ok(Exit::Code(NO_DIRECTORY)) => {
+            Some("the remote folder can no longer be opened".to_owned())
+        }
+        Ok(Exit::Code(code)) => {
+            let line = last_line(&remote_err);
+            Some(if line.is_empty() {
+                format!("tar on the server exited with {code}")
+            } else {
+                line.to_owned()
             })
-        },
-    );
+        }
+        Ok(Exit::Signal(signal)) => Some(format!("tar on the server was ended by signal {signal}")),
+        Err(reason) => Some(reason.clone()),
+    };
     let local_failed = (!local_status.is_ok_and(|status| status.success())).then(|| {
         let line = last_line(&local_err);
         if line.is_empty() {
@@ -217,10 +227,8 @@ fn stream(
             line.to_owned()
         }
     });
-    let remote_spoke = !last_line(&remote_err).is_empty()
-        || remote_status
-            .as_ref()
-            .is_ok_and(|status| status.code() == Some(NO_DIRECTORY));
+    let remote_spoke =
+        !last_line(&remote_err).is_empty() || matches!(remote_status, Ok(Exit::Code(NO_DIRECTORY)));
     match (remote_failed, local_failed) {
         (Some(reason), _) if remote_spoke => Outcome::Failed(reason),
         (_, Some(reason)) | (Some(reason), None) => Outcome::Failed(reason),
@@ -373,8 +381,8 @@ mod tests {
 
     /// A local shell in place of ssh: `sh -c "<remote command>"` — the very script and
     /// stream that would run remotely, without a connection (`upload`'s precedent).
-    fn local_ssh() -> Vec<String> {
-        vec!["/bin/sh".to_owned(), "-c".to_owned()]
+    fn local_ssh() -> Served {
+        Served::fake(vec!["/bin/sh".to_owned(), "-c".to_owned()])
     }
 
     fn names(dir: &Path) -> Vec<String> {
@@ -473,12 +481,12 @@ mod tests {
     /// `tar c`s whatever `operands` name from `dir` — a link as the item, a FIFO,
     /// a folder whose own link points out of it. The remote command arrives as
     /// `$0` and is never run.
-    fn hostile_ssh(operands: &str) -> Vec<String> {
-        vec![
+    fn hostile_ssh(operands: &str) -> Served {
+        Served::fake(vec![
             "/bin/sh".to_owned(),
             "-c".to_owned(),
             format!("exec /usr/bin/tar -c -f - {operands}"),
-        ]
+        ])
     }
 
     fn mode(path: &Path) -> u32 {

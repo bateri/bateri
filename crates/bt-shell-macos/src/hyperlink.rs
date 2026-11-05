@@ -741,10 +741,10 @@ impl BateriView {
         let request = Request {
             command,
             host: target.host.clone(),
-            // A background job: rides a live master or today's argv, never asks.
+            // A background job: asks nobody.
             dial: pane.dial(target, None),
             query: Query::Verify { candidates, cwd },
-            reply: Box::new(move |answer, _| {
+            reply: Box::new(move |answer| {
                 let found = match answer {
                     Ok(Answer::Verified(found)) => Ok(found),
                     Ok(Answer::Counted(_) | Answer::Load(_) | Answer::Ports(_)) => Ok(None),

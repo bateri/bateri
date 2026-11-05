@@ -317,20 +317,19 @@ impl TerminalPane {
             state.last = Some(Instant::now());
         }
         let (id, lookup) = (self.id(), self.lookup());
-        let reply = Box::new(move |answer: Result<Answer, String>, ssh: &[String]| {
-            let ssh = ssh.to_vec();
+        let reply = Box::new(move |answer: Result<Answer, String>| {
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(pane) = lookup(mtm, id) {
-                    pane.remote_ports_answered(generation, answer, ssh);
+                    pane.remote_ports_answered(generation, answer);
                 }
             });
         });
         self.remote_helper().borrow_mut().ask(Request {
             command: generation,
             host: target.host.clone(),
-            // A background job: rides a live master or today's argv, never asks.
+            // A background job: asks nobody.
             dial: self.dial(target, None),
             query: Query::Ports { shell },
             reply,
@@ -357,12 +356,7 @@ impl TerminalPane {
     }
 
     /// A scan's answer for `generation`, on the main queue.
-    fn remote_ports_answered(
-        &self,
-        generation: u64,
-        answer: Result<Answer, String>,
-        ssh: Vec<String>,
-    ) {
+    fn remote_ports_answered(&self, generation: u64, answer: Result<Answer, String>) {
         let again = {
             let mut state = self.remote_ports().borrow_mut();
             if state.generation != Some(generation) {
@@ -384,9 +378,6 @@ impl TerminalPane {
                         }
                     }
                     state.listeners = listeners;
-                    if !ssh.is_empty() {
-                        state.ssh = ssh;
-                    }
                 }
                 _ => state.listeners.clear(),
             }

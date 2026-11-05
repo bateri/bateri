@@ -29,6 +29,7 @@ use std::thread;
 
 use block2::RcBlock;
 use bt_core::HostMark;
+use bt_shell_common::kablo::served::Served;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
@@ -47,7 +48,7 @@ use crate::pane::TerminalPane;
 use crate::password_sheet::Job as SheetJob;
 use crate::preview_cache;
 use crate::remote_files::{self, CacheState, PreviewOpen, RemoteEntry};
-use crate::remote_helper::{Answer, Query, Request};
+use crate::remote_helper::{Answer, Dial, Query, Request};
 use crate::sheets::{self, Asker, Seat};
 use crate::upload::{Job, Lane, format_bytes};
 use crate::uploader::{self, Confirmed, on_pane};
@@ -82,7 +83,7 @@ enum Decided {
 /// The worker's answer, back on the main thread.
 struct Asked {
     command: u64,
-    ssh: Vec<String>,
+    served: Served,
     host: String,
     mark: HostMark,
     remote: String,
@@ -94,7 +95,7 @@ struct Asked {
 /// A preview that will download: everything the queue needs.
 struct Fetch {
     command: u64,
-    ssh: Vec<String>,
+    served: Served,
     host: String,
     mark: HostMark,
     remote: String,
@@ -287,15 +288,18 @@ impl TerminalPane {
             return;
         }
         // The job does not hold the sheet gate: the password sheet takes it if free.
-        let dial = self.dial(target, Some((SheetJob::Preview, false)));
+        let served = self.served(&target);
+        let dial = Dial::new(
+            served.clone(),
+            self.login_ask(&host, Some((SheetJob::Preview, false))),
+        );
         let (id, lookup) = (self.id(), self.lookup());
         let request = Request {
             command,
             dial,
             host: host.clone(),
             query: Query::Count(remote.clone()),
-            reply: Box::new(move |answer, ssh| {
-                let ssh = ssh.to_vec();
+            reply: Box::new(move |answer| {
                 let decided = match answer {
                     Ok(Answer::Counted(Some(entry @ RemoteEntry::File { size, mtime, .. }))) => {
                         decide(&dir, &local, &downloads, entry, (size, mtime))
@@ -306,7 +310,7 @@ impl TerminalPane {
                 };
                 let asked = Asked {
                     command,
-                    ssh,
+                    served,
                     host,
                     mark,
                     remote,
@@ -333,7 +337,7 @@ impl TerminalPane {
         }
         let Asked {
             command,
-            ssh,
+            served,
             host,
             mark,
             remote,
@@ -370,7 +374,7 @@ impl TerminalPane {
         };
         let fetch = Fetch {
             command,
-            ssh,
+            served,
             host,
             mark,
             remote,
@@ -412,7 +416,7 @@ impl TerminalPane {
     fn fetch_preview(&self, fetch: Fetch) {
         let Fetch {
             command,
-            ssh,
+            served,
             host,
             mark,
             remote,
@@ -439,7 +443,7 @@ impl TerminalPane {
         self.previews().borrow_mut().insert(local, ticket);
         let queued = self.upload_confirmed(Confirmed {
             command,
-            ssh,
+            served,
             host,
             mark,
             jobs: vec![job],
@@ -509,7 +513,7 @@ impl TerminalPane {
         self.failure_sheet(&format!("Can't preview from {host}"), text);
     }
 
-    /// A remote job's error sheet — title, ssh's reason, OK — through the
+    /// A remote job's error sheet — title, the reason, OK — through the
     /// pane's sheet gate; a beep when another sheet is up.
     pub(crate) fn failure_sheet(&self, title: &str, text: &str) {
         let Some(seat) =

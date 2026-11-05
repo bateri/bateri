@@ -2009,9 +2009,8 @@ fn helper_shells() -> std::collections::HashSet<String> {
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_helper_over_a_real_kablo_answers_what_exists_the_ports_and_the_load_and_leaves_no_sh_idle() {
-    use crate::remote_helper::{
-        Answer, Dial, LoadReply, Process, Query, RemoteHelper, Reply, Request,
-    };
+    use crate::kablo::served::Served;
+    use crate::remote_helper::{Answer, Dial, LoadReply, Query, RemoteHelper, Reply, Request};
     let Some(here) = Here::new("helper") else {
         return;
     };
@@ -2023,23 +2022,15 @@ fn the_helper_over_a_real_kablo_answers_what_exists_the_ports_and_the_load_and_l
     let mut ask = |query: Query| {
         let (tx, answers) = mpsc::channel();
         let backend = Arc::clone(&backend);
-        let reply: Reply = Box::new(move |answer, _| {
+        let reply: Reply = Box::new(move |answer| {
             let _ = tx.send(answer);
         });
         helper.ask(Request {
             command: 1,
-            dial: Dial {
-                user: false,
-                argv: Box::new(|| Ok(Vec::new())),
-                connect: Box::new(move || {
-                    Process::remote(
-                        &*backend,
-                        &super::host(),
-                        crate::ssh_route::Ask::Never,
-                        Duration::from_secs(30),
-                    )
-                }),
-            },
+            dial: Dial::new(
+                Served::new(Arc::clone(&backend), super::host()),
+                crate::ssh_route::Ask::Never,
+            ),
             host: "this computer".to_owned(),
             query,
             reply,
@@ -2100,4 +2091,197 @@ fn the_helper_over_a_real_kablo_answers_what_exists_the_ports_and_the_load_and_l
         let _ = Command::new("kill").args(["-9", pid]).status();
     }
     assert!(left.is_empty(), "the helper's sh stayed: {left:?}");
+}
+
+/// The pids of the processes on this machine that run a program with these words.
+fn running(words: &str) -> std::collections::HashSet<String> {
+    let listing = Command::new("ps")
+        .args(["-axww", "-o", "pid=,command="])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter(|line| line.contains(words))
+        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_folder_goes_up_and_comes_down_over_a_real_kablo_with_the_same_contents() {
+    use crate::download::{self, Conflict};
+    use crate::kablo::served::Served;
+    use crate::ssh_route::Ask;
+    use crate::upload::{self, Outcome, Shared};
+    let Some(here) = Here::new("updown") else {
+        return;
+    };
+    let served = Served::new(here.service.backend(), super::host());
+    let home = here.ground.home.clone();
+    let site = home.join("src/site");
+    std::fs::create_dir_all(site.join("css")).expect("a tree");
+    std::fs::write(site.join("css/site.css"), b"body{}").expect("a file");
+    std::fs::write(site.join("a name with spaces.js"), vec![b'j'; 70_000]).expect("a file");
+    let server = home.join("server");
+    std::fs::create_dir_all(&server).expect("the server's folder");
+
+    // Up: the probe finds the folder, the stream puts the tree in it.
+    let (items, reply) = upload::probe(
+        &served,
+        Ask::Never,
+        "this computer",
+        Some(&server.to_string_lossy()),
+        &[site.to_string_lossy().into_owned()],
+    )
+    .expect("a probe");
+    assert!(reply.existing.is_empty());
+    let shared = Arc::new(Shared::default());
+    assert_eq!(
+        upload::transfer(&served, &items[0], &reply.dir, &shared, || {}),
+        Outcome::Done
+    );
+    assert_eq!(shared.progress().1, 2, "two files went");
+    assert_eq!(
+        std::fs::read(server.join("site/css/site.css")).expect("css"),
+        b"body{}"
+    );
+    assert_eq!(
+        std::fs::read(server.join("site/a name with spaces.js"))
+            .expect("js")
+            .len(),
+        70_000
+    );
+
+    // Down: the same tree lands whole in the folder it is given.
+    let landing = home.join("Downloads");
+    std::fs::create_dir_all(&landing).expect("a landing folder");
+    let (outcome, landed) = download::transfer(
+        &served,
+        &server.join("site").to_string_lossy(),
+        &landing.join("site"),
+        Conflict::KeepBoth,
+        &Arc::new(Shared::default()),
+        || {},
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Done);
+    assert_eq!(landed, Some(landing.join("site")));
+    assert_eq!(
+        std::fs::read(landing.join("site/css/site.css")).expect("css"),
+        b"body{}"
+    );
+    assert_eq!(
+        std::fs::read(landing.join("site/a name with spaces.js"))
+            .expect("js")
+            .len(),
+        70_000
+    );
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_cancelled_upload_ends_its_tar_on_the_server_and_removes_the_half_written_file() {
+    use crate::kablo::served::Served;
+    use crate::upload::{self, Outcome, Shared};
+    let Some(here) = Here::new("cancel") else {
+        return;
+    };
+    let served = Served::new(here.service.backend(), super::host());
+    let home = here.ground.home.clone();
+    let server = home.join("server");
+    std::fs::create_dir_all(&server).expect("the server's folder");
+    let big = home.join("big.bin");
+    {
+        let mut file = std::fs::File::create(&big).expect("a big file");
+        let block = vec![b'z'; 8 << 20];
+        for _ in 0..48 {
+            file.write_all(&block).expect("a block");
+        }
+    }
+    let before = running("tar -x -v -p -o -f -");
+    let item = upload::measure(&big).expect("measured");
+    let dir = server.to_string_lossy().into_owned();
+    let shared = Arc::new(Shared::default());
+    let (sender, ended) = mpsc::channel();
+    thread::spawn({
+        let shared = Arc::clone(&shared);
+        let served = served.clone();
+        move || {
+            let _ = sender.send(upload::transfer(&served, &item, &dir, &shared, || {}));
+        }
+    });
+    // The server's tar has begun the file when it is there; it has said so a moment later.
+    let began = Instant::now();
+    while !server.join("big.bin").exists() && began.elapsed() < Duration::from_secs(30) {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        server.join("big.bin").exists(),
+        "the stream never got going"
+    );
+    thread::sleep(Duration::from_millis(100));
+    shared.cancel();
+    let outcome = ended
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the stream thread ended");
+    assert_eq!(outcome, Outcome::Cancelled);
+
+    // The server's tar is gone with the stream, and the file it had begun is removed.
+    let waited = Instant::now();
+    while running("tar -x -v -p -o -f -")
+        .difference(&before)
+        .next()
+        .is_some()
+        && waited.elapsed() < Duration::from_secs(20)
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let left: Vec<String> = running("tar -x -v -p -o -f -")
+        .difference(&before)
+        .cloned()
+        .collect();
+    for pid in &left {
+        // What the test started is not left behind.
+        let _ = Command::new("kill").args(["-9", pid]).status();
+    }
+    assert!(left.is_empty(), "the server's tar stayed: {left:?}");
+    assert!(
+        !server.join("big.bin").exists(),
+        "the half-written file stayed"
+    );
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_write_to_a_program_that_reads_nothing_waits_on_its_window_until_the_program_is_ended() {
+    use std::sync::atomic::AtomicBool;
+    let Some(here) = Here::new("blocked") else {
+        return;
+    };
+    let mut command = here.run(&["sleep", "600"]).expect("a program");
+    let mut input = command.stdin.take().expect("its input");
+    let end = Arc::clone(&command.end);
+    let (sender, result) = mpsc::channel();
+    thread::spawn(move || {
+        let stop = AtomicBool::new(false);
+        let bytes = vec![b'q'; 16 << 20];
+        let _ = sender.send(input.write_all_within(
+            &bytes,
+            Duration::from_secs(120),
+            Duration::from_millis(10),
+            &stop,
+        ));
+    });
+    assert!(
+        result.recv_timeout(Duration::from_millis(1500)).is_err(),
+        "sixteen megabytes were taken by a program that reads nothing"
+    );
+    end.kill();
+    let written = result
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the write ended with the program");
+    assert_eq!(
+        written.expect_err("the stream is over").kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
 }

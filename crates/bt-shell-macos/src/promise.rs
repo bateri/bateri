@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use block2::{DynBlock, RcBlock};
 use bt_core::HostMark;
+use bt_shell_common::kablo::served::Served;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
@@ -61,7 +62,7 @@ use crate::download::Conflict;
 use crate::pane::{PaneLookup, TerminalPane};
 use crate::password_sheet::Job as SheetJob;
 use crate::remote_files::{self, RemoteEntry};
-use crate::remote_helper::{Answer, Query, Request};
+use crate::remote_helper::{Answer, Dial, Query, Request};
 use crate::upload::{Job, Lane, Outcome, Shared};
 use crate::uploader::Confirmed;
 use crate::view::BateriView;
@@ -464,15 +465,18 @@ impl TerminalPane {
         // connection comes from `target`.
         let host = target.label().into_owned();
         // The job does not hold the sheet gate: the password sheet takes it if free.
-        let dial = self.dial(target, Some((SheetJob::Finder, false)));
+        let served = self.served(&target);
+        let dial = Dial::new(
+            served.clone(),
+            self.login_ask(&host, Some((SheetJob::Finder, false))),
+        );
         let (id, lookup) = (self.id(), self.lookup());
         let request = Request {
             command,
             dial,
             host: host.clone(),
             query: Query::Count(remote.clone()),
-            reply: Box::new(move |answer, ssh| {
-                let ssh = ssh.to_vec();
+            reply: Box::new(move |answer| {
                 let counted = match answer {
                     Ok(Answer::Counted(Some(entry))) => Ok(entry),
                     Ok(_) => Err(format!("{remote} no longer exists on {host}.")),
@@ -480,7 +484,7 @@ impl TerminalPane {
                 };
                 let finder = Finder {
                     command,
-                    ssh,
+                    served,
                     host,
                     mark,
                     remote,
@@ -521,7 +525,7 @@ impl TerminalPane {
         };
         let Finder {
             command,
-            ssh,
+            served,
             host,
             mark,
             remote,
@@ -560,7 +564,7 @@ impl TerminalPane {
         drop(stale);
         let queued = self.upload_confirmed(Confirmed {
             command,
-            ssh,
+            served,
             host,
             mark,
             jobs: vec![job],
@@ -687,7 +691,7 @@ impl TerminalPane {
 /// A Finder write between the main thread and the helper's answer.
 struct Finder {
     command: u64,
-    ssh: Vec<String>,
+    served: Served,
     host: String,
     mark: HostMark,
     remote: String,

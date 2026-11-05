@@ -1535,20 +1535,6 @@ impl Masters {
     }
 }
 
-/// A job's stream argv through the gate: [`Masters::ensure`], then
-/// [`crate::upload::ssh_argv_for`]. No masters (the timed run): today's argv.
-pub fn dial(
-    masters: Option<&Masters>,
-    target: &RemoteTarget,
-    ask: Ask,
-) -> Result<Vec<String>, Denied> {
-    let route = match masters {
-        Some(masters) => masters.ensure(target, ask)?,
-        None => Route::Direct,
-    };
-    Ok(crate::upload::ssh_argv_for(target, &route))
-}
-
 /// The server a password prompt must name for it to be the account's: the
 /// user and the name ssh's prompts give the server — `HostKeyAlias` or the
 /// host name (OpenSSH `sshconnect2.c`: `user@host's password:` for
@@ -2312,8 +2298,6 @@ mod tests {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         for file in [
             "ssh_route.rs",
-            "upload.rs",
-            "download.rs",
             "port_forward.rs",
             "kablo/install.rs",
             "kablo/ssh.rs",
@@ -3294,7 +3278,7 @@ exit $code
         assert_eq!(lines(&root.join("opens")), 1);
         // The stream argv names our socket; the askpass variables went to the
         // master's environment only — not to the checks, not to this process.
-        let argv = dial(Some(&masters), &target, Ask::Never).unwrap();
+        let argv = ssh_argv_for(&target, &masters.ensure(&target, Ask::Never).unwrap());
         assert!(argv.contains(&format!("ControlPath={}", socket.display())));
         assert!(argv.contains(&"BatchMode=yes".to_owned()));
         assert!(!root.join("leak").exists(), "askpass variables leaked");
@@ -3360,8 +3344,6 @@ exit $code
         let target = host_target(&root, "prod");
         assert_eq!(masters.ensure(&target, Ask::Never), Ok(Route::Direct));
         assert_eq!(lines(&root.join("opens")), 0);
-        // No registry (the timed run): today's argv, no process at all.
-        assert_eq!(dial(None, &target, Ask::Never).unwrap(), ssh_argv(&target));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -4346,7 +4328,7 @@ exit $code
         };
         assert!(lock(&asked).is_empty(), "a key login asked");
         // The stream rides the master, the next job reuses it.
-        let argv = dial(Some(&masters), &target, Ask::Never).unwrap();
+        let argv = ssh_argv_for(&target, &masters.ensure(&target, Ask::Never).unwrap());
         let out = Command::new(&argv[0])
             .args(&argv[1..])
             .arg("echo riding")

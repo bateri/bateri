@@ -1,5 +1,5 @@
 //! The transfers of a program that runs on a server: the pipe is made there, by a script that
-//! runs through the account's main connection ([`crate::kablo::install::pipe_script`]), and the
+//! runs over the account's main connection ([`crate::kablo::install::pipe_script`]), and the
 //! bytes ride that connection: a person's file is written to the script's standard input and the
 //! script pours it into the pipe, a program's file is read from the script's standard output
 //! after the two words the script says first.
@@ -9,28 +9,28 @@
 //! mount that does not share it) must not have a file's first megabytes in the connection's
 //! buffers counted as sent. The script ends when the transfer does, and takes the pipe with it.
 //!
-//! **What the connection's end means.** The ssh that ran the script is the one who knows what
-//! became of the transfer: its exit status is the script's (`cat`'s: 0 for a file that went
-//! through, the signal's 128 and more for a program that closed its end early), and 255 or no
-//! status at all is the connection that went. The second is `route`, the one answer that says
-//! "ask again from where you are": a stage starts again at the program's offset, and a fetch's
-//! part is kept for the offset it ended at.
+//! **What the script's end means.** The script is the one who knows what became of the transfer:
+//! its exit status is `cat`'s (0 for a file that went through, the signal's 128 and more for a
+//! program that closed its end early), and no status at all is the connection that went. The
+//! second is `route`, the one answer that says "ask again from where you are": a stage starts
+//! again at the program's offset, and a fetch's part is kept for the offset it ended at.
 
-use std::fs::File;
 use std::io::{self, Read};
-use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
-use std::process::{Child, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use bt_core::pencere::{FetchError, StageError};
+use kablo_proto::v1::Exit;
 
 use super::super::files::Part;
-use super::{Ground, PIECE, POLL_MS, Waits, fetch_error, lock, open_source, pour, same, take_part};
+use super::{Ground, PIECE, Waits, fetch_error, lock, open_source, same, take_part};
 use crate::kablo::install::{self, Cross, PIPE_OPEN, PIPE_READY};
-use crate::stage::{self, Server};
+use crate::kablo::remote::{End, Reader, RemoteCommand, Writer};
+use crate::stage::Server;
 
 /// The most that the tail of a stage is waited for: the last of the file is in the connection's
 /// buffers when the pouring is done, and the script ends when the program has taken it, at the
@@ -47,11 +47,11 @@ enum Lost {
     Io,
 }
 
-/// What a status of ssh says of a transfer that did not end well. 255 is ssh's own failure (the
-/// connection, the login); no status is a process that was ended, which is a connection that was.
+/// What the status of the script says of a transfer that did not end well. No status is a
+/// script that was ended, which is a connection that was.
 fn lost(code: Option<i32>) -> Lost {
     match code {
-        Some(255) | None => Lost::Route,
+        None => Lost::Route,
         Some(_) => Lost::Io,
     }
 }
@@ -84,59 +84,39 @@ enum Wait {
     Cancelled,
     /// The word did not come in time.
     Late,
-    /// The script's output ended: ssh is going or gone.
+    /// The script's output ended: the script is going or gone.
     Ended,
 }
 
-/// The ssh that runs a pipe's script, the file its output is read from and the one its input is
-/// written to. It is ended, with the processes it started, when this is dropped.
+/// The script that runs a pipe on the server, what it says and the way to say something to it.
+/// It is ended, with the processes it started, when this is dropped.
 struct Remote {
-    child: Child,
-    /// Whether the child was waited for: a process that was is not signalled any more, its number
-    /// is another process's.
-    reaped: bool,
-    out: File,
-    input: Option<File>,
+    end: Arc<End>,
+    out: Receiver<Vec<u8>>,
+    input: Option<Writer>,
     /// What was read from the script and is not used yet: lines to look at, and after the second
     /// word, the first bytes of a file.
     seen: Vec<u8>,
 }
 
 impl Remote {
-    /// Runs `script` through `argv` (the ssh, its options and the destination). The script's input
-    /// is open to write when `feeds`, and is nothing otherwise.
-    fn start(argv: &[String], script: &str, feeds: bool) -> io::Result<Self> {
-        let (program, args) = argv
-            .split_first()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-        let mut command = crate::ssh_route::command(program);
-        command
-            .args(args)
-            .arg(crate::upload::remote_command(script))
-            .stdin(if feeds { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = command.spawn()?;
-        let (Some(out), input) = (child.stdout.take(), child.stdin.take()) else {
-            // Nothing owns the child yet: it is ended here, with what it started.
-            crate::program::end_group(&mut child);
-            return Err(io::Error::other("no output"));
-        };
-        // From here on the child is `remote`'s, and is ended with it when anything fails.
-        let mut remote = Self {
-            child,
-            reaped: false,
-            out: File::from(OwnedFd::from(out)),
-            input: None,
+    /// Runs `script` on `server`, waiting up to `wait` for the connection and its answer. The
+    /// script's input is open to write when `feeds`, and is nothing otherwise.
+    fn start(server: &Server, script: &str, feeds: bool, wait: Duration) -> Result<Self, String> {
+        let RemoteCommand {
+            stdin,
+            stdout,
+            stderr,
+            end,
+        } = server.run(script, wait)?;
+        // What the script says on its error output is not looked at; it is not left unread.
+        drop(stderr);
+        Ok(Self {
+            end,
+            out: forward(stdout),
+            input: stdin.filter(|_| feeds),
             seen: Vec::new(),
-        };
-        stage::nonblocking(&remote.out)?;
-        if let Some(input) = input {
-            let input = File::from(OwnedFd::from(input));
-            stage::nonblocking(&input)?;
-            remote.input = Some(input);
-        }
-        Ok(remote)
+        })
     }
 
     /// Takes the next whole line of what the script said, if there is one.
@@ -146,11 +126,15 @@ impl Remote {
         Some(String::from_utf8_lossy(&line).trim().to_owned())
     }
 
-    /// Waits for the script to say `word` on a line of its own, for as long as `within`. What a
-    /// login shell says before it is not looked at.
-    fn word(&mut self, word: &str, within: Duration, cancel: &AtomicBool) -> Wait {
+    /// Waits for the script to say `word` on a line of its own, for as long as `within`.
+    fn word(
+        &mut self,
+        word: &str,
+        within: Duration,
+        look_again: Duration,
+        cancel: &AtomicBool,
+    ) -> Wait {
         let began = Instant::now();
-        let mut buffer = [0u8; 4096];
         loop {
             if cancel.load(Ordering::Acquire) {
                 return Wait::Cancelled;
@@ -160,24 +144,21 @@ impl Remote {
                     return Wait::Said;
                 }
             }
-            if began.elapsed() > within {
+            let left = within.saturating_sub(began.elapsed());
+            if left.is_zero() {
                 return Wait::Late;
             }
-            match self.out.read(&mut buffer) {
-                Ok(0) => return Wait::Ended,
-                Ok(read) => self.seen.extend_from_slice(&buffer[..read]),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    let _ = stage::ready(&self.out, true, POLL_MS);
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => return Wait::Ended,
+            match self.out.recv_timeout(left.min(look_again)) {
+                Ok(chunk) => self.seen.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Wait::Ended,
             }
         }
     }
 
-    /// Waits for ssh to have ended, for as long as `within`, and says with what status; a process
-    /// that is still there after that is ended and has none. `None` when the transfer was taken
-    /// back first.
+    /// Waits for the script to have ended, for as long as `within`, and says with what status;
+    /// one that is still there after that is ended and has none. `None` when the transfer was
+    /// taken back first.
     fn exited(
         &mut self,
         within: Duration,
@@ -189,17 +170,29 @@ impl Remote {
             if cancel.load(Ordering::Acquire) {
                 return None;
             }
-            match self.child.try_wait() {
-                Ok(Some(status)) => {
-                    self.reaped = true;
-                    return Some(status.code());
-                }
-                Ok(None) if began.elapsed() < within => thread::sleep(look_again),
-                _ => {
-                    crate::program::end_group(&mut self.child);
-                    self.reaped = true;
+            match self.end.try_wait() {
+                Some(Ok(Exit::Code(code))) => return Some(Some(code)),
+                Some(Ok(Exit::Signal(_)) | Err(_)) => return Some(None),
+                None if began.elapsed() < within => thread::sleep(look_again),
+                None => {
+                    self.end.kill();
                     return Some(None);
                 }
+            }
+        }
+    }
+
+    /// Whether the script said more than it was taken for, once it is over: what the program
+    /// wrote last is in what the stream left.
+    fn more(&mut self, within: Duration) -> bool {
+        if !self.seen.is_empty() {
+            return true;
+        }
+        loop {
+            match self.out.recv_timeout(within) {
+                Ok(chunk) if !chunk.is_empty() => return true,
+                Ok(_) => {}
+                Err(_) => return false,
             }
         }
     }
@@ -207,13 +200,34 @@ impl Remote {
 
 impl Drop for Remote {
     fn drop(&mut self) {
-        if !self.reaped {
-            crate::program::end_group(&mut self.child);
-        }
+        self.end.kill();
     }
 }
 
-/// How a stage that could not go on ended, once ssh is asked what became of it. `None` when the
+/// What the script writes, chunk by chunk, from a thread that reads it: a read that waits can
+/// then be given up when the transfer is taken back. The thread ends with the stream.
+fn forward(mut stdout: Reader) -> Receiver<Vec<u8>> {
+    let (tx, chunks) = mpsc::sync_channel(8);
+    thread::spawn(move || {
+        let mut buffer = vec![0u8; PIECE];
+        loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if tx
+                        .send(buffer.get(..read).unwrap_or_default().to_vec())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    chunks
+}
+
+/// How a stage that could not go on ended, once the script is asked what became of it. `None` when the
 /// transfer was taken back while it waited.
 fn stage_lost(remote: &mut Remote, ground: &Ground, cancel: &AtomicBool) -> Option<StageError> {
     let waits = ground.waits;
@@ -243,20 +257,17 @@ pub(super) fn run_stage(
         return Some(Err(StageError::Io));
     };
     // No connection to be had without asking a person is a connection that is not there.
-    let Some(argv) = server.argv() else {
+    let Ok(mut remote) = Remote::start(server, &script, true, waits.silent_for) else {
         return Some(Err(StageError::Route));
     };
-    let Ok(mut remote) = Remote::start(&argv, &script, true) else {
-        return Some(Err(StageError::Io));
-    };
-    match remote.word(PIPE_READY, waits.silent_for, cancel) {
+    match remote.word(PIPE_READY, waits.silent_for, waits.look_again, cancel) {
         Wait::Said => {}
         Wait::Cancelled => return None,
         Wait::Late => return Some(Err(StageError::Route)),
         Wait::Ended => return stage_lost(&mut remote, ground, cancel).map(Err),
     }
     ground.outcomes.pipe_ready(transfer);
-    match remote.word(PIPE_OPEN, waits.opened_within, cancel) {
+    match remote.word(PIPE_OPEN, waits.opened_within, waits.look_again, cancel) {
         Wait::Said => {}
         Wait::Cancelled => return None,
         Wait::Late => return Some(Err(StageError::Io)),
@@ -279,7 +290,7 @@ pub(super) fn run_stage(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return Some(Err(StageError::Io)),
         };
-        match pour(&mut input, &buffer[..read], cancel, waits.silent_for) {
+        match input.write_all_within(&buffer[..read], waits.silent_for, waits.look_again, cancel) {
             Ok(true) => at += read as u64,
             Ok(false) => return None,
             // The connection went, or the program closed its end and the script with it.
@@ -306,7 +317,7 @@ fn route(ground: &Ground, handle: &str, part: Part) -> FetchError {
     FetchError::Route { at }
 }
 
-/// A fetch whose script ended without the file being whole, once ssh says how: the connection that
+/// A fetch whose script ended without the file being whole, once its status says how: the connection that
 /// went keeps the part ([`route`]), the rest is a failure.
 fn fetch_lost(ground: &Ground, handle: &str, part: Part, code: Option<i32>) -> FetchError {
     match lost(code) {
@@ -342,17 +353,14 @@ pub(super) fn run_fetch(
     else {
         return Some(Err(FetchError::Io));
     };
-    let Some(argv) = server.argv() else {
+    let Ok(mut remote) = Remote::start(server, &script, false, waits.silent_for) else {
         return Some(Err(route(ground, handle, part)));
-    };
-    let Ok(mut remote) = Remote::start(&argv, &script, false) else {
-        return Some(Err(FetchError::Io));
     };
     for (word, within, told) in [
         (PIPE_READY, waits.silent_for, false),
         (PIPE_OPEN, waits.opened_within, true),
     ] {
-        match remote.word(word, within, cancel) {
+        match remote.word(word, within, waits.look_again, cancel) {
             Wait::Said => {}
             Wait::Cancelled => return None,
             Wait::Late if told => return Some(Err(FetchError::Io)),
@@ -377,8 +385,23 @@ pub(super) fn run_fetch(
         let step = usize::try_from(want - got).map_or(PIECE, |left| left.min(PIECE));
         // What came with the second word is the file's first bytes.
         let read = if remote.seen.is_empty() {
-            match remote.out.read(&mut buffer[..step]) {
-                Ok(0) => {
+            match remote.out.recv_timeout(waits.look_again) {
+                Ok(chunk) => {
+                    let taken = chunk.len().min(step);
+                    buffer[..taken].copy_from_slice(&chunk[..taken]);
+                    remote.seen.extend_from_slice(&chunk[taken..]);
+                    taken
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // Nothing for this long is a connection that is not carrying anything, as
+                    // a stage reads it (the part stays, the program asks again from `at`);
+                    // `remote` ends the script when it is dropped.
+                    if last.elapsed() > waits.silent_for {
+                        return Some(Err(route(ground, handle, part)));
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
                     // The script ended before the file did: the program closed its end after
                     // fewer bytes (status 0), or the connection went.
                     let code = remote.exited(waits.tidy_within, waits.look_again, cancel)?;
@@ -387,20 +410,6 @@ pub(super) fn run_fetch(
                         other => fetch_lost(ground, handle, part, other),
                     }));
                 }
-                Ok(read) => read,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    // Nothing for this long is a connection that is not carrying anything, as
-                    // a stage reads it (the part stays, the program asks again from `at`); `remote`
-                    // ends ssh when it is dropped.
-                    if !stage::ready(&remote.out, true, POLL_MS)
-                        && last.elapsed() > waits.silent_for
-                    {
-                        return Some(Err(route(ground, handle, part)));
-                    }
-                    continue;
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return Some(Err(FetchError::Io)),
             }
         } else {
             let taken = remote.seen.len().min(step);
@@ -419,10 +428,8 @@ pub(super) fn run_fetch(
     // takes the pipe with it before the program hears that the file is saved.
     remote.exited(waits.tidy_within, waits.look_again, cancel)?;
     // A pipe from which more came than the file has: the bytes are not the file's. Looked at once
-    // the script is over, so that what the program wrote last is in what ssh left.
-    let more =
-        !remote.seen.is_empty() || matches!(remote.out.read(&mut buffer), Ok(extra) if extra > 0);
-    if more {
+    // the script is over, so that what the program wrote last is in what the stream left.
+    if remote.more(waits.tidy_within) {
         return Some(Err(FetchError::Size));
     }
     if cancel.load(Ordering::Acquire) {
@@ -648,9 +655,9 @@ mod tests {
         assert_eq!(rig.parts(), Vec::<String>::new());
     }
 
-    /// A connection that is there and carries nothing (a network that dropped without ssh knowing)
+    /// A connection that is there and carries nothing (a network that dropped without the connection knowing)
     /// is a connection that went, as a stage reads it: the part stays and the program is told where
-    /// it ended, and ssh does not outlive the transfer.
+    /// it ended, and the script does not outlive the transfer.
     #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_connection_that_falls_silent_while_a_file_comes_keeps_the_part_like_one_that_goes() {

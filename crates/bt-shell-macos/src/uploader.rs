@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use block2::{DynBlock, RcBlock};
 use bt_core::{HostMark, Transfer};
+use bt_shell_common::kablo::served::Served;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
@@ -60,7 +61,7 @@ use crate::password_sheet::Job as SheetJob;
 use crate::preview::beep;
 use crate::preview_cache;
 use crate::remote_files::{self, RemoteEntry};
-use crate::remote_helper::{Answer, Query, Request};
+use crate::remote_helper::{Answer, Dial, Query, Request};
 use crate::sheets::{self, Asker};
 use crate::ssh_route;
 use crate::upload::{
@@ -71,7 +72,7 @@ use crate::upload::{
 /// Everything that returns to the main thread from the background probe.
 struct Asked {
     command: u64,
-    ssh: Vec<String>,
+    served: Served,
     host: String,
     mark: HostMark,
     reported: bool,
@@ -82,7 +83,7 @@ struct Asked {
 /// queue.
 pub(crate) struct Confirmed {
     pub(crate) command: u64,
-    pub(crate) ssh: Vec<String>,
+    pub(crate) served: Served,
     pub(crate) host: String,
     pub(crate) mark: HostMark,
     pub(crate) jobs: Vec<Job>,
@@ -94,7 +95,7 @@ pub(crate) struct Confirmed {
 /// must not stall the main thread).
 struct Prepared {
     command: u64,
-    ssh: Vec<String>,
+    served: Served,
     host: String,
     mark: HostMark,
     /// The remote absolute path.
@@ -153,7 +154,8 @@ impl TerminalPane {
         // connection comes from `target`.
         let host = target.label().into_owned();
         // The job holds the sheet gate from here: the password sheet opens within it.
-        let dial = self.dial(target, Some((SheetJob::Upload, true)));
+        let served = self.served(&target);
+        let ask = self.login_ask(&host, Some((SheetJob::Upload, true)));
         let reported = !cwd.is_empty();
         let (id, lookup) = (self.id(), self.lookup());
         self.uploads().borrow_mut().set_asking(true);
@@ -161,17 +163,10 @@ impl TerminalPane {
             .name("upload probe".into())
             .spawn(move || {
                 let dir = reported.then_some(cwd.as_str());
-                // The route first: the probe and the stream ride it.
-                let (ssh, result) = match (dial.argv)() {
-                    Ok(ssh) => {
-                        let result = upload::probe(&ssh, &host, dir, &paths);
-                        (ssh, result)
-                    }
-                    Err(text) => (Vec::new(), Err(text)),
-                };
+                let result = upload::probe(&served, ask, &host, dir, &paths);
                 let asked = Asked {
                     command,
-                    ssh,
+                    served,
                     host,
                     mark,
                     reported,
@@ -242,7 +237,7 @@ impl TerminalPane {
                 cancel.setKeyEquivalent(ns_string!("\u{1b}"));
                 sheet.enabled.then(|| Confirmed {
                     command: asked.command,
-                    ssh: asked.ssh,
+                    served: asked.served,
                     host: asked.host,
                     mark: asked.mark,
                     jobs: items
@@ -295,7 +290,7 @@ impl TerminalPane {
         }
         let queued = self.uploads().borrow_mut().enqueue(
             confirmed.command,
-            confirmed.ssh,
+            confirmed.served,
             confirmed.host,
             confirmed.mark,
             confirmed.jobs,
@@ -337,7 +332,11 @@ impl TerminalPane {
         // connection comes from `target`.
         let host = target.label().into_owned();
         // The job holds the sheet gate from here: the password sheet opens within it.
-        let dial = self.dial(target, Some((SheetJob::Download, true)));
+        let served = self.served(&target);
+        let dial = Dial::new(
+            served.clone(),
+            self.login_ask(&host, Some((SheetJob::Download, true))),
+        );
         let download_dir = self.remote_files().borrow().download_dir.clone();
         let (id, lookup) = (self.id(), self.lookup());
         self.uploads().borrow_mut().set_asking(true);
@@ -346,8 +345,7 @@ impl TerminalPane {
             dial,
             host: host.clone(),
             query: Query::Count(remote.clone()),
-            reply: Box::new(move |answer, ssh| {
-                let ssh = ssh.to_vec();
+            reply: Box::new(move |answer| {
                 let result = match answer {
                     Ok(Answer::Counted(Some(entry))) => {
                         landing(entry, &remote, folder, &download_dir)
@@ -357,7 +355,7 @@ impl TerminalPane {
                 };
                 let prepared = Prepared {
                     command,
-                    ssh,
+                    served,
                     host,
                     mark,
                     remote,
@@ -383,7 +381,7 @@ impl TerminalPane {
         };
         let Prepared {
             command,
-            ssh,
+            served,
             host,
             mark,
             remote,
@@ -424,7 +422,7 @@ impl TerminalPane {
                     Ok(conflict) => {
                         self.uploads().borrow_mut().set_asking(false);
                         self.download_confirmed(
-                            command, ssh, host, mark, &remote, &landing, conflict,
+                            command, served, host, mark, &remote, &landing, conflict,
                         );
                         return;
                     }
@@ -447,7 +445,7 @@ impl TerminalPane {
         };
         let (id, lookup) = (self.id(), self.lookup());
         // The block is `Fn`: the payload is taken once.
-        let payload = RefCell::new(landing.map(|landing| (ssh, host, mark, remote, landing)));
+        let payload = RefCell::new(landing.map(|landing| (served, host, mark, remote, landing)));
         let answered = RcBlock::new(move |response: NSModalResponse| {
             // audit: the sheet's completion block runs on AppKit's main thread.
             let mtm = MainThreadMarker::new().expect("the sheet block is on the main thread");
@@ -463,10 +461,10 @@ impl TerminalPane {
             } else {
                 None
             };
-            if let (Some(&conflict), Some((ssh, host, mark, remote, landing))) =
+            if let (Some(&conflict), Some((served, host, mark, remote, landing))) =
                 (chosen, payload.borrow_mut().take())
             {
-                pane.download_confirmed(command, ssh, host, mark, &remote, &landing, conflict);
+                pane.download_confirmed(command, served, host, mark, &remote, &landing, conflict);
             }
         });
         self.upload_alert().replace(Some(alert.clone()));
@@ -479,7 +477,7 @@ impl TerminalPane {
     fn download_confirmed(
         &self,
         command: u64,
-        ssh: Vec<String>,
+        served: Served,
         host: String,
         mark: HostMark,
         remote: &str,
@@ -504,7 +502,7 @@ impl TerminalPane {
         let queued = job.is_some_and(|job| {
             self.upload_confirmed(Confirmed {
                 command,
-                ssh,
+                served,
                 host,
                 mark,
                 jobs: vec![job],
@@ -537,7 +535,7 @@ impl TerminalPane {
     fn spawn_transfer(&self, started: Started) {
         let Started {
             id: item,
-            ssh,
+            served,
             job,
             shared,
         } = started;
@@ -565,11 +563,11 @@ impl TerminalPane {
                 let progress = || tick(lookup, id, &shared);
                 let (outcome, landed) = match job.way {
                     Way::Up => (
-                        upload::transfer(&ssh, &job.local, &job.dir, &shared, progress),
+                        upload::transfer(&served, &job.local, &job.dir, &shared, progress),
                         None,
                     ),
                     Way::Down { conflict, .. } => download::transfer(
-                        &ssh,
+                        &served,
                         &job.remote_path(),
                         job.landing(),
                         conflict,

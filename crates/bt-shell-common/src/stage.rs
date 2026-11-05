@@ -26,6 +26,9 @@ use std::time::{Duration, SystemTime};
 
 use bt_core::pencere::{StageDir, system_random};
 
+use crate::kablo::remote::RemoteCommand;
+use crate::kablo::served::Served;
+
 /// Where the folders are, under the home directory: one for each instance of bateri.
 pub const ROOT: &str = ".cache/pencere-stage";
 
@@ -82,15 +85,15 @@ pub enum Way {
     Server(Server),
 }
 
-/// The account's main connection, as a transfer asks for it: the ssh argv that uses the
-/// connection the account has, without the command to run. It is asked when a transfer begins and
-/// not when the folder is offered, because the connection that was there when the program started
-/// may have been made again since (and asking may open one, which is why the answer is not
-/// kept).
+/// The account's main connection, as a transfer asks for it: a program run on the server over the
+/// connection the account has. It is asked when a transfer begins and not when the folder is
+/// offered, because the connection that was there when the program started may have been made
+/// again since (and asking may open one, which is why the answer is not kept).
 pub trait Reach: Send + Sync {
-    /// The argv of the ssh to run, the program first and the destination last; `None` when the
-    /// connection cannot be had without asking the person for a login.
-    fn argv(&self) -> Option<Vec<String>>;
+    /// Runs `script` with the server's `sh`, waiting up to `wait` for the connection and the
+    /// server's answer; `Err` when the connection cannot be had without asking the person for a
+    /// login.
+    fn run(&self, script: &str, wait: Duration) -> Result<RemoteCommand, String>;
 
     /// What tells this connection from another one: two offers with the same folder and the same
     /// key are the same offer.
@@ -117,10 +120,9 @@ impl Server {
         &self.dir
     }
 
-    /// The argv of the ssh a transfer runs (see [`Reach::argv`]).
-    #[must_use]
-    pub fn argv(&self) -> Option<Vec<String>> {
-        self.reach.argv()
+    /// Runs the script of a transfer on the server (see [`Reach::run`]).
+    pub fn run(&self, script: &str, wait: Duration) -> Result<RemoteCommand, String> {
+        self.reach.run(script, wait)
     }
 }
 
@@ -141,33 +143,24 @@ impl PartialEq for Server {
 
 impl Eq for Server {}
 
-/// The connection of a pane that shows a terminal a server keeps: the account's main connection
-/// by the gate every job of bateri's on a server goes through ([`crate::ssh_route::dial`]), and
+/// The connection of a pane that shows a terminal a server keeps: the account's main connection,
 /// never with a question to the person.
 pub struct Through {
-    masters: Option<Arc<crate::ssh_route::Masters>>,
+    served: Served,
     target: bt_core::RemoteTarget,
 }
 
 impl Through {
-    /// The connection to `target`; `masters` is `None` in a run that keeps none.
+    /// The connection to `target`, through `served`.
     #[must_use]
-    pub fn new(
-        masters: Option<Arc<crate::ssh_route::Masters>>,
-        target: bt_core::RemoteTarget,
-    ) -> Self {
-        Self { masters, target }
+    pub fn new(served: Served, target: bt_core::RemoteTarget) -> Self {
+        Self { served, target }
     }
 }
 
 impl Reach for Through {
-    fn argv(&self) -> Option<Vec<String>> {
-        crate::ssh_route::dial(
-            self.masters.as_deref(),
-            &self.target,
-            crate::ssh_route::Ask::Never,
-        )
-        .ok()
+    fn run(&self, script: &str, wait: Duration) -> Result<RemoteCommand, String> {
+        self.served.sh(script, crate::ssh_route::Ask::Never, wait)
     }
 
     fn key(&self) -> String {

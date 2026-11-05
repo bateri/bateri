@@ -259,7 +259,7 @@ fn request(account: &str, detail: bool) {
         return;
     };
     let key = account.to_owned();
-    let reply: HelperReply = Box::new(move |answer: Result<Answer, String>, _: &[String]| {
+    let reply: HelperReply = Box::new(move |answer: Result<Answer, String>| {
         DispatchQueue::main().exec_async(move || answered(&key, epoch, answer));
     });
     // audit: the pane's methods run on the main thread; so does the caller.
@@ -269,7 +269,7 @@ fn request(account: &str, detail: bool) {
         .and_then(|(member, lookup)| Some((member, lookup(mtm, member.pane)?)));
     match pane {
         Some((member, pane)) => pane.ask_load(member.command, detail, reply),
-        None => reply(Err("The remote session ended".to_owned()), &[]),
+        None => reply(Err("The remote session ended".to_owned())),
     }
 }
 

@@ -31,23 +31,20 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kablo_proto::v1::stream::Command;
-
-use crate::kablo::remote::RemoteCommand;
-use crate::kablo::service::Backend;
+use crate::kablo::remote::{End, RemoteCommand, Writer};
+use crate::kablo::served::Served;
 use crate::links::{self, Entry};
 use crate::remote_files::{
     Ask, LoadSample, RemoteEntry, RemoteListener, ends_reply, helper_script, load_request_line,
     parse_greeting, parse_load, parse_ports, parse_reply, ports_request_line, request_line,
 };
-use crate::ssh_wrap::KabloHost;
 use crate::upload::{is_safe, last_line};
 
 /// How long a scan of the server's listening ports may take — a `/proc`
 /// walk, [`LOAD_TIMEOUT`]'s kind of work.
 pub const PORTS_TIMEOUT: Duration = LOAD_TIMEOUT;
 
-/// How long the helper may take to greet — an ssh handshake, a jump host. A
+/// How long the helper may take to greet — the connection to the server made first, a jump host. A
 /// **design constant**, not a measurement: generous, because a server that
 /// answers slowly once answers fast afterwards on the open connection.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -64,15 +61,15 @@ pub const COUNT_TIMEOUT: Duration = Duration::from_secs(120);
 /// indicator hides on a timeout and the next tick asks again.
 pub const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A session with no question for this long closes: an idle ssh
-/// connection is not held open for the whole remote session. Design constant —
+/// A session with no question for this long closes: an idle helper
+/// is not held open on the server for the whole remote session. Design constant —
 /// long enough that hovering over a listing, reading, then hovering again does
 /// not pay a new handshake.
 pub const IDLE: Duration = Duration::from_secs(120);
 
 /// After a failed open, the same generation's questions get the same answer
-/// for this long without a new ssh: hovering over every word of an unreachable
-/// server's listing must not start one connection per word. Design constant.
+/// for this long without a new try: hovering over every word of an unreachable
+/// server's listing must not start one helper per word. Design constant.
 pub const RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// The pane label's text when a relative name cannot be resolved because the
@@ -99,53 +96,10 @@ pub fn remote_cwd_unknown(fault: Option<bt_core::RemoteSetupFault>) -> &'static 
     }
 }
 
-/// The helper's process on the server, as its session talks to it: what it reads, what it
-/// writes, its error output, and the way to end it.
-pub struct Process {
-    stdin: Box<dyn Write + Send>,
-    stdout: Box<dyn Read + Send>,
-    stderr: Box<dyn Read + Send>,
-    end: Box<dyn FnMut() + Send>,
-}
-
-impl Process {
-    /// The helper script run by `sh` on `server` over the one connection kept to it
-    /// ([`Backend::command`]): `ask` is how a password is asked for when the connection has to be
-    /// made first, `wait` how long the connection and the server's answer may take. `Err` is the
-    /// pane label's text. Ending the process, or dropping it, ends the `sh` on the server.
-    pub fn remote(
-        backend: &dyn Backend,
-        server: &KabloHost,
-        ask: crate::ssh_route::Ask,
-        wait: Duration,
-    ) -> Result<Self, String> {
-        let script = helper_script();
-        let command = Command::new(
-            ["sh", "-c", script.as_str()]
-                .iter()
-                .map(|word| word.as_bytes().to_vec())
-                .collect(),
-        );
-        let RemoteCommand {
-            stdin,
-            stdout,
-            stderr,
-            end,
-        } = backend.command(server, command, ask, wait)?;
-        let stdin = stdin.ok_or_else(|| "The server's helper has no input".to_owned())?;
-        Ok(Self {
-            stdin: Box::new(stdin),
-            stdout: Box::new(stdout),
-            stderr: Box::new(stderr),
-            end: Box::new(move || end.kill()),
-        })
-    }
-}
-
 /// The open helper process.
 pub struct HelperSession {
-    stdin: Box<dyn Write + Send>,
-    end: Box<dyn FnMut() + Send>,
+    stdin: Writer,
+    end: Arc<End>,
     lines: Receiver<String>,
     stderr: Option<thread::JoinHandle<String>>,
     home: Option<String>,
@@ -153,15 +107,16 @@ pub struct HelperSession {
 }
 
 impl HelperSession {
-    /// Waits up to `timeout` for the greeting of the helper `process` runs. `Err` is the pane
-    /// label's text: why there is no link.
-    pub fn open(process: Process, host: &str, timeout: Duration) -> Result<Self, String> {
-        let Process {
+    /// Waits up to `timeout` for the greeting of the helper `command` runs on the server. `Err`
+    /// is the pane label's text: why there is no link.
+    pub fn open(command: RemoteCommand, host: &str, timeout: Duration) -> Result<Self, String> {
+        let RemoteCommand {
             stdin,
             stdout,
             stderr,
             end,
-        } = process;
+        } = command;
+        let stdin = stdin.ok_or_else(|| format!("No link: {host} gave the helper no input"))?;
         let stderr = Some(read_errors(stderr));
         let (tx, lines) = mpsc::channel();
         thread::Builder::new()
@@ -303,7 +258,7 @@ impl HelperSession {
     /// The open's failure text: the process is ended first, so its error
     /// output is complete (the server's own last line says why).
     fn failure(mut self, host: &str, timed_out: bool) -> String {
-        (self.end)();
+        self.end.kill();
         let stderr = self
             .stderr
             .take()
@@ -316,7 +271,7 @@ impl HelperSession {
 impl Drop for HelperSession {
     fn drop(&mut self) {
         // Closing stdin ends the loop; the end makes sure a stuck process goes too.
-        (self.end)();
+        self.end.kill();
     }
 }
 
@@ -386,7 +341,7 @@ pub fn remote_paths(candidates: &[String], cwd: &str, home: Option<&str>) -> Vec
 }
 
 /// The helper's answers that exist, per remote generation: a name asked
-/// once is not asked again while the same ssh session runs. A missing name is
+/// once is not asked again while the same remote session runs. A missing name is
 /// **not** cached — a file created a moment later must be found at the next ⌘
 /// (the view forgets its own "missing" when ⌘ goes up).
 #[derive(Debug, Default)]
@@ -455,7 +410,7 @@ pub enum Answer {
 
 /// The answer to a [`Query::Load`]. Its failures are split by what the
 /// sampler does next: a failed **open** comes back here as
-/// [`LoadReply::Unreachable`] and ends sampling for the generation (no ssh
+/// [`LoadReply::Unreachable`] and ends sampling for the generation (no
 /// attempt every few seconds against a server that wants a password); a
 /// failure on an **open** session stays the reply's `Err` — the indicator
 /// hides and the next tick tries once more.
@@ -470,57 +425,29 @@ pub enum LoadReply {
 }
 
 /// The reply callback — runs on the worker thread; the platform shell posts it
-/// to its main thread. The second argument is the ssh argv the answer came
-/// over (empty when no session opened): a download's or a preview's stream
-/// rides the **same** route as its question.
-pub type Reply = Box<dyn FnOnce(Result<Answer, String>, &[String]) + Send>;
+/// to its main thread.
+pub type Reply = Box<dyn FnOnce(Result<Answer, String>) + Send>;
 
-/// How the worker gets the session: the route gate ([`crate::ssh_route::dial`]) and the helper's
-/// process on the server's own connection ([`Process::remote`]) both run **on the worker
-/// thread**, only when a session has to be opened — they may wait at a sheet.
+/// How the worker gets the session's process: the helper script run by the server's `sh` over
+/// the connection kept to it ([`Served::sh`]), made **on the worker thread**, only when a session
+/// has to be opened — it may wait at a sheet.
 pub struct Dial {
     /// A job the user started (a sheet may ask for the password): it neither
     /// reads nor writes the failed-open hold ([`RETRY_AFTER`]) — a hover's
     /// failure must not refuse a ⌘-click for ten seconds, and a cancelled sheet
     /// is not a hover's label.
     pub user: bool,
-    /// The route gate's argv without the remote command (`Err`: the open's failure text): it
-    /// opens the application's master first, asking for a password when the job may, and it is
-    /// the route a download's or a preview's stream rides ([`Reply`]).
-    pub argv: Box<dyn FnOnce() -> Result<Vec<String>, String> + Send>,
-    /// Starts the helper's process on the server over the connection kept to it, once the gate
-    /// has let the job through (`Err`: the open's failure text).
-    pub connect: Box<dyn FnOnce() -> Result<Process, String> + Send>,
+    /// Starts the helper's process (`Err`: the open's failure text).
+    pub connect: Box<dyn FnOnce() -> Result<RemoteCommand, String> + Send>,
 }
 
 impl Dial {
-    /// The gate's dial: `masters` `None` (the timed run) → today's argv. `served` is the
-    /// backend and the server the pane's terminal is kept on; `None` (a process without the
-    /// service) opens nothing.
-    pub fn gated(
-        served: Option<(Arc<dyn Backend>, KabloHost)>,
-        masters: Option<Arc<crate::ssh_route::Masters>>,
-        target: bt_core::RemoteTarget,
-        ask: crate::ssh_route::Ask,
-    ) -> Self {
-        let user = matches!(ask, crate::ssh_route::Ask::Sheet(_));
+    /// The dial of `served`; `ask` is how a password is asked for when the connection has to be
+    /// made first (`Ask::Never`: a background job, which asks nobody).
+    pub fn new(served: Served, ask: crate::ssh_route::Ask) -> Self {
         Self {
-            user,
-            argv: Box::new(move || {
-                crate::ssh_route::dial(masters.as_deref(), &target, ask)
-                    .map_err(|denied| denied.text())
-            }),
-            // The gate has asked what it had to: the connection asks nothing more.
-            connect: Box::new(move || {
-                let (backend, server) =
-                    served.ok_or_else(|| "bateri's connections are not running".to_owned())?;
-                Process::remote(
-                    &*backend,
-                    &server,
-                    crate::ssh_route::Ask::Never,
-                    OPEN_TIMEOUT,
-                )
-            }),
+            user: matches!(ask, crate::ssh_route::Ask::Sheet(_)),
+            connect: Box::new(move || served.sh(&helper_script(), ask, OPEN_TIMEOUT)),
         }
     }
 }
@@ -529,7 +456,7 @@ impl Dial {
 pub struct Request {
     /// The remote session's generation: another one closes the open session.
     pub command: u64,
-    /// The session's argv, through the route gate.
+    /// How the session is opened.
     pub dial: Dial,
     pub host: String,
     pub query: Query,
@@ -543,7 +470,7 @@ enum Message {
 
 /// The pane's handle on its helper session. The worker thread is born at the
 /// first [`RemoteHelper::ask`] and ends when the handle drops (the session's
-/// ssh with it).
+/// program with it).
 pub struct RemoteHelper {
     tx: Option<Sender<Message>>,
     /// How long an open session may go without a question ([`IDLE`]).
@@ -584,14 +511,13 @@ impl RemoteHelper {
             Ok(_) => {
                 if let Err(mpsc::SendError(Message::Ask(request))) = tx.send(Message::Ask(request))
                 {
-                    (request.reply)(Err("The remote helper stopped".to_owned()), &[]);
+                    (request.reply)(Err("The remote helper stopped".to_owned()));
                 }
                 self.tx = Some(tx);
             }
-            Err(error) => (request.reply)(
-                Err(format!("The remote helper could not start: {error}")),
-                &[],
-            ),
+            Err(error) => {
+                (request.reply)(Err(format!("The remote helper could not start: {error}")))
+            }
         }
     }
 
@@ -636,14 +562,14 @@ fn run(rx: &Receiver<Message>, idle: Duration) {
                     query,
                     reply,
                 } = request;
-                let (answer, ssh) = serve(
+                let answer = serve(
                     &mut open,
                     &mut failed,
                     &mut cache,
                     (command, dial, &host),
                     query,
                 );
-                reply(answer, &ssh);
+                reply(answer);
             }
         }
     }
@@ -662,32 +588,26 @@ impl Failure {
     }
 }
 
-/// The open session: its generation and the argv it was opened with (the
-/// replies hand it on to the streams).
+/// The open session and the generation it was opened for.
 struct Open {
     command: u64,
-    ssh: Vec<String>,
     session: HelperSession,
 }
 
 /// One question against the open session (opened or reopened as needed); a
-/// failed request drops the session, so the next question starts clean. The
-/// argv the answer came over goes back with it.
+/// failed request drops the session, so the next question starts clean.
 fn serve(
     open: &mut Option<Open>,
     failed: &mut Option<Failure>,
     cache: &mut RemoteCache,
     (command, dial, host): (u64, Dial, &str),
     query: Query,
-) -> (Result<Answer, String>, Vec<String>) {
+) -> Result<Answer, String> {
     // A name the script cannot carry is refused before it can cost the session.
     if let Query::Count(path) = &query
         && !is_safe(path)
     {
-        return (
-            Err(format!("{path} can't be downloaded safely")),
-            Vec::new(),
-        );
+        return Err(format!("{path} can't be downloaded safely"));
     }
     if open.as_ref().is_some_and(|open| open.command != command) {
         *open = None;
@@ -702,22 +622,15 @@ fn serve(
             .as_ref()
             .filter(|failure| !dial.user && failure.holds(command))
         {
-            return (opening_failed(failure.text.clone()), Vec::new());
+            return opening_failed(failure.text.clone());
         }
         let user = dial.user;
-        let opened = (dial.argv)().and_then(|ssh| {
-            (dial.connect)()
-                .and_then(|process| HelperSession::open(process, host, OPEN_TIMEOUT))
-                .map(|session| (ssh, session))
-        });
+        let opened =
+            (dial.connect)().and_then(|process| HelperSession::open(process, host, OPEN_TIMEOUT));
         match opened {
-            Ok((ssh, session)) => {
+            Ok(session) => {
                 *failed = None;
-                *open = Some(Open {
-                    command,
-                    ssh,
-                    session,
-                });
+                *open = Some(Open { command, session });
             }
             Err(text) => {
                 if !user {
@@ -727,19 +640,18 @@ fn serve(
                         text: text.clone(),
                     });
                 }
-                return (opening_failed(text), Vec::new());
+                return opening_failed(text);
             }
         }
     }
     let Some(current) = open.as_mut() else {
-        return (Err(format!("No link: can't reach {host}")), Vec::new());
+        return Err(format!("No link: can't reach {host}"));
     };
-    let ssh = current.ssh.clone();
     let result = answer(&mut current.session, cache, command, query);
     if result.is_err() {
         *open = None;
     }
-    (result, ssh)
+    result
 }
 
 /// [`serve`]'s work once a session is open.
@@ -795,8 +707,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
 
-    use crate::upload::remote_command;
-
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("bt-helper-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -805,58 +715,30 @@ mod tests {
     }
 
     /// A local shell in place of ssh: `sh -c "<remote command>"` — the very
-    /// script that would run remotely, without a connection (`download`'s
-    /// precedent).
+    /// script that would run remotely, without a connection.
     fn local_ssh() -> Vec<String> {
         vec!["/bin/sh".to_owned(), "-c".to_owned()]
     }
 
-    impl Process {
-        /// A local program in place of the connection: `argv` stands for the ssh command, and
-        /// the helper script follows it as ssh would carry it.
-        fn local(argv: &[String]) -> Result<Process, String> {
-            let (program, args) = argv.split_first().ok_or("No command")?;
-            let mut child = std::process::Command::new(program)
-                .args(args)
-                .arg(remote_command(&helper_script()))
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|error| error.to_string())?;
-            let (stdin, stdout, stderr) = (
-                child.stdin.take().ok_or("no input")?,
-                child.stdout.take().ok_or("no output")?,
-                child.stderr.take().ok_or("no errors")?,
-            );
-            Ok(Process {
-                stdin: Box::new(stdin),
-                stdout: Box::new(stdout),
-                stderr: Box::new(stderr),
-                end: Box::new(move || crate::program::end_group(&mut child)),
-            })
-        }
+    /// The server that `argv` stands in for, as a dial gives it.
+    fn dial(user: bool, argv: Vec<String>) -> Dial {
+        let ask = if user {
+            crate::ssh_route::Ask::Sheet(Box::new(|_| None))
+        } else {
+            crate::ssh_route::Ask::Never
+        };
+        Dial::new(Served::fake(argv), ask)
     }
 
-    impl Dial {
-        /// A background dial that starts `argv` locally and says it is the route.
-        fn fixed(argv: Vec<String>) -> Dial {
-            Dial::local(false, argv)
-        }
-
-        fn local(user: bool, argv: Vec<String>) -> Dial {
-            let route = argv.clone();
-            Dial {
-                user,
-                argv: Box::new(move || Ok(route)),
-                connect: Box::new(move || Process::local(&argv)),
-            }
-        }
+    fn fixed(argv: Vec<String>) -> Dial {
+        dial(false, argv)
     }
 
     /// The session of the local helper `argv` starts.
     fn opened(argv: &[String], host: &str) -> Result<HelperSession, String> {
-        Process::local(argv).and_then(|process| HelperSession::open(process, host, OPEN_TIMEOUT))
+        Served::fake(argv.to_vec())
+            .sh(&helper_script(), crate::ssh_route::Ask::Never, OPEN_TIMEOUT)
+            .and_then(|command| HelperSession::open(command, host, OPEN_TIMEOUT))
     }
 
     fn text(path: &Path) -> String {
@@ -1137,10 +1019,10 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             helper.ask(Request {
                 command,
-                dial: Dial::fixed(local_ssh()),
+                dial: fixed(local_ssh()),
                 host: "local".to_owned(),
                 query,
-                reply: Box::new(move |answer, _| {
+                reply: Box::new(move |answer| {
                     let _ = tx.send(answer);
                 }),
             });
@@ -1210,10 +1092,10 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             helper.ask(Request {
                 command,
-                dial: Dial::fixed(vec!["/bin/sh".to_owned(), "-c".to_owned(), dial.clone()]),
+                dial: fixed(vec!["/bin/sh".to_owned(), "-c".to_owned(), dial.clone()]),
                 host: "prod".to_owned(),
                 query: Query::Count("/etc".to_owned()),
-                reply: Box::new(move |answer, _| {
+                reply: Box::new(move |answer| {
                     let _ = tx.send(answer);
                 }),
             });
@@ -1230,18 +1112,17 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A job the user started is not refused by a hover's held
-    /// failure, does not leave one behind, and its reply carries the argv the
-    /// session was opened with — the stream rides the same route.
+    /// A job the user started is not refused by a hover's held failure, and does not leave one
+    /// behind.
     #[test]
-    fn a_user_dial_ignores_the_held_failure_and_hands_on_its_argv() {
+    fn a_user_dial_ignores_the_held_failure_and_leaves_none() {
         let root = scratch("user-dial");
         let counter = root.join("dials");
-        let dial = format!(
+        let dials = format!(
             "echo dial >> '{}'; echo 'Permission denied (password).' >&2; exit 255",
             text(&counter)
         );
-        let failing = vec!["/bin/sh".to_owned(), "-c".to_owned(), dial];
+        let failing = vec!["/bin/sh".to_owned(), "-c".to_owned(), dials];
         let counted = text(&root);
         let mut helper = RemoteHelper::default();
         let mut ask = |dial: Dial| {
@@ -1251,34 +1132,26 @@ mod tests {
                 dial,
                 host: "prod".to_owned(),
                 query: Query::Count(counted.clone()),
-                reply: Box::new(move |answer, ssh: &[String]| {
-                    let _ = tx.send((answer, ssh.to_vec()));
+                reply: Box::new(move |answer| {
+                    let _ = tx.send(answer);
                 }),
             });
             rx.recv_timeout(Duration::from_secs(30))
                 .expect("the worker replies")
         };
         // A background failure is held...
-        assert!(ask(Dial::fixed(failing.clone())).0.is_err());
-        let user = |argv: Vec<String>| Dial::local(true, argv);
+        assert!(ask(fixed(failing.clone())).is_err());
         // ...a user's dial tries anyway, and its own failure is not held.
-        let (answer, ssh) = ask(user(failing.clone()));
-        assert!(answer.is_err());
-        assert!(ssh.is_empty());
+        assert!(ask(dial(true, failing.clone())).is_err());
         assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 2);
-        // The gate's own refusal reaches the reply as the error text.
+        // The refusal of the connection reaches the reply as the error text.
         let refused = Dial {
             user: true,
-            argv: Box::new(|| Err(crate::ssh_route::CANCELLED.to_owned())),
-            connect: Box::new(|| Err("no connection".to_owned())),
+            connect: Box::new(|| Err(crate::ssh_route::CANCELLED.to_owned())),
         };
-        assert_eq!(ask(refused).0.unwrap_err(), crate::ssh_route::CANCELLED);
-        let (answer, ssh) = ask(user(local_ssh()));
+        assert_eq!(ask(refused).unwrap_err(), crate::ssh_route::CANCELLED);
+        let answer = ask(dial(true, local_ssh()));
         assert!(matches!(answer, Ok(Answer::Counted(Some(_)))), "{answer:?}");
-        assert_eq!(ssh, local_ssh());
-        // Later questions of the open session hand the same argv on.
-        let (_, ssh) = ask(Dial::fixed(failing));
-        assert_eq!(ssh, local_ssh());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1298,10 +1171,10 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             helper.ask(Request {
                 command: 1,
-                dial: Dial::fixed(ssh),
+                dial: fixed(ssh),
                 host: "prod".to_owned(),
                 query,
-                reply: Box::new(move |answer, _| {
+                reply: Box::new(move |answer| {
                     let _ = tx.send(answer);
                 }),
             });
@@ -1321,20 +1194,19 @@ mod tests {
         // Other questions keep their `Err`.
         assert!(ask(failing(), Query::Count("/etc".to_owned())).is_err());
         let _ = fs::remove_dir_all(&root);
-        // A connection the gate refuses (a background job's server wants a password it does not
-        // have) is the gate's own text, whole, for a load sample too.
+        // A connection refused for want of a login a background job cannot give is that text,
+        // whole, for a load sample too.
         let mut helper = RemoteHelper::default();
         let (tx, rx) = mpsc::channel();
         helper.ask(Request {
             command: 1,
             dial: Dial {
                 user: false,
-                argv: Box::new(|| Err(crate::ssh_route::SIGN_IN_NEEDED.to_owned())),
-                connect: Box::new(|| Err("no connection".to_owned())),
+                connect: Box::new(|| Err(crate::ssh_route::SIGN_IN_NEEDED.to_owned())),
             },
             host: "prod".to_owned(),
             query: Query::Load { detail: false },
-            reply: Box::new(move |answer, _| {
+            reply: Box::new(move |answer| {
                 let _ = tx.send(answer);
             }),
         });
@@ -1352,10 +1224,10 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         helper.ask(Request {
             command: 1,
-            dial: Dial::fixed(local_ssh()),
+            dial: fixed(local_ssh()),
             host: "local".to_owned(),
             query: Query::Load { detail: true },
-            reply: Box::new(move |answer, _| {
+            reply: Box::new(move |answer| {
                 let _ = tx.send(answer);
             }),
         });

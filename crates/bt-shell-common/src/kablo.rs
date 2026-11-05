@@ -80,6 +80,7 @@ pub mod mail;
 pub mod quit;
 pub mod remote;
 pub mod roster;
+pub mod served;
 pub mod service;
 pub mod ssh;
 pub mod streams;
