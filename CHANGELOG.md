@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-11-05
+
 ### Fixed
 
 - A tab of this computer no longer shows up as a server, with a dot and another name (`zsh MacBookPro`). A computer's name can follow the network it is on, and bateri took the old name in a shell's title for another computer. Only a real connection says a pane is on a server now.
