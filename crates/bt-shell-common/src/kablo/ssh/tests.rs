@@ -944,6 +944,51 @@ fn reaching_a_server_sets_it_up_with_this_builds_kablo_and_command_once_a_run() 
 }
 
 #[test]
+fn a_program_or_a_connection_is_asked_for_only_on_a_server_bateri_has_been() {
+    let world = stand_in("streams-gate", 0);
+    let backend = world.backend(None);
+    let server = KabloHost {
+        host: "rasp".to_owned(),
+        port: None,
+        argv: vec!["ssh".to_owned(), "rasp".to_owned()],
+        config: String::new(),
+        key: "u@h:22".to_owned(),
+    };
+    let wait = Duration::from_secs(1);
+    let program = || kablo_proto::v1::stream::Command::new(vec![b"true".to_vec()]);
+
+    // A server bateri never opened: told to open a terminal on it, and nothing is asked of it.
+    let error = backend
+        .command(&server, program(), Ask::Never, wait)
+        .err()
+        .expect("not set up");
+    assert!(
+        error.contains("has not set up rasp") && error.contains("ssh rasp"),
+        "{error}"
+    );
+    let error = backend
+        .connection(&server, "db", 5432, Ask::Never, wait)
+        .err()
+        .expect("not set up");
+    assert!(error.contains("has not set up rasp"), "{error}");
+
+    // Opened once, the request goes on to the service; one that is not running says so.
+    let mut state = ssh_wrap::HostState::default();
+    state.note(Fact::Touched, "u@h:22", 1);
+    std::fs::write(&world.state, state.render()).expect("state");
+    let error = backend
+        .command(&server, program(), Ask::Never, wait)
+        .err()
+        .expect("no service");
+    assert_eq!(error, "bateri's connections are not running");
+    let error = backend
+        .connection(&server, "db", 5432, Ask::Never, wait)
+        .err()
+        .expect("no service");
+    assert_eq!(error, "bateri's connections are not running");
+}
+
+#[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_bateri_has_been() {
     let world = stand_in("reach", 0);

@@ -107,11 +107,17 @@ impl TerminalPane {
     /// gate (the upload's probe, the download's count). `None` — a background
     /// job, which never asks.
     pub(crate) fn dial(&self, target: bt_core::RemoteTarget, job: Option<(Job, bool)>) -> Dial {
+        // The server the pane's terminal is kept on, and what connects to it for a program.
+        let served = self.host().connections().zip(
+            self.host()
+                .kept_terminal(self.uuid())
+                .map(|shown| shown.server(target.port)),
+        );
         let Some((job, holds)) = job else {
-            return Dial::gated(self.masters(), target, Ask::Never);
+            return Dial::gated(served, self.masters(), target, Ask::Never);
         };
         let ask = Ask::Sheet(self.password_asker(target.host.clone(), job, holds));
-        Dial::gated(self.masters(), target, ask)
+        Dial::gated(served, self.masters(), target, ask)
     }
 
     /// The password sheet for a program in this pane that wants to reach `host` (`bateri split

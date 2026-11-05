@@ -206,6 +206,12 @@ pub trait PaneHost {
     fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
         None
     }
+    /// What keeps the connections to the servers, and so runs a program or opens a connection
+    /// on one for the pane's jobs ([`bt_shell_common::kablo::service::Backend::command`]).
+    /// The default is an owner that keeps none.
+    fn connections(&self) -> Option<std::sync::Arc<dyn bt_shell_common::kablo::service::Backend>> {
+        None
+    }
     /// A terminal of this Mac for the pane `pane` to show instead of a shell of its own: the
     /// stream its session reads and writes ([`bt_core::Session::streamed`]), the terminal
     /// started with what `launch` says and `history` rows of scrollback. `None` — the default,

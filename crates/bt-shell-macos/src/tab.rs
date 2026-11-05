@@ -151,6 +151,10 @@ impl PaneHost for TabHost {
         crate::hold_service::shown(pane)
     }
 
+    fn connections(&self) -> Option<std::sync::Arc<dyn bt_shell_common::kablo::service::Backend>> {
+        crate::hold_service::backend()
+    }
+
     /// The shortcuts the application keeps from a program's view are the table's, as the
     /// file has moved them (`Resolved::kept_from_view`).
     fn keeps_key(&self, chord: &bt_core::Chord) -> bool {

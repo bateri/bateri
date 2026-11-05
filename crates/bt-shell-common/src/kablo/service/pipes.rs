@@ -153,8 +153,10 @@ impl Core {
                 .get(&open.account)
                 .map(|entry| entry.server.host.clone());
             let (Some(host), Some(client)) = (host, self.hub.client_mut(&open.account)) else {
-                open.far
-                    .refused("bateri keeps no connection to this server now");
+                open.far.refused(&format!(
+                    "bateri keeps no connection to {} now",
+                    open.account
+                ));
                 continue;
             };
             match client.link() {

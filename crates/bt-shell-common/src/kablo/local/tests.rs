@@ -443,6 +443,7 @@ struct RealMac {
     bundle: Bundle,
     home: PathBuf,
     sockets: PathBuf,
+    streams: std::sync::OnceLock<crate::kablo::service::Streams>,
 }
 
 impl Backend for RealMac {
@@ -477,6 +478,24 @@ impl Backend for RealMac {
             .env(sockdir_variable(), &self.sockets)
             .env("KABLO_TEST_END_KEEP_MS", "200");
         start(command)
+    }
+
+    fn serving(&self, streams: crate::kablo::service::Streams) {
+        let _ = self.streams.set(streams);
+    }
+
+    // This Mac's connection needs no ssh to be there: the account's key is all the service asks.
+    fn command(
+        &self,
+        server: &KabloHost,
+        command: kablo_proto::v1::stream::Command,
+        _: crate::ssh_route::Ask,
+        wait: Duration,
+    ) -> Result<crate::kablo::remote::RemoteCommand, String> {
+        self.streams
+            .get()
+            .ok_or_else(|| "the service is not running".to_owned())?
+            .command(&server.key, command, wait)
     }
 }
 
@@ -591,6 +610,7 @@ fn a_pane_over_a_real_kablo_shows_what_the_program_writes_types_into_it_is_sized
         bundle,
         home: ground.home.clone(),
         sockets: ground.sockets.clone(),
+        streams: Default::default(),
     };
     let ledger = Arc::new(Ledger::memory());
     let service =
@@ -769,6 +789,7 @@ fn a_pane_over_a_real_kablo_is_found_and_read_by_its_childs_pid_behind_login_too
         bundle,
         home: ground.home.clone(),
         sockets: ground.sockets.clone(),
+        streams: Default::default(),
     };
     let ledger = Arc::new(Ledger::memory());
     let service =
@@ -913,6 +934,7 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
         bundle,
         home: ground.home.clone(),
         sockets: ground.sockets.clone(),
+        streams: Default::default(),
     });
     let ledger = Arc::new(Ledger::memory());
 
@@ -1243,6 +1265,7 @@ fn measure_file_receive_direct_pty_and_kablo() {
             bundle,
             home: ground.home.clone(),
             sockets: ground.sockets.clone(),
+            streams: Default::default(),
         };
         let ledger = Arc::new(Ledger::memory());
         let service = Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger))
@@ -1731,6 +1754,7 @@ impl Here {
             bundle,
             home: ground.home.clone(),
             sockets: ground.sockets.clone(),
+            streams: Default::default(),
         };
         let ledger = Arc::new(Ledger::memory());
         let service = Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger))
@@ -1967,4 +1991,113 @@ fn thirty_two_megabytes_go_through_a_program_and_come_back_whole_while_both_are_
         started.elapsed(),
         BYTES * 2,
     );
+}
+
+/// The pids of the processes on this machine that run the helper's script.
+fn helper_shells() -> std::collections::HashSet<String> {
+    let listing = Command::new("ps")
+        .args(["-axww", "-o", "pid=,command="])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter(|line| line.contains("IFS= read -r bt_line"))
+        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_helper_over_a_real_kablo_answers_what_exists_the_ports_and_the_load_and_leaves_no_sh_idle() {
+    use crate::remote_helper::{
+        Answer, Dial, LoadReply, Process, Query, RemoteHelper, Reply, Request,
+    };
+    let Some(here) = Here::new("helper") else {
+        return;
+    };
+    let before = helper_shells();
+    let file = here.ground.home.join("a file.txt");
+    std::fs::write(&file, b"twelve bytes").expect("a file");
+    let backend = here.service.backend();
+    let mut helper = RemoteHelper::idling(Duration::from_millis(500));
+    let mut ask = |query: Query| {
+        let (tx, answers) = mpsc::channel();
+        let backend = Arc::clone(&backend);
+        let reply: Reply = Box::new(move |answer, _| {
+            let _ = tx.send(answer);
+        });
+        helper.ask(Request {
+            command: 1,
+            dial: Dial {
+                user: false,
+                argv: Box::new(|| Ok(Vec::new())),
+                connect: Box::new(move || {
+                    Process::remote(
+                        &*backend,
+                        &super::host(),
+                        crate::ssh_route::Ask::Never,
+                        Duration::from_secs(30),
+                    )
+                }),
+            },
+            host: "this computer".to_owned(),
+            query,
+            reply,
+        });
+        answers
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the worker replies")
+    };
+
+    // What exists, and what a folder holds.
+    let path = file.to_string_lossy().into_owned();
+    let answer = ask(Query::Verify {
+        candidates: vec!["nowhere-at-all".to_owned(), path.clone()],
+        cwd: here.ground.home.to_string_lossy().into_owned(),
+    });
+    match answer {
+        Ok(Answer::Verified(Some((1, found, entry)))) => {
+            assert_eq!(found, path);
+            assert!(
+                matches!(
+                    entry,
+                    crate::remote_files::RemoteEntry::File { size: Some(12), .. }
+                ),
+                "{entry:?}"
+            );
+        }
+        other => panic!("expected the second candidate, got {other:?}"),
+    }
+    let home = here.ground.home.to_string_lossy().into_owned();
+    assert!(matches!(
+        ask(Query::Count(home)),
+        Ok(Answer::Counted(Some(
+            crate::remote_files::RemoteEntry::Dir(_)
+        )))
+    ));
+    // The load line and the port list: a Linux server reads them, any other says it cannot.
+    assert!(matches!(
+        ask(Query::Load { detail: false }),
+        Ok(Answer::Load(LoadReply::Sample(_) | LoadReply::NoProc))
+    ));
+    assert!(matches!(
+        ask(Query::Ports {
+            shell: std::process::id()
+        }),
+        Ok(Answer::Ports(_))
+    ));
+
+    // One `sh` runs on the server for all of it, and it is gone once the helper has idled.
+    let ours: Vec<String> = helper_shells().difference(&before).cloned().collect();
+    assert_eq!(ours.len(), 1, "one helper shell: {ours:?}");
+    let idled = Instant::now();
+    while idled.elapsed() < Duration::from_secs(20) && ours.iter().any(|pid| alive(pid)) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let left: Vec<&String> = ours.iter().filter(|pid| alive(pid)).collect();
+    for pid in &left {
+        // What the test started is not left behind.
+        let _ = Command::new("kill").args(["-9", pid]).status();
+    }
+    assert!(left.is_empty(), "the helper's sh stayed: {left:?}");
 }

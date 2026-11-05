@@ -2315,7 +2315,6 @@ mod tests {
             "upload.rs",
             "download.rs",
             "port_forward.rs",
-            "remote_helper.rs",
             "kablo/install.rs",
             "kablo/ssh.rs",
         ] {

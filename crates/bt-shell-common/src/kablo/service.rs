@@ -266,6 +266,19 @@ impl Shown {
         self.host == target.host
     }
 
+    /// The server this terminal is on, as what asks for a program or a connection on it takes
+    /// it ([`Backend::command`]). `port` is the one the pane's `ssh` names. The `ssh -G` answer is
+    /// not kept here, and nothing reads it afterwards.
+    pub fn server(&self, port: Option<u16>) -> KabloHost {
+        KabloHost {
+            host: self.host.clone(),
+            port,
+            argv: self.argv.clone(),
+            config: String::new(),
+            key: self.account.clone(),
+        }
+    }
+
     /// What the pane's icon draws for the program in front of the terminal, by the
     /// name the server gave it and the table of a local program's
     /// ([`crate::program::identity::from_server`]): the same kind the same program

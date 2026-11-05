@@ -1,45 +1,47 @@
-//! The helper ssh session of a remote pane: one long-lived
-//! `ssh … sh` that answers "does this exist, what is it, how big" line by line,
-//! so a ⌘-hover over a name in a remote `ls` costs one round trip on an open
-//! connection, not a new ssh handshake.
+//! The helper of a remote pane: one long-lived `sh` on the server that answers "does this exist,
+//! what is it, how big" line by line, run over the one connection kept to the server (kablo), so a
+//! ⌘-hover over a name in a remote `ls` costs one round trip on an open connection and no
+//! connection of its own.
 //!
-//! - **[`HelperSession`]** is the process: the route gate's argv ([`Dial`]) +
-//!   [`crate::remote_files::helper_script`], a reader thread turning its
-//!   standard output into lines and every wait bounded ([`OPEN_TIMEOUT`],
-//!   [`STAT_TIMEOUT`], [`COUNT_TIMEOUT`]) — a hung ssh never blocks for good.
-//!   `BatchMode=yes` (the upload's argv): no password is asked on the stream —
-//!   the route gate opens bateri's own master first when it may, and a
-//!   background job whose server wants a password it does not have fails the
-//!   open with [`crate::ssh_route::SIGN_IN_NEEDED`] (nothing asks for it).
-//! - **[`RemoteHelper`]** is the pane's handle: a worker thread born at the
-//!   first question (lazy), owning the session and the answer cache
-//!   ([`RemoteCache`]). A question carries the remote session's generation
-//!   (`Session::remote_target`'s command): another generation closes the old
-//!   session and opens a new one, and so does [`RemoteHelper::close`] (the
-//!   pane closing) and [`IDLE`] without a question. While the load indicator
-//!   samples ([`Query::Load`]) a question comes every few seconds,
-//!   so the session stays open; it closes [`IDLE`] after sampling stops.
-//! - **Resolution** ([`remote_paths`]) is `links::resolve`'s, on the remote
-//!   disk: `~` from the helper's greeting, a relative name from the remote
-//!   OSC 7 directory and **no** relative name without it.
+//! - **[`HelperSession`]** is the process ([`Process`]): the helper script
+//!   ([`crate::remote_files::helper_script`]) run by `sh`, a reader thread turning its standard
+//!   output into lines and every wait bounded ([`OPEN_TIMEOUT`], [`STAT_TIMEOUT`],
+//!   [`COUNT_TIMEOUT`]) — a hung server never blocks for good. Nothing asks for a password here:
+//!   the connection is the application's master's, made first when the job may ask
+//!   ([`Dial`]); a background job whose server wants a password it does not have fails the open
+//!   with [`crate::ssh_route::SIGN_IN_NEEDED`].
+//! - **[`RemoteHelper`]** is the pane's handle: a worker thread born at the first question (lazy),
+//!   owning the session and the answer cache ([`RemoteCache`]). A question carries the remote
+//!   session's generation (`Session::remote_target`'s command): another generation closes the old
+//!   session and opens a new one, and so does [`RemoteHelper::close`] (the pane closing) and
+//!   [`IDLE`] without a question. While the load indicator samples ([`Query::Load`]) a question
+//!   comes every few seconds, so the session stays open; it closes [`IDLE`] after sampling stops.
+//! - **Resolution** ([`remote_paths`]) is `links::resolve`'s, on the remote disk: `~` from the
+//!   helper's greeting, a relative name from the remote OSC 7 directory and **no** relative name
+//!   without it.
 //!
-//! Platform-free like `upload`'s processes; the platform shell takes the answer
-//! back to its main thread.
+//! Platform-free like `upload`'s processes; the platform shell takes the answer back to its main
+//! thread.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kablo_proto::v1::stream::Command;
+
+use crate::kablo::remote::RemoteCommand;
+use crate::kablo::service::Backend;
 use crate::links::{self, Entry};
 use crate::remote_files::{
     Ask, LoadSample, RemoteEntry, RemoteListener, ends_reply, helper_script, load_request_line,
     parse_greeting, parse_load, parse_ports, parse_reply, ports_request_line, request_line,
 };
-use crate::upload::{collect_stderr, is_safe, last_line, remote_command};
+use crate::ssh_wrap::KabloHost;
+use crate::upload::{is_safe, last_line};
 
 /// How long a scan of the server's listening ports may take — a `/proc`
 /// walk, [`LOAD_TIMEOUT`]'s kind of work.
@@ -97,10 +99,53 @@ pub fn remote_cwd_unknown(fault: Option<bt_core::RemoteSetupFault>) -> &'static 
     }
 }
 
+/// The helper's process on the server, as its session talks to it: what it reads, what it
+/// writes, its error output, and the way to end it.
+pub struct Process {
+    stdin: Box<dyn Write + Send>,
+    stdout: Box<dyn Read + Send>,
+    stderr: Box<dyn Read + Send>,
+    end: Box<dyn FnMut() + Send>,
+}
+
+impl Process {
+    /// The helper script run by `sh` on `server` over the one connection kept to it
+    /// ([`Backend::command`]): `ask` is how a password is asked for when the connection has to be
+    /// made first, `wait` how long the connection and the server's answer may take. `Err` is the
+    /// pane label's text. Ending the process, or dropping it, ends the `sh` on the server.
+    pub fn remote(
+        backend: &dyn Backend,
+        server: &KabloHost,
+        ask: crate::ssh_route::Ask,
+        wait: Duration,
+    ) -> Result<Self, String> {
+        let script = helper_script();
+        let command = Command::new(
+            ["sh", "-c", script.as_str()]
+                .iter()
+                .map(|word| word.as_bytes().to_vec())
+                .collect(),
+        );
+        let RemoteCommand {
+            stdin,
+            stdout,
+            stderr,
+            end,
+        } = backend.command(server, command, ask, wait)?;
+        let stdin = stdin.ok_or_else(|| "The server's helper has no input".to_owned())?;
+        Ok(Self {
+            stdin: Box::new(stdin),
+            stdout: Box::new(stdout),
+            stderr: Box::new(stderr),
+            end: Box::new(move || end.kill()),
+        })
+    }
+}
+
 /// The open helper process.
 pub struct HelperSession {
-    child: Child,
-    stdin: ChildStdin,
+    stdin: Box<dyn Write + Send>,
+    end: Box<dyn FnMut() + Send>,
     lines: Receiver<String>,
     stderr: Option<thread::JoinHandle<String>>,
     home: Option<String>,
@@ -108,26 +153,16 @@ pub struct HelperSession {
 }
 
 impl HelperSession {
-    /// Starts `ssh` (the argv without the remote command) running the helper
-    /// script and waits up to `timeout` for its greeting. `Err` is the pane
+    /// Waits up to `timeout` for the greeting of the helper `process` runs. `Err` is the pane
     /// label's text: why there is no link.
-    pub fn open(ssh: &[String], host: &str, timeout: Duration) -> Result<Self, String> {
-        let Some((program, args)) = ssh.split_first() else {
-            return Err(format!("No ssh command for {host}"));
-        };
-        let mut child = crate::ssh_route::command(program)
-            .args(args)
-            .arg(remote_command(&helper_script()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("ssh could not be started: {error}"))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            crate::program::end_group(&mut child);
-            return Err(format!("ssh could not be started for {host}"));
-        };
-        let stderr = Some(collect_stderr(child.stderr.take(), None, None));
+    pub fn open(process: Process, host: &str, timeout: Duration) -> Result<Self, String> {
+        let Process {
+            stdin,
+            stdout,
+            stderr,
+            end,
+        } = process;
+        let stderr = Some(read_errors(stderr));
         let (tx, lines) = mpsc::channel();
         thread::Builder::new()
             .name("remote helper output".into())
@@ -154,10 +189,10 @@ impl HelperSession {
                     }
                 }
             })
-            .map_err(|error| format!("ssh could not be started: {error}"))?;
+            .map_err(|error| format!("The helper could not be started: {error}"))?;
         let mut session = HelperSession {
-            child,
             stdin,
+            end,
             lines,
             stderr,
             home: None,
@@ -266,9 +301,9 @@ impl HelperSession {
     }
 
     /// The open's failure text: the process is ended first, so its error
-    /// output is complete (ssh's own last line says why).
+    /// output is complete (the server's own last line says why).
     fn failure(mut self, host: &str, timed_out: bool) -> String {
-        crate::program::end_group(&mut self.child);
+        (self.end)();
         let stderr = self
             .stderr
             .take()
@@ -280,21 +315,30 @@ impl HelperSession {
 
 impl Drop for HelperSession {
     fn drop(&mut self) {
-        // Closing stdin ends the loop; the kill makes sure a stuck ssh goes too, with its proxy.
-        crate::program::end_group(&mut self.child);
+        // Closing stdin ends the loop; the end makes sure a stuck process goes too.
+        (self.end)();
     }
 }
 
-/// Why the helper did not open, as the pane's label says it: one line,
-/// with ssh's own last line if it gave one.
+/// What the process says on its error output, kept to what a label can carry.
+fn read_errors(stream: impl Read + Send + 'static) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stream.take(1 << 16).read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
+/// Why the helper did not open, as the pane's label says it: one line, with the server's own last
+/// line if it gave one.
 pub fn open_failure(host: &str, timed_out: bool, stderr: &str) -> String {
     let last = last_line(stderr);
     if timed_out {
         format!("No link: {host} did not answer in time")
     } else if last.is_empty() {
-        format!("No link: can't reach {host} without a password (ssh-agent or ControlMaster)")
+        format!("No link: the connection to {host} ended before the helper answered")
     } else {
-        format!("No link: can't reach {host} without a password — {last}")
+        format!("No link: {host} could not run the helper — {last}")
     }
 }
 
@@ -431,48 +475,51 @@ pub enum LoadReply {
 /// rides the **same** route as its question.
 pub type Reply = Box<dyn FnOnce(Result<Answer, String>, &[String]) + Send>;
 
-/// How the worker gets the session's ssh argv: the route gate
-/// ([`crate::ssh_route::dial`]) runs **on the worker thread**, only when a
-/// session has to be opened — it spawns ssh processes and may wait at a sheet.
+/// How the worker gets the session: the route gate ([`crate::ssh_route::dial`]) and the helper's
+/// process on the server's own connection ([`Process::remote`]) both run **on the worker
+/// thread**, only when a session has to be opened — they may wait at a sheet.
 pub struct Dial {
     /// A job the user started (a sheet may ask for the password): it neither
     /// reads nor writes the failed-open hold ([`RETRY_AFTER`]) — a hover's
     /// failure must not refuse a ⌘-click for ten seconds, and a cancelled sheet
     /// is not a hover's label.
     pub user: bool,
-    /// A background job through bateri's masters: a login the server refused
-    /// on today's argv is [`crate::ssh_route::SIGN_IN_NEEDED`], the words the gate
-    /// itself gives a background job it refuses — one text whichever of the two
-    /// noticed. `false` without masters (the timed run, the tests' fixed argv):
-    /// there is nothing to sign in with.
-    pub sign_in: bool,
-    /// The argv without the remote command (`Err`: the open's failure text).
+    /// The route gate's argv without the remote command (`Err`: the open's failure text): it
+    /// opens the application's master first, asking for a password when the job may, and it is
+    /// the route a download's or a preview's stream rides ([`Reply`]).
     pub argv: Box<dyn FnOnce() -> Result<Vec<String>, String> + Send>,
+    /// Starts the helper's process on the server over the connection kept to it, once the gate
+    /// has let the job through (`Err`: the open's failure text).
+    pub connect: Box<dyn FnOnce() -> Result<Process, String> + Send>,
 }
 
 impl Dial {
-    /// A fixed argv, no gate (the tests' local shell).
-    pub fn fixed(argv: Vec<String>) -> Self {
-        Self {
-            user: false,
-            sign_in: false,
-            argv: Box::new(move || Ok(argv)),
-        }
-    }
-
-    /// The gate's dial: `masters` `None` (the timed run) → today's argv.
+    /// The gate's dial: `masters` `None` (the timed run) → today's argv. `served` is the
+    /// backend and the server the pane's terminal is kept on; `None` (a process without the
+    /// service) opens nothing.
     pub fn gated(
-        masters: Option<std::sync::Arc<crate::ssh_route::Masters>>,
+        served: Option<(Arc<dyn Backend>, KabloHost)>,
+        masters: Option<Arc<crate::ssh_route::Masters>>,
         target: bt_core::RemoteTarget,
         ask: crate::ssh_route::Ask,
     ) -> Self {
         let user = matches!(ask, crate::ssh_route::Ask::Sheet(_));
         Self {
             user,
-            sign_in: !user && masters.is_some(),
             argv: Box::new(move || {
                 crate::ssh_route::dial(masters.as_deref(), &target, ask)
                     .map_err(|denied| denied.text())
+            }),
+            // The gate has asked what it had to: the connection asks nothing more.
+            connect: Box::new(move || {
+                let (backend, server) =
+                    served.ok_or_else(|| "bateri's connections are not running".to_owned())?;
+                Process::remote(
+                    &*backend,
+                    &server,
+                    crate::ssh_route::Ask::Never,
+                    OPEN_TIMEOUT,
+                )
             }),
         }
     }
@@ -497,12 +544,25 @@ enum Message {
 /// The pane's handle on its helper session. The worker thread is born at the
 /// first [`RemoteHelper::ask`] and ends when the handle drops (the session's
 /// ssh with it).
-#[derive(Default)]
 pub struct RemoteHelper {
     tx: Option<Sender<Message>>,
+    /// How long an open session may go without a question ([`IDLE`]).
+    idle: Duration,
+}
+
+impl Default for RemoteHelper {
+    fn default() -> Self {
+        Self::idling(IDLE)
+    }
 }
 
 impl RemoteHelper {
+    /// A handle whose session closes after `idle` without a question (the timed runs and the
+    /// tests shorten [`IDLE`]).
+    pub fn idling(idle: Duration) -> Self {
+        Self { tx: None, idle }
+    }
+
     /// Sends a question; the reply comes on the worker thread. If the worker
     /// cannot be started the reply is called here with the reason.
     pub fn ask(&mut self, request: Request) {
@@ -516,9 +576,10 @@ impl RemoteHelper {
             None => request,
         };
         let (tx, rx) = mpsc::channel();
+        let idle = self.idle;
         let spawned = thread::Builder::new()
             .name("remote helper".into())
-            .spawn(move || run(&rx));
+            .spawn(move || run(&rx, idle));
         match spawned {
             Ok(_) => {
                 if let Err(mpsc::SendError(Message::Ask(request))) = tx.send(Message::Ask(request))
@@ -545,13 +606,13 @@ impl RemoteHelper {
 
 /// The worker loop: one session at a time, closed on [`IDLE`], on
 /// [`Message::Close`] and on another generation.
-fn run(rx: &Receiver<Message>) {
+fn run(rx: &Receiver<Message>, idle: Duration) {
     let mut open: Option<Open> = None;
     let mut failed: Option<Failure> = None;
     let mut cache = RemoteCache::default();
     loop {
         let message = if open.is_some() {
-            match rx.recv_timeout(IDLE) {
+            match rx.recv_timeout(idle) {
                 Ok(message) => message,
                 Err(RecvTimeoutError::Timeout) => {
                     open = None;
@@ -643,17 +704,11 @@ fn serve(
         {
             return (opening_failed(failure.text.clone()), Vec::new());
         }
-        let (user, sign_in) = (dial.user, dial.sign_in);
+        let user = dial.user;
         let opened = (dial.argv)().and_then(|ssh| {
-            HelperSession::open(&ssh, host, OPEN_TIMEOUT)
+            (dial.connect)()
+                .and_then(|process| HelperSession::open(process, host, OPEN_TIMEOUT))
                 .map(|session| (ssh, session))
-                .map_err(|text| {
-                    if sign_in && crate::ssh_route::password_refused(&text) {
-                        crate::ssh_route::SIGN_IN_NEEDED.to_owned()
-                    } else {
-                        text
-                    }
-                })
         });
         match opened {
             Ok((ssh, session)) => {
@@ -740,6 +795,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
 
+    use crate::upload::remote_command;
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("bt-helper-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -752,6 +809,54 @@ mod tests {
     /// precedent).
     fn local_ssh() -> Vec<String> {
         vec!["/bin/sh".to_owned(), "-c".to_owned()]
+    }
+
+    impl Process {
+        /// A local program in place of the connection: `argv` stands for the ssh command, and
+        /// the helper script follows it as ssh would carry it.
+        fn local(argv: &[String]) -> Result<Process, String> {
+            let (program, args) = argv.split_first().ok_or("No command")?;
+            let mut child = std::process::Command::new(program)
+                .args(args)
+                .arg(remote_command(&helper_script()))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let (stdin, stdout, stderr) = (
+                child.stdin.take().ok_or("no input")?,
+                child.stdout.take().ok_or("no output")?,
+                child.stderr.take().ok_or("no errors")?,
+            );
+            Ok(Process {
+                stdin: Box::new(stdin),
+                stdout: Box::new(stdout),
+                stderr: Box::new(stderr),
+                end: Box::new(move || crate::program::end_group(&mut child)),
+            })
+        }
+    }
+
+    impl Dial {
+        /// A background dial that starts `argv` locally and says it is the route.
+        fn fixed(argv: Vec<String>) -> Dial {
+            Dial::local(false, argv)
+        }
+
+        fn local(user: bool, argv: Vec<String>) -> Dial {
+            let route = argv.clone();
+            Dial {
+                user,
+                argv: Box::new(move || Ok(route)),
+                connect: Box::new(move || Process::local(&argv)),
+            }
+        }
+    }
+
+    /// The session of the local helper `argv` starts.
+    fn opened(argv: &[String], host: &str) -> Result<HelperSession, String> {
+        Process::local(argv).and_then(|process| HelperSession::open(process, host, OPEN_TIMEOUT))
     }
 
     fn text(path: &Path) -> String {
@@ -771,8 +876,7 @@ mod tests {
         fs::write(folder.join("a"), b"12345").unwrap();
         fs::write(folder.join("deep/b"), b"123").unwrap();
 
-        let mut session =
-            HelperSession::open(&local_ssh(), "local", OPEN_TIMEOUT).expect("the helper greets");
+        let mut session = opened(&local_ssh(), "local").expect("the helper greets");
         assert_eq!(
             session.home().map(str::to_owned),
             std::env::var("HOME").ok().filter(|home| !home.is_empty())
@@ -840,8 +944,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let _client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
-        let mut session =
-            HelperSession::open(&local_ssh(), "local", OPEN_TIMEOUT).expect("the helper greets");
+        let mut session = opened(&local_ssh(), "local").expect("the helper greets");
         let found = session
             .ports(std::process::id(), PORTS_TIMEOUT)
             .expect("a reply");
@@ -871,8 +974,7 @@ mod tests {
         use crate::remote_stats::Sampler;
         use bt_core::StatsForm;
 
-        let mut session =
-            HelperSession::open(&local_ssh(), "local", OPEN_TIMEOUT).expect("the helper greets");
+        let mut session = opened(&local_ssh(), "local").expect("the helper greets");
         let first = session.load(false, LOAD_TIMEOUT).expect("a reply");
         if Path::new("/proc/stat").exists() {
             let plain = first.expect("a Linux /proc gives a sample");
@@ -946,9 +1048,7 @@ mod tests {
     fn a_helper_that_never_greets_fails_with_the_reason() {
         // `false` in place of ssh: exits at once, says nothing.
         let silent = vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 255".to_owned()];
-        let error = HelperSession::open(&silent, "prod", OPEN_TIMEOUT)
-            .err()
-            .expect("no greeting");
+        let error = opened(&silent, "prod").err().expect("no greeting");
         assert!(error.contains("prod"), "{error}");
         // ssh's own last line is carried.
         let noisy = vec![
@@ -956,9 +1056,7 @@ mod tests {
             "-c".to_owned(),
             "echo 'Permission denied (publickey).' >&2; exit 255".to_owned(),
         ];
-        let error = HelperSession::open(&noisy, "prod", OPEN_TIMEOUT)
-            .err()
-            .expect("no greeting");
+        let error = opened(&noisy, "prod").err().expect("no greeting");
         assert!(error.ends_with("Permission denied (publickey)."), "{error}");
         assert!(open_failure("prod", true, "").contains("did not answer"));
     }
@@ -1162,11 +1260,7 @@ mod tests {
         };
         // A background failure is held...
         assert!(ask(Dial::fixed(failing.clone())).0.is_err());
-        let user = |argv: Vec<String>| Dial {
-            user: true,
-            sign_in: false,
-            argv: Box::new(move || Ok(argv)),
-        };
+        let user = |argv: Vec<String>| Dial::local(true, argv);
         // ...a user's dial tries anyway, and its own failure is not held.
         let (answer, ssh) = ask(user(failing.clone()));
         assert!(answer.is_err());
@@ -1175,8 +1269,8 @@ mod tests {
         // The gate's own refusal reaches the reply as the error text.
         let refused = Dial {
             user: true,
-            sign_in: false,
             argv: Box::new(|| Err(crate::ssh_route::CANCELLED.to_owned())),
+            connect: Box::new(|| Err("no connection".to_owned())),
         };
         assert_eq!(ask(refused).0.unwrap_err(), crate::ssh_route::CANCELLED);
         let (answer, ssh) = ask(user(local_ssh()));
@@ -1227,37 +1321,32 @@ mod tests {
         // Other questions keep their `Err`.
         assert!(ask(failing(), Query::Count("/etc".to_owned())).is_err());
         let _ = fs::remove_dir_all(&root);
-        // Through bateri's masters a refused login is the gate's own text — a
-        // background job's only; a user's job keeps ssh's reason.
+        // A connection the gate refuses (a background job's server wants a password it does not
+        // have) is the gate's own text, whole, for a load sample too.
         let mut helper = RemoteHelper::default();
-        let mut gated = |user: bool, command: u64| {
-            let (tx, rx) = mpsc::channel();
-            let argv = failing();
-            helper.ask(Request {
-                command,
-                dial: Dial {
-                    user,
-                    sign_in: !user,
-                    argv: Box::new(move || Ok(argv)),
-                },
-                host: "prod".to_owned(),
-                query: Query::Load { detail: false },
-                reply: Box::new(move |answer, _| {
-                    let _ = tx.send(answer);
-                }),
-            });
-            rx.recv_timeout(Duration::from_secs(30))
-                .expect("the worker replies")
-        };
-        let unreachable = |answer: Result<Answer, String>| match answer {
-            Ok(Answer::Load(LoadReply::Unreachable(text))) => text,
+        let (tx, rx) = mpsc::channel();
+        helper.ask(Request {
+            command: 1,
+            dial: Dial {
+                user: false,
+                argv: Box::new(|| Err(crate::ssh_route::SIGN_IN_NEEDED.to_owned())),
+                connect: Box::new(|| Err("no connection".to_owned())),
+            },
+            host: "prod".to_owned(),
+            query: Query::Load { detail: false },
+            reply: Box::new(move |answer, _| {
+                let _ = tx.send(answer);
+            }),
+        });
+        match rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the worker replies")
+        {
+            Ok(Answer::Load(LoadReply::Unreachable(text))) => {
+                assert_eq!(text, crate::ssh_route::SIGN_IN_NEEDED);
+            }
             other => panic!("expected Unreachable, got {other:?}"),
-        };
-        assert_eq!(
-            unreachable(gated(false, 1)),
-            crate::ssh_route::SIGN_IN_NEEDED
-        );
-        assert!(unreachable(gated(true, 2)).contains("Permission denied"));
+        }
         // An open session answers through the worker.
         let mut helper = RemoteHelper::default();
         let (tx, rx) = mpsc::channel();
