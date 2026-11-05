@@ -12,8 +12,6 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
-## [0.24.2] - 2026-11-05
-
 ### Fixed
 
 - A program with a lot of output keeps what bateri knows about it through later updates of kablo: its folder, its blocks and that a command is running. The first update to this version cannot do that yet, and 0.24.1's check covers it.
