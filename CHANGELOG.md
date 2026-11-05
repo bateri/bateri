@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-05
+
 ### Before you update
 
 - **`bateri new` is gone, and a terminal's name is `p9`, not `t9`.** A program that ran `bateri new` opens a tab (`bateri tab`, which does not take the keyboard) or a pane (`bateri split`) instead; the terminals it started before this update keep their old names and still run, but cannot be named in a command. Scripts that read `bateri ls` should read the `id:` it prints.
@@ -35,7 +37,7 @@ of every installed copy. A version without a section is not released.
   tells it where it runs. A terminal an agent opens on a server is started the same way as on this Mac, a number is still never
   given twice, and a server is set up with the new kablo the first time a program reaches it.
 - **What bateri does on a server goes over the one connection kablo keeps to it.** Previews and listings, the load indicator, files dropped on a server pane and downloads, open ports, and what a program on a server asks of your other machines (`bateri split -S prod`, `bateri send p9@prod`) each started an `ssh` of their own. They share the terminal's connection now: no second login, no second password question, and `ssh` is started only to sign in and to put kablo on a server.
-- **A server whose administrator forbids forwarding opens no port**, and bateri says why when you try; the file is `/etc/kablo/no-forwarding`.
+- **A server whose administrator forbids forwarding opens no port**, and bateri says why when you try; the file is `/etc/kablo/no-forwarding`. To know that before the browser opens, clicking a port the Mac cannot reach connects to it once, so a listener that takes a single connection (`nc -l`) spends it there.
 - **`bateri capture p9@prod` that prints more than 4 MiB ends with an error that says so**, as it already did for a program on a server. What bateri runs on another machine for a program on a server (`bateri wait p9@prod`) lasts as long as the job and ends with the program that asked: no hour limit, and nothing is left running on the server when you press ^C.
 - **A program that prints a lot reaches the screen faster.** Text, colored output and wide
   characters cost less on the way from a program to the window.

@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -221,7 +221,7 @@ harfrust = { version = "0.13", default-features = false, features = ["std"] }
 # written once, in kablo, and bateri is a client of it; rewriting it here would be a second
 # copy that drifts. The crate has no dependencies of its own and the same license as
 # bateri (GPL-3.0-or-later); `make audit` fails if the four do not resolve to one commit.
-kablo-proto = { git = "https://github.com/bateri/kablo", rev = "e362822bf5a53f5d423251de7a5dafdce40812cb" }
+kablo-proto = { git = "https://github.com/bateri/kablo", rev = "b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5" }
 
 # The text a program in a pane and the app say to each other (`bateri 2`: the requests the `bateri`
 # command makes, the replies the window gives, and the types they are written in). Written once,
@@ -229,7 +229,7 @@ kablo-proto = { git = "https://github.com/bateri/kablo", rev = "e362822bf5a53f5d
 # side uses, and the command's side is the same code, so the two cannot drift. The same pinned
 # commit as `kablo-proto` and the forks, for the same reason; it has no dependencies of its own
 # but `kablo-proto` (for the validation of a terminal's name).
-kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "e362822bf5a53f5d423251de7a5dafdce40812cb" }
+kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5" }
 
 # pencere: the protocol a program in a pane speaks to show its view there, and the kit its
 # native views are made with, from its own repository and one pinned commit, like
@@ -308,8 +308,8 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 # dependency decision (2026-10-17, the command palette): the same care as vte's — `make audit`
 # fails if the patch stops applying, and a newer upstream release is merged by hand.
 [patch.crates-io]
-vte = { git = "https://github.com/bateri/kablo", rev = "e362822bf5a53f5d423251de7a5dafdce40812cb" }
-alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "e362822bf5a53f5d423251de7a5dafdce40812cb" }
+vte = { git = "https://github.com/bateri/kablo", rev = "b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5" }
+alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "b5793af3ef9e8d36e22a35bd7b7ca7d4848ed1c5" }
 
 # On macOS the default development profile keeps full debug info in object files beside every
 # build ("unpacked") and never removes the ones a rebuild replaces: each edit at the bottom
