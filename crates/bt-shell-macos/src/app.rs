@@ -4572,7 +4572,19 @@ impl AppDelegate {
             },
             child::home,
         )
-        .and_then(|dir| restore::lock(&dir))
+        .and_then(|dir| {
+            let lock = restore::lock(&dir);
+            if lock.is_none() {
+                // Said, because what follows is otherwise silent: no saved window comes back,
+                // nothing of this one is saved, and the terminals the save names wait.
+                eprintln!(
+                    "bateri: {} is held by another bateri or could not be locked; no saved \
+                     window comes back and none of these is saved",
+                    dir.display()
+                );
+            }
+            lock
+        })
     }
 
     /// Takes the saved layout, under the directory's `lock` (a timed run, an
@@ -4793,6 +4805,13 @@ impl AppDelegate {
             RestoreWindows::Off => restore::clear(&lock),
             RestoreWindows::All | RestoreWindows::Layout => {
                 let (saved, histories) = self.saved_session(setting == RestoreWindows::All);
+                if saved.windows.is_empty() {
+                    eprintln!(
+                        "bateri: no window could be saved at quit ({} open); the saved windows \
+                         are cleared",
+                        self.windows().len()
+                    );
+                }
                 restore::save(&lock, &saved, &histories)
             }
         };

@@ -132,6 +132,10 @@ const UNNAMED: u32 = 1;
 
 /// The layout file's name inside the directory.
 const LAYOUT: &str = "layout";
+
+/// Where a layout that did not parse is set aside ([`take`]): the windows it named do not come
+/// back, and what it said stays to be read. One at a time — the next replaces it.
+const UNREADABLE: &str = "layout.unreadable";
 /// The lock file's name: the layout cannot carry the lock, every save renames a new inode onto
 /// its path (`ssh_wrap`'s lock precedent).
 const LOCK: &str = "lock";
@@ -1301,6 +1305,7 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
         };
         if name == LOCK
             || name == LAYOUT
+            || name == UNREADABLE
             || name == RECENT
             || name == ATTEMPT
             || name == crate::ids::FILE
@@ -1317,20 +1322,26 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
 }
 
 /// Reads the layout and leaves it until the launch writes its own (module doc). A missing or
-/// unreadable layout is `None`; one that does not parse is `None`, deleted, and takes its
-/// histories with it. Histories the layout does not name are swept.
+/// unreadable layout is `None`; one that does not parse is `None`, set aside as
+/// [`UNREADABLE`] with a line to standard error, and takes its histories with it. Histories the
+/// layout does not name are swept.
 ///
 /// Without `histories` (`restore_windows = "layout"`) every history is swept **unread** and no
 /// returned pane claims one: a user who said the scrollback should not come back must not see an
 /// earlier `"all"` save's once more.
 pub fn take(lock: &Lock, histories: bool) -> Option<Saved> {
     let path = lock.dir.join(LAYOUT);
-    let mut saved = fs::read_to_string(&path)
-        .ok()
-        .as_deref()
-        .and_then(Saved::parse);
-    if saved.is_none() {
-        let _ = fs::remove_file(&path);
+    let text = fs::read_to_string(&path).ok();
+    let mut saved = text.as_deref().and_then(Saved::parse);
+    if saved.is_none() && text.is_some() {
+        let aside = lock.dir.join(UNREADABLE);
+        eprintln!(
+            "bateri: the saved windows could not be read; they are set aside as {}",
+            aside.display()
+        );
+        if fs::rename(&path, &aside).is_err() {
+            let _ = fs::remove_file(&path);
+        }
     }
     if !histories {
         for pane in saved
@@ -2705,7 +2716,17 @@ mod tests {
         save(&lock, &rich(), &[(id(A), b"x".to_vec())]).expect("save");
         fs::write(lock.dir().join(LAYOUT), b"bateri-session 9\n").expect("overwrite");
         assert_eq!(take(&lock, true), None);
-        assert_eq!(names(lock.dir()), vec!["lock".to_owned()]);
+        // What it said is kept beside the lock, to be read; the next take leaves it.
+        assert_eq!(
+            names(lock.dir()),
+            vec!["layout.unreadable".to_owned(), "lock".to_owned()]
+        );
+        assert_eq!(
+            fs::read(lock.dir().join(UNREADABLE)).expect("set aside"),
+            b"bateri-session 9\n"
+        );
+        assert_eq!(take(&lock, true), None);
+        assert!(lock.dir().join(UNREADABLE).exists());
     }
 
     #[test]
