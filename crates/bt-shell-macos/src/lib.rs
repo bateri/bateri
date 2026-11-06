@@ -59,6 +59,7 @@ mod leaving;
 mod locale;
 mod menu;
 mod native_page;
+mod open_files;
 mod overview;
 mod pacer;
 mod palette;
@@ -365,6 +366,9 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     // window), and the type enforces it: `Options` carries an `Instant`, not
     // a flag.
     let skip_restore = app::shift_held_at_launch(&opts);
+    // Before the first window: every pane is a few descriptors, and launchd's 256 is some forty
+    // tabs (`open_files`).
+    open_files::raise();
     // An interactive launch from Finder or the Dock writes nowhere: its lines go to a file
     // (`stderr_log`). A timed run's standard error is the gate's to read, and stays.
     if opts.run.is_none() {
