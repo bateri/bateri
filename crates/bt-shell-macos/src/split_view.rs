@@ -70,7 +70,7 @@
 use std::cell::{Cell, RefCell};
 
 use bt_core::{ContentEdge, SplitStyle, Theme};
-use bt_shell_common::floating::{Card, Gone, Ground, Layers};
+use bt_shell_common::floating::{self, Area, Card, Gone, Grip, Ground, Layers};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
@@ -92,6 +92,10 @@ use crate::window::RootView;
 /// a mouse. The gap between cards is exactly [`GAP_PT`] wide, so in practice
 /// the handle is the gap; the number only matters if the gap is ever narrowed.
 const HANDLE_PT: f64 = 3.0;
+
+/// How far a floating card's grip reaches either side of its border, points: the handle
+/// straddles the border, and a corner is where two handles meet.
+const GRIP_PT: f64 = 5.0;
 
 /// The id a split that has not happened yet gives the pane it would add: only
 /// the arithmetic of the split limit sees it ([`SplitView::halves`]).
@@ -307,6 +311,144 @@ impl DividerHandle {
     }
 }
 
+/// A press-and-drag on a floating card's border or header in progress
+/// ([`SplitView::begin_card_drag`]).
+#[derive(Clone, Copy, Debug)]
+struct CardDrag {
+    /// A pane of the card.
+    pane: u64,
+    /// The edges it moves: `None` moves the whole card (the header).
+    grip: Option<Grip>,
+    /// The card's shown share when the press came, and where it came (container coordinates):
+    /// the drag is measured from here, so a card that was stopped at the tab's edge comes back
+    /// the way it went.
+    start: Area,
+    origin: NSPoint,
+}
+
+define_class!(
+    /// The edges and corners of the floating cards, one view over every card: it takes a press
+    /// only on a grip ([`floating::pick`]) and lets everything else through to the card under it.
+    // SAFETY: NSView is designed for subclassing; CardGrips has no ivar and implements no
+    // `Drop`; it is born with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriCardGrips"]
+    pub(crate) struct CardGrips;
+
+    unsafe impl NSObjectProtocol for CardGrips {}
+
+    impl CardGrips {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// A grip is this view's; the rest is the card's or the flat area's.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+            let on_a_grip = self.container().is_some_and(|container| {
+                matches!(container.card_at((point.x, point.y)), Some((_, Some(_))))
+            });
+            let view: &NSView = self;
+            on_a_grip.then(|| view.retain())
+        }
+
+        /// The cursors of the grips, back to front so that a card in front has the last word.
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let Some(container) = self.container() else {
+                return;
+            };
+            for (_, outline) in container.outlines() {
+                for (grip, rect) in grip_rects(outline, GRIP_PT) {
+                    self.addCursorRect_cursor(rect, &crate::pointer::grip_cursor(grip));
+                }
+            }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let Some(container) = self.container() else {
+                return;
+            };
+            let point = container.convertPoint_fromView(event.locationInWindow(), None);
+            if let Some((pane, Some(grip))) = container.card_at((point.x, point.y)) {
+                container.begin_card_drag(pane, Some(grip), event.locationInWindow());
+            }
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            if let Some(container) = self.container() {
+                container.drag_card(event.locationInWindow());
+            }
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {
+            if let Some(container) = self.container() {
+                container.end_card_drag();
+            }
+        }
+    }
+);
+
+impl CardGrips {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `initWithFrame:` is NSView's designated initializer; there is no ivar.
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    fn container(&self) -> Option<Retained<SplitView>> {
+        // SAFETY: reading the superview; we are on the main thread (`MainThreadOnly`).
+        unsafe { self.superview() }?.downcast::<SplitView>().ok()
+    }
+}
+
+/// The rectangles of a card's eight grips in the card's outline `card`: the four corners, `reach`
+/// either side of the corner point both ways, and the four edges between them, `reach` either
+/// side of the border — where [`floating::grip_at`] says the grip is.
+fn grip_rects(card: Rect, reach: f64) -> Vec<(Grip, NSRect)> {
+    let (x, y, right, bottom) = (card.x, card.y, card.x + card.width, card.y + card.height);
+    let wide = 2.0 * reach;
+    let rect = |x: f64, y: f64, width: f64, height: f64| {
+        NSRect::new(
+            NSPoint::new(x, y),
+            NSSize::new(width.max(0.0), height.max(0.0)),
+        )
+    };
+    vec![
+        (
+            Grip::Left,
+            rect(x - reach, y + reach, wide, card.height - wide),
+        ),
+        (
+            Grip::Right,
+            rect(right - reach, y + reach, wide, card.height - wide),
+        ),
+        (
+            Grip::Top,
+            rect(x + reach, y - reach, card.width - wide, wide),
+        ),
+        (
+            Grip::Bottom,
+            rect(x + reach, bottom - reach, card.width - wide, wide),
+        ),
+        (Grip::TopLeft, rect(x - reach, y - reach, wide, wide)),
+        (Grip::TopRight, rect(right - reach, y - reach, wide, wide)),
+        (
+            Grip::BottomLeft,
+            rect(x - reach, bottom - reach, wide, wide),
+        ),
+        (
+            Grip::BottomRight,
+            rect(right - reach, bottom - reach, wide, wide),
+        ),
+    ]
+}
+
 define_class!(
     // SAFETY: NSBox is designed for subclassing; Hairline implements no
     // `Drop`, has no ivar and is born with NSBox's constructor (`new`).
@@ -356,6 +498,13 @@ pub(crate) struct SplitIvars {
     /// The dividers' drag handles of the cards' own splits, per card, in the order of
     /// `cards`.
     card_handles: RefCell<Vec<Vec<Retained<DividerHandle>>>>,
+    /// The frames the shown cards have now, back to front, with a pane of each: what a pointer is
+    /// asked against ([`SplitView::card_at`]), kept from the last layout.
+    outlines: RefCell<Vec<(u64, Rect)>>,
+    /// The cards' edges and corners (made while a card is shown, [`CardGrips`]).
+    grips: RefCell<Option<Retained<CardGrips>>>,
+    /// The press on a card's border or header that is being dragged.
+    card_drag: Cell<Option<CardDrag>>,
     /// The tab's panes, the flat area's and the cards'. The container also holds them as
     /// subviews; this list is for typed access. **Never becomes empty**: removing the last pane
     /// means closing the window ([`Removal::Last`]).
@@ -440,6 +589,9 @@ impl SplitView {
             cards: RefCell::new(Vec::new()),
             shades: RefCell::new(Vec::new()),
             card_handles: RefCell::new(Vec::new()),
+            outlines: RefCell::new(Vec::new()),
+            grips: RefCell::new(None),
+            card_drag: Cell::new(None),
             panes: RefCell::new(vec![first.retain()]),
             backdrop: backdrop.clone(),
             hairline: hairline.clone(),
@@ -805,6 +957,12 @@ impl SplitView {
         }
         if wanted.is_empty() {
             return;
+        }
+        // The grips stand over every card: a press on an edge is the front card's or the one
+        // behind it, never a pane's.
+        if let Some(grips) = iv.grips.borrow().as_ref() {
+            let view: &NSView = grips;
+            wanted.push(view.retain());
         }
         let subviews = self.subviews();
         let at = |view: &NSView| {
@@ -1637,6 +1795,7 @@ impl SplitView {
             }
         }
         let mut placed = Vec::new();
+        let mut outlines = Vec::new();
         for (index, (card, (rect, inner))) in layers.cards.iter().zip(&arranged).enumerate() {
             let mut focused = false;
             let mut last: Option<Retained<NSView>> = None;
@@ -1677,8 +1836,155 @@ impl SplitView {
             }
             let dividers: &[Divider] = if card.minimized { &[] } else { &inner.dividers };
             self.sync_card_handles(index, dividers, last.as_deref());
+            if !card.minimized
+                && let Some(pane) = card.tree.leaves().first()
+            {
+                outlines.push((*pane, *rect));
+            }
         }
+        iv.outlines.replace(outlines);
+        self.sync_grips();
         placed
+    }
+
+    /// The grips' view exists while a card is shown, over the whole container, and its cursor
+    /// rects follow the cards.
+    fn sync_grips(&self) {
+        let iv = self.ivars();
+        let shown = !iv.outlines.borrow().is_empty();
+        let mut grips = iv.grips.borrow_mut();
+        match (shown, grips.as_ref()) {
+            (true, None) => {
+                let view = CardGrips::new(self.mtm(), self.bounds());
+                self.addSubview(&view);
+                *grips = Some(view);
+            }
+            (false, Some(view)) => {
+                view.removeFromSuperview();
+                *grips = None;
+            }
+            _ => {}
+        }
+        if let Some(view) = grips.as_ref() {
+            view.setFrame(self.bounds());
+            if let Some(window) = self.window() {
+                window.invalidateCursorRectsForView(view);
+            }
+        }
+    }
+
+    /// The frames of the shown cards, back to front, with a pane of each.
+    fn outlines(&self) -> Vec<(u64, Rect)> {
+        self.ivars().outlines.borrow().clone()
+    }
+
+    /// What a pointer at `point` (container coordinates) is on among the shown cards: a pane of
+    /// the front-most card it is on or grips, and the grip, `None` for the card's inside
+    /// ([`floating::pick`]).
+    fn card_at(&self, point: (f64, f64)) -> Option<(u64, Option<Grip>)> {
+        let outlines = self.ivars().outlines.borrow();
+        let frames: Vec<Rect> = outlines.iter().map(|(_, rect)| *rect).collect();
+        let (index, grip) = floating::pick(&frames, point, GRIP_PT)?;
+        Some((outlines.get(index)?.0, grip))
+    }
+
+    /// A press on the card holding `pane` — its border (`grip`) or header (`None`) — at `at`
+    /// (window coordinates): the drag that follows moves the card or the grip's edges
+    /// ([`SplitView::drag_card`]). The card's shown share now is where it is measured from.
+    pub(crate) fn begin_card_drag(&self, pane: u64, grip: Option<Grip>, at: NSPoint) {
+        let layers = self.layers();
+        let Some(index) = layers.card_of(pane) else {
+            return;
+        };
+        let min = self.limits();
+        let least = self.ground(&min).least(&layers.cards[index].tree);
+        self.ivars().card_drag.set(Some(CardDrag {
+            pane,
+            grip,
+            start: layers.cards[index].area.within(least),
+            origin: self.convertPoint_fromView(at, None),
+        }));
+    }
+
+    /// The pointer is at `at` (window coordinates) in a card drag: the card follows, inside the
+    /// tab and no smaller than its least. A drag is not undone, like a divider's.
+    pub(crate) fn drag_card(&self, at: NSPoint) {
+        let Some(drag) = self.ivars().card_drag.get() else {
+            return;
+        };
+        let bounds = self.bounds_rect();
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return;
+        }
+        let point = self.convertPoint_fromView(at, None);
+        let (dx, dy) = (
+            (point.x - drag.origin.x) / bounds.width,
+            (point.y - drag.origin.y) / bounds.height,
+        );
+        let min = self.limits();
+        let ground = self.ground(&min);
+        let changed = {
+            let mut cards = self.ivars().cards.borrow_mut();
+            let Some(card) = cards
+                .iter_mut()
+                .find(|card| card.tree.leaves().contains(&drag.pane))
+            else {
+                return;
+            };
+            let least = ground.least(&card.tree);
+            let area = match drag.grip {
+                None => drag.start.moved(dx, dy, least),
+                Some(grip) => drag.start.dragged(grip, dx, dy, least),
+            };
+            let changed = area != card.area;
+            card.area = area;
+            changed
+        };
+        if changed {
+            self.layout_panes();
+        }
+    }
+
+    /// The drag ended: the card's place is part of the layout on disk (once per drag, not per
+    /// step). `false` when no drag was on.
+    pub(crate) fn end_card_drag(&self) -> bool {
+        let was = self.ivars().card_drag.take().is_some();
+        if was && let Some(app) = crate::app::delegate(self.mtm()) {
+            app.layout_changed();
+        }
+        was
+    }
+
+    /// ⌃⌘ + arrow on floating pane `pane` ([`Layers::resize_key`]): its card's right and bottom
+    /// edges move by one key step. `true` if the card changed.
+    pub(crate) fn resize_card(&self, pane: u64, direction: Direction) -> bool {
+        self.nudge_card(pane, direction, Layers::resize_key)
+    }
+
+    /// ⌃⌥⌘ + arrow on floating pane `pane` ([`Layers::move_key`]): its card moves by one key
+    /// step, inside the tab. `true` if the card changed.
+    pub(crate) fn move_card(&self, pane: u64, direction: Direction) -> bool {
+        self.nudge_card(pane, direction, Layers::move_key)
+    }
+
+    fn nudge_card(
+        &self,
+        pane: u64,
+        direction: Direction,
+        key: fn(&mut Layers, u64, Direction, f64, &Ground<'_>) -> bool,
+    ) -> bool {
+        let mut layers = self.layers();
+        let step = floating::key_step(direction, self.bounds_rect());
+        let moved = {
+            let min = self.limits();
+            let ground = self.ground(&min);
+            key(&mut layers, pane, direction, step, &ground)
+        };
+        if moved {
+            self.ivars().cards.replace(layers.cards);
+            self.layout_panes();
+        }
+        moved
     }
 
     /// Puts a header over each pane `placed` (its id and frame), and takes the others away. Each
@@ -1866,6 +2172,30 @@ mod tests {
         );
         // Lines touch in the flat area; a floating card does not follow it.
         assert_ne!(inside, spaced(2.0, SplitStyle::Lines, false));
+    }
+
+    #[test]
+    fn the_cursor_rects_of_a_card_are_where_the_pointer_grips_it() {
+        // The middle of each grip's rectangle grips exactly that grip, so the cursor over a
+        // border says what a press there does.
+        let card = Rect::new(100.0, 80.0, 300.0, 200.0);
+        let rects = grip_rects(card, GRIP_PT);
+        assert_eq!(rects.len(), 8);
+        for (grip, rect) in rects {
+            let middle = (
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            );
+            assert_eq!(
+                floating::grip_at(card, middle, GRIP_PT),
+                Some(grip),
+                "{grip:?}"
+            );
+        }
+        // A card narrower than two grips has no rectangle with a negative size.
+        for (_, rect) in grip_rects(Rect::new(0.0, 0.0, 4.0, 4.0), GRIP_PT) {
+            assert!(rect.size.width >= 0.0 && rect.size.height >= 0.0);
+        }
     }
 
     #[test]

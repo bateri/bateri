@@ -2,10 +2,11 @@
 //! one and a zoomed one too, so a pane can always be taken by it, whatever the program in it
 //! covers. The program's mark with no tile — a dot on its corner says the pane's own signals —,
 //! the pane's title (the focused pane's in full ink), and under the pointer the pane's tools at
-//! its right: Split Right, Split Down, Open in New Tab (with other panes beside it) and Close
-//! Split. A press on the band gives the pane the keyboard and is the start of carrying it: past
-//! the slop the pane is carried (`pane_drag`, no key held) — to a region of a pane, onto a strip,
-//! out of the window. A press on a tool runs that command on this pane.
+//! its right: Split Right, Split Down, Float Pane (Dock Pane while it floats) and Open in New Tab
+//! (with other panes beside it) and Close Split. A press on the band gives the pane the keyboard
+//! and is the start of carrying it: past the slop the pane is carried (`pane_drag`, no key
+//! held) — to a region of a pane, onto a strip, out of the window; the band of a floating pane
+//! moves its card instead, inside the tab. A press on a tool runs that command on this pane.
 //!
 //! **The title is a tab's** ([`super::tab_title::Title`]): a title that does not fit fades at its
 //! end instead of ending in "…", and gives the tools its room while they show — the tools come in
@@ -288,17 +289,36 @@ define_class!(
             let part = self.part_at(event);
             self.ivars().pressed.set(part);
             self.focus_pane();
-            // Off the tools and Quit the press may become a carry: the session watches the
-            // pointer from here and takes over once it travels.
-            if part.is_none()
-                && let Some(app) = crate::app::delegate(self.mtm())
+            if part.is_some() {
+                return;
+            }
+            // Off the tools and Quit a floating pane's band moves its card, and from the press on:
+            // the card is already where the pointer is taking it.
+            if let Some(container) = self.container()
+                && container.floating(self.pane())
             {
+                container.begin_card_drag(self.pane(), None, event.locationInWindow());
+                return;
+            }
+            // Otherwise the press may become a carry: the session watches the pointer from
+            // here and takes over once it travels.
+            if let Some(app) = crate::app::delegate(self.mtm()) {
                 app.pane_press(self.pane(), event.locationInWindow());
+            }
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            if let Some(container) = self.container() {
+                container.drag_card(event.locationInWindow());
             }
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
+            if let Some(container) = self.container() {
+                container.end_card_drag();
+            }
             if let Some(part) = self.ivars().pressed.take()
                 && self.part_at(event) == Some(part)
             {
@@ -572,12 +592,17 @@ impl PaneHead {
             .find_map(|(tool, rect)| inside(rect).then_some(Part::Tool(tool)))
     }
 
+    /// The container the band and its pane are in.
+    fn container(&self) -> Option<Retained<crate::split_view::SplitView>> {
+        // SAFETY: reading the superview; we are on the main thread.
+        unsafe { self.superview() }
+            .and_then(|view| view.downcast::<crate::split_view::SplitView>().ok())
+    }
+
     /// The pane the band stands over, from the container both are in.
     fn pane_view(&self) -> Option<Retained<TerminalPane>> {
-        // SAFETY: reading the superview; we are on the main thread.
-        let container = unsafe { self.superview() }
-            .and_then(|view| view.downcast::<crate::split_view::SplitView>().ok());
-        container.and_then(|container| container.pane(self.pane()))
+        self.container()
+            .and_then(|container| container.pane(self.pane()))
     }
 
     /// The pane under the band takes the keyboard.

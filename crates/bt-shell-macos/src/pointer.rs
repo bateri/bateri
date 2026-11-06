@@ -6,6 +6,7 @@
 //! ([`cursor`]).
 
 use bt_core::PointerShape;
+use bt_shell_common::floating::Grip;
 use objc2::available;
 use objc2::rc::Retained;
 use objc2_app_kit::{
@@ -81,6 +82,40 @@ pub(crate) fn cursor(shape: PointerShape) -> Retained<NSCursor> {
     }
 }
 
+/// The cursor over the edge or corner of a floating card that `grip` names: the frame-resize
+/// cursors of macOS 15, whose arrows say which edges move; on 14 an edge shows the two-way
+/// resize cursor, and a corner the arrow — AppKit has no public diagonal cursor before 15.
+#[allow(deprecated)]
+pub(crate) fn grip_cursor(grip: Grip) -> Retained<NSCursor> {
+    if available!(macos = 15.0) {
+        return NSCursor::frameResizeCursorFromPosition_inDirections(
+            grip_position(grip),
+            NSCursorFrameResizeDirections::All,
+        );
+    }
+    match grip {
+        Grip::Left | Grip::Right => NSCursor::resizeLeftRightCursor(),
+        Grip::Top | Grip::Bottom => NSCursor::resizeUpDownCursor(),
+        Grip::TopLeft | Grip::TopRight | Grip::BottomLeft | Grip::BottomRight => {
+            NSCursor::arrowCursor()
+        }
+    }
+}
+
+/// Where on a frame the cursor of `grip` sits.
+fn grip_position(grip: Grip) -> NSCursorFrameResizePosition {
+    match grip {
+        Grip::Left => NSCursorFrameResizePosition::Left,
+        Grip::Right => NSCursorFrameResizePosition::Right,
+        Grip::Top => NSCursorFrameResizePosition::Top,
+        Grip::Bottom => NSCursorFrameResizePosition::Bottom,
+        Grip::TopLeft => NSCursorFrameResizePosition::TopLeft,
+        Grip::TopRight => NSCursorFrameResizePosition::TopRight,
+        Grip::BottomLeft => NSCursorFrameResizePosition::BottomLeft,
+        Grip::BottomRight => NSCursorFrameResizePosition::BottomRight,
+    }
+}
+
 /// An edge's or a divider's cursor before macOS 15: the ones AppKit deprecated in 15 for
 /// the divider and frame cursors, which 14 does not have.
 #[allow(deprecated)]
@@ -106,5 +141,35 @@ mod tests {
         assert!(link_command(NSEventModifierFlags::Command));
         assert!(!link_command(both));
         assert!(!link_command(NSEventModifierFlags::empty()));
+    }
+
+    #[test]
+    fn each_grip_of_a_card_has_a_cursor_position_of_its_own() {
+        let all = [
+            Grip::Left,
+            Grip::Right,
+            Grip::Top,
+            Grip::Bottom,
+            Grip::TopLeft,
+            Grip::TopRight,
+            Grip::BottomLeft,
+            Grip::BottomRight,
+        ];
+        let mut seen: Vec<_> = all
+            .iter()
+            .map(|grip| grip_position(*grip) as usize)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), all.len());
+        // A corner is its two edges.
+        assert_eq!(
+            (grip_position(Grip::TopLeft) as usize),
+            (grip_position(Grip::Top) as usize) | (grip_position(Grip::Left) as usize)
+        );
+        assert_eq!(
+            (grip_position(Grip::BottomRight) as usize),
+            (grip_position(Grip::Bottom) as usize) | (grip_position(Grip::Right) as usize)
+        );
     }
 }

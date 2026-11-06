@@ -25,7 +25,8 @@ pub enum Family {
     Tabs,
     /// Select Group ▸: the tag is the digit, 0–9 (0 is the ungrouped tabs, 9 the last group).
     Groups,
-    /// Select, Resize and Swap Split ▸: the tags 0–3 are left, right, up and down.
+    /// Select, Resize and Swap Split ▸ and Move Floating Pane ▸: the tags 0–3 are left, right,
+    /// up and down.
     Arrows,
 }
 
@@ -318,6 +319,12 @@ pub const COMMANDS: &[Command] = &[
     command("equalize_splits", "equalizeSplits", &["ctrl+cmd+="]),
     command("zoom_split", "toggleSplitZoom", &["shift+cmd+return"]),
     command("float_pane", "toggleFloatPane", &["option+cmd+return"]),
+    family(
+        "move_floating_pane",
+        "moveFloatingPane",
+        &["ctrl+option+cmd"],
+        Family::Arrows,
+    ),
     command("new_floating_pane", "newFloatingPane", &[]),
     command("move_split_to_new_tab", "movePaneToNewTab", &[]),
     command("move_split_to_new_window", "movePaneToNewWindow", &[]),
@@ -584,6 +591,25 @@ mod tests {
         );
         assert_eq!(family_keys("select_split")[0].2, mask("co"));
         assert_eq!(family_keys("resize_split")[0].2, mask("ck"));
+        // Move Floating Pane ▸ takes ⌃⌥⌘ and the arrows.
+        let moves = family_keys("move_floating_pane");
+        assert_eq!(moves.len(), 4);
+        assert_eq!(
+            moves[0],
+            (
+                "moveFloatingPane".to_owned(),
+                "\u{F702}".to_owned(),
+                mask("cko")
+            )
+        );
+        assert_eq!(
+            moves[3],
+            (
+                "moveFloatingPane:3".to_owned(),
+                "\u{F701}".to_owned(),
+                mask("cko")
+            )
+        );
     }
 
     #[test]

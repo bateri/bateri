@@ -890,10 +890,19 @@ impl TerminalTab {
     /// ⌃⌘ + arrow: moves the focused pane's divider on that axis by one cell.
     /// The step is the focused pane's **one cell** — every press
     /// changes the grid by one column or row; a design decision, the number
-    /// from the font. Stops at the smallest pane limit.
+    /// from the font. Stops at the smallest pane limit. On a floating pane
+    /// it moves its card's right and bottom edges instead, by a step of the tab.
     pub(crate) fn resize_split(&self, direction: Direction) {
-        self.set_zoom(None);
         let pane = self.focused_pane();
+        // A floating pane's card has edges of its own: the right and bottom ones move, over the
+        // zoom, by a step of the tab ([`SplitView::resize_card`]).
+        if self.ivars().container.floating(pane.id()) {
+            if self.ivars().container.resize_card(pane.id(), direction) {
+                self.layout_changed();
+            }
+            return;
+        }
+        self.set_zoom(None);
         let Some(cell) = pane.cell_size() else {
             return;
         };
@@ -903,6 +912,15 @@ impl TerminalTab {
         };
         self.ivars().container.resize(pane.id(), direction, step);
         self.layout_changed();
+    }
+
+    /// ⌃⌥⌘ + arrow: the focused floating pane's card moves by a step of the tab, staying inside
+    /// it ([`SplitView::move_card`]); nothing for a flat pane.
+    pub(crate) fn move_floating(&self, direction: Direction) {
+        let pane = self.focused_pane();
+        if self.ivars().container.move_card(pane.id(), direction) {
+            self.layout_changed();
+        }
     }
 
     /// `bateri resize p9 --left --by 3`: the divider of `pane` on `direction` moves by `steps`

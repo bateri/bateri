@@ -680,6 +680,7 @@ pub(crate) fn install(
     let select_split = directed(sel!(selectSplit:));
     let resize_split = directed(sel!(resizeSplit:));
     let swap_split = directed(sel!(swapSplit:));
+    let move_floating = directed(sel!(moveFloatingPane:));
     // The tabs a split can go to are filled when the menu opens
     // ([`ShellMenuDelegate`]); the placeholder is what a menu that never
     // opened would show.
@@ -731,6 +732,7 @@ pub(crate) fn install(
             // or docks it (`validateMenuItem:` writes its title), and a new pane that floats.
             item(mtm, "Float Pane", sel!(toggleFloatPane:)),
             item(mtm, "New Floating Pane", sel!(newFloatingPane:)),
+            submenu(mtm, "Move Floating Pane", &move_floating),
             NSMenuItem::separatorItem(mtm),
             // A split leaves for a tab or a window (`TerminalWindow`'s
             // appliers); the shortcuts are Previous / Next Tab's with ⌥ —

@@ -1047,6 +1047,9 @@ define_class!(
                     NSControlStateValueOff
                 });
                 tab.can_zoom()
+            } else if action == Some(sel!(moveFloatingPane:)) {
+                // Only a floating pane has a card to move.
+                tab.focused_floats()
             } else if action == Some(sel!(toggleFloatPane:)) {
                 // The title says which way the pane goes. The flat area's only pane stays in it.
                 item.setTitle(if tab.focused_floats() {
@@ -1200,6 +1203,14 @@ define_class!(
         fn resize_split_action(&self, sender: Option<&AnyObject>) {
             if let Some(direction) = direction_of(sender) {
                 self.selected_tab().resize_split(direction);
+            }
+        }
+
+        /// Window ▸ Move Floating Pane ▸ (⌃⌥⌘ + arrow): the focused floating pane's card moves.
+        #[unsafe(method(moveFloatingPane:))]
+        fn move_floating_pane_action(&self, sender: Option<&AnyObject>) {
+            if let Some(direction) = direction_of(sender) {
+                self.selected_tab().move_floating(direction);
             }
         }
 

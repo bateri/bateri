@@ -34,8 +34,21 @@ pub const NEW_SHARE: (f64, f64) = (0.55, 0.60);
 /// its middle. A design constant.
 pub const FLOATED_SHARE: f64 = 0.80;
 
+/// What one press of the keys that move or resize a card moves it by: 4% of the tab's width
+/// (left, right) or height (up, down). A design constant (the mockup's `STEP`).
+pub const KEY_STEP: f64 = 0.04;
+
 /// The tolerance of the geometry's comparisons.
 const EPSILON: f64 = 1e-9;
+
+/// One press of a card's move or resize key in `direction`, in points, in a tab of `bounds`
+/// ([`KEY_STEP`] of the length it runs along).
+pub fn key_step(direction: Direction, bounds: Rect) -> f64 {
+    match direction {
+        Direction::Left | Direction::Right => KEY_STEP * bounds.width,
+        Direction::Up | Direction::Down => KEY_STEP * bounds.height,
+    }
+}
 
 /// The fraction of a tab's content area a card takes: left, top, width and height, each 0–1.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -235,6 +248,24 @@ pub fn grip_at(card: Rect, point: (f64, f64), slop: f64) -> Option<Grip> {
         (_, _, _, true) => Some(Grip::Bottom),
         _ => None,
     }
+}
+
+/// What a pointer at `point` is on, among the shown cards `cards` (their frames in points, back
+/// to front): the front-most card it is on or grips, as the index in `cards` and the grip — `None`
+/// for the card's inside, which hides whatever stands behind it. `None` when no card is there
+/// (the pointer is on the flat area). A card's grip reaches `slop` points either side of its
+/// border; a card in front takes the pointer even where a card behind it has an edge.
+pub fn pick(cards: &[Rect], point: (f64, f64), slop: f64) -> Option<(usize, Option<Grip>)> {
+    cards.iter().enumerate().rev().find_map(|(index, card)| {
+        if let Some(grip) = grip_at(*card, point, slop) {
+            return Some((index, Some(grip)));
+        }
+        let inside = point.0 >= card.x
+            && point.0 <= card.x + card.width
+            && point.1 >= card.y
+            && point.1 <= card.y + card.height;
+        inside.then_some((index, None))
+    })
 }
 
 /// One floating card.
@@ -1124,6 +1155,39 @@ mod tests {
         assert_eq!(grip_at(card, (200.0, 300.0), 4.0), None);
         // Past the slop of an edge but level with the card: not a grip either.
         assert_eq!(grip_at(card, (95.0, 150.0), 4.0), None);
+    }
+
+    #[test]
+    fn the_pointer_is_on_the_front_most_card_it_touches() {
+        let back = Rect::new(100.0, 100.0, 300.0, 200.0);
+        let front = Rect::new(250.0, 150.0, 300.0, 200.0);
+        let cards = [back, front];
+        // The back card's own edge, clear of the front one: its grip.
+        assert_eq!(
+            pick(&cards, (100.0, 200.0), 4.0),
+            Some((0, Some(Grip::Left)))
+        );
+        // The back card's right edge lies inside the front card: the front's inside wins.
+        assert_eq!(pick(&cards, (400.0, 200.0), 4.0), Some((1, None)));
+        // The front card's slop reaches out over the back card's inside.
+        assert_eq!(
+            pick(&cards, (248.0, 200.0), 4.0),
+            Some((1, Some(Grip::Left)))
+        );
+        // On the back card's inside, clear of the front: the back card, no grip.
+        assert_eq!(pick(&cards, (150.0, 150.0), 4.0), Some((0, None)));
+        // Nowhere near either: the flat area.
+        assert_eq!(pick(&cards, (20.0, 20.0), 4.0), None);
+        assert_eq!(pick(&[], (200.0, 200.0), 4.0), None);
+    }
+
+    #[test]
+    fn a_key_press_is_four_percent_of_the_length_it_runs_along() {
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        assert!(near(key_step(Direction::Right, bounds), 40.0));
+        assert!(near(key_step(Direction::Left, bounds), 40.0));
+        assert!(near(key_step(Direction::Down, bounds), 24.0));
+        assert!(near(key_step(Direction::Up, bounds), 24.0));
     }
 
     #[test]
