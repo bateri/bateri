@@ -634,8 +634,7 @@ impl KeyboardPage {
         let mtm = self.mtm();
         self.setTranslatesAutoresizingMaskIntoConstraints(false);
 
-        let search = NSSearchField::new(mtm);
-        search.setPlaceholderString(Some(ns_string!("Search commands")));
+        let (search, search_box) = super::themed_search(mtm, "Search commands");
         search.setSendsSearchStringImmediately(true);
         // SAFETY: the target is a weak reference; the page lives as long as the settings window,
         // which lives for the whole process.
@@ -706,14 +705,14 @@ impl KeyboardPage {
         controls.addView_inGravity(&restore, NSStackViewGravity::Trailing);
         let toolbar = stack(
             mtm,
-            &[&search, &controls],
+            &[&search_box, &controls],
             NSUserInterfaceLayoutOrientation::Vertical,
             10.0,
         );
         toolbar.setTranslatesAutoresizingMaskIntoConstraints(false);
         self.addSubview(&toolbar);
         for constraint in [
-            search
+            search_box
                 .widthAnchor()
                 .constraintEqualToAnchor(&toolbar.widthAnchor()),
             controls

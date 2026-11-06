@@ -4685,10 +4685,21 @@ const POPUP_PAD: f64 = 5.0;
 /// field's corner — where the system's control would draw its own grey on any theme. `content`
 /// stands `pad` in from the sides, in the middle of the box's height.
 fn theme_box(mtm: MainThreadMarker, content: &NSView, pad: f64) -> Retained<NSBox> {
+    theme_box_sized(mtm, content, pad, FIELD_HEIGHT, 6.0)
+}
+
+/// [`theme_box`] `height` points tall with a corner of `radius`.
+pub(super) fn theme_box_sized(
+    mtm: MainThreadMarker,
+    content: &NSView,
+    pad: f64,
+    height: f64,
+    radius: f64,
+) -> Retained<NSBox> {
     let frame = NSBox::new(mtm);
     frame.setBoxType(NSBoxType::Custom);
     frame.setTitlePosition(NSTitlePosition::NoTitle);
-    frame.setCornerRadius(6.0);
+    frame.setCornerRadius(radius);
     frame.setBorderWidth(0.5);
     frame.setBorderColor(&look::ink(Ink::Line));
     frame.setFillColor(&look::ink(Ink::Field));
@@ -4706,10 +4717,43 @@ fn theme_box(mtm: MainThreadMarker, content: &NSView, pad: f64) -> Retained<NSBo
         content
             .centerYAnchor()
             .constraintEqualToAnchor(&frame.centerYAnchor()),
-        frame.heightAnchor().constraintEqualToConstant(FIELD_HEIGHT),
+        frame.heightAnchor().constraintEqualToConstant(height),
     ]);
     frame
 }
+
+/// A search field in the theme: bare (the system's draws its own grey on any theme) in a box of
+/// the theme's, typing in its text colour, `placeholder` in its dim one. The field, and the box
+/// that is to be placed.
+pub(super) fn themed_search(
+    mtm: MainThreadMarker,
+    placeholder: &str,
+) -> (Retained<NSSearchField>, Retained<NSBox>) {
+    let search = NSSearchField::new(mtm);
+    search.setBezeled(false);
+    search.setBordered(false);
+    search.setDrawsBackground(false);
+    search.setFocusRingType(objc2_app_kit::NSFocusRingType::None);
+    search.setTextColor(Some(&look::ink(Ink::Text)));
+    let font = search
+        .font()
+        .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
+    let hint = pictures::attributes(&font, &look::ink(Ink::Dim));
+    // SAFETY: `hint` is a dictionary of attribute keys and values AppKit reads.
+    let hint = unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str(placeholder),
+            Some(&hint),
+        )
+    };
+    search.setPlaceholderAttributedString(Some(&hint));
+    let frame = theme_box_sized(mtm, &search, 6.0, SEARCH_HEIGHT, 8.0);
+    (search, frame)
+}
+
+/// A search field's box, a little taller than a number's.
+const SEARCH_HEIGHT: f64 = 28.0;
 
 fn width_constraint(view: &NSView, width: f64) {
     view.widthAnchor()

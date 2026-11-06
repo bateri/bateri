@@ -15,7 +15,7 @@ use objc2::rc::Retained;
 
 use bt_core::{CursorBlink, Settings, Theme};
 use bt_gpu::ScrollbarMode;
-use objc2::{DefinedClass, Message};
+use objc2::{DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{NSBitmapImageFileType, NSView};
 use objc2_foundation::{NSDate, NSDictionary, NSIndexSet, NSObjectProtocol, NSRect, NSRunLoop};
 
@@ -291,6 +291,9 @@ impl SettingsWindow {
         self.gallery_problems(&themes, resolved, shots, &mut problems);
         self.theme_change_problems(&themes, resolved, &dark, shots, &mut problems);
         self.window_ground_problems(&themes, resolved, &mut problems);
+        if let Some(dir) = shots {
+            self.search_pictures(&themes, resolved, dir);
+        }
         problems
     }
 
@@ -447,6 +450,51 @@ impl SettingsWindow {
                     picture(&document, &dir.join("appearance-user.png"));
                 }
             }
+        }
+    }
+
+    /// The Keyboard page draws nothing off screen, so its search field is pictured on its own: one
+    /// made the way the page makes it, for a moment in the window, in a dark and a light theme.
+    fn search_pictures(&self, themes: &ThemeLists<'_>, resolved: Resolved, dir: &Path) {
+        let Some(content) = self
+            .ivars()
+            .window
+            .get()
+            .and_then(|window| window.contentView())
+        else {
+            return;
+        };
+        for (name, theme, dark) in [
+            ("ultraviolet", Theme::ULTRAVIOLET, true),
+            ("linen", Theme::LINEN, false),
+        ] {
+            let settings = Settings {
+                theme: name.to_owned(),
+                ..Settings::default()
+            };
+            let themes = ThemeLists {
+                on_screen: &theme,
+                dark_appearance: dark,
+                ..*themes
+            };
+            self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+            let (search, frame) = super::themed_search(self.mtm(), "Search commands");
+            content.addSubview(&frame);
+            for constraint in [
+                frame.widthAnchor().constraintEqualToConstant(320.0),
+                frame
+                    .leadingAnchor()
+                    .constraintEqualToAnchor_constant(&content.leadingAnchor(), 260.0),
+                frame
+                    .topAnchor()
+                    .constraintEqualToAnchor_constant(&content.topAnchor(), 60.0),
+            ] {
+                constraint.setActive(true);
+            }
+            content.layoutSubtreeIfNeeded();
+            let _ = &search;
+            picture(&frame, &dir.join(format!("search-{name}.png")));
+            frame.removeFromSuperview();
         }
     }
 
