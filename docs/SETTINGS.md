@@ -120,8 +120,12 @@ inactive window and the running line on a tab); the other short choices are
 pop-up menus, and the three that are a few words (Icon colors, Details under a
 tab, Cursor motion) are segmented buttons. The Font list has the fonts that
 come with bateri under "Included with bateri" and the rest under "On this
-computer", each name in its own letters; the theme lists have Light and Dark
-headings with four of the theme's colours beside each name. The search field
+computer", each name in its own letters. Themes are a gallery of cards, each
+drawn in the theme's own colours, under bateri, Dark, Light and Your themes:
+Theme is Match System or One Theme, one theme is picked from the gallery, and
+while Theme matches the system, Light offers the light themes and Dark the dark
+ones (a theme of the other shade written in the file still shows, under
+Chosen). The search field
 above the pages looks through every row's name, what it says about its current
 value and the names of its choices (a query with a `.` or `_` in it, such as
 `font.size`, also looks at the key in the file); a click on a result opens its
