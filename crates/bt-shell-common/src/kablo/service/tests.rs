@@ -4217,10 +4217,13 @@ fn what_a_crash_left_of_this_macs_is_ended_by_the_first_connection_and_not_shown
     second.stop();
 }
 
+/// The launch after a quit that kept the programs: nothing it does ends a terminal the bateri
+/// before left, whether or not a pane of it showed the terminal again. It is told when this Mac's
+/// account is there — and only then, since before it no pane can be given one — and the terminals
+/// no pane shows are still in the ledger, to be shown in panes of their own.
 #[test]
-#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn what_no_pane_of_the_launch_showed_again_is_ended_and_what_one_did_is_not() {
-    let back = Comeback::leaves("local-unclaimed", b"x\r\n");
+fn a_launch_is_told_when_this_macs_account_is_there_and_ends_none_of_what_was_left() {
+    let back = Comeback::leaves("local-unshown", b"x\r\n");
     let abandoned = SessionId::new("b-00000000000000000000000000000002").expect("a name");
     back.world
         .bridge()
@@ -4230,38 +4233,61 @@ fn what_no_pane_of_the_launch_showed_again_is_ended_and_what_one_did_is_not() {
         &abandoned,
         Some(&PaneUuid::parse("7c3a4b5d-6e7f-4809-91a2-b3c4d5e6f708").expect("a pane")),
     );
+    back.world.install_millis.store(400, Ordering::SeqCst);
+    let installs = back.world.count("install");
     let second = back.arrives();
-    let _mac = Pane::of(
-        second
-            .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
-            .expect("its terminal"),
-    );
-    // The launch has a pane for the terminal that was found, and one for another that did not
-    // get its terminal (an ordinary pane for now): both rows stay, the third goes.
-    let waiting = PaneUuid::parse("8d4b5c6e-7f80-4a91-a2b3-c4d5e6f70819").expect("a pane");
-    back.world
-        .bridge()
-        .add("b-00000000000000000000000000000003", MAC);
-    back.ledger.shown(
-        local::ACCOUNT,
-        &SessionId::new("b-00000000000000000000000000000003").expect("a name"),
-        Some(&waiting),
-    );
-    second.end_unclaimed(&[back.pane.clone(), waiting]);
-    until("the unclaimed one ended", || {
-        back.world.bridge().terminated(&abandoned) == Some(false)
+    let (told, heard) = mpsc::channel();
+    second.when_local(move |ready| {
+        let _ = told.send(ready);
     });
-    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
-    assert!(back.ledger.keeps(local::ACCOUNT, &back.terminal));
-    thread::sleep(Duration::from_millis(200));
+    assert!(
+        heard.recv_timeout(Duration::from_millis(150)).is_err(),
+        "not told while the account is being made"
+    );
+    assert_eq!(heard.recv_timeout(Duration::from_secs(15)), Ok(true));
     assert_eq!(
-        back.world
-            .bridge()
-            .terminated(&SessionId::new("b-00000000000000000000000000000003").expect("a name")),
-        None,
-        "a pane that is there and has no terminal yet keeps the one it had"
+        back.world.count("install"),
+        installs + 1,
+        "the account was made for the asker"
+    );
+    // Asked again, it is told at once.
+    let (told, heard) = mpsc::channel();
+    second.when_local(move |ready| {
+        let _ = told.send(ready);
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_millis(500)), Ok(true));
+    // Nothing was ended: both terminals are the ledger's, and neither pane shows them now.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(back.world.bridge().terminated(&abandoned), None);
+    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
+    assert_eq!(
+        back.ledger.unshown_local(&[]),
+        vec![back.terminal.clone(), abandoned]
     );
     second.stop();
+}
+
+/// Where this Mac's account cannot be made, the asker is told so, at once the next time.
+#[test]
+fn a_launch_is_told_when_this_macs_account_cannot_be_made() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_refuses.store(true, Ordering::SeqCst);
+    let rig = Rig::over("local-when-refused", world.clone());
+    let (told, heard) = mpsc::channel();
+    rig.service.when_local(move |ready| {
+        let _ = told.send(ready);
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_secs(15)), Ok(false));
+    let (told, heard) = mpsc::channel();
+    rig.service.when_local(move |ready| {
+        let _ = told.send(ready);
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_millis(500)), Ok(false));
+    assert_eq!(
+        world.count("install"),
+        1,
+        "a refusal is not asked again at once"
+    );
 }
 
 #[test]

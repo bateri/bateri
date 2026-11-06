@@ -525,3 +525,26 @@ fn a_ledger_in_memory_touches_no_disk() {
     ledger.end("ada@rasp:2222", &id("b-1"));
     assert_eq!(ledger.ending("ada@rasp:2222"), [id("b-1")]);
 }
+
+/// What no pane that is there shows: a terminal of this Mac meant to live whose pane is not among
+/// the shown ones (or that has no pane). Not one to end, not a server's, not one a pane shows.
+#[test]
+fn the_terminals_of_this_mac_no_pane_shows_are_the_live_ones_without_a_shown_pane() {
+    let ledger = Ledger::memory();
+    ledger.shown(local::ACCOUNT, &id("p1"), Some(&pane()));
+    ledger.shown(local::ACCOUNT, &id("p2"), Some(&other_pane()));
+    ledger.shown(local::ACCOUNT, &id("p3"), None);
+    ledger.shown(local::ACCOUNT, &id("p4"), Some(&other_pane()));
+    ledger.end(local::ACCOUNT, &id("p4"));
+    ledger.shown("u@prod:22", &id("t9"), None);
+
+    assert_eq!(ledger.unshown_local(&[pane()]), vec![id("p2"), id("p3")]);
+    assert_eq!(
+        ledger.unshown_local(&[pane(), other_pane()]),
+        vec![id("p3")]
+    );
+    assert_eq!(
+        ledger.unshown_local(&[]),
+        vec![id("p1"), id("p2"), id("p3")]
+    );
+}

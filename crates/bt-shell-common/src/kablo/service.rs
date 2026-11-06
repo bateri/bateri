@@ -102,8 +102,9 @@
 //! stream starts with the terminal's past ([`bt_core::Silence`]) — the bytes the server answered
 //! the questions of, which the pane's session reads without doing again what they asked — and
 //! the process id comes from the server's list. A terminal the server does not have is made again
-//! for the pane. What no pane showed again by the time a launch has built its windows is ended
-//! ([`Service::end_unclaimed`]).
+//! for the pane. What no pane showed again by the time this Mac's account is there is not ended:
+//! the application shows it again in a pane of its own ([`Service::when_local`],
+//! [`crate::kablo::ledger::Ledger::unshown_local`]).
 //!
 //! **What they left while the application was away.** A program that asked when no application
 //! was connected left its request on the server. When a connection to the server comes up and the
@@ -895,8 +896,8 @@ enum Msg {
     Leave(PaneUuid),
     /// The user cleared the pane's scrollback: its terminals forget theirs.
     Forget(PaneUuid),
-    /// The launch's panes are built ([`Service::end_unclaimed`]).
-    EndUnclaimed(Vec<PaneUuid>),
+    /// Someone waits for this Mac's account to be there ([`Service::when_local`]).
+    WhenLocal(Box<dyn FnOnce(bool) + Send>),
     /// The next pane to ask for the terminal takes it ([`Service::take_over`]).
     TakeOver {
         account: String,
@@ -1237,6 +1238,7 @@ impl Service {
             waiters: Vec::new(),
             panes: BTreeMap::new(),
             local_waiting: Vec::new(),
+            local_when: Vec::new(),
             local_refused: None,
             awaiting: BTreeMap::new(),
             shown: Arc::clone(&shown),
@@ -1460,14 +1462,13 @@ impl Service {
         let _ = self.tx.send(Msg::DropShown(pane.clone()));
     }
 
-    /// The first windows of a launch are built, and `panes` are the panes they have: the
-    /// terminals of this Mac that the bateri before left and that no pane of them is for are
-    /// nobody's — a program running for no window — and are asked to end, whatever
-    /// `keep_running` says (it decided what became of them when the bateri before left). A pane
-    /// that is there but did not get its terminal (kablo was slow, the pane is an ordinary one
-    /// for now) still has it: it is shown again by the next launch.
-    pub fn end_unclaimed(&self, panes: &[PaneUuid]) {
-        let _ = self.tx.send(Msg::EndUnclaimed(panes.to_vec()));
+    /// `done` is told, on the service's thread, once this Mac's account is there (`true`) or
+    /// could not be made (`false`); at once when it is already one or the other, and the account
+    /// is made for it when nothing asked for it yet. What a launch waits for before it shows the
+    /// terminals the bateri before left that no pane of it shows: before the account is there a
+    /// pane cannot be given one, and after it is, every pane can.
+    pub fn when_local(&self, done: impl FnOnce(bool) + Send + 'static) {
+        let _ = self.tx.send(Msg::WhenLocal(Box::new(done)));
     }
 
     /// The user cleared what the pane remembers of its past (Clear Scrollback, Clear to Start):
@@ -1788,6 +1789,8 @@ struct Core {
     panes: BTreeMap<HoldId, PaneUuid>,
     /// The panes of this Mac that wait for the account of this Mac to be made.
     local_waiting: Vec<Ask>,
+    /// Who else waits for it ([`Service::when_local`]).
+    local_when: Vec<Box<dyn FnOnce(bool) + Send>>,
     /// When the account of this Mac was last refused, and why.
     local_refused: Option<(Instant, Refusal)>,
     /// The terminals of this Mac that were asked for and have not been made.
@@ -1986,18 +1989,7 @@ impl Core {
             }
             Msg::End(pane) => self.end(&pane, now),
             Msg::Leave(pane) => self.leave(&pane, now),
-            Msg::EndUnclaimed(claimed) => {
-                for row in self.shared.ledger.terminals() {
-                    if row.ending
-                        || !local::is_account(&row.account)
-                        || row.pane.as_ref().is_some_and(|pane| claimed.contains(pane))
-                    {
-                        continue;
-                    }
-                    self.shared.ledger.end(&row.account, &row.terminal);
-                    self.finish_off(&row.account, &row.terminal, now);
-                }
-            }
+            Msg::WhenLocal(done) => self.when_local(done, now),
             Msg::Forget(pane) => {
                 for (account, terminal) in self.terminals_of(&pane) {
                     if let Some(client) = self.hub.client_mut(&account) {
@@ -3419,14 +3411,39 @@ impl Core {
             let _ = ask.reply.send(Err(refusal.clone()));
             return;
         }
-        let first = self.local_waiting.is_empty();
+        let first = self.local_waiting.is_empty() && self.local_when.is_empty();
         self.local_waiting.push(ask);
         if first {
-            let tx = self.shared.tx.clone();
-            let told: Told = Box::new(move |outcome| {
-                let _ = tx.send(Msg::LocalAccount(outcome.map(|_| ())));
-            });
-            self.here(Arc::new(Mutex::new(Some(told))));
+            self.make_local();
+        }
+    }
+
+    /// The account of this Mac is made for the ones that wait for it ([`Core::local_account`]).
+    fn make_local(&mut self) {
+        let tx = self.shared.tx.clone();
+        let told: Told = Box::new(move |outcome| {
+            let _ = tx.send(Msg::LocalAccount(outcome.map(|_| ())));
+        });
+        self.here(Arc::new(Mutex::new(Some(told))));
+    }
+
+    /// [`Service::when_local`]: told now when the account is there or was just refused, else
+    /// when it has been made — started here if nothing else is making it.
+    fn when_local(&mut self, done: Box<dyn FnOnce(bool) + Send>, now: Instant) {
+        if self.accounts.contains_key(local::ACCOUNT) {
+            return done(true);
+        }
+        if self
+            .local_refused
+            .as_ref()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) < LOCAL_REFUSAL)
+        {
+            return done(false);
+        }
+        let first = self.local_waiting.is_empty() && self.local_when.is_empty();
+        self.local_when.push(done);
+        if first {
+            self.make_local();
         }
     }
 
@@ -3439,6 +3456,9 @@ impl Core {
                     let _ = ask.reply.send(Err(refusal.clone()));
                 }
             }
+        }
+        for done in std::mem::take(&mut self.local_when) {
+            done(outcome.is_ok());
         }
     }
 
