@@ -420,7 +420,7 @@ mod tests {
                     .iter()
                     .map(|&(tag, on)| (tag.to_owned(), on))
                     .collect();
-                Atlas::with_features(family, 13.0, 1.0, spacing, &chosen)
+                Atlas::with_features(family, 13.0, 1.0, spacing, &chosen, false)
                     .missing_features()
                     .to_vec()
             };
@@ -439,8 +439,14 @@ mod tests {
                 ["calt"]
             );
             assert!(tags(Some("No Such Family 1234"), &[("calt", true)]).is_empty());
-            let atlas =
-                Atlas::with_features(obel, 13.0, 1.0, spacing, &[("ss99".to_owned(), true)]);
+            let atlas = Atlas::with_features(
+                obel,
+                13.0,
+                1.0,
+                spacing,
+                &[("ss99".to_owned(), true)],
+                false,
+            );
             assert_eq!(atlas.family(), obel);
         }
 
@@ -471,10 +477,10 @@ mod tests {
             // The same request, with or without the empty list, is the same
             // key: the atlas is not rebuilt for nothing.
             assert!(!atlas.ensure(None, 13.0, 1.0, spacing));
-            assert!(!atlas.ensure_with(None, 13.0, 1.0, spacing, &[]));
-            assert!(atlas.ensure_with(None, 13.0, 1.0, spacing, &on));
-            assert!(!atlas.ensure_with(None, 13.0, 1.0, spacing, &on));
-            assert!(atlas.ensure_with(None, 13.0, 1.0, spacing, &[]));
+            assert!(!atlas.ensure_with(None, 13.0, 1.0, spacing, &[], false));
+            assert!(atlas.ensure_with(None, 13.0, 1.0, spacing, &on, false));
+            assert!(!atlas.ensure_with(None, 13.0, 1.0, spacing, &on, false));
+            assert!(atlas.ensure_with(None, 13.0, 1.0, spacing, &[], false));
         }
     }
 }

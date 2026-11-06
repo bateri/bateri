@@ -512,6 +512,7 @@ impl FontSystem for CoreText {
         m: Metrics,
         x: f64,
         baseline: f64,
+        smooth: bool,
         target: &mut [u8],
     ) -> DrawResult {
         // Not `debug_assert`: this line is the precondition of the `unsafe`
@@ -554,8 +555,14 @@ impl FontSystem for CoreText {
         // itself dropped subpixel AA in macOS 10.14. Both calls are needed separately: `allows_font_smoothing` turns
         // off the context's permission, `should` the preference for this
         // drawing.
-        CGContext::set_allows_font_smoothing(Some(&ctx), false);
-        CGContext::set_should_smooth_fonts(Some(&ctx), false);
+        //
+        // Font smoothing is what is left of that: macOS thickens the strokes
+        // of text it smooths, and it does so in an alpha-only context too (the
+        // coverage grows, no colour is involved). `[font] smoothing` asks for
+        // it, the two calls then turn the permission and the preference on
+        // together; off, they are exactly the calls that were always made.
+        CGContext::set_allows_font_smoothing(Some(&ctx), smooth);
+        CGContext::set_should_smooth_fonts(Some(&ctx), smooth);
         // In an alpha-only context the grey component is ignored; alpha is
         // what matters.
         CGContext::set_gray_fill_color(Some(&ctx), 1.0, 1.0);
@@ -662,7 +669,8 @@ impl FontSystem for CoreText {
             }
             Family::Terminal(Some(name)) => {
                 let (font, returned) = Self::open(name, size);
-                if returned == *name {
+                // The grid's own rule: the name matches without regard to case.
+                if crate::rules::same_family(&returned, name) {
                     font
                 } else {
                     crate::app_fonts::open_default(size).0
@@ -850,24 +858,31 @@ impl FontSystem for CoreText {
     /// The bitmap is the glyph's ink box widened to whole pixels at the
     /// requested sub-pixel offset, plus a one-pixel margin on every side:
     /// antialiasing bleeds a fraction past the box and a linear sampler
-    /// reads one texel beyond it.
-    fn draw_text_glyph(font: &Self::Font, glyph: u32, sub: f64) -> Option<TextBitmap> {
+    /// reads one texel beyond it. Smoothed strokes are thicker than the
+    /// outline the box was measured on, so that margin is two pixels then.
+    fn draw_text_glyph(
+        font: &Self::Font,
+        glyph: u32,
+        sub: f64,
+        smooth: bool,
+    ) -> Option<TextBitmap> {
         let ink = Self::ink(font, glyph);
         if ink.width <= 0.0 || ink.height <= 0.0 {
             return None;
         }
-        let left = (ink.x + sub).floor() - 1.0;
-        let right = (ink.x + sub + ink.width).ceil() + 1.0;
-        let bottom = (ink.y).floor() - 1.0;
-        let top = (ink.y + ink.height).ceil() + 1.0;
+        let margin = if smooth { 2.0 } else { 1.0 };
+        let left = (ink.x + sub).floor() - margin;
+        let right = (ink.x + sub + ink.width).ceil() + margin;
+        let bottom = (ink.y).floor() - margin;
+        let top = (ink.y + ink.height).ceil() + margin;
         // A glyph this large is a broken font, not text.
         if right - left > 1024.0 || top - bottom > 1024.0 {
             return None;
         }
         let (w, h) = ((right - left) as usize, (top - bottom) as usize);
         let mut data = vec![0u8; w * h];
-        // Same context as the grid's mask: alpha only, 8 bits, grey smoothing
-        // off (the target is one channel and the system dropped subpixel AA).
+        // Same context as the grid's mask: alpha only, 8 bits, no subpixel AA
+        // (the target is one channel and the system dropped it).
         // SAFETY: `data` is w*h bytes and alive while the context lives (to
         // the end of this function); the dimensions match the buffer.
         let ctx = unsafe {
@@ -882,8 +897,9 @@ impl FontSystem for CoreText {
             )
         }?;
         CGContext::set_should_antialias(Some(&ctx), true);
-        CGContext::set_allows_font_smoothing(Some(&ctx), false);
-        CGContext::set_should_smooth_fonts(Some(&ctx), false);
+        // The grid mask's two calls, with the same switch ([`CoreText::draw_mask`]).
+        CGContext::set_allows_font_smoothing(Some(&ctx), smooth);
+        CGContext::set_should_smooth_fonts(Some(&ctx), smooth);
         CGContext::set_gray_fill_color(Some(&ctx), 1.0, 1.0);
         // The bitmap's origin is `(left, bottom)` of font space, so the glyph
         // origin sits at `(sub - left, -bottom)`; CG's y runs up and the

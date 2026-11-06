@@ -578,7 +578,7 @@ pub struct Atlas {
     shaped: shaping::Cache,
 }
 
-/// The atlas's key: if any one of these four changes, the metric, the raster
+/// The atlas's key: if any one of these changes, the metric, the raster
 /// and the slot mapping are invalid.
 ///
 /// [`Spacing`] is part of the key too, because it determines the cell size:
@@ -593,6 +593,10 @@ struct Key {
     /// per tag (see [`normalized`]): the order a caller lists them in is no
     /// reason to rebuild.
     features: Vec<(String, bool)>,
+    /// Whether the mask is drawn with the platform's font smoothing
+    /// (`[font] smoothing`). The metric does not move, but every raster does:
+    /// a slot drawn thin must not be handed out for a thick request.
+    smoothing: bool,
 }
 
 impl Key {
@@ -611,12 +615,14 @@ impl Key {
         scale: f64,
         spacing: Spacing,
         features: &[(String, bool)],
+        smoothing: bool,
     ) -> bool {
         self.family.as_deref() == family
             && self.point_size == point_size
             && self.scale == scale
             && self.spacing == spacing
             && self.features == features
+            && self.smoothing == smoothing
     }
 }
 
@@ -656,19 +662,23 @@ impl Atlas {
     /// [`Atlas::font_issue`] reports it. A terminal cannot open without a
     /// font; a misspelled name should not close the window.
     pub fn new(family: Option<&str>, point_size: f64, scale: f64, spacing: Spacing) -> Self {
-        Self::with_features(family, point_size, scale, spacing, &[])
+        Self::with_features(family, point_size, scale, spacing, &[], false)
     }
 
     /// [`Atlas::new`] with OpenType `features` (tag → on or off) given to
-    /// every face, the small one included. The list is part of the key
-    /// ([`Atlas::ensure_with`]): another list is another atlas. An empty list
-    /// is [`Atlas::new`] exactly.
+    /// every face, the small one included, and `smoothing`: whether the mask
+    /// is drawn with the platform's font smoothing (the heavier strokes macOS
+    /// gives text; the colour plane never is, and a backend without the thing
+    /// ignores it). Both are part of the key ([`Atlas::ensure_with`]): another
+    /// list or another smoothing is another atlas. An empty list and `false`
+    /// are [`Atlas::new`] exactly.
     pub fn with_features(
         family: Option<&str>,
         point_size: f64,
         scale: f64,
         spacing: Spacing,
         features: &[(String, bool)],
+        smoothing: bool,
     ) -> Self {
         let features = normalized(features);
         let (faces, font_issue) =
@@ -769,6 +779,7 @@ impl Atlas {
                 scale,
                 spacing,
                 features: features.into_owned(),
+                smoothing,
             },
             font_issue,
             missing_features,
@@ -807,14 +818,14 @@ impl Atlas {
         scale: f64,
         spacing: Spacing,
     ) -> bool {
-        self.ensure_with(family, point_size, scale, spacing, &[])
+        self.ensure_with(family, point_size, scale, spacing, &[], false)
     }
 
-    /// [`Atlas::ensure`] with the OpenType features of
-    /// [`Atlas::with_features`]: the atlas is rebuilt when the list changed
-    /// too, whatever order it is given in. An atlas built with features and
-    /// asked for none is rebuilt, so a caller that has features passes them
-    /// every time.
+    /// [`Atlas::ensure`] with the OpenType features and the smoothing of
+    /// [`Atlas::with_features`]: the atlas is rebuilt when the list or the
+    /// smoothing changed too, whatever order the list is given in. An atlas
+    /// built with features (or smoothing) and asked for none is rebuilt, so a
+    /// caller that has them passes them every time.
     #[must_use = "if true the atlas was rebuilt: the slot mapping and texture size may have changed and the texture must be reallocated too"]
     pub fn ensure_with(
         &mut self,
@@ -823,20 +834,34 @@ impl Atlas {
         scale: f64,
         spacing: Spacing,
         features: &[(String, bool)],
+        smoothing: bool,
     ) -> bool {
         // The list is normalized only when there is something to normalize:
         // this is asked every frame and an empty list costs nothing.
         let same = if features.is_empty() {
-            self.key.is(family, point_size, scale, spacing, &[])
-        } else {
             self.key
-                .is(family, point_size, scale, spacing, &normalized(features))
+                .is(family, point_size, scale, spacing, &[], smoothing)
+        } else {
+            self.key.is(
+                family,
+                point_size,
+                scale,
+                spacing,
+                &normalized(features),
+                smoothing,
+            )
         };
         if same {
             return false;
         }
-        *self = Self::with_features(family, point_size, scale, spacing, features);
+        *self = Self::with_features(family, point_size, scale, spacing, features, smoothing);
         true
+    }
+
+    /// Whether the mask is drawn with the platform's font smoothing: the
+    /// value this atlas was built with ([`Atlas::with_features`]).
+    pub fn smoothing(&self) -> bool {
+        self.key.smoothing
     }
 
     /// The **grid** metric: the cell the grid steps by (the two
@@ -1296,7 +1321,15 @@ impl Atlas {
                 // declared wide that exists in the base font is drawn into one
                 // cell there — Menlo's `☕ ⚡ ♈` family is exactly this arm: 21
                 // of the measured 65.
-                let drawn = raster::draw(font, ch, self.slot_metrics, cell, 0.0, &mut self.buffer);
+                let drawn = raster::draw(
+                    font,
+                    ch,
+                    self.slot_metrics,
+                    cell,
+                    0.0,
+                    self.key.smoothing,
+                    &mut self.buffer,
+                );
                 // **Fallback font.** The arm runs inside the `NoGlyph` leaf and
                 // only on the regular face, i.e. the order is: first the face
                 // ladder (the `face != Regular` arm below falls to the regular
@@ -1361,6 +1394,7 @@ impl Atlas {
                         m,
                         cell.cols(shaped.cells),
                         step,
+                        self.key.smoothing,
                         &mut self.buffer,
                     );
                     // Below `1` the slot is wider than its cell: what lies
@@ -1376,7 +1410,16 @@ impl Atlas {
                     }
                     drawn
                 } else {
-                    raster::draw_glyph(font, shaped.glyph, m, cell, 0.0, 0.0, &mut self.buffer)
+                    raster::draw_glyph(
+                        font,
+                        shaped.glyph,
+                        m,
+                        cell,
+                        0.0,
+                        0.0,
+                        self.key.smoothing,
+                        &mut self.buffer,
+                    )
                 };
                 (drawn, Half::Whole, Plane::Mask)
             }
@@ -1703,9 +1746,16 @@ impl Atlas {
         // matches it. If they do not match, `raster`'s precondition assert
         // fires — that assert is the only thing that catches the wrong plane.
         let left = match plane {
-            Plane::Mask => {
-                raster::draw_glyph(&alt.font, alt.glyph, m, bx, 0.0, rise, &mut self.buffer)
-            }
+            Plane::Mask => raster::draw_glyph(
+                &alt.font,
+                alt.glyph,
+                m,
+                bx,
+                0.0,
+                rise,
+                self.key.smoothing,
+                &mut self.buffer,
+            ),
             Plane::Color => raster::draw_color_glyph(
                 &alt.font,
                 alt.glyph,
@@ -1727,6 +1777,7 @@ impl Atlas {
                 bx,
                 shift,
                 rise,
+                self.key.smoothing,
                 &mut self.buffer_right,
             ),
             Plane::Color => raster::draw_color_glyph(
@@ -2302,6 +2353,7 @@ mod tests {
                 m,
                 rules::GlyphBox::unpadded(a.cell_advance),
                 0.0,
+                false,
                 &mut own
             ),
             DrawResult::Drawn
@@ -2314,6 +2366,7 @@ mod tests {
                 m,
                 rules::GlyphBox::unpadded(a.cell_advance + 4.0),
                 0.0,
+                false,
                 &mut wider
             ),
             DrawResult::Drawn
@@ -2449,6 +2502,7 @@ mod tests {
                     m,
                     rules::GlyphBox::unpadded(cell),
                     0.0,
+                    false,
                     &mut centred
                 ),
                 DrawResult::Drawn
@@ -2460,6 +2514,7 @@ mod tests {
                     m,
                     rules::GlyphBox::unpadded(advance),
                     0.0,
+                    false,
                     &mut flush
                 ),
                 DrawResult::Drawn
@@ -3189,6 +3244,155 @@ mod tests {
         );
     }
 
+    /// The mask of one character at one smoothing, with the slot it lies in.
+    /// The family is named (or `None`, the default chain) and the small
+    /// class is the context line's.
+    fn smoothed_slot(
+        family: Option<&str>,
+        scale: f64,
+        size: SizeClass,
+        ch: char,
+        smoothing: bool,
+    ) -> (Vec<u8>, Metrics) {
+        let mut a = Atlas::with_features(
+            family,
+            POINT_SIZE,
+            scale,
+            Spacing::default(),
+            &[],
+            smoothing,
+        );
+        let m = a.slot_metrics();
+        let (_, upload) = a.slot(Sprite::Char(ch), Face::Regular, size, Half::Whole);
+        (upload.expect("a new slot").bytes.to_vec(), m)
+    }
+
+    #[test]
+    fn smoothing_is_part_of_the_key_and_rebuilds_the_atlas() {
+        let spacing = Spacing::default();
+        let mut a = Atlas::with_features(None, POINT_SIZE, 1.0, spacing, &[], false);
+        assert!(!a.ensure_with(None, POINT_SIZE, 1.0, spacing, &[], false));
+        assert!(
+            a.ensure_with(None, POINT_SIZE, 1.0, spacing, &[], true),
+            "thin slots are not handed out for a thick request"
+        );
+        assert!(a.smoothing());
+        assert!(!a.ensure_with(None, POINT_SIZE, 1.0, spacing, &[], true));
+        assert!(a.ensure_with(None, POINT_SIZE, 1.0, spacing, &[], false));
+        assert!(!a.smoothing());
+        // The four-argument forms ask for the thin atlas.
+        assert!(!a.ensure(None, POINT_SIZE, 1.0, spacing));
+        let mut thick = Atlas::with_features(None, POINT_SIZE, 1.0, spacing, &[], true);
+        assert!(thick.ensure(None, POINT_SIZE, 1.0, spacing));
+    }
+
+    /// FreeType has no font smoothing: the value is read and the drawing is
+    /// the same either way.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_backend_without_font_smoothing_draws_the_same_either_way() {
+        let (off, _) = smoothed_slot(None, 1.0, SizeClass::Normal, 'e', false);
+        let (on, _) = smoothed_slot(None, 1.0, SizeClass::Normal, 'e', true);
+        assert!(off.iter().any(|&b| b > 0));
+        assert_eq!(on, off);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn coverage(bytes: &[u8]) -> u32 {
+        bytes.iter().map(|&b| u32::from(b)).sum()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn smoothing_draws_the_letter_heavier() {
+        fixture::register_test_fonts();
+        for family in [None, Some(fixture::JETBRAINS_MONO)] {
+            for scale in [1.0, 2.0] {
+                let (off, _) = smoothed_slot(family, scale, SizeClass::Normal, 'e', false);
+                let (on, _) = smoothed_slot(family, scale, SizeClass::Normal, 'e', true);
+                assert!(
+                    coverage(&on) > coverage(&off),
+                    "{family:?}@{scale}x: 'e' on {} off {}",
+                    coverage(&on),
+                    coverage(&off)
+                );
+                // Off is the plain constructor's atlas, byte for byte. (That it
+                // is also the drawing from before the key existed is
+                // `raster_digest`'s witness, run against the parent commit.)
+                let mut plain = Atlas::new(family, POINT_SIZE, scale, Spacing::default());
+                let (_, upload) = plain.slot(
+                    Sprite::Char('e'),
+                    Face::Regular,
+                    SizeClass::Normal,
+                    Half::Whole,
+                );
+                assert_eq!(upload.expect("new slot").bytes.to_vec(), off);
+            }
+        }
+    }
+
+    /// The ink of `ch` the slot would cut off and the ink it keeps, drawn the
+    /// way [`Atlas::slot`] draws it, into a buffer three slots wide and three
+    /// high with the slot in the middle.
+    #[cfg(target_os = "macos")]
+    fn ink_at_the_slots_edge(a: &Atlas, size: SizeClass, ch: char, smooth: bool) -> (u32, u32) {
+        let m = a.slot_metrics();
+        let (cw, ch_px) = (usize::from(m.cell_px.0), usize::from(m.cell_px.1));
+        let wide = crate::rules::Metrics {
+            cell_px: (m.cell_px.0 * 3, m.cell_px.1 * 3),
+            baseline_px: m.baseline_px + m.cell_px.1,
+            ..m
+        };
+        let w = usize::from(wide.cell_px.0);
+        let (bx, _) = a.glyph_box(size);
+        let font = match size {
+            SizeClass::Normal => a.faces.get(Face::Regular),
+            SizeClass::Small => &a.small,
+        };
+        let mut buffer = vec![0u8; wide.slot_bytes()];
+        // The slot starts one slot in: a negative offset moves the glyph right.
+        let drawn = raster::draw(font, ch, wide, bx, -(cw as f64), smooth, &mut buffer);
+        assert_eq!(drawn, DrawResult::Drawn, "{ch}");
+        let total: u32 = buffer.iter().map(|&b| u32::from(b)).sum();
+        let kept: u32 = (ch_px..2 * ch_px)
+            .flat_map(|y| (cw..2 * cw).map(move |x| (y, x)))
+            .map(|(y, x)| u32::from(buffer[y * w + x]))
+            .sum();
+        (total - kept, kept)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_wide_letter_smoothed_keeps_its_ink_inside_the_slot() {
+        // The strokes grow, the slot does not: a wide letter (`m`, `W`) is the
+        // one that could be cut at the cell's edge. Measured as the ink that
+        // would fall outside the slot, on every side, in both size classes at
+        // both scales. (Lit pixels *on* the slot's edge are no measure: the
+        // letter's own outline touches it with smoothing off too.) The font
+        // the app comes with loses nothing; a system font may lose a fraction
+        // of a percent.
+        fixture::register_test_fonts();
+        for family in [None, Some(fixture::JETBRAINS_MONO)] {
+            for scale in [1.0, 2.0] {
+                let a =
+                    Atlas::with_features(family, POINT_SIZE, scale, Spacing::default(), &[], true);
+                for size in [SizeClass::Normal, SizeClass::Small] {
+                    for ch in ['m', 'W'] {
+                        let (cut, kept) = ink_at_the_slots_edge(&a, size, ch, true);
+                        let (cut_off, _) = ink_at_the_slots_edge(&a, size, ch, false);
+                        assert!(kept > 0, "{family:?}@{scale}x {size:?} '{ch}' is empty");
+                        assert_eq!(cut_off, 0, "{family:?}@{scale}x {size:?} '{ch}' off");
+                        let allowed = if family.is_some() { 0 } else { kept / 100 };
+                        assert!(
+                            cut <= allowed,
+                            "{family:?}@{scale}x {size:?} '{ch}': {cut} cut of {kept}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn line_height_grows_the_cell_and_keeps_the_glyph_centred() {
         // `[font] line_height` (user: "could we open the line spacing up a
@@ -3821,6 +4025,7 @@ mod tests {
         assert!(bytes.iter().any(|&b| b > 0), "'W' painted no pixels at all");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn monospaced_families_are_the_ones_the_chain_accepts() {
         // The settings window's Font list: every selectable family opens
@@ -3851,6 +4056,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_font_that_declares_fixed_pitch_is_monospaced_though_the_system_does_not_flag_it() {
         // Obel Mono says `post.isFixedPitch` and every advance is the same,
@@ -6434,7 +6640,16 @@ mod tests {
                 b
             } else {
                 let mut b = vec![0u8; wide.slot_bytes()];
-                raster::draw_glyph(&alt.font, alt.glyph, wide, bx.cols(2), 0.0, rise, &mut b);
+                raster::draw_glyph(
+                    &alt.font,
+                    alt.glyph,
+                    wide,
+                    bx.cols(2),
+                    0.0,
+                    rise,
+                    false,
+                    &mut b,
+                );
                 b
             };
             let edge = usize::from(a.slot_offset().0);

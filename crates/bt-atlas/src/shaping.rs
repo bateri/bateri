@@ -426,7 +426,7 @@ mod font_tests {
             .iter()
             .map(|&(tag, on)| (tag.to_owned(), on))
             .collect();
-        Atlas::with_features(family, 13.0, 2.0, Spacing::default(), &features)
+        Atlas::with_features(family, 13.0, 2.0, Spacing::default(), &features, false)
     }
 
     fn row(atlas: &mut Atlas, face: Face, text: &str) -> Vec<Option<Shaped>> {
@@ -525,8 +525,14 @@ mod font_tests {
             (1.0, 0.7),
         ] {
             let spacing = Spacing { line: 1.0, letter };
-            let mut atlas =
-                Atlas::with_features(Some(fixture::JETBRAINS_MONO), 13.0, scale, spacing, &[]);
+            let mut atlas = Atlas::with_features(
+                Some(fixture::JETBRAINS_MONO),
+                13.0,
+                scale,
+                spacing,
+                &[],
+                false,
+            );
             for text in ["->", "===", "<!--"] {
                 let slices: Vec<Shaped> = row(&mut atlas, Face::Regular, text)
                     .into_iter()
@@ -554,6 +560,7 @@ mod font_tests {
                     wide,
                     bx.cols(cells),
                     0.0,
+                    false,
                     &mut whole,
                 );
                 assert!(

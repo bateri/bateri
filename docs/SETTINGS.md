@@ -122,6 +122,9 @@ also takes effect at once.
   none (Menlo) shows no row. A switch writes only its own lines under
   `[font.features."Family"]`; the choices of every family stay in the file when
   you change the font.
+- **Bolder text.** Under Options, Appearance has a Bolder text switch: the
+  `[font] smoothing` key (see [`[font]`](#font)). It turns on the macOS
+  thickening of the text, in the window and in the command palette alike.
 - **A value that is not accepted** is shown in orange under its own row; the
   control shows the value currently in effect, and picking a new value fixes
   the row. A diagnostic that does not belong to a row (for example the retired
@@ -344,6 +347,10 @@ line_height = 1.0
 # spacing, 1.2 opens the columns a little. Letters keep their size and sit in
 # the middle of the cell; below 1 they overflow onto the neighbouring column.
 letter_spacing = 1.0
+# true | false. Draws the text the way macOS thickens it (font smoothing), as
+# Terminal.app does: heavier strokes. false is the outline's own weight.
+# macOS only; the Linux build reads the value and draws as before.
+smoothing = false
 # OpenType features of a font, one table per family: the family's name (case
 # does not matter; "" is the default font) and a `tag = true|false` line for
 # each feature to change. `ss01` or `cv02` does another thing in every font,
@@ -1336,6 +1343,7 @@ family = "Menlo"
 size = 13
 line_height = 0.9
 letter_spacing = 1.0
+smoothing = false
 ```
 
 | key | type | default | meaning |
@@ -1344,6 +1352,7 @@ letter_spacing = 1.0
 | `size` | number, greater than `0` | `13` | size in points |
 | `line_height` | number, `0.5` – `2` | `1.0` | line spacing multiplier |
 | `letter_spacing` | number, `0.5` – `2` | `1.0` | letter spacing multiplier |
+| `smoothing` | `true` or `false` | `false` | thicken the text the way macOS does (macOS only) |
 | `features` | tables of `tag = true\|false`, one per family | none | OpenType feature choices |
 
 - `family` is a **family name**, the name shown in Font Book (`"JetBrains
@@ -1409,6 +1418,16 @@ letter_spacing = 1.0
   is a separate piece of work.
 - `family = ""`, or the key being absent, means the default font and gives no
   warning.
+- **`smoothing = true` draws the text heavier**, the way macOS thickens it in
+  Terminal.app. It is **off** by default, which is the outline's own weight.
+  The setting is in Settings ▸ Appearance (Bolder text, under Options) and in
+  the command palette (Bolder Text, a switch). It applies to the terminal's
+  text — the grid, the history, the input line — and to the text bateri draws
+  for its own views; colour glyphs (emoji) are drawn the same either way. The
+  strokes get thicker inside the same cell, so a wide letter (`m`, `W`) keeps
+  its place. **macOS only**: the Linux build reads the value and draws as
+  before. A value that is not `true` or `false` falls back to the previous
+  value and the title bar says so.
 - `[font.features."Family"]` holds the OpenType feature choices of one family,
   one `tag = true` or `tag = false` line each (`ss01`, `cv02`, `calt`, `zero`).
   The family is matched without regard to case and `""` is the default font. A

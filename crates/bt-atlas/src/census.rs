@@ -261,6 +261,7 @@ mod tests {
                 rules::GlyphBox::unpadded(box_advance),
                 offset,
                 rise,
+                false,
                 &mut mask,
             );
             mask
@@ -479,6 +480,7 @@ mod tests {
             m,
             rules::GlyphBox::unpadded(cell),
             0.0,
+            false,
             &mut before,
         );
         raster::draw_glyph(
@@ -488,6 +490,7 @@ mod tests {
             rules::GlyphBox::unpadded(cell),
             0.0,
             alt.rise(m),
+            false,
             &mut after,
         );
         assert_eq!(before, after, "⏺ raster changed");

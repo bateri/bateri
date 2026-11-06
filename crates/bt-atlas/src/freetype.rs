@@ -666,6 +666,9 @@ impl FontSystem for FreeType {
         m: Metrics,
         x: f64,
         baseline: f64,
+        // FreeType has no font smoothing to ask for: the outline is drawn as it
+        // is, whatever `[font] smoothing` says.
+        _smooth: bool,
         target: &mut [u8],
     ) -> DrawResult {
         assert_eq!(target.len(), m.slot_bytes(), "buffer must be a full slot");

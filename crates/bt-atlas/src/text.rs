@@ -260,6 +260,9 @@ pub struct TextAtlas {
     /// [`TextAtlas::take_flushed`]: every entry handed out before is void.
     flushed: bool,
     edge: u16,
+    /// Whether glyphs are drawn with the platform's font smoothing
+    /// ([`TextAtlas::set_smoothing`]).
+    smoothing: bool,
 }
 
 impl TextAtlas {
@@ -273,7 +276,40 @@ impl TextAtlas {
             uploads: Vec::new(),
             flushed: false,
             edge,
+            smoothing: false,
         }
+    }
+
+    /// An atlas that draws its glyphs with (`true`) or without the platform's
+    /// font smoothing from the start: the heavier strokes macOS gives text,
+    /// the terminal's `[font] smoothing`. Nothing is drawn yet, so nothing is
+    /// emptied ([`TextAtlas::set_smoothing`] is for a change).
+    #[must_use]
+    pub fn with_smoothing(mut self, on: bool) -> Self {
+        self.smoothing = on;
+        self
+    }
+
+    /// Changes the smoothing of the glyphs drawn from now on. A change empties
+    /// the cache the way a full texture does — every entry handed out was
+    /// drawn the other way, so [`TextAtlas::take_flushed`] tells the holders
+    /// of lists to build them again. Returns whether it changed.
+    pub fn set_smoothing(&mut self, on: bool) -> bool {
+        if self.smoothing == on {
+            return false;
+        }
+        self.smoothing = on;
+        self.flush();
+        true
+    }
+
+    /// Starts the texture over: every cached entry and every pending upload
+    /// belongs to its old contents, and the holders of lists are told.
+    fn flush(&mut self) {
+        self.entries.clear();
+        self.uploads.clear();
+        self.packer.clear();
+        self.flushed = true;
     }
 
     /// Does this platform shape and draw proportional text at all?
@@ -345,7 +381,12 @@ impl TextAtlas {
             return *known;
         }
         let bitmap = self.fonts.get(font.0 as usize).and_then(|face| {
-            Backend::draw_text_glyph(face, glyph, f64::from(key.2) / f64::from(SUBPIXELS))
+            Backend::draw_text_glyph(
+                face,
+                glyph,
+                f64::from(key.2) / f64::from(SUBPIXELS),
+                self.smoothing,
+            )
         });
         let entry = bitmap.and_then(|bitmap| self.place(bitmap));
         self.entries.insert(key, entry);
@@ -385,12 +426,8 @@ impl TextAtlas {
         let (x, y) = match self.packer.alloc(bitmap.width, bitmap.height) {
             Some(at) => at,
             None => {
-                // Full: start over. Every cached entry and every pending
-                // upload belongs to the texture's old contents.
-                self.entries.clear();
-                self.uploads.clear();
-                self.packer.clear();
-                self.flushed = true;
+                // Full: start over.
+                self.flush();
                 self.packer.alloc(bitmap.width, bitmap.height)?
             }
         };
@@ -595,6 +632,42 @@ mod tests {
         for pair in line.glyphs.windows(2) {
             assert!((pair[1].x - pair[0].x - first).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn smoothing_draws_the_text_heavier_and_empties_the_cache_when_it_changes() {
+        if !proportional() {
+            return;
+        }
+        let ink = |atlas: &mut TextAtlas, font: FontId, glyph: u32| -> u32 {
+            atlas.glyph(font, glyph, 0).expect("has ink");
+            atlas
+                .take_uploads()
+                .iter()
+                .flat_map(|upload| upload.data.iter())
+                .map(|&b| u32::from(b))
+                .sum()
+        };
+        let mut atlas = TextAtlas::new(256);
+        let font = atlas
+            .open(&style(Family::System, 24.0, 400))
+            .expect("opens");
+        let h = atlas.shape(font, "H").expect("shapes").glyphs[0];
+        let thin = ink(&mut atlas, h.font, h.glyph);
+        assert!(!atlas.set_smoothing(false), "off is what it already is");
+        assert!(!atlas.take_flushed());
+
+        assert!(atlas.set_smoothing(true));
+        assert!(
+            atlas.take_flushed(),
+            "the holders of lists build them again"
+        );
+        assert_eq!(atlas.cached(), 0, "nothing drawn thin is handed out");
+        let thick = ink(&mut atlas, h.font, h.glyph);
+        assert!(thick > thin, "on {thick} off {thin}");
+
+        assert!(atlas.set_smoothing(false));
+        assert_eq!(ink(&mut atlas, h.font, h.glyph), thin, "and back, exactly");
     }
 
     #[test]

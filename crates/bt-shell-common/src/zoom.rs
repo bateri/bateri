@@ -115,6 +115,7 @@ mod tests {
             line_height: 1.0,
             letter_spacing: 1.0,
             features: Default::default(),
+            smoothing: false,
         }
     }
 
@@ -123,6 +124,12 @@ mod tests {
         let base = font(13.0);
         let zoom = Zoom::default().bigger(&base).bigger(&base);
         assert_eq!(zoom.apply(&base), font(15.0));
+        // Only the size is temporary: the smoothing passes through.
+        let smoothed = FontOptions {
+            smoothing: true,
+            ..base.clone()
+        };
+        assert!(zoom.apply(&smoothed).smoothing);
         assert_eq!(zoom.smaller(&base).apply(&base), font(14.0));
         // The family stays the settings' one; Actual Size resets the offset.
         assert_eq!(Zoom::default().apply(&base), base);
@@ -141,6 +148,7 @@ mod tests {
             line_height: 1.0,
             letter_spacing: 1.0,
             features: Default::default(),
+            smoothing: false,
         };
         assert_eq!(zoom.after_reload(&font(13.0), &other), zoom);
         assert_eq!(zoom.after_reload(&font(13.0), &font(13.0)), zoom);

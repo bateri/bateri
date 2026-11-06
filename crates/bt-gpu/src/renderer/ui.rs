@@ -710,11 +710,22 @@ impl Renderer {
     /// Opens `style` (sizes in pixels); `None` where there is no proportional
     /// text or the font could not be opened.
     pub fn ui_font(&self, style: &TextStyle) -> Option<FontId> {
+        let smoothing = self.font.borrow().smoothing;
         self.ui
             .borrow_mut()
             .text
-            .get_or_insert_with(|| TextAtlas::new(TEXT_EDGE))
+            .get_or_insert_with(|| TextAtlas::new(TEXT_EDGE).with_smoothing(smoothing))
             .open(style)
+    }
+
+    /// Hands the font smoothing to the text atlas once it exists
+    /// ([`TextAtlas::set_smoothing`]; one opened later is given it when it
+    /// opens). A change empties its cache, which [`Renderer::ui_flushed`]
+    /// reports to whoever holds a list.
+    pub(super) fn ui_set_smoothing(&self, on: bool) {
+        if let Some(text) = self.ui.borrow_mut().text.as_mut() {
+            text.set_smoothing(on);
+        }
     }
 
     /// Shapes `text` as one line in `font` and measures it: width, ascent,

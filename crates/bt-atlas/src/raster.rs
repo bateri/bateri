@@ -35,6 +35,9 @@ pub(crate) enum DrawResult {
 /// `x_offset` is a **whole** pixel shift applied after drawing — non-zero
 /// only for the right half of a wide glyph.
 ///
+/// `smooth` is the platform's font smoothing for the mask
+/// ([`FontSystem::draw_mask`]); the colour recipe never takes it.
+///
 /// The buffer is cleared only if drawing actually happens.
 pub(crate) fn draw(
     font: &Font,
@@ -42,12 +45,13 @@ pub(crate) fn draw(
     m: Metrics,
     bx: GlyphBox,
     x_offset: f64,
+    smooth: bool,
     target: &mut [u8],
 ) -> DrawResult {
     let Some(glyph) = Backend::glyph(font, ch) else {
         return DrawResult::NoGlyph;
     };
-    draw_glyph(font, glyph, m, bx, x_offset, 0.0, target)
+    draw_glyph(font, glyph, m, bx, x_offset, 0.0, smooth, target)
 }
 
 /// Where a glyph goes in its slot — **one formula** for both drawing recipes
@@ -114,6 +118,10 @@ fn position(
 /// comes not from a code point but from shaping ([`rules::shape_cluster`]),
 /// so the `glyph(ch)` question cannot be asked there. Placement and centring
 /// stay **in one place** ([`position`]); [`draw`] only finds the number.
+// The eighth argument is the smoothing switch: the colour sibling takes the same
+// seven without it, and bundling `x_offset`, `rise` and `smooth` into a type of
+// their own would touch every caller to save one parameter.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_glyph(
     font: &Font,
     glyph: u32,
@@ -121,10 +129,11 @@ pub(crate) fn draw_glyph(
     bx: GlyphBox,
     x_offset: f64,
     rise: f64,
+    smooth: bool,
     target: &mut [u8],
 ) -> DrawResult {
     let (x, baseline) = position(font, glyph, m, bx, x_offset, rise);
-    Backend::draw_mask(font, glyph, m, x, baseline, target)
+    Backend::draw_mask(font, glyph, m, x, baseline, smooth, target)
 }
 
 /// Draws one cell's slice of a ligature's glyph into `target`.
@@ -143,6 +152,7 @@ pub(crate) fn draw_slice(
     m: Metrics,
     bx: GlyphBox,
     x_offset: f64,
+    smooth: bool,
     target: &mut [u8],
 ) -> DrawResult {
     let baseline = f64::from(m.cell_px.1 - m.baseline_px);
@@ -150,7 +160,7 @@ pub(crate) fn draw_slice(
     let lead = f64::from(shaped.lead);
     let start = rules::centre_shift(bx, advance * (lead + 1.0));
     let x = start + advance * lead - x_offset;
-    Backend::draw_mask(font, shaped.glyph, m, x, baseline, target)
+    Backend::draw_mask(font, shaped.glyph, m, x, baseline, smooth, target)
 }
 
 /// Draws the **colour** pixels of a glyph into `target` (`RGBA8`, sRGB,

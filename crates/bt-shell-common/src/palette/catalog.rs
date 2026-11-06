@@ -513,7 +513,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 38] = [
+static CATALOG: [Setting; 39] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -588,6 +588,16 @@ static CATALOG: [Setting; 38] = [
         |s| s.font.line_height,
         SettingsEdit::LineHeight,
         multiple
+    ),
+    toggle!(
+        "font.smoothing",
+        Font,
+        "Bolder Text",
+        "smoothing thicken heavier strokes weight terminal",
+        false,
+        None,
+        |s| s.font.smoothing,
+        SettingsEdit::FontSmoothing
     ),
     named!(
         "terminal.cursor",
@@ -967,8 +977,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_thirty_eight_settings_once_each() {
-        assert_eq!(all().len(), 38);
+    fn the_catalog_lists_the_thirty_nine_settings_once_each() {
+        assert_eq!(all().len(), 39);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -1108,8 +1118,30 @@ mod tests {
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
         // The font's own options are the machine's, so only the table is counted.
-        assert_eq!(all().len(), 38);
-        assert_eq!(rows(&settings).len(), 38 + font_rows(&settings).len());
+        assert_eq!(all().len(), 39);
+        assert_eq!(rows(&settings).len(), 39 + font_rows(&settings).len());
+    }
+
+    #[test]
+    fn bolder_text_is_a_switch_in_the_font_section_that_shows_the_file_and_writes_it() {
+        let bolder = find("font.smoothing").expect("the switch is in the catalog");
+        assert_eq!(bolder.section(), Section::Font);
+        assert_eq!(bolder.control(), Control::Toggle);
+        let mut settings = Settings::default();
+        assert_eq!(bolder.row(&settings).toggle, Some(false), "off by default");
+        assert_eq!(bolder.edit("on"), Some(SettingsEdit::FontSmoothing(true)));
+        assert_eq!(bolder.edit("off"), Some(SettingsEdit::FontSmoothing(false)));
+        assert_eq!(bolder.edit("maybe"), None);
+        settings.font.smoothing = true;
+        assert_eq!(bolder.row(&settings).toggle, Some(true));
+        // It follows the line spacing, the section's setting before it, and the
+        // font's own options come after it.
+        let ids: Vec<String> = rows(&settings).iter().map(|r| r.id.clone()).collect();
+        let at = ids.iter().position(|id| id == "set.font.smoothing");
+        let spacing = ids.iter().position(|id| id == "set.font.line_height");
+        assert_eq!(at, spacing.map(|spacing| spacing + 1), "{ids:?}");
+        // Passing over the row shows nothing: it would rebuild every pane's atlas.
+        assert!(!bolder.live());
     }
 
     #[test]

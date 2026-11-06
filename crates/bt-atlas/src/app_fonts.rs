@@ -261,6 +261,7 @@ mod tests {
     /// `raster_digest` rest on the chain staying SF Mono / Menlo. The test
     /// fonts are registered here on purpose — JetBrains Mono is among them and
     /// would be the default if registering any font were enough.
+    #[cfg(target_os = "macos")]
     #[test]
     fn registering_the_test_fonts_does_not_change_the_default_font() {
         crate::system::fixture::register_test_fonts();

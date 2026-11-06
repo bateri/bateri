@@ -426,7 +426,17 @@ def font_notices():
                 "Font Awesome, Copyright (c) Fonticons, Inc., https://fontawesome.com. The Nerd",
                 "Fonts project combined the icons into one font and scaled and aligned them; the",
                 "font is otherwise as released. Font Logos is released into the public domain",
-                "(the Unlicense).", ""]
+                "(the Unlicense).", "",
+                "The notices of the other sets, as their projects state them (the Nerd Fonts",
+                "release and each set's own repository):", "",
+                "  Octicons (MIT): Copyright (c) 2023 GitHub Inc., https://github.com/primer/octicons",
+                "  Devicons (MIT): Copyright (c) 2015 konpa, https://github.com/devicons/devicon",
+                "  Powerline Symbols: Copyright 2013 Kim Silkebækken and other contributors,",
+                "    https://github.com/powerline/powerline",
+                "  Pomicons (SIL Open Font License 1.1): Copyright (c) 2021, Gabriele Lana",
+                "    (gabriele.lana@gmail.com), with Reserved Font Name Pomicons",
+                "  Weather Icons (SIL Open Font License 1.1): Erik Flowers,",
+                "    https://github.com/erikflowers/weather-icons", ""]
     return out
 
 

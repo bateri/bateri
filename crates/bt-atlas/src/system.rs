@@ -116,12 +116,17 @@ pub(crate) trait FontSystem {
     /// the baseline's height above the slot's **bottom** edge. The backend
     /// only paints, so the centring formula cannot leak into it. The buffer is
     /// cleared only if drawing actually happens.
+    ///
+    /// `smooth` asks for the platform's font smoothing (the heavier strokes
+    /// macOS gives text): a backend that has no such thing ignores it. The
+    /// colour plane never takes it ([`Self::draw_color`]).
     fn draw_mask(
         font: &Self::Font,
         glyph: u32,
         m: Metrics,
         x: f64,
         baseline: f64,
+        smooth: bool,
         target: &mut [u8],
     ) -> DrawResult;
 
@@ -216,8 +221,14 @@ pub(crate) trait FontSystem {
     /// Draws one glyph's coverage into a tight bitmap, its origin shifted
     /// right by `sub` pixels (`0.0 <= sub < 1.0`): the horizontal sub-pixel
     /// position the text atlas keys on. `None` for a glyph with no ink
-    /// (a space) or a drawing target the backend could not make.
-    fn draw_text_glyph(_font: &Self::Font, _glyph: u32, _sub: f64) -> Option<TextBitmap> {
+    /// (a space) or a drawing target the backend could not make. `smooth` is
+    /// [`Self::draw_mask`]'s.
+    fn draw_text_glyph(
+        _font: &Self::Font,
+        _glyph: u32,
+        _sub: f64,
+        _smooth: bool,
+    ) -> Option<TextBitmap> {
         None
     }
 }

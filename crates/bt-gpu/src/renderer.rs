@@ -1904,7 +1904,7 @@ impl Renderer {
     /// How many rows the shaper has been asked to shape since the atlas was
     /// built: the proof a font without rules is never asked and a row seen
     /// twice is asked once.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn shape_calls(&self) -> usize {
         self.state
             .borrow()
@@ -1923,8 +1923,8 @@ impl Renderer {
     /// error, and the symptom shows only on a two-display machine. The gutter
     /// comes from the **same call** so the two cannot drift for a frame.
     ///
-    /// **This is the only place that changes the atlas's key** (family, size and
-    /// scale), i.e. the cell geometry; drawing opens slots and may grow the
+    /// **This is the only place that changes the atlas's key** (family, size,
+    /// scale, features and smoothing), i.e. the cell geometry; drawing opens slots and may grow the
     /// texture ([`Renderer::plan_with_room`]) but never changes the cell. When
     /// `ensure` reports a rebuild, every texture drops in the
     /// same line: the slot map and the texture edge may have changed (the edge
@@ -1943,14 +1943,21 @@ impl Renderer {
             letter: font.letter_spacing,
         };
         let entry = state.atlas.get_or_insert_with(|| WgpuAtlas {
-            atlas: Atlas::with_features(family, font.size, scale, spacing, &features),
+            atlas: Atlas::with_features(
+                family,
+                font.size,
+                scale,
+                spacing,
+                &features,
+                font.smoothing,
+            ),
             mask: None,
             color: None,
             fx_bind: None,
         });
         if entry
             .atlas
-            .ensure_with(family, font.size, scale, spacing, &features)
+            .ensure_with(family, font.size, scale, spacing, &features, font.smoothing)
         {
             entry.drop_textures();
         }
@@ -1959,6 +1966,10 @@ impl Renderer {
 
     /// Changes the requested font; `true` when it differs. The atlas opens
     /// with it on the next [`Renderer::cell_metrics`].
+    ///
+    /// The font smoothing (`[font] smoothing`) reaches the grid's atlas that
+    /// way — it is part of the atlas's key — and the page's text atlas here,
+    /// at once: that one has no key to rebuild on, it empties itself.
     pub fn set_font(&self, font: &FontOptions) -> bool {
         let mut current = self.font.borrow_mut();
         if *current == *font {
@@ -1966,7 +1977,19 @@ impl Renderer {
         }
         current.clone_from(font);
         *self.font_features.borrow_mut() = font.active_features();
+        self.ui_set_smoothing(font.smoothing);
         true
+    }
+
+    /// Whether the open atlas draws with the font smoothing; `None` without an
+    /// atlas.
+    #[cfg(test)]
+    pub(crate) fn atlas_smoothing(&self) -> Option<bool> {
+        self.state
+            .borrow()
+            .atlas
+            .as_ref()
+            .map(|entry| entry.atlas.smoothing())
     }
 
     /// What to tell the user about the open atlas's font; `None` without an
@@ -3429,7 +3452,8 @@ fn pipeline_over(
 
 #[cfg(test)]
 mod picture_tests;
-#[cfg(test)]
+// The registered test fonts exist on macOS only; FreeType's fixture has none.
+#[cfg(all(test, target_os = "macos"))]
 mod shaping_tests;
 pub(crate) mod shrink;
 #[cfg(test)]

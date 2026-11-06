@@ -140,6 +140,26 @@ fn a_feature_choice_is_a_font_change_that_leaves_the_cell_alone() {
 }
 
 #[test]
+fn the_font_smoothing_is_a_font_change_that_rebuilds_the_atlas_and_leaves_the_cell_alone() {
+    let r = renderer();
+    let base = r.cell_metrics(1.0);
+    assert_eq!(r.atlas_smoothing(), Some(false), "off is today's drawing");
+    let on = FontOptions {
+        smoothing: true,
+        ..FontOptions::default()
+    };
+    assert!(r.set_font(&on), "the smoothing is a change");
+    assert!(!r.set_font(&on), "the same request is not a change");
+    // The atlas is asked with the value on the next ask; the grid does not move.
+    assert_eq!(r.cell_metrics(1.0), base);
+    assert_eq!(r.atlas_smoothing(), Some(true));
+    // And it comes back.
+    assert!(r.set_font(&FontOptions::default()));
+    assert_eq!(r.cell_metrics(1.0), base);
+    assert_eq!(r.atlas_smoothing(), Some(false));
+}
+
+#[test]
 fn missing_family_becomes_a_notice_after_the_atlas_opens() {
     let r = renderer();
     assert_eq!(

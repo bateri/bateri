@@ -23,6 +23,8 @@ of every installed copy. A version without a section is not released.
 
 - **Icons in your prompt are drawn in any font.** The git branch, a folder and the arrows of a powerline prompt came out as empty boxes unless the font was a Nerd Font. bateri now draws them from a Symbols Nerd Font that comes with it, in one cell, whichever font you use; a font that has the icons itself keeps its own.
 
+- **A switch for heavier text.** With `smoothing = true` under `[font]`, or Bolder text in Settings ▸ Appearance and Bolder Text in the command palette, text is drawn the way macOS thickens it in Terminal.app, where the default is the font's own thinner weight. It is off unless you turn it on, it needs no restart, and it is macOS only.
+
 ### Changed
 
 - **bateri starts in JetBrains Mono.** If you never chose a font, text is now drawn in JetBrains Mono, with its ligatures (`->`, `!=`, `===`), where it used to be SF Mono or Menlo. Choose Menlo in Settings or write `family = "Menlo"` to go back; a font you chose stays as it was.

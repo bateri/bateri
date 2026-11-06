@@ -111,6 +111,12 @@ pub struct FontOptions {
     /// thing in every font. Read it through [`FontOptions::active_features`] /
     /// [`FontOptions::feature`], which ask for the family in effect.
     pub features: BTreeMap<String, BTreeMap<String, bool>>,
+    /// `[font] smoothing`: draw the text the way macOS thickens it
+    /// (font smoothing: Terminal.app's heavier strokes) instead of at the
+    /// outline's own weight. Off by default, which is what the text looked like
+    /// before the key existed. macOS only: the Linux build reads the value and
+    /// draws as before.
+    pub smoothing: bool,
 }
 
 impl FontOptions {
@@ -149,6 +155,7 @@ impl Default for FontOptions {
             line_height: 1.0,
             letter_spacing: 1.0,
             features: BTreeMap::new(),
+            smoothing: false,
         }
     }
 }
@@ -1874,6 +1881,8 @@ pub enum SettingsEdit {
     FontSize(f64),
     LineHeight(f64),
     LetterSpacing(f64),
+    /// The settings window's and the palette's "Bolder text": `[font] smoothing`.
+    FontSmoothing(bool),
     Osc52(Osc52),
     CursorMotion(CursorMotion),
     ReduceMotion(ReduceMotion),
@@ -2037,6 +2046,7 @@ impl SettingsEdit {
             Self::FontSize(_) => ("font", "size", "font.size"),
             Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
             Self::LetterSpacing(_) => ("font", "letter_spacing", "font.letter_spacing"),
+            Self::FontSmoothing(_) => ("font", "smoothing", "font.smoothing"),
             Self::Osc52(_) => ("clipboard", "osc52", "clipboard.osc52"),
             Self::CursorMotion(_) => ("motion", "cursor_motion", "motion.cursor_motion"),
             Self::ReduceMotion(_) => ("motion", "reduce_motion", "motion.reduce_motion"),
@@ -2128,6 +2138,7 @@ impl SettingsEdit {
             | Self::DimUnfocusedSplits(on)
             | Self::FocusFrame(on)
             | Self::ResizeInSteps(on)
+            | Self::FontSmoothing(on)
             | Self::TabIcons(on) => (*on).into(),
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
@@ -2306,6 +2317,10 @@ line_height = 1.0
 # spacing, 1.2 opens the columns a little. Letters keep their size and sit in
 # the middle of the cell; below 1 they overflow onto the neighbouring column.
 letter_spacing = 1.0
+# true | false. Draws the text the way macOS thickens it (font smoothing), as
+# Terminal.app does: heavier strokes. false is the outline's own weight.
+# macOS only; the Linux build reads the value and draws as before.
+smoothing = false
 # OpenType features of a font, one table per family: the family's name (case
 # does not matter; "" is the default font) and a `tag = true|false` line for
 # each feature to change. `ss01` or `cv02` does another thing in every font,
@@ -2864,6 +2879,15 @@ stats_interval = 3
                 if let Some(item) = font.get("features") {
                     parsed.settings.font.features =
                         font_features::read(text, item, &fallback.font.features, diagnostics);
+                }
+                if let Some(item) = font.get("smoothing") {
+                    parsed.settings.font.smoothing = boolean(
+                        text,
+                        item,
+                        "font.smoothing",
+                        fallback.font.smoothing,
+                        diagnostics,
+                    );
                 }
             }
             None if root.contains_key("font") => {
@@ -4872,6 +4896,7 @@ mod tests {
             ("font", "size"),
             ("font", "line_height"),
             ("font", "letter_spacing"),
+            ("font", "smoothing"),
             ("clipboard", "osc52"),
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
@@ -5192,6 +5217,7 @@ mod tests {
                 line_height: 1.0,
                 letter_spacing: 1.0,
                 features: BTreeMap::new(),
+                smoothing: false,
             }
         );
         assert_eq!(
@@ -5202,6 +5228,7 @@ mod tests {
                 line_height: 1.0,
                 letter_spacing: 1.0,
                 features: BTreeMap::new(),
+                smoothing: false,
             }
         );
         // An integer is a point size too: the first thing the user will write is
@@ -5265,6 +5292,7 @@ mod tests {
                 line_height: 1.0,
                 letter_spacing: 1.0,
                 features: BTreeMap::new(),
+                smoothing: false,
             },
             ..Settings::default()
         };
@@ -6081,6 +6109,72 @@ found 1.5; using 0.1"
         assert!(edited.contains("# mine"), "{edited}");
         assert!(edited.contains("future = 1"), "{edited}");
         assert_eq!(clean(&edited).font.letter_spacing, 1.3);
+    }
+
+    #[test]
+    fn smoothing_is_off_unless_the_file_turns_it_on() {
+        assert!(!clean("").font.smoothing, "off is how text looked before");
+        assert!(clean("[font]\nsmoothing = true\n").font.smoothing);
+        assert!(!clean("[font]\nsmoothing = false\n").font.smoothing);
+        // The neighbouring keys are read as they were.
+        let parsed = Settings::parse("[font]\nsmoothing = true\nsize = 18\n").expect("parses");
+        assert_eq!(parsed.settings.font.size, 18.0);
+        assert!(parsed.settings.font.smoothing);
+        // A change of the key is a font change: the shell hands it to the panes.
+        let on = clean("[font]\nsmoothing = true\n");
+        assert!(clean("").changes(&on).font);
+        assert!(!clean("").changes(&clean("")).font);
+    }
+
+    #[test]
+    fn smoothing_that_is_not_a_boolean_is_named_and_keeps_the_given_value() {
+        for text in [
+            "[font]\nsmoothing = \"on\"\n",
+            "[font]\nsmoothing = 1\n",
+            "[font]\nsmoothing = 0.5\n",
+        ] {
+            let (settings, diagnostic) = rejected(text);
+            assert!(!settings.font.smoothing, "{text}");
+            assert_eq!(diagnostic.key, Some("font.smoothing"), "{text}");
+            assert!(
+                diagnostic.message.contains("must be true or false"),
+                "{text}: {}",
+                diagnostic.message
+            );
+        }
+        // What the user had stays when the file turns bad: the window must not
+        // thin its text for a typo.
+        let current = Settings {
+            font: FontOptions {
+                smoothing: true,
+                ..FontOptions::default()
+            },
+            ..Settings::default()
+        };
+        let parsed =
+            Settings::parse_keeping("[font]\nsmoothing = \"x\"\n", &current).expect("parses");
+        assert!(parsed.settings.font.smoothing);
+        assert_eq!(parsed.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn smoothing_is_written_in_place_and_the_rest_of_the_file_stays() {
+        let text = "[font]\n# mine\nsmoothing = false\nfuture = 1\n";
+        let on = Settings::with_edit(text, &SettingsEdit::FontSmoothing(true)).expect("edits");
+        assert!(on.contains("# mine"), "{on}");
+        assert!(on.contains("future = 1"), "{on}");
+        assert!(clean(&on).font.smoothing);
+        let off = Settings::with_edit(&on, &SettingsEdit::FontSmoothing(false)).expect("edits");
+        assert!(!clean(&off).font.smoothing);
+        assert_eq!(off, text, "the round trip gives the file back");
+        // A file that does not name the key gets the line under `[font]`.
+        let bare = Settings::with_edit("[font]\nsize = 14\n", &SettingsEdit::FontSmoothing(true))
+            .expect("edits");
+        assert!(clean(&bare).font.smoothing);
+        assert_eq!(clean(&bare).font.size, 14.0);
+        // And a file with no `[font]` table at all gets one.
+        let none = Settings::with_edit("", &SettingsEdit::FontSmoothing(true)).expect("edits");
+        assert!(clean(&none).font.smoothing);
     }
 
     #[test]
@@ -8009,6 +8103,7 @@ cursor = \"spring\"
             SettingsEdit::FontSize(size) => settings.font.size = two(size),
             SettingsEdit::LineHeight(height) => settings.font.line_height = two(height),
             SettingsEdit::LetterSpacing(spacing) => settings.font.letter_spacing = two(spacing),
+            SettingsEdit::FontSmoothing(on) => settings.font.smoothing = on,
             SettingsEdit::Osc52(mode) => settings.osc52 = mode,
             SettingsEdit::CursorMotion(motion) => settings.cursor_motion = motion,
             SettingsEdit::ReduceMotion(reduce) => settings.reduce_motion = reduce,
@@ -8133,6 +8228,7 @@ cursor = \"spring\"
             SettingsEdit::FontSize(14.5),
             SettingsEdit::LineHeight(1.25),
             SettingsEdit::LetterSpacing(1.3),
+            SettingsEdit::FontSmoothing(true),
             SettingsEdit::Osc52(Osc52::Off),
             SettingsEdit::CursorMotion(CursorMotion::Ease),
             SettingsEdit::ReduceMotion(ReduceMotion::On),

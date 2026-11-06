@@ -206,6 +206,7 @@ enum Key {
     LineHeight,
     LetterSpacing,
     FontFeatures,
+    FontSmoothing,
     Shape,
     Blink,
     BlinkSpeed,
@@ -252,7 +253,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 54] = [
+    const ALL: [Key; 55] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -265,6 +266,7 @@ impl Key {
         Key::LineHeight,
         Key::LetterSpacing,
         Key::FontFeatures,
+        Key::FontSmoothing,
         Key::Shape,
         Key::Blink,
         Key::BlinkSpeed,
@@ -348,6 +350,7 @@ impl Key {
             Key::LineHeight => "font.line_height",
             Key::LetterSpacing => "font.letter_spacing",
             Key::FontFeatures => "font.features",
+            Key::FontSmoothing => "font.smoothing",
             Key::Shape => "terminal.cursor",
             Key::Blink => "terminal.cursor_blink",
             Key::BlinkSpeed => "terminal.cursor_blink_interval",
@@ -1259,6 +1262,7 @@ struct Controls {
     split_style: Retained<NSPopUpButton>,
     tab_details: Retained<NSPopUpButton>,
     tab_icons: Retained<NSSwitch>,
+    font_smoothing: Retained<NSSwitch>,
     tab_icon_colors: Retained<NSPopUpButton>,
     tab_running: Retained<NSPopUpButton>,
     tab_position: Retained<NSPopUpButton>,
@@ -1551,6 +1555,7 @@ define_class!(
                 Some(Key::FocusFrame) => Some(SettingsEdit::FocusFrame(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
                 Some(Key::TabIcons) => Some(SettingsEdit::TabIcons(on)),
+                Some(Key::FontSmoothing) => Some(SettingsEdit::FontSmoothing(on)),
                 _ => None,
             };
             self.save(edit);
@@ -1915,6 +1920,7 @@ impl SettingsWindow {
         select_choice(&c.split_style, settings.split_style);
         select_choice(&c.tab_details, settings.tab_details);
         set_switch(&c.tab_icons, settings.tab_icons);
+        set_switch(&c.font_smoothing, settings.font.smoothing);
         select_choice(&c.tab_icon_colors, settings.tab_icon_colors);
         select_choice(&c.tab_running, settings.tab_running);
         select_choice(&c.tab_position, settings.tab_position);
@@ -2657,6 +2663,7 @@ impl SettingsWindow {
         let tab_details = self.popup::<TabDetails>(Key::TabDetails);
         let resize_in_steps = self.switch(Key::ResizeInSteps);
         let tab_icons = self.switch(Key::TabIcons);
+        let font_smoothing = self.switch(Key::FontSmoothing);
         let tab_icon_colors = self.popup::<IconColors>(Key::TabIconColors);
         let tab_running = self.popup::<TabRunning>(Key::TabRunning);
         let tab_position = self.popup::<TabPosition>(Key::TabPosition);
@@ -2689,6 +2696,13 @@ impl SettingsWindow {
         let options_stack = font_options::Options::stack(mtm);
         let options_row = appearance.row(Key::FontFeatures, "Options:", &options_stack, &[], None);
         let font_options = font_options::Options::new(options_stack, options_row);
+        appearance.row(
+            Key::FontSmoothing,
+            "Bolder text:",
+            &font_smoothing,
+            &[&font_smoothing],
+            Some("Draw the text the way macOS thickens it, as Terminal.app does. Off: the font's own weight."),
+        );
         appearance.row(
             Key::Size,
             "Size:",
@@ -3069,6 +3083,7 @@ impl SettingsWindow {
             split_style,
             tab_details,
             tab_icons,
+            font_smoothing,
             tab_icon_colors,
             tab_running,
             tab_position,
@@ -3576,7 +3591,7 @@ mod tests {
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
                     focus_frame = []\nsplit_style = []\ntab_details = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_running = []\ntab_position = []\n\
-                    [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\nfeatures = []\n\
+                    [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\nfeatures = []\nsmoothing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
@@ -3612,6 +3627,7 @@ mod tests {
                 Key::Size => SettingsEdit::FontSize(13.0),
                 Key::LineHeight => SettingsEdit::LineHeight(1.0),
                 Key::LetterSpacing => SettingsEdit::LetterSpacing(1.0),
+                Key::FontSmoothing => SettingsEdit::FontSmoothing(true),
                 Key::FontFeatures => SettingsEdit::FontFeature {
                     family: String::new(),
                     tag: "ss01".to_owned(),

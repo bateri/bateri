@@ -183,7 +183,11 @@ pub fn options(family: Option<&str>) -> Vec<FontOption> {
 /// their copy is what opens (`bt_gpu::register_app_fonts`). A timed run goes the same way.
 pub fn register_app_fonts() {
     if let Some(dir) = app_fonts_dir() {
-        let _ = bt_gpu::register_app_fonts(&dir);
+        // A file the system refuses (damaged, quarantined) leaves its family short of a
+        // face; say so on standard error, as the other font diagnostics do.
+        for file in bt_gpu::register_app_fonts(&dir).refused.iter() {
+            eprintln!("bateri: the system refused the font {}", file.display());
+        }
     }
 }
 

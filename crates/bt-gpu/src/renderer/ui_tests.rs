@@ -290,6 +290,41 @@ fn style(family: Family, size_px: f64, weight: u16) -> TextStyle {
 }
 
 #[test]
+fn the_font_smoothing_reaches_the_pages_text_and_the_lists_are_built_again() {
+    if !proportional() {
+        return;
+    }
+    let r = renderer();
+    let font = r
+        .ui_font(&style(Family::System, 32.0, 400))
+        .expect("the system face opens");
+    let line = r.ui_shape(font, "HHHH").expect("shapes");
+    let ink = |r: &Renderer| -> u64 {
+        let mut list = UiList::new();
+        r.ui_text(
+            &mut list,
+            &line,
+            [10.0, 12.0],
+            tint(WHITE, 1.0),
+            UiRect::UNBOUNDED,
+        );
+        r.render_ui_offscreen(SHEET as u32, BACKGROUND, &list)
+            .iter()
+            .map(|&b| u64::from(b))
+            .sum()
+    };
+    let thin = ink(&r);
+    assert!(!r.ui_flushed(), "nothing was emptied yet");
+    let on = bt_core::FontOptions {
+        smoothing: true,
+        ..bt_core::FontOptions::default()
+    };
+    assert!(r.set_font(&on));
+    assert!(r.ui_flushed(), "a list built before holds thin glyphs");
+    assert!(ink(&r) > thin, "the page's text is drawn heavier");
+}
+
+#[test]
 fn text_lands_inside_the_line_it_was_measured_as_and_in_its_colour() {
     if !proportional() {
         return;
