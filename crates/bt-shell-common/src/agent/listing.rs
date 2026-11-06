@@ -160,13 +160,49 @@ pub struct Tab {
     pub selected: bool,
     /// The pane filling the tab, when one is zoomed.
     pub zoomed: Option<Pane>,
+    /// The flat area.
     pub tree: Node,
+    /// The floating cards, back to front.
+    pub cards: Vec<Card>,
 }
 
 impl Tab {
     /// Nothing in it is a terminal of this server.
     fn elsewhere(&self) -> bool {
-        self.tree.folded() == Node::Pane(Pane::Elsewhere)
+        let none = Node::Pane(Pane::Elsewhere);
+        self.tree.folded() == none && self.cards.iter().all(|card| card.tree.folded() == none)
+    }
+}
+
+/// A floating card of a tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Card {
+    /// The panes in it: one, or a split of several.
+    pub tree: Node,
+    /// The card is a capsule: it is not shown, its panes are not on screen.
+    pub minimized: bool,
+}
+
+/// Which layer of its tab a pane is in: the flat area (both false), a shown card, or a capsule.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Layer {
+    floating: bool,
+    minimized: bool,
+}
+
+impl Layer {
+    /// The flat area.
+    const FLAT: Layer = Layer {
+        floating: false,
+        minimized: false,
+    };
+
+    /// The layer of a card's panes.
+    fn of(card: &Card) -> Layer {
+        Layer {
+            floating: true,
+            minimized: card.minimized,
+        }
     }
 }
 
@@ -651,9 +687,8 @@ impl Scene {
     }
 
     fn json_tab(&self, out: &mut String, window: &Window, tab: &Tab) {
-        let tree = tab.tree.folded();
         out.push('{');
-        if tree == Node::Pane(Pane::Elsewhere) {
+        if tab.elsewhere() {
             out.push_str("\"elsewhere\":true,\"keys\":");
             json_optional(out, tab.keys.as_deref());
             let _ = write!(out, ",\"selected\":{}}}", tab.selected);
@@ -674,7 +709,7 @@ impl Scene {
         json_optional(out, tab.title.as_deref());
         let _ = write!(out, ",\"selected\":{},\"zoomed\":", tab.selected);
         match &tab.zoomed {
-            Some(pane) => self.json_pane(out, pane, None),
+            Some(pane) => self.json_pane(out, pane, None, None),
             None => out.push_str("null"),
         }
         out.push_str(",\"tree\":");
@@ -686,42 +721,72 @@ impl Scene {
                     .as_ref()
                     .is_none_or(|zoomed| *zoomed == Pane::Terminal(name.to_owned()))
         };
-        self.json_node(out, &tree, &on_screen);
-        out.push('}');
+        self.json_node(out, &tab.tree.folded(), &on_screen, Layer::FLAT);
+        // A card is over the zoom: it is on screen wherever its tab is, unless it is a capsule.
+        let over = |_: &str| window.visible && tab.selected;
+        out.push_str(",\"cards\":[");
+        for (c, card) in tab.cards.iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            self.json_node(out, &card.tree.folded(), &over, Layer::of(card));
+        }
+        out.push_str("]}");
     }
 
-    fn json_pane(&self, out: &mut String, pane: &Pane, on_screen: Option<bool>) {
+    /// A pane as an object. `on_screen` is told for a terminal of this server only, and
+    /// `layer` for every pane that is a terminal at all: `floating` and `minimized` are on each
+    /// of them, in the flat area too, so that a line has the same keys whatever its layer.
+    fn json_pane(
+        &self,
+        out: &mut String,
+        pane: &Pane,
+        on_screen: Option<bool>,
+        layer: Option<Layer>,
+    ) {
         match pane {
             Pane::Terminal(name) => {
                 out.push('{');
                 json_pane_name(out, name);
                 out.push_str(",\"label\":");
                 json_optional(out, self.label_of(name).as_deref());
-                if let Some(on_screen) = on_screen {
-                    let _ = write!(out, ",\"on_screen\":{on_screen}");
-                }
-                out.push('}');
             }
             Pane::Remote { machine, name } => {
                 out.push('{');
                 json_remote_name(out, machine, name.as_deref());
-                if let Some(on_screen) = on_screen {
-                    let _ = write!(out, ",\"on_screen\":{on_screen}");
-                }
-                out.push('}');
             }
-            Pane::Elsewhere => out.push_str("{\"elsewhere\":true}"),
+            Pane::Elsewhere => {
+                out.push_str("{\"elsewhere\":true}");
+                return;
+            }
         }
+        if let Some(on_screen) = on_screen {
+            let _ = write!(out, ",\"on_screen\":{on_screen}");
+        }
+        if let Some(layer) = layer {
+            let _ = write!(
+                out,
+                ",\"floating\":{},\"minimized\":{}",
+                layer.floating, layer.minimized
+            );
+        }
+        out.push('}');
     }
 
-    fn json_node(&self, out: &mut String, node: &Node, on_screen: &dyn Fn(&str) -> bool) {
+    fn json_node(
+        &self,
+        out: &mut String,
+        node: &Node,
+        on_screen: &dyn Fn(&str) -> bool,
+        layer: Layer,
+    ) {
         match node {
             Node::Pane(pane) => {
                 let shown = match pane {
-                    Pane::Terminal(name) => Some(on_screen(name)),
+                    Pane::Terminal(name) => Some(on_screen(name) && !layer.minimized),
                     Pane::Remote { .. } | Pane::Elsewhere => None,
                 };
-                self.json_pane(out, pane, shown);
+                self.json_pane(out, pane, shown, Some(layer));
             }
             Node::Split {
                 axis,
@@ -740,9 +805,9 @@ impl Scene {
                 out.push_str(",\"ratio\":");
                 json_ratio(out, *ratio);
                 out.push_str(",\"first\":");
-                self.json_node(out, first, on_screen);
+                self.json_node(out, first, on_screen, layer);
                 out.push_str(",\"second\":");
-                self.json_node(out, second, on_screen);
+                self.json_node(out, second, on_screen, layer);
                 out.push('}');
             }
         }
@@ -844,8 +909,7 @@ fn write_tab(
     indent: usize,
     label_of: &dyn Fn(&str) -> Option<String>,
 ) {
-    let tree = tab.tree.folded();
-    let whole = tree == Node::Pane(Pane::Elsewhere);
+    let whole = tab.elsewhere();
     let _ = write!(out, "{}tab", " ".repeat(indent));
     if !whole {
         let _ = write!(out, " id:{}", named(IdKind::Tab, tab.id));
@@ -891,7 +955,37 @@ fn write_tab(
                     .as_ref()
                     .is_none_or(|zoomed| *zoomed == Pane::Terminal(name.to_owned()))
         };
-        write_node(out, &tree, indent + 2, &on_screen, label_of);
+        write_node(
+            out,
+            &tab.tree.folded(),
+            indent + 2,
+            &on_screen,
+            Layer::FLAT,
+            label_of,
+        );
+        // The cards are told after the flat area, back to front, each pane marked as floating.
+        let over = |_: &str| window.visible && tab.selected;
+        for card in &tab.cards {
+            write_node(
+                out,
+                &card.tree.folded(),
+                indent + 2,
+                &over,
+                Layer::of(card),
+                label_of,
+            );
+        }
+    }
+}
+
+/// The marks of a pane that is not in the flat area: `(floating)`, and `(minimized)` when its
+/// card is a capsule.
+fn write_layer(out: &mut String, layer: Layer) {
+    if layer.floating {
+        out.push_str(" (floating)");
+    }
+    if layer.minimized {
+        out.push_str(" (minimized)");
     }
 }
 
@@ -905,6 +999,7 @@ fn write_node(
     node: &Node,
     indent: usize,
     on_screen: &dyn Fn(&str) -> bool,
+    layer: Layer,
     label_of: &dyn Fn(&str) -> Option<String>,
 ) {
     let pad = " ".repeat(indent);
@@ -917,13 +1012,16 @@ fn write_node(
             if let Some(label) = label_of(name) {
                 let _ = write!(out, " label:\"{label}\"");
             }
-            if on_screen(name) {
+            if on_screen(name) && !layer.minimized {
                 out.push_str(" (on screen)");
             }
+            write_layer(out, layer);
             out.push('\n');
         }
         Node::Pane(Pane::Remote { machine, name }) => {
-            let _ = writeln!(out, "{pad}pane {}", remote_field(machine, name.as_deref()));
+            let _ = write!(out, "{pad}pane {}", remote_field(machine, name.as_deref()));
+            write_layer(out, layer);
+            out.push('\n');
         }
         Node::Split {
             axis,
@@ -937,8 +1035,8 @@ fn write_node(
                 Axis::Vertical => "stacked",
             };
             let _ = writeln!(out, "{pad}{word} {a}/{b}");
-            write_node(out, first, indent + 2, on_screen, label_of);
-            write_node(out, second, indent + 2, on_screen, label_of);
+            write_node(out, first, indent + 2, on_screen, layer, label_of);
+            write_node(out, second, indent + 2, on_screen, layer, label_of);
         }
     }
 }

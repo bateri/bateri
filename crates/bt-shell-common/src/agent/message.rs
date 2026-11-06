@@ -34,6 +34,7 @@ mod tests {
             ratio: None,
             keep_open: false,
             focus: false,
+            float: None,
             home: Home::default(),
             fresh: Some("/tmp".to_owned()),
             shell: Some("/opt/bin/fish".to_owned()),

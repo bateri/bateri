@@ -9074,7 +9074,8 @@ mod tests {
         // The gate stands in `place`, before `put` makes the pane: the rule every keyboard-moving
         // command passes (the cursor is in the pane that asked, its web view's included, or bateri
         // is behind, or the pane goes to another window). `put` gives the keyboard to the new pane
-        // only as that gate said.
+        // only as that gate said: in each of the three places a pane is made (a card, a split, a
+        // tab).
         let agent = include_str!("agent.rs");
         let place = &agent[agent.find("    fn place_on(").expect("place")..];
         let place = &place[..place.find("\n    }\n").expect("its end")];
@@ -9087,8 +9088,8 @@ mod tests {
         assert!(
             put.contains("let focus = place.focus;")
                 && !put.contains("holds_keyboard")
-                && put.matches("show_pane(").count() == 2
-                && put.matches("if focus {").count() == 2,
+                && put.matches("show_pane(").count() == 3
+                && put.matches("if focus {").count() == 3,
             "{put}"
         );
     }

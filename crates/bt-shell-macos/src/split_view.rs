@@ -884,6 +884,40 @@ impl SplitView {
         layers.dock(pane, beside, &ground).then_some(layers)
     }
 
+    /// [`SplitView::docked`] for a place a command names: beside flat pane `leaf`, on `side`
+    /// ([`Layers::dock_beside`]). `None` when there is no room there, `pane` does not float or
+    /// `leaf` is not in the flat area.
+    pub(crate) fn docked_beside(&self, pane: u64, leaf: u64, side: Direction) -> Option<Layers> {
+        let mut layers = self.layers();
+        let min = self.limits();
+        let ground = self.ground(&min);
+        layers
+            .dock_beside(pane, leaf, side, &ground)
+            .then_some(layers)
+    }
+
+    /// Floating pane `pane`'s card moves or changes its size as the wish says (`--at`, `--size`;
+    /// fractions of the tab: [`Layers::reframe`]). `true` if the card changed. Not a move: the
+    /// card's place is not undone, like a drag's.
+    pub(crate) fn reframe_card(
+        &self,
+        pane: u64,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+    ) -> bool {
+        let mut layers = self.layers();
+        let changed = {
+            let min = self.limits();
+            let ground = self.ground(&min);
+            layers.reframe(pane, at, size, &ground)
+        };
+        if changed {
+            self.ivars().cards.replace(layers.cards);
+            self.layout_panes();
+        }
+        changed
+    }
+
     /// The card holding `pane` comes to the front and opens if it was a capsule: a click on it,
     /// the keyboard arriving in it. `true` when something changed (a card already in front and
     /// shown changes nothing); the pane views were taken out and put back, so the keyboard
@@ -1126,7 +1160,7 @@ impl SplitView {
     pub(crate) fn swap(&self, a: u64, b: u64) -> bool {
         let before = self.snapshot();
         if !self.ivars().tree.borrow_mut().swap(a, b) {
-            return false;
+            return self.swap_in_card(a, b, &before);
         }
         if !self.fits() {
             self.ivars().tree.borrow_mut().swap(a, b);
@@ -1134,6 +1168,24 @@ impl SplitView {
         }
         self.layout_panes();
         self.slide(&before, None, card::MOVE_SECS);
+        true
+    }
+
+    /// Panes `a` and `b` of one card trade places inside it: the card keeps its place and its
+    /// share (it is held to the least its tree then needs when it is laid out). `false` and no
+    /// change if they are not in one card, or are one pane — a pane of the flat area and one
+    /// of a card do not trade: they are not in one layer.
+    fn swap_in_card(&self, a: u64, b: u64, before: &[Before]) -> bool {
+        let mut layers = self.layers();
+        let (Some(first), Some(second)) = (layers.card_of(a), layers.card_of(b)) else {
+            return false;
+        };
+        if first != second || !layers.cards[first].tree.swap(a, b) {
+            return false;
+        }
+        self.ivars().cards.replace(layers.cards);
+        self.layout_panes();
+        self.slide(before, None, card::MOVE_SECS);
         true
     }
 

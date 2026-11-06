@@ -598,15 +598,62 @@ impl Layers {
         let Some(tree) = placed else {
             return false;
         };
-        match self.cards[index].tree.remove(pane) {
-            Removal::Removed { .. } => {}
-            Removal::Last => {
-                self.cards.remove(index);
-            }
-            Removal::Missing => return false,
+        if !self.leave_card(index, pane) {
+            return false;
         }
         self.flat = tree;
         true
+    }
+
+    /// Docks floating pane `pane` beside flat pane `leaf`, on `side` — where a command says
+    /// (`move pane p9 --beside p3 --right`), not where the card's centre is. `false` and no
+    /// change when `pane` is not floating, `leaf` is not in the flat area, or there is no room
+    /// beside it on that side.
+    pub fn dock_beside(
+        &mut self,
+        pane: u64,
+        leaf: u64,
+        side: Direction,
+        ground: &Ground<'_>,
+    ) -> bool {
+        let Some(index) = self.card_of(pane) else {
+            return false;
+        };
+        let room = ground.flat_room();
+        let Some(placement) = self.flat.plan_beside(leaf, side, &Tree::Leaf(pane), &room) else {
+            return false;
+        };
+        if !self.leave_card(index, pane) {
+            return false;
+        }
+        self.flat = placement.tree;
+        true
+    }
+
+    /// `pane` leaves its card, number `index`: the card's other panes stay; an emptied card is
+    /// gone. `false` and no change when `pane` is not in it.
+    fn leave_card(&mut self, index: usize, pane: u64) -> bool {
+        match self.cards[index].tree.remove(pane) {
+            Removal::Removed { .. } => true,
+            Removal::Last => {
+                self.cards.remove(index);
+                true
+            }
+            Removal::Missing => false,
+        }
+    }
+
+    /// Floating pane `pane`'s card moves or changes its size as the wish says (`--at`, `--size`;
+    /// fractions of the tab): the corner is the top left, a size alone keeps the middle. Kept in
+    /// the tab and at the least. `false` when `pane` is not floating or nothing moved.
+    pub fn reframe(
+        &mut self,
+        pane: u64,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+        ground: &Ground<'_>,
+    ) -> bool {
+        self.edit_area(pane, ground, |area, least| area.wished(at, size, least))
     }
 
     /// Closes `pane`, wherever it is (see [`Gone`]).
@@ -1367,6 +1414,85 @@ mod tests {
         let before = layers.clone();
         assert!(!layers.dock(3, 1, &g));
         assert_eq!(layers, before);
+    }
+
+    #[test]
+    fn a_pane_docks_beside_the_pane_a_command_names_on_the_side_it_names() {
+        let g = ground(&small);
+        let mut layers = with_cards(vec![Card::of(3, Area::new(0.6, 0.1, 0.35, 0.8))]);
+        assert!(layers.dock_beside(3, 1, Direction::Left, &g));
+        assert!(layers.cards.is_empty());
+        assert_eq!(layers.flat.leaves(), vec![3, 1, 2]);
+        let mut layers = with_cards(vec![Card::of(3, Area::new(0.6, 0.1, 0.35, 0.8))]);
+        assert!(layers.dock_beside(3, 1, Direction::Down, &g));
+        assert_eq!(layers.flat.leaves(), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn docking_beside_leaves_the_cards_other_panes_and_refuses_what_is_not_there() {
+        let g = ground(&small);
+        let mut inner = Tree::Leaf(3);
+        assert!(inner.split(3, Axis::Horizontal, 4));
+        let mut layers = with_cards(vec![Card {
+            tree: inner,
+            area: Area::new(0.05, 0.1, 0.3, 0.8),
+            minimized: false,
+        }]);
+        assert!(layers.dock_beside(3, 2, Direction::Right, &g));
+        assert_eq!(layers.cards.len(), 1);
+        assert_eq!(layers.cards[0].tree, Tree::Leaf(4));
+        assert_eq!(layers.flat.leaves(), vec![1, 2, 3]);
+        let before = layers.clone();
+        // A flat pane, a stranger, and a leaf that is in no flat area do not dock.
+        assert!(!layers.dock_beside(1, 2, Direction::Right, &g));
+        assert!(!layers.dock_beside(9, 2, Direction::Right, &g));
+        assert!(!layers.dock_beside(4, 9, Direction::Right, &g));
+        assert!(!layers.dock_beside(4, 4, Direction::Right, &g));
+        assert_eq!(layers, before);
+    }
+
+    #[test]
+    fn docking_beside_with_no_room_on_that_side_changes_nothing() {
+        let huge = |_: u64| Size::new(900.0, 500.0);
+        let g = Ground {
+            bounds: Rect::new(0.0, 0.0, 1000.0, 600.0),
+            scale: 1.0,
+            flat: Spacing::DIVIDED,
+            card: Spacing::DIVIDED,
+            min: &huge,
+        };
+        let mut layers = Layers {
+            flat: Tree::Leaf(1),
+            cards: vec![Card::of(3, Area::new(0.1, 0.1, 0.8, 0.8))],
+        };
+        let before = layers.clone();
+        assert!(!layers.dock_beside(3, 1, Direction::Right, &g));
+        assert_eq!(layers, before);
+    }
+
+    #[test]
+    fn a_reframe_moves_or_resizes_the_card_as_the_wish_says() {
+        let g = ground(&small);
+        let mut layers = with_cards(vec![Card::of(3, Area::new(0.2, 0.2, 0.4, 0.4))]);
+        assert!(layers.reframe(3, Some((0.5, 0.1)), None, &g));
+        assert!(same(layers.cards[0].area, Area::new(0.5, 0.1, 0.4, 0.4)));
+        // A size alone keeps the middle.
+        assert!(layers.reframe(3, None, Some((0.2, 0.2)), &g));
+        assert!(same(layers.cards[0].area, Area::new(0.6, 0.2, 0.2, 0.2)));
+        // Both at once; outside the tab is pulled in, too small held to the least.
+        assert!(layers.reframe(3, Some((0.9, 0.9)), Some((0.5, 0.05)), &g));
+        let area = layers.cards[0].area;
+        assert!(near(area.width, 0.5) && near(area.x, 0.5));
+        assert!(area.height >= 0.1 - 1e-9 && area.y + area.height <= 1.0 + 1e-9);
+        // The same wish twice changes nothing the second time; a flat pane has no card.
+        assert!(!layers.reframe(
+            3,
+            Some((area.x, area.y)),
+            Some((area.width, area.height)),
+            &g
+        ));
+        assert!(!layers.reframe(1, Some((0.1, 0.1)), None, &g));
+        assert!(!layers.reframe(9, None, Some((0.5, 0.5)), &g));
     }
 
     #[test]

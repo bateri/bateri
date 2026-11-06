@@ -71,6 +71,7 @@ fn tab(
         selected: false,
         zoomed: None,
         tree: tree(shape, names),
+        cards: Vec::new(),
     }
 }
 
@@ -895,6 +896,21 @@ fn the_json_is_json_and_says_what_the_text_says() {
     assert_eq!(root.get("first").get("id").string(), "p4");
     assert_eq!(root.get("first").get("name"), &Json::Null);
     assert_eq!(root.get("first").get("on_screen"), &Json::Bool(true));
+    // Every pane of a terminal says the layer it is in, the flat area's too.
+    assert_eq!(
+        root.get("first").keys(),
+        [
+            "id",
+            "name",
+            "machine",
+            "label",
+            "on_screen",
+            "floating",
+            "minimized"
+        ]
+    );
+    assert_eq!(root.get("first").get("floating"), &Json::Bool(false));
+    assert_eq!(root.get("first").get("minimized"), &Json::Bool(false));
     let stacked = root.get("second");
     assert_eq!(stacked.get("axis").string(), "stacked");
     assert_eq!(stacked.get("ratio"), &Json::Number(0.6));
@@ -903,9 +919,10 @@ fn the_json_is_json_and_says_what_the_text_says() {
     assert_eq!(
         tabs[0].keys(),
         [
-            "id", "group", "keys", "label", "title", "selected", "zoomed", "tree"
+            "id", "group", "keys", "label", "title", "selected", "zoomed", "tree", "cards"
         ]
     );
+    assert_eq!(tabs[0].get("cards"), &Json::Array(Vec::new()));
     assert_eq!(tabs[0].get("id").string(), "t3");
     assert_eq!(tabs[0].get("group").string(), "g1");
     assert_eq!(tabs[0].get("label").string(), "api");
@@ -1070,7 +1087,7 @@ fn the_json_of_a_small_scene_is_this_exactly() {
         terminals: vec![row(shell)],
     };
     let expected = "{\"caller\":\"p4\",\"typing\":null,\"windows\":[
-{\"id\":\"w1\",\"visible\":true,\"groups\":[{\"id\":\"g1\",\"label\":\"api\"}],\"tabs\":[{\"id\":\"t3\",\"group\":\"g1\",\"keys\":\"⌘1\",\"label\":null,\"title\":null,\"selected\":true,\"zoomed\":null,\"tree\":{\"axis\":\"stacked\",\"ratio\":0.333,\"first\":{\"id\":\"p4\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true},\"second\":{\"id\":\"p5\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true}}}]}
+{\"id\":\"w1\",\"visible\":true,\"groups\":[{\"id\":\"g1\",\"label\":\"api\"}],\"tabs\":[{\"id\":\"t3\",\"group\":\"g1\",\"keys\":\"⌘1\",\"label\":null,\"title\":null,\"selected\":true,\"zoomed\":null,\"tree\":{\"axis\":\"stacked\",\"ratio\":0.333,\"first\":{\"id\":\"p4\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true,\"floating\":false,\"minimized\":false},\"second\":{\"id\":\"p5\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true,\"floating\":false,\"minimized\":false}},\"cards\":[]}]}
 ],\"terminals\":[
 {\"id\":\"p4\",\"name\":null,\"machine\":null,\"state\":\"running\",\"activity\":\"idle\",\"program\":\"zsh\",\"directory\":\"/home/ada\",\"cols\":120,\"rows\":30,\"exit\":null,\"secret\":false,\"label\":null,\"started\":100,\"front_started\":null,\"front_is_own\":true,\"output_at\":160,\"opened_by\":null,\"placed\":\"tab\",\"window\":\"w1\",\"group\":\"g1\",\"tab\":\"t3\"}
 ]}
@@ -1250,4 +1267,154 @@ fn the_rows_know_who_opened_each_terminal_and_which_wait_for_a_pane() {
         .find(|line| line.starts_with("p9"))
         .expect("p9");
     assert!(line.contains("waiting"), "{line}");
+}
+
+/// A selected tab with `1 | 2` flat (p4, p5) and the cards `cards` over it.
+fn floated(cards: Vec<Card>) -> Scene {
+    let names = [(1, "p4"), (2, "p5"), (3, "p9"), (4, "p10")];
+    Scene {
+        caller: None,
+        typing: None,
+        windows: Some(vec![Window {
+            id: 1,
+            visible: true,
+            groups: Vec::new(),
+            tabs: vec![Tab {
+                selected: true,
+                cards,
+                ..tab(
+                    3,
+                    None,
+                    None,
+                    &pair(Axis::Horizontal, 0.5, leaf(1), leaf(2)),
+                    &names,
+                )
+            }],
+        }]),
+        terminals: Vec::new(),
+    }
+}
+
+fn card_of(shape: &Tree, minimized: bool) -> Card {
+    Card {
+        tree: tree(shape, &[(1, "p4"), (2, "p5"), (3, "p9"), (4, "p10")]),
+        minimized,
+    }
+}
+
+#[test]
+fn a_floating_pane_is_marked_in_the_text_and_a_capsule_is_not_on_screen() {
+    let scene = floated(vec![card_of(&leaf(3), false), card_of(&leaf(4), true)]);
+    let text = scene.text(NOW);
+    let layout = text.split("\n\n").next().expect("the layout");
+    assert_eq!(
+        layout,
+        "window id:w1\n  tab id:t3 (selected)\n    side by side 50/50\n      pane id:p4 (on screen)\n      pane id:p5 (on screen)\n    pane id:p9 (on screen) (floating)\n    pane id:p10 (floating) (minimized)"
+    );
+}
+
+#[test]
+fn a_card_stays_on_screen_over_a_zoom_and_goes_with_its_tab() {
+    let mut scene = floated(vec![card_of(&leaf(3), false)]);
+    let tab = &mut scene.windows.as_mut().expect("windows")[0].tabs[0];
+    tab.zoomed = Some(terminal("p4"));
+    let text = scene.text(NOW);
+    // The flat pane that is not zoomed is behind the zoom; the card is over it.
+    assert!(text.contains("pane id:p5\n"), "{text}");
+    assert!(text.contains("pane id:p9 (on screen) (floating)"), "{text}");
+    // The tab is not the selected one: nothing of it is on screen.
+    let mut scene = floated(vec![card_of(&leaf(3), false)]);
+    scene.windows.as_mut().expect("windows")[0].tabs[0].selected = false;
+    let text = scene.text(NOW);
+    assert!(text.contains("pane id:p9 (floating)\n"), "{text}");
+}
+
+#[test]
+fn a_card_with_several_panes_marks_each_of_them() {
+    let shape = pair(Axis::Vertical, 0.5, leaf(3), leaf(4));
+    let text = floated(vec![card_of(&shape, false)]).text(NOW);
+    assert!(text.contains("    stacked 50/50\n      pane id:p9 (on screen) (floating)\n      pane id:p10 (on screen) (floating)\n"), "{text}");
+}
+
+#[test]
+fn the_json_gives_every_pane_the_floating_and_minimized_keys_and_the_cards_a_list() {
+    let scene = floated(vec![card_of(&leaf(3), false), card_of(&leaf(4), true)]);
+    let parsed = Json::parse(&scene.json());
+    let tab = &parsed.get("windows").items()[0].get("tabs").items()[0];
+    let cards = tab.get("cards").items();
+    assert_eq!(cards.len(), 2);
+    for card in cards {
+        assert_eq!(
+            card.keys(),
+            [
+                "id",
+                "name",
+                "machine",
+                "label",
+                "on_screen",
+                "floating",
+                "minimized"
+            ]
+        );
+    }
+    assert_eq!(cards[0].get("id").string(), "p9");
+    assert_eq!(cards[0].get("floating"), &Json::Bool(true));
+    assert_eq!(cards[0].get("minimized"), &Json::Bool(false));
+    assert_eq!(cards[0].get("on_screen"), &Json::Bool(true));
+    assert_eq!(cards[1].get("id").string(), "p10");
+    assert_eq!(cards[1].get("floating"), &Json::Bool(true));
+    assert_eq!(cards[1].get("minimized"), &Json::Bool(true));
+    assert_eq!(cards[1].get("on_screen"), &Json::Bool(false));
+    // The flat panes have the same keys, with the flat values.
+    let flat = tab.get("tree").get("first");
+    assert_eq!(flat.get("floating"), &Json::Bool(false));
+    assert_eq!(flat.get("minimized"), &Json::Bool(false));
+}
+
+#[test]
+fn a_card_of_other_machines_is_told_as_that_and_a_tab_of_only_such_is_one_line() {
+    // A card of a pane nothing is told of: the line says there is something, and no more.
+    let none = Card {
+        tree: Node::Pane(Pane::Elsewhere),
+        minimized: false,
+    };
+    let text = floated(vec![none.clone()]).text(NOW);
+    assert!(text.contains("    another machine\n"), "{text}");
+    assert!(!text.contains("floating"), "{text}");
+    let json = floated(vec![none]).json();
+    assert!(json.contains("\"cards\":[{\"elsewhere\":true}]"), "{json}");
+    // A tab whose flat area and every card are other machines' is the one line, with no id.
+    let mut scene = floated(vec![Card {
+        tree: Node::Pane(Pane::Elsewhere),
+        minimized: false,
+    }]);
+    let tab = &mut scene.windows.as_mut().expect("windows")[0].tabs[0];
+    tab.tree = Node::Pane(Pane::Elsewhere);
+    let text = scene.text(NOW);
+    assert!(text.contains("window another machine"), "{text}");
+}
+
+#[test]
+fn a_card_that_is_a_terminal_of_another_machine_seen_by_the_level_is_marked_too() {
+    let remote = Card {
+        tree: Node::Pane(Pane::Remote {
+            machine: "prod".to_owned(),
+            name: Some("p9".to_owned()),
+        }),
+        minimized: true,
+    };
+    let scene = floated(vec![remote]);
+    let text = scene.text(NOW);
+    assert!(
+        text.contains("    pane id:p9@prod (floating) (minimized)\n"),
+        "{text}"
+    );
+    let parsed = Json::parse(&scene.json());
+    let card = &parsed.get("windows").items()[0].get("tabs").items()[0]
+        .get("cards")
+        .items()[0];
+    assert_eq!(card.get("floating"), &Json::Bool(true));
+    assert_eq!(card.get("minimized"), &Json::Bool(true));
+    // The level sees another machine's pane but not whether it is on screen: no such key.
+    assert!(!card.keys().contains(&"on_screen"), "{card:?}");
 }

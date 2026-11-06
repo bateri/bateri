@@ -66,7 +66,7 @@ use bt_core::CommandLevel;
 use bt_core::PaneUuid;
 use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
-use bt_shell_common::agent::listing::{self, Node, Pane, Scene, Tab, Window};
+use bt_shell_common::agent::listing::{self, Card, Node, Pane, Scene, Tab, Window};
 use bt_shell_common::agent::message::{
     self, Failure, Format, Kind, Place, Placed, Reply, WindowHome,
 };
@@ -510,6 +510,13 @@ impl<'a> World<'a> {
             share: place.share(),
         };
         let landing = match dest {
+            // A floating pane stands where its frame says: nothing to plan beside.
+            Dest::Anchor | Dest::Tab(_) if place.float.is_some() => Landing {
+                spot: Spot::NewTab,
+                landed: Landed::AsAsked,
+                squeezed: false,
+                hidden: false,
+            },
             Dest::Anchor | Dest::Tab(_) => into
                 .container()
                 .plan_agent_pane(beside.id(), incoming, &ask)
@@ -539,6 +546,24 @@ impl<'a> World<'a> {
         let focus = place.focus;
         let label = place.home.label.as_deref();
         let (at_tab, at_group, at_window) = match (landing.spot, dest) {
+            // A floating pane: a card over the tab, in front, as `--at` and `--size` say. The
+            // keyboard goes to it only if the person is where it opens ([`World::place_on`]).
+            (_, Dest::Anchor | Dest::Tab(_)) if place.float.is_some() => {
+                let frame = place.float.unwrap_or_default();
+                let (wish_at, wish_size) = arrange::wished(&frame);
+                let (config, _) = app.pane_launch_as(
+                    into.id(),
+                    Some(anchor),
+                    Opening::Split,
+                    Some(&start),
+                    incoming,
+                );
+                let pane = into.add_floating_with(mtm, config, wish_at, wish_size, false)?;
+                if focus {
+                    window.show_pane(into.id(), pane.id());
+                }
+                standing(&window, &into)
+            }
             (Spot::Beside { tree, landing: at }, _) => {
                 let (config, _) = app.pane_launch_as(
                     into.id(),
@@ -803,6 +828,22 @@ impl Shell for World<'_> {
             Ok(dest) => dest,
             Err(failure) => return Placing::Refused(failure),
         };
+        // A floating pane floats over a tab (the anchor's, or the one `--tab` names) and is no
+        // split: no side, no share and no tab, group or window of its own.
+        if place.float.is_some() {
+            if !matches!(dest, Dest::Anchor | Dest::Tab(_)) || place.side.is_some() {
+                return Placing::Refused(Failure::new(
+                    Kind::Usage,
+                    "a floating pane floats over a tab: it goes with no side, --new-tab, --group, --window or --new-group",
+                ));
+            }
+            if place.ratio.is_some() {
+                return Placing::Refused(Failure::new(
+                    Kind::Usage,
+                    "a floating pane is no split: it has no --ratio",
+                ));
+            }
+        }
         // `--focus` is the keyboard moving, so it passes the rule every such command passes
         // ([`bt_shell_common::agent::arrange`]): the cursor is in the pane that asked, or bateri is
         // behind, or the pane goes to another window than the one being typed in. Otherwise the
@@ -1009,6 +1050,7 @@ fn windows_of(
             if typing.is_none() && focused.is_active() {
                 typing.clone_from(&own);
             }
+            let layers = tab.container().layers();
             tabs.push(Tab {
                 id: tab.number(),
                 group: groups
@@ -1023,7 +1065,15 @@ fn windows_of(
                 label: tab.name(),
                 title: own.as_ref().and_then(|_| tab.automatic_title()),
                 selected: window.is_selected(tab.id()),
-                tree: Node::of(&tab.container().tree(), &named),
+                tree: Node::of(&layers.flat, &named),
+                cards: layers
+                    .cards
+                    .iter()
+                    .map(|card| Card {
+                        tree: Node::of(&card.tree, &named),
+                        minimized: card.minimized,
+                    })
+                    .collect(),
                 zoomed: tab.zoomed().map(named),
             });
         }
@@ -1197,6 +1247,37 @@ mod tests {
         );
         assert!(
             include_str!("pane.rs").contains("child::shell_command_for(asked_shell, &shell_args)")
+        );
+    }
+
+    /// A floating pane is refused for what contradicts it before anything is made, opens as a card
+    /// (no split is planned) and takes the keyboard only if the rule gave it. A source scan.
+    #[test]
+    fn a_floating_pane_is_a_card_and_takes_the_keyboard_only_by_the_rule() {
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let body = |signature: &str| {
+            let at = source.find(signature).expect(signature);
+            &source[at..at + source[at..].find("\n    }\n").expect("its end")]
+        };
+        let place = body("    fn place_on(");
+        let whither = place.find("self.whither(").expect(place);
+        let refused = place
+            .find("a floating pane floats over a tab")
+            .expect(place);
+        let put = place.find("self.put(").expect(place);
+        assert!(whither < refused && refused < put, "{place}");
+        assert!(place.contains("place.ratio.is_some()"), "{place}");
+        let put = body("    fn put(");
+        let card = put.find("add_floating_with(").expect(put);
+        let planned = put.find("add_planned_pane(").expect(put);
+        assert!(card < planned, "the card comes before the split: {put}");
+        // The keyboard stays unless `--focus` was given and the rule let it go.
+        let float = &put[put.find("place.float.is_some() =>").expect(put)..planned];
+        assert!(
+            float.contains("add_floating_with(mtm, config, wish_at, wish_size, false)")
+                && float.contains("if focus {"),
+            "{float}"
         );
     }
 

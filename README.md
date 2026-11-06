@@ -193,6 +193,8 @@ bateri move tab t3 --group g1                    # or --window w1, which also ta
 bateri move pane p9 --beside p3 --right          # or --tab t3, beside its focused pane
 bateri move pane p9 --new-tab web                # a tab of its own, its name optional; --group g1, --new-group api or --window w1 say where; prints the tab
 bateri zoom [p9]    bateri swap p9 p3    bateri resize [p9] --left [--by N]
+bateri split --float [--at X,Y] [--size W,H]     # a floating pane over this tab; a pane or --tab t3 says whose; percents of the tab
+bateri move pane p9 --float [--at X,Y] [--size W,H]   # a flat pane floats; --dock puts it back; --at, --size alone move or resize it
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
 bateri split -S prod -- make test                # a terminal on the server prod (full level only); prints p9@prod
 bateri send p9@prod 'q'                          # capture, send-key and wait reach it the same way
@@ -208,6 +210,19 @@ by default the focus stays where it was). Fields that contradict each other
 (`split p9 --tab t3`, `tab --group g1 --window w1`) are refused. Without a
 program the pane runs bateri's shell. On this Mac `--keep-open` leaves your login
 shell in the pane when the program ends, and `--wait` needs a program.
+
+**Floating panes.** A floating pane is a card over the tab's other panes, with
+its own place and size, and the flat area always keeps at least one pane.
+`split --float` opens one; `move pane p9 --float` lifts a flat pane out of its
+place, `--dock` puts a floating one back among the flat panes and `--at X,Y`
+or `--size W,H` (percents of the tab, from 0 to 100) move or resize it. `--float`
+goes with no side, `--ratio`, `--new-tab`, `--group` or `--window`. `move pane
+p9 --beside p3 --right`, `--tab t3` and `--new-tab` take a floating pane too and
+put it flat where they say. `resize p9 --right` or `--left` changes the card's
+width and `--below` or `--above` its height, as ⌃⌘ + arrow does. `zoom p9` of a
+floating pane, `swap` of two panes that are not in one layer, `--dock` or `--at`
+of a flat pane are mistakes (64). `bateri ls` marks such a pane `(floating)`, and
+`--json` gives every pane `floating` and `minimized`.
 
 **What a machine may do** is a setting per machine, `off`, `own`, `screen` or
 `full`, and nobody is asked ([`[commands]`](docs/SETTINGS.md#commands)). `own`,

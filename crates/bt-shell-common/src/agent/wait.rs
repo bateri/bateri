@@ -110,6 +110,7 @@ mod tests {
                 ratio: None,
                 keep_open: false,
                 focus: false,
+                float: None,
                 fresh: None,
                 shell: None,
                 server: None,

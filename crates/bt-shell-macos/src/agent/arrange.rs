@@ -19,7 +19,7 @@ use bt_shell_common::agent::Anchor;
 use bt_shell_common::agent::arrange::{self as rule, Go, Keyboard};
 use bt_shell_common::agent::level::{self, Act, Panes, Verdict};
 use bt_shell_common::agent::message::{
-    Arrange, Failure, Home, Kind, Placed, Reply, Subject, TabHome, WindowHome,
+    Arrange, Failure, Frame, Home, Kind, Placed, Reply, Subject, TabHome, WindowHome,
 };
 use bt_shell_common::agent::place::{Landed, Side, direction};
 use bt_shell_common::agent::serve::Server;
@@ -189,6 +189,13 @@ fn carry_out(
         Arrange::Focus(subject) => focus(app, server, caller.as_ref(), from, subject),
         Arrange::Zoom(named) => {
             let target = pane_or_own(app, server, from, named.as_ref())?;
+            // The zoom is the flat area's: a pane that floats has none.
+            if target.tab.container().floating(target.pane.id()) {
+                return Err(usage(format!(
+                    "{} floats: only a pane of the flat area zooms",
+                    named_or(named.as_ref(), "the pane")
+                )));
+            }
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
             target
                 .tab
@@ -206,6 +213,14 @@ fn carry_out(
                     ),
                 ));
             }
+            // Both stand in the flat area, or both in one floating card: a pane that floats
+            // does not trade places with one under it.
+            let layers = first.tab.container().layers();
+            if layers.card_of(first.pane.id()) != layers.card_of(second.pane.id()) {
+                return Err(usage(format!(
+                    "{pane} and {other} are not in the same layer: both stand in the flat area, or both in one floating card"
+                )));
+            }
             lays_out(app, caller.as_ref(), &first.window, &first.tab)?;
             if first
                 .window
@@ -219,6 +234,13 @@ fn carry_out(
         Arrange::Move { pane, beside, side } => {
             let moving = pane_or_own(app, server, from, Some(pane))?;
             let target = pane_or_own(app, server, from, Some(beside))?;
+            // A pane goes beside one of the flat area: a card has no neighbour a tree could
+            // be planned for.
+            if target.tab.container().floating(target.pane.id()) {
+                return Err(usage(format!(
+                    "{beside} floats: a pane goes beside a pane of the flat area; dock {beside} first (move --dock)"
+                )));
+            }
             lays_out(app, caller.as_ref(), &moving.window, &moving.tab)?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
             // A pane that joins another tab changes that tab: it is the level's to judge as a
@@ -261,12 +283,92 @@ fn carry_out(
             let direction = direction_of(*side)?;
             if target.tab.resize_pane(&target.pane, direction, *steps) {
                 Ok(())
+            } else if target.tab.container().floating(target.pane.id()) {
+                Err(failed("the card is at the edge of the tab or at its least"))
             } else {
                 Err(failed("the divider is at its limit"))
             }
         }
+        Arrange::Float { pane, frame } => {
+            let target = pane_or_own(app, server, from, Some(pane))?;
+            let container = target.tab.container();
+            if container.floating(target.pane.id()) {
+                return Err(usage(format!("{pane} floats already")));
+            }
+            if container.flat_panes().len() < 2 {
+                return Err(usage(format!(
+                    "{pane} is the only pane of the flat area: the flat area keeps one pane"
+                )));
+            }
+            lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
+            let (at, size) = wished(frame);
+            if !target.tab.float_pane(target.pane.id(), at, size) {
+                return Err(failed(format!("{pane} could not float")));
+            }
+            return pane_stands(app, server, from, pane);
+        }
+        Arrange::Dock(pane) => {
+            let target = floating_pane(app, server, from, pane)?;
+            lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
+            if !target.tab.dock_pane(target.pane.id()) {
+                return Err(failed(format!("there is no room to dock {pane}")));
+            }
+            return pane_stands(app, server, from, pane);
+        }
+        Arrange::Reframe { pane, frame } => {
+            let target = floating_pane(app, server, from, pane)?;
+            lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
+            let (at, size) = wished(frame);
+            // A card that is there already is no failure, as a pane in the tab it is asked to
+            // join is not.
+            target.tab.reframe_pane(target.pane.id(), at, size);
+            return pane_stands(app, server, from, pane);
+        }
     };
     done.map(|()| Reply::Done)
+}
+
+fn usage(text: impl Into<String>) -> Failure {
+    Failure::new(Kind::Usage, text)
+}
+
+/// The words for a pane a command named, or `what` when it named none (its own).
+fn named_or(named: Option<&Anchor>, what: &str) -> String {
+    named.map_or_else(|| what.to_owned(), ToString::to_string)
+}
+
+/// A corner and a size as fractions of the tab, each or neither ([`wished`]).
+pub(super) type Wish = (Option<(f64, f64)>, Option<(f64, f64)>);
+
+/// A frame as the layers read it: the corner and the size as fractions of the tab (the command's
+/// percents, 0 to 100).
+pub(super) fn wished(frame: &Frame) -> Wish {
+    let at = frame
+        .at
+        .map(|at| (f64::from(at.x) / 100.0, f64::from(at.y) / 100.0));
+    let size = frame.size.map(|size| {
+        (
+            f64::from(size.width) / 100.0,
+            f64::from(size.height) / 100.0,
+        )
+    });
+    (at, size)
+}
+
+/// The pane a command about a floating pane names, found: it floats, or the command is told it
+/// does not.
+fn floating_pane(
+    app: &AppDelegate,
+    server: &Server,
+    from: Option<&str>,
+    named: &Anchor,
+) -> Result<Spot, Failure> {
+    let target = pane_or_own(app, server, from, Some(named))?;
+    if target.tab.container().floating(target.pane.id()) {
+        Ok(target)
+    } else {
+        Err(usage(format!("{named} is not floating")))
+    }
 }
 
 /// The answer of a move: where the tab stands now.
@@ -474,6 +576,17 @@ fn move_beside(
         return Err(Failure::new(Kind::Usage, "a pane cannot go beside itself"));
     }
     if moving.tab.id() == target.tab.id() {
+        // A pane that floats docks beside the other, on the side asked.
+        if moving.tab.container().floating(moving.pane.id()) {
+            return if moving
+                .tab
+                .dock_pane_beside(moving.pane.id(), target.pane.id(), direction)
+            {
+                Ok(())
+            } else {
+                Err(failed("there is no room for it there"))
+            };
+        }
         let placement = moving
             .tab
             .plan_move_within(moving.pane.id(), target.pane.id(), direction)
@@ -897,6 +1010,98 @@ fn reach(target: &Target, go: Go) -> Done {
 
 #[cfg(test)]
 mod tests {
+    use bt_shell_common::agent::message as wire;
+
+    use super::wished;
+
+    #[test]
+    fn a_frame_is_percents_of_the_tab_and_the_layers_read_fractions_of_it() {
+        let frame = wire::Frame {
+            at: Some(wire::Spot { x: 25, y: 0 }),
+            size: Some(wire::Extent {
+                width: 50,
+                height: 100,
+            }),
+        };
+        assert_eq!(wished(&frame), (Some((0.25, 0.0)), Some((0.5, 1.0))));
+        // What is not asked stays the app's to choose.
+        assert_eq!(wished(&wire::Frame::default()), (None, None));
+        let only_size = wire::Frame {
+            at: None,
+            size: Some(wire::Extent {
+                width: 30,
+                height: 40,
+            }),
+        };
+        assert_eq!(wished(&only_size), (None, Some((0.3, 0.4))));
+    }
+
+    /// The new commands judge in the order the others do: a mistake of the command (64) before the
+    /// keyboard rule (a refusal, 77) before any change, and what is changed is the window code's
+    /// own function. A source scan: the windows are AppKit's and need a window server.
+    #[test]
+    fn floating_docking_and_reframing_say_what_is_wrong_before_they_touch_the_layout() {
+        let source = include_str!("arrange.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let arm = |head: &str, next: &str| {
+            let at = source.find(head).expect(head);
+            let end = at + source[at..].find(next).expect(next);
+            &source[at..end]
+        };
+        let float = arm(
+            "Arrange::Float { pane, frame } =>",
+            "Arrange::Dock(pane) =>",
+        );
+        let flat = float.find("floats already").expect(float);
+        let only = float.find("only pane of the flat area").expect(float);
+        let lays = float.find("lays_out(").expect(float);
+        let made = float.find(".float_pane(").expect(float);
+        assert!(flat < lays && only < lays && lays < made, "{float}");
+        let dock = arm(
+            "Arrange::Dock(pane) =>",
+            "Arrange::Reframe { pane, frame } =>",
+        );
+        let found = dock.find("floating_pane(").expect(dock);
+        let lays = dock.find("lays_out(").expect(dock);
+        let made = dock.find(".dock_pane(").expect(dock);
+        assert!(found < lays && lays < made, "{dock}");
+        let reframe = arm(
+            "Arrange::Reframe { pane, frame } =>",
+            "\n    };\n    done.map",
+        );
+        let found = reframe.find("floating_pane(").expect(reframe);
+        let lays = reframe.find("lays_out(").expect(reframe);
+        let made = reframe.find(".reframe_pane(").expect(reframe);
+        assert!(found < lays && lays < made, "{reframe}");
+        assert!(
+            source.contains("\"{named} is not floating\""),
+            "a flat pane is told it is not floating"
+        );
+        // Zoom and swap look at the layer first; a pane goes beside a flat pane only.
+        let zoom = arm(
+            "Arrange::Zoom(named) =>",
+            "Arrange::Swap { pane, other } =>",
+        );
+        assert!(
+            zoom.find("floating(").expect(zoom) < zoom.find("zoom_pane(").expect(zoom),
+            "{zoom}"
+        );
+        let swap = arm("Arrange::Swap { pane, other } =>", "Arrange::Move { pane,");
+        assert!(
+            swap.find("card_of(").expect(swap) < swap.find("swap_panes(").expect(swap),
+            "{swap}"
+        );
+        let moved = arm(
+            "Arrange::Move { pane, beside, side } =>",
+            "Arrange::PaneIntoTab",
+        );
+        assert!(
+            moved.find("floats: a pane goes beside").expect(moved)
+                < moved.find("move_beside(").expect(moved),
+            "{moved}"
+        );
+    }
+
     /// What changes a tab, a group or a window passes the level before it touches a window; the
     /// keyboard rule looks at a tab that moves; and nothing here goes through a question (a
     /// program on a server cannot answer one, and nobody is asked). A source scan: the windows

@@ -925,8 +925,20 @@ impl TerminalTab {
 
     /// `bateri resize p9 --left --by 3`: the divider of `pane` on `direction` moves by `steps`
     /// of the pane's cells, as ⌃⌘ + arrow does for the focused pane (the zoom ends; the keyboard
-    /// stays where it is). `false` when the divider is at its limit or the pane has no cell yet.
+    /// stays where it is). For a floating pane the edge of its card moves by `steps` of the
+    /// tab ([`SplitView::resize_card`]). `false` when the divider is at its limit or the pane
+    /// has no cell yet.
     pub(crate) fn resize_pane(&self, pane: &TerminalPane, direction: Direction, steps: u8) -> bool {
+        // A floating pane's card has edges of its own (⌃⌘ + arrow: the right and bottom ones move
+        // by a step of the tab each), and the zoom, which is the flat area's, stays.
+        if self.ivars().container.floating(pane.id()) {
+            let moved = (0..steps)
+                .filter(|_| self.ivars().container.resize_card(pane.id(), direction))
+                .count()
+                > 0;
+            self.layout_changed();
+            return moved;
+        }
         self.set_zoom(None);
         let Some(cell) = pane.cell_size() else {
             return false;
@@ -1088,6 +1100,52 @@ impl TerminalTab {
         true
     }
 
+    /// `bateri move p9 --float [--at X,Y] [--size W,H]`: flat pane `pane` floats, where and as big
+    /// as the wish says (fractions of the tab; none: [`Layers::float_out`]'s own). The keyboard
+    /// stays in the pane that held it. `false` when the layers refuse (the flat area's only pane,
+    /// a pane that does not stand in it) or the move is not made.
+    pub(crate) fn float_pane(
+        &self,
+        pane: u64,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+    ) -> bool {
+        self.float_move(pane, at, size)
+            .is_some_and(|wanted| self.relayer(wanted))
+    }
+
+    /// `bateri move p9 --dock`: floating pane `pane` docks where [`Layers::dock`] puts it, as ⌥⌘↩
+    /// does. `false` when there is no room or it does not float.
+    pub(crate) fn dock_pane(&self, pane: u64) -> bool {
+        self.dock_move(pane)
+            .is_some_and(|wanted| self.relayer(wanted))
+    }
+
+    /// `bateri move p9 --beside p3 --right` with `p9` floating and `p3` in the flat area of its
+    /// tab: `pane` docks beside `leaf`, on `side` ([`Layers::dock_beside`]). `false` when there
+    /// is no room there.
+    pub(crate) fn dock_pane_beside(&self, pane: u64, leaf: u64, side: Direction) -> bool {
+        let Some(layers) = self.ivars().container.docked_beside(pane, leaf, side) else {
+            return false;
+        };
+        self.relayer(Move::Dock { pane, layers })
+    }
+
+    /// `bateri move p9 --at X,Y`, `--size W,H`: floating pane `pane`'s card moves or changes its
+    /// size ([`SplitView::reframe_card`]). `false` when nothing changed.
+    pub(crate) fn reframe_pane(
+        &self,
+        pane: u64,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+    ) -> bool {
+        let changed = self.ivars().container.reframe_card(pane, at, size);
+        if changed {
+            self.layout_changed();
+        }
+        changed
+    }
+
     /// Window ▸ New Floating Pane: a new pane floating in front, from the focused pane
     /// (`AppDelegate::open_floating`: directory, point-size delta, theme and remote line from
     /// it). The zoom stays: it is the flat area's.
@@ -1112,7 +1170,22 @@ impl TerminalTab {
         at: Option<(f64, f64)>,
         size: Option<(f64, f64)>,
     ) -> Result<(), String> {
+        self.add_floating_with(mtm, launch, at, size, true)
+            .map(drop)
+    }
+
+    /// [`Self::add_floating`] for a pane that is asked for (`bateri split --float`): the keyboard
+    /// goes to it only if `focus`, and stays where it was otherwise. The new pane is returned.
+    pub(crate) fn add_floating_with(
+        &self,
+        mtm: MainThreadMarker,
+        launch: embed::Config,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+        focus: bool,
+    ) -> Result<Retained<TerminalPane>, String> {
         let container = &self.ivars().container;
+        let held = self.responder_pane().map(|pane| pane.id());
         let pane = embed::open(mtm, initial_rect(), launch).map_err(|e| e.to_string())?;
         if !container.open_card(&pane, at, size) {
             drop(pane.begin_close());
@@ -1125,9 +1198,14 @@ impl TerminalTab {
             drop(container.detach(pane.id()));
             return Err(format!("could not start the shell: {e}"));
         }
-        self.focus_pane(&pane);
+        if focus {
+            self.focus_pane(&pane);
+        } else if let Some(keeper) = held.and_then(|id| container.pane(id)) {
+            // Putting the card's views in front takes the first responder down: it goes back.
+            let _ = keeper.focus();
+        }
         self.layout_changed();
-        Ok(())
+        Ok(pane)
     }
 
     /// A layout edge, for the layout on disk (`AppDelegate::layout_changed`).
@@ -1355,7 +1433,10 @@ impl TerminalTab {
     /// if a pane would have to be smaller than its smallest in the other's
     /// place.
     pub(crate) fn swap(&self, a: u64, b: u64) -> bool {
-        self.set_zoom(None);
+        // The zoom is the flat area's: two panes of a card trading places leave it as it is.
+        if !self.ivars().container.floating(a) {
+            self.set_zoom(None);
+        }
         self.ivars().container.swap(a, b)
     }
 
