@@ -6488,6 +6488,8 @@ impl AppDelegate {
 
     /// The settings window's Show in Finder: selects the settings file in a Finder window — the
     /// strip's answer to a file that cannot be written, where the way to the file is the point.
+    /// A file that is not there (the folder could not be written either) shows the folder, which
+    /// is where the file would be.
     pub(crate) fn reveal_settings(&self) {
         let Inputs::User {
             config_root: Some(root),
@@ -6496,9 +6498,14 @@ impl AppDelegate {
             return;
         };
         let path = root.join(settings::FILE_NAME);
-        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-        NSWorkspace::sharedWorkspace()
-            .activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
+        let workspace = NSWorkspace::sharedWorkspace();
+        if path.exists() {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+            workspace.activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
+        } else {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&root.to_string_lossy()));
+            workspace.openURL(&url);
+        }
     }
 
     /// View ▸ Theme ▸ Open Themes Folder: shows `themes/` under the settings directory in
@@ -6652,14 +6659,22 @@ impl AppDelegate {
         // The theme on screen for the file's choice, read without watching it: the pictures are
         // drawn in its colours.
         let dark = self.dark_appearance();
-        let (theme, _) =
-            settings::load_theme(Some(&root), settings.theme_for(dark)).or_embedded(dark);
         // The pair Appearance's example shows, loaded the same way (a theme the folder no longer
         // has falls back to the embedded one for the appearance it is for).
         let (light, _) =
             settings::load_theme(Some(&root), &settings.light_theme).or_embedded(false);
         let (dark_theme, _) =
             settings::load_theme(Some(&root), &settings.dark_theme).or_embedded(true);
+        // The one on screen is one of the pair while the theme follows the system: the pair's
+        // copy is that theme, so it is not read from the folder a second time.
+        let name = settings.theme_for(dark);
+        let theme = if dark && name == settings.dark_theme {
+            dark_theme
+        } else if !dark && name == settings.light_theme {
+            light
+        } else {
+            settings::load_theme(Some(&root), name).or_embedded(dark).0
+        };
         let themes = crate::settings_window::ThemeLists {
             embedded: &embedded,
             user: &user,
@@ -6744,6 +6759,10 @@ impl AppDelegate {
         if self.ivars().appearance_dark.replace(Some(dark)) == Some(dark) {
             return;
         }
+        // The settings window's pictures are drawn in the theme on screen and its Appearance
+        // example tags the one the system is in: they follow the system as the terminals do. This
+        // comes before the gates below, which end only the terminal windows' work.
+        self.refresh_settings_window();
         // The bit is written **before** the gate: a change arriving while there is no window
         // counts as seen too, and a window born later selects the theme from the
         // appearance anyway.

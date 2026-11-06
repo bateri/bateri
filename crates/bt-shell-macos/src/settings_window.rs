@@ -1910,6 +1910,21 @@ define_class!(
     }
 
     impl SettingsWindow {
+        /// A click on the sidebar. A different page ends the search through the selection; the
+        /// page that is already open reports no change, so a click on it, while the results
+        /// cover it, brings the page back here.
+        #[unsafe(method(sidebarClicked:))]
+        fn sidebar_clicked(&self, sender: Option<&AnyObject>) {
+            let Some(table) = sender.and_then(|s| s.downcast_ref::<NSTableView>()) else {
+                return;
+            };
+            if self.searching() && matches!(SideItem::at(table.clickedRow()), Some(SideItem::Page(_)))
+            {
+                self.clear_search();
+                self.show_selected();
+            }
+        }
+
         #[unsafe(method(popupChanged:))]
         fn popup_changed(&self, sender: Option<&AnyObject>) {
             let Some(popup) = sender.and_then(|s| s.downcast_ref::<NSPopUpButton>()) else {
@@ -2437,14 +2452,11 @@ impl SettingsWindow {
         select_choice(&c.command_level, settings.commands_level);
 
         let (items, index) = theme_items(&settings.theme, true, embedded, user);
-        fill_themes(&c.theme, &items, index);
-        self.ivars().themes.replace(items);
+        show_themes(&c.theme, &self.ivars().themes, items, index);
         let (items, index) = theme_items(&settings.light_theme, false, embedded, user);
-        fill_themes(&c.light_theme, &items, index);
-        self.ivars().light_themes.replace(items);
+        show_themes(&c.light_theme, &self.ivars().light_themes, items, index);
         let (items, index) = theme_items(&settings.dark_theme, false, embedded, user);
-        fill_themes(&c.dark_theme, &items, index);
-        self.ivars().dark_themes.replace(items);
+        show_themes(&c.dark_theme, &self.ivars().dark_themes, items, index);
         let (items, index) = contrast_items(settings.minimum_contrast);
         fill_contrasts(&c.minimum_contrast, &items, index);
         self.ivars().contrasts.replace(items);
@@ -3214,11 +3226,14 @@ impl SettingsWindow {
         table.setIntercellSpacing(NSSize::new(0.0, 1.0));
         let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("c"));
         table.addTableColumn(&column);
-        // SAFETY: the source and delegate are weak references; this object
-        // lives for the whole process (`AppDelegate`'s ivar).
+        // SAFETY: the source, delegate and target are weak references; this object
+        // lives for the whole process (`AppDelegate`'s ivar); the selector is this class's
+        // `sidebarClicked:`.
         unsafe {
             table.setDataSource(Some(ProtocolObject::from_ref(self)));
             table.setDelegate(Some(ProtocolObject::from_ref(self)));
+            table.setTarget(Some(self.target()));
+            table.setAction(Some(sel!(sidebarClicked:)));
         }
         let scroll = NSScrollView::new(mtm);
         scroll.setDocumentView(Some(&table));
@@ -4464,6 +4479,23 @@ fn set_number(number: &Number, value: f64, text: &str) {
 fn set_slide(slide: &Slide, position: f64, text: &str) {
     slide.slider.setDoubleValue(position);
     slide.value.setStringValue(&NSString::from_str(text));
+}
+
+/// Shows `items` in a theme popup. Each item carries a swatch drawn for it, so a list that is
+/// the one on screen only moves the selection (a choice made in the popup writes the file and
+/// comes back here).
+fn show_themes(
+    popup: &NSPopUpButton,
+    shown: &RefCell<Vec<ThemeItem>>,
+    items: Vec<ThemeItem>,
+    selected: usize,
+) {
+    if *shown.borrow() == items {
+        popup.selectItemAtIndex(selected as NSInteger);
+    } else {
+        fill_themes(popup, &items, selected);
+    }
+    shown.replace(items);
 }
 
 fn fill_themes(popup: &NSPopUpButton, items: &[ThemeItem], selected: usize) {

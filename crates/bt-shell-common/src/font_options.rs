@@ -264,14 +264,38 @@ pub fn options(family: Option<&str>) -> Vec<FontOption> {
 }
 
 /// The tags the file chose for `font`'s family that the font does not list: lines the font
-/// ignores without a word, which the page says. Empty for a family that is not installed.
+/// ignores without a word, which the page says. Empty for a family that is not installed. The
+/// answer is kept per family and per choice for the life of the process, like the list of
+/// options: asking opens the font and reads two tables, and the page asks on every refresh.
 pub fn lacking(font: &FontOptions) -> Vec<String> {
+    /// How many answers are kept before the lot is dropped: a family and a set of tags each,
+    /// so a session that tries every font in turn stays small.
+    const KEPT: usize = 64;
+    type Key = (String, Vec<(String, bool)>);
+    static ANSWERS: OnceLock<Mutex<HashMap<Key, Vec<String>>>> = OnceLock::new();
     let family = font
         .family
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty());
-    bt_gpu::lacking_features(family, &font.active_features())
+    let chosen = font.active_features();
+    if chosen.is_empty() {
+        return Vec::new();
+    }
+    let key = (family.unwrap_or_default().to_lowercase(), chosen);
+    let mut answers = ANSWERS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(known) = answers.get(&key) {
+        return known.clone();
+    }
+    let answer = bt_gpu::lacking_features(family, &key.1);
+    if answers.len() >= KEPT {
+        answers.clear();
+    }
+    answers.insert(key, answer.clone());
+    answer
 }
 
 /// Registers the fonts that ship with the app for this process, before the first pane opens its

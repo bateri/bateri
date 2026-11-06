@@ -177,7 +177,8 @@ a change made from the window also takes effect at once.
   does not write to a broken file — the half-finished work in it is yours; the
   lock lifts once you fix and save it.
 - **A file that cannot be written** (permissions) is reported in the strip,
-  which offers Show in Finder, and in the title bar, and the control goes back to the value in the file.
+  which offers Show in Finder, and in the title bar; the control goes back to
+  the value in the file.
 - Not shown in the window: the temporary font size (Cmd +/−; Size is the
   file's value) and settings that do not exist yet.
 

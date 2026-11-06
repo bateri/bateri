@@ -89,7 +89,7 @@ pub(super) fn entries(settings: &Settings, resolved: Resolved) -> Vec<Entry> {
     entries
 }
 
-/// Whether `query` finds `entry`: every word of the query is in the name, the description, the
+/// Whether `query` finds `entry`: the query, as typed, is in the name, the description, the
 /// choices or — only when the query has a `.` or `_` in it — the file's key; case does not
 /// matter. An empty query finds nothing.
 pub(super) fn matches(query: &str, entry: &Entry) -> bool {

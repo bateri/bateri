@@ -591,9 +591,10 @@ impl Specimens {
     }
 
     /// Gives the renderer's textures and the sessions back (the window closed); the next draw
-    /// makes them again.
+    /// makes them again, and tries for a renderer again if the last try found none.
     pub(super) fn release(&self) {
         self.stage.replace(None);
+        self.no_gpu.set(false);
         for specimen in &self.all {
             if let Body::Cards(cards) = &specimen.body {
                 for card in cards {

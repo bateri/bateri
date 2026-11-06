@@ -48,15 +48,8 @@ const PROBE_SIZE: f64 = 12.0;
 /// chain's font. Empty for a family that is not installed, for a font
 /// without a `GSUB` table (Menlo), and on a backend that cannot read tables.
 pub fn font_features(family: Option<&str>) -> Vec<FontFeature> {
-    let font = match family {
-        None => crate::app_fonts::open_default(PROBE_SIZE).0,
-        Some(name) => {
-            let (font, returned) = Backend::open(name, PROBE_SIZE);
-            if !same_family(&returned, name) {
-                return Vec::new();
-            }
-            font
-        }
+    let Some(font) = open_family(family) else {
+        return Vec::new();
     };
     let Some(gsub) = Backend::table(&font, *b"GSUB") else {
         return Vec::new();
@@ -71,17 +64,21 @@ pub fn font_features(family: Option<&str>) -> Vec<FontFeature> {
 /// default chain's font. Empty for a family that is not installed, and on a backend that cannot
 /// read tables.
 pub fn lacking_features(family: Option<&str>, chosen: &[(String, bool)]) -> Vec<String> {
-    let font = match family {
-        None => crate::app_fonts::open_default(PROBE_SIZE).0,
+    open_family(family).map_or_else(Vec::new, |font| lacking(&font, chosen))
+}
+
+/// The named family's font, opened to read its tables (`None`: the default chain's font);
+/// `None` for a family that is not installed. The list a font offers and the tags the file asks
+/// of it that it lacks are read from the same font, so the page cannot show a tile for a family
+/// it then calls missing.
+fn open_family(family: Option<&str>) -> Option<Font> {
+    match family {
+        None => Some(crate::app_fonts::open_default(PROBE_SIZE).0),
         Some(name) => {
             let (font, returned) = Backend::open(name, PROBE_SIZE);
-            if !same_family(&returned, name) {
-                return Vec::new();
-            }
-            font
+            same_family(&returned, name).then_some(font)
         }
-    };
-    lacking(&font, chosen)
+    }
 }
 
 /// Does the font have a rule that runs without the user asking for it
