@@ -108,6 +108,10 @@ pub use surface::Surface;
 /// `bt-atlas` (the precedent is [`FontNotice`]).
 pub use bt_atlas::monospaced_families;
 
+/// The fonts that ship with the app: registered for the process at launch,
+/// before the first atlas and the Font list. Re-exported for the same reason.
+pub use bt_atlas::{AppFonts, register_app_fonts};
+
 /// What the selected font offers in OpenType features — the settings window's
 /// and the palette's rows. Re-exported for the same reason.
 pub use bt_atlas::{FontFeature, font_features};

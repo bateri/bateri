@@ -1,0 +1,13 @@
+Cascadia Code 2407.24. Family name in the Font list: "Cascadia Code".
+
+Unmodified copies of the upstream variable fonts (roman and italic, the
+weight axis covers regular and bold). Ligatures live in `calt`.
+
+- `CascadiaCode.ttf`, `CascadiaCodeItalic.ttf`: `ttf/` of the GitHub release
+  v2407.24, https://github.com/microsoft/cascadia-code/releases/tag/v2407.24
+  (CascadiaCode-2407.24.zip, sha256
+  e67a68ee3386db63f48b9054bd196ea752bc6a4ebb4df35adce6733da50c8474)
+  sha256 54eae6e26961e980eb3e1ec4ee30f6d3ba7a932a2028832baceb91cc65844a65
+  and  48e64f8d82acd86956df5f33076966eacf4d9c3ea620c9d88231fa94da117f2c.
+- `OFL.txt`: SIL Open Font License 1.1, the LICENSE file of the repository at
+  tag v2407.24 (the release archive carries no license text).

@@ -1122,6 +1122,11 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
             disable_press_and_hold();
+            // The fonts that ship with the app are registered for this process first of
+            // all: the first pane opens its atlas below and the Font list is taken just
+            // after, and a family registered later would not show until the next launch.
+            // A timed run goes the same way, so the smoke gate runs on the fonts users get.
+            crate::font_options::register_app_fonts();
             // The `PATH` the ssh the application runs gets is the user's
             // shell's, asked first so that it is in before the restored panes
             // dial; a timed run starts no ssh and runs no startup file.

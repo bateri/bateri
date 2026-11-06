@@ -10,6 +10,8 @@
 //! `Atlas` and not `dyn`: a process has one font system, and `bt-gpu` holds a
 //! plain `Atlas`.
 
+use std::path::Path;
+
 use crate::raster::DrawResult;
 use crate::rules::{Face, InkRect, Metrics, RawMetrics};
 use crate::text::{Family, ShapedLine, TextBitmap};
@@ -158,6 +160,23 @@ pub(crate) trait FontSystem {
     /// does not shape by the font's rules; the caller then draws every
     /// character as itself.
     fn shape_run(_font: &Self::Font, _text: &str) -> Option<Vec<RunGlyph>> {
+        None
+    }
+
+    /// Makes the font file at `path` available to **this process only** (the
+    /// machine's font list is not touched). `false`: it was not registered —
+    /// the backend has no such call (the default), the file is not a font or
+    /// it was registered before. Only the app-font pass calls it
+    /// ([`crate::app_fonts`]).
+    fn register_file(_path: &Path) -> bool {
+        false
+    }
+
+    /// The family name a font file declares about itself, read **without**
+    /// registering it: the pass asks whether the user already has that family
+    /// before it adds the app's own copy. `None`: the backend cannot read it
+    /// (the default) or the file is no font.
+    fn file_family(_path: &Path) -> Option<String> {
         None
     }
 

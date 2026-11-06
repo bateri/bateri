@@ -1,0 +1,14 @@
+Obel Mono 1.002. Family name in the Font list: "Obel Mono".
+
+Unmodified copies of the upstream variable fonts from the
+ObelMono-1.002-ttf release archive (`variable/`),
+https://typographic.systems/obel-mono. Masking rules live in `ccmp`, switched
+on by `ss01` ("Mask secrets"); there is no `calt` or `liga`. The font does not
+declare itself fixed-pitch, which is why the Font list decides on advance
+widths. Also registered for the test process only (`coretext::fixture`).
+
+- `ObelMono[wght].ttf`
+  sha256 15e4340c4173bd563966dd1b6254e83d726feec96278d9ba59b2a81b739d9596
+- `ObelMono-Italic[wght].ttf`
+  sha256 2b5de9a8ceaf2afe5eec9cfa00984a91bbb86f8d7c272ace0f9fb4fb6d9a0b84
+- `OFL.txt` (SIL Open Font License 1.1) and `AUTHORS.txt`: from the same archive.

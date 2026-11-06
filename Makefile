@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle package install dev release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle fonts-sums package install dev release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -540,6 +540,17 @@ bundle: sparkle
 	@listed=$$(awk '{print $$2}' $(KABLO_DIST)/SHA256SUMS | grep '^kablo-'); \
 	for t in $(KABLO_TARGETS); do echo "$$listed" | grep -q -- "-$$t\$$" || { echo "bundle: the kablo release lists no binary for $$t"; exit 1; }; done; \
 	for f in $$listed LICENSE THIRD-PARTY-LICENSES.txt; do cp $(KABLO_DIST)/$$f $(STAGE)/Contents/Resources/kablo/ || exit 1; done
+	@# The fonts: assets/fonts is checked against its own list (`make fonts-sums` writes it)
+	@# and then exactly the files the list names are copied — no recursive copy, for the
+	@# reason the shell wrapper's comment above gives.
+	@test -f assets/fonts/SHA256SUMS || { echo "bundle: assets/fonts/SHA256SUMS is missing (make fonts-sums writes it)"; exit 1; }
+	@(cd assets/fonts && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || { echo "bundle: assets/fonts is not what its SHA256SUMS says (make fonts-sums after a deliberate change)"; exit 1; }
+	@test "$$(awk '{print $$2}' assets/fonts/SHA256SUMS)" = "$$(cd assets/fonts && find . -type f ! -name SHA256SUMS ! -name .DS_Store | sed 's|^\./||' | LC_ALL=C sort)" || { echo "bundle: assets/fonts holds files its SHA256SUMS does not list, or lists files it lacks"; exit 1; }
+	mkdir -p $(STAGE)/Contents/Resources/fonts
+	@while read -r sum f; do \
+		mkdir -p "$(STAGE)/Contents/Resources/fonts/$$(dirname "$$f")" && cp "assets/fonts/$$f" "$(STAGE)/Contents/Resources/fonts/$$f" || exit 1; \
+	done < assets/fonts/SHA256SUMS; \
+	cp assets/fonts/SHA256SUMS $(STAGE)/Contents/Resources/fonts/
 	mkdir -p $(STAGE)/Contents/Frameworks
 	ditto --arch arm64 $(SPARKLE_DIR)/Sparkle.framework $(STAGE)/Contents/Frameworks/Sparkle.framework
 	rm -rf $(STAGE)/Contents/Frameworks/Sparkle.framework/XPCServices \
@@ -588,6 +599,12 @@ bundle: sparkle
 	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/dock.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish fish/dock.fish bash/bateri.bash bash/dock.bash; do \
 		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f is not in the package or differs from the input"; \
 	done; \
+	fd=$$c/Resources/fonts; \
+	test -s $$fd/SHA256SUMS || fail "the fonts' list of sums is not in the package"; \
+	cmp -s assets/fonts/SHA256SUMS $$fd/SHA256SUMS || fail "the fonts' list of sums differs from the input"; \
+	(cd $$fd && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || fail "the fonts are not what the package's list says"; \
+	test "$$(cd $$fd && find . -type f ! -name SHA256SUMS | wc -l | tr -d ' ')" = "$$(wc -l < $$fd/SHA256SUMS | tr -d ' ')" || fail "the package holds font files its list does not name"; \
+	while read -r sum f; do cmp -s "assets/fonts/$$f" "$$fd/$$f" || fail "fonts/$$f is not in the package or differs from the input"; done < assets/fonts/SHA256SUMS; \
 	kd=$$c/Resources/kablo; \
 	test -s $$kd/SHA256SUMS || fail "kablo's list of sums is not in the package"; \
 	(cd $$kd && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || fail "kablo's files are not what the package's list says"; \
@@ -600,6 +617,11 @@ bundle: sparkle
 	done; \
 	rm -rf $(APP) && mv $(STAGE) $(APP) && \
 	echo "bundle: $(APP) (version $(VERSION), macOS floor $$minos, signature $(if $(filter -,$(SIGN_ID)),ad-hoc,'$(SIGN_ID)'))"
+
+# The list `bundle` checks assets/fonts against: every file of the tree but the list
+# itself, with its sha256. Rewritten after a deliberate change of a font or its license.
+fonts-sums:
+	cd assets/fonts && find . -type f ! -name SHA256SUMS ! -name .DS_Store | sed 's|^\./||' | LC_ALL=C sort | xargs shasum -a 256 > SHA256SUMS
 
 # Targets that have no input yet. They exist so that `proje.md`'s verification
 # table does not carry a target name that does not exist; if run they say "not

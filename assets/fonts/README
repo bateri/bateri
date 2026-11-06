@@ -1,0 +1,25 @@
+The fonts that ship with bateri: one directory per family, unmodified copies
+of the upstream files, each with its license text and a README that names the
+source, the version and the sha256 of what it holds. `make bundle` copies this
+tree to `Contents/Resources/fonts` and checks it against `SHA256SUMS` (`make
+fonts-sums` writes the list again after a deliberate change).
+
+At launch the fonts are registered for the bateri process only, so they appear
+in bateri's Font list and nowhere else on the Mac. A family the user installed
+under the same name is left alone: their copy opens, not this one.
+
+| directory | Font list name | files |
+|---|---|---|
+| JetBrainsMono | JetBrains Mono | variable, roman and italic |
+| FiraCode | Fira Code | variable, roman (no italic design) |
+| CascadiaCode | Cascadia Code | variable, roman and italic |
+| MonaspaceNeon | Monaspace Neon | static, four faces |
+| GeistMono | Geist Mono | variable, roman and italic |
+| MapleMono | Maple Mono | variable, roman and italic |
+| IBMPlexMono | IBM Plex Mono | static, four faces |
+| ObelMono | Obel Mono | variable, roman and italic |
+| SymbolsNerdFontMono | (not listed) | one file: the symbols drawn where the selected font has none |
+
+The font files add up to 9,287,652 bytes (9.3 MB) in the package.
+
+Obel Mono and JetBrains Mono also serve the tests (`coretext::fixture`).

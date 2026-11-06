@@ -1,0 +1,15 @@
+IBM Plex Mono 2.5.0. Family name in the Font list: "IBM Plex Mono".
+
+Unmodified copies of the upstream static fonts: the four faces bateri asks
+for (regular, bold, italic, bold italic); the other weights are not shipped.
+
+- `IBMPlexMono-Regular.ttf`, `-Bold.ttf`, `-Italic.ttf`, `-BoldItalic.ttf`:
+  `fonts/complete/ttf/` of ibm-plex-mono.zip from the GitHub release
+  @ibm/plex-mono@2.5.0, https://github.com/IBM/plex/releases
+  (sha256 6d23f01257663d8cc49a0d64c22ced630b79e0e2a0ac08a0da86e9a38bbc481c)
+  sha256 7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43 (Regular),
+  74e5eedcfa4596497d34e19023cabdabd3a8c852b903007a5654a59591a72ffb (Bold),
+  a55368deb953f594ac18336a1029009ed820e2d9abbb57ad601f61e22bec072b (Italic),
+  c8b00068fd2fd69bbcf62059148623f09d19e9ada8bf9e8caf1aedd01347046a (BoldItalic).
+- `OFL.txt`: SIL Open Font License 1.1 with the reserved font name "Plex",
+  `LICENSE.txt` of the same archive.

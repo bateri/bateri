@@ -415,9 +415,16 @@ pub fn monospaced_families() -> Vec<String> {
     const PROBE_SIZE: f64 = 12.0;
     names.retain(|name| {
         let (font, returned) = Backend::open(name, PROBE_SIZE);
-        same_family(&returned, name) && monospaced(&font)
+        !is_symbol_family(name) && same_family(&returned, name) && monospaced(&font)
     });
     names
+}
+
+/// The symbol font that ships with the app is monospaced but has no letters:
+/// it is where private-use symbols come from, not a font to type in, so the
+/// list never offers it.
+fn is_symbol_family(name: &str) -> bool {
+    same_family(name, crate::app_fonts::SYMBOL_FAMILY)
 }
 
 /// What the chain would say while opening `family` — the state of a family

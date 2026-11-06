@@ -1,0 +1,13 @@
+Maple Mono 7.9. Family name in the Font list: "Maple Mono".
+
+Unmodified copies of the upstream variable fonts (roman and italic, the
+weight axis covers regular and bold). Ligatures live in `calt`.
+
+- `MapleMono[wght].ttf`, `MapleMono-Italic[wght].ttf`: the GitHub release v7.9
+  asset MapleMono-Variable.zip,
+  https://github.com/subframe7536/maple-font/releases/tag/v7.9
+  (sha256 b9e57677cc4ec069ce178bd965d66cd14bd26c12e37d89d786ff959339bf8c93,
+  the same value as the release's MapleMono-Variable.sha256)
+  sha256 55c21f6733c7fa93403c7acccb9d15d87c98fec20723b875e4fdd6db1619388c
+  and  a95b2e4254be1057fb3838cec43c04cb2a5a2852a3e7beea122951571af07d8f.
+- `OFL.txt`: SIL Open Font License 1.1, `LICENSE.txt` of the same archive.

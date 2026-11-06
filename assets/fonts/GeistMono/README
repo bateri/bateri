@@ -1,0 +1,13 @@
+Geist Mono 1.9.1. Family name in the Font list: "Geist Mono".
+
+Unmodified copies of the upstream variable fonts (roman and italic, the
+weight axis covers regular and bold).
+
+- `GeistMono[wght].ttf`, `GeistMono-Italic[wght].ttf`:
+  `geist-font/GeistMono/variable/` of the GitHub release v1.9.1,
+  https://github.com/vercel/geist-font/releases/tag/v1.9.1
+  (geist-font-v1.9.1.zip, sha256
+  f1194047382839bb3ad76a82b43694083cbb56201b2791d420282376fd592506)
+  sha256 647c1bf64563f1b9c057f2816f75e4dd2ef18b91dfb740e6d60496eda3712ee4
+  and  a26cd9468e15d7ef55ac69b2e5f315e6742857020a5e447813270ba470168d41.
+- `OFL.txt`: SIL Open Font License 1.1, `geist-font/OFL.txt` of the same archive.

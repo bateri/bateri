@@ -1,0 +1,16 @@
+JetBrains Mono 2.305. Family name in the Font list: "JetBrains Mono".
+
+Unmodified copies of the upstream variable fonts (roman and italic, the
+weight axis covers regular and bold). Ligatures live in `calt`.
+Also registered for the test process only (`coretext::fixture`).
+
+- `JetBrainsMono[wght].ttf`, `JetBrainsMono-Italic[wght].ttf`: the
+  JetBrains/JetBrainsMono repository, `fonts/variable/` at commit 19371302b95d
+  (2.305; the newest GitHub release, v2.304, predates it, and both files come
+  from this one commit so the family stays one version).
+  https://github.com/JetBrains/JetBrainsMono
+  sha256 3cfafa86e28b87184d592fef82846e8c10cb48653c62efcda34f082da225ec34
+  and  c5c2a1d29297d2a40ec4a0114447c6b7a1477678ab2d9aa4b755356e1a02cead.
+- `OFL.txt`: SIL Open Font License 1.1, from the same commit.
+- `AUTHORS.txt`: from the v2.304 release archive JetBrainsMono-2.304.zip
+  (sha256 6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf).

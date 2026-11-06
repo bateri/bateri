@@ -17,6 +17,7 @@
 //! is on and whose off is the two lines `calt = false` and `liga = false`.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use bt_core::{FontOptions, SettingsEdit};
@@ -176,6 +177,39 @@ pub fn options(family: Option<&str>) -> Vec<FontOption> {
         .clone()
 }
 
+/// Registers the fonts that ship with the app for this process, before the first pane opens its
+/// atlas and before [`warm_families`] takes the list: a family registered later would not show
+/// until the next launch. A family the user installed under the same name is left alone, so
+/// their copy is what opens (`bt_gpu::register_app_fonts`). A timed run goes the same way.
+pub fn register_app_fonts() {
+    if let Some(dir) = app_fonts_dir() {
+        let _ = bt_gpu::register_app_fonts(&dir);
+    }
+}
+
+/// Where the app's fonts are: the bundle's `Contents/Resources/fonts`, and in a debug build that
+/// has no bundle around it the repository's `assets/fonts`.
+fn app_fonts_dir() -> Option<PathBuf> {
+    // `…/bateri.app/Contents/MacOS/bateri` → two parents up → `Resources/fonts`. Whether it is a
+    // bundle is not asked: there is no such directory two levels above `target/debug/bateri`.
+    let bundle = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/fonts")));
+    #[cfg(debug_assertions)]
+    let repo = Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"));
+    #[cfg(not(debug_assertions))]
+    let repo = None;
+    first_directory([bundle, repo])
+}
+
+/// The first of `candidates` that is a directory.
+fn first_directory(candidates: [Option<PathBuf>; 2]) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|dir: &PathBuf| Path::is_dir(dir))
+}
+
 /// The monospaced families of this machine, the list the settings window and the palette's Font
 /// page both show. Taken **once** per process and shared by the two: the answer opens every
 /// installed family and reads its tables, which takes a fraction of a second at the first call
@@ -207,6 +241,24 @@ pub fn find(font: &FontOptions, id: &str) -> Option<FontOption> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bundles_fonts_come_before_the_repositorys_and_a_missing_one_is_skipped() {
+        let root = std::env::temp_dir().join(format!("bt-fonts-dir-{}", std::process::id()));
+        let (bundle, repo) = (root.join("bundle"), root.join("repo"));
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let missing = root.join("missing");
+        let pick = |a: &Path, b: &Path| first_directory([Some(a.to_owned()), Some(b.to_owned())]);
+        let answers = (
+            pick(&bundle, &repo),
+            pick(&missing, &repo),
+            pick(&missing, &missing),
+            first_directory([None, None]),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(answers, (Some(bundle), Some(repo), None, None));
+    }
 
     fn feature(tag: &str, name: Option<&str>) -> FontFeature {
         FontFeature {

@@ -1,0 +1,18 @@
+Monaspace Neon 1.400. Family name in the Font list: "Monaspace Neon".
+
+Unmodified copies of the upstream static fonts (OpenType/CFF). The variable
+build is named "Monaspace Neon Var" and has no italic file, so the static
+build is the one that carries the plain family name and real italics.
+
+- `MonaspaceNeon-Regular.otf`, `-Bold.otf`, `-Italic.otf`, `-BoldItalic.otf`:
+  `Static Fonts/Monaspace Neon/` of the GitHub release v1.400,
+  https://github.com/githubnext/monaspace/releases/tag/v1.400
+  (monaspace-static-v1.400.zip, sha256
+  ab66d71be751495f679727332a3345597943bd4d7beebca03f5cde04bf994de7)
+  sha256 0daf2cd6cbd780b1a9426cb25c17e80f22844051f988a5133ad54b2751b0b8af (Regular),
+  9ff6e131e139c73fe67d1cc045a8a536078fa56cd2c69ee33f0475238a8a9609 (Bold),
+  8bf31d46a42df399444d2a5a16095cc706cbf20bc6637af4a251b5958b02cdbc (Italic),
+  6a6bc24aefa327ec73991ca4f93d764cfc19209a3f34252fa6c2ffb5da41a4e8 (BoldItalic).
+- `OFL.txt`: SIL Open Font License 1.1 with the reserved font name "Monaspace",
+  the LICENSE file of the repository at tag v1.400 (the archive carries no
+  license text).

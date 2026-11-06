@@ -250,7 +250,7 @@ mod tests {
 
     fn file(name: &str) -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fonts")
+            .join("../../assets/fonts")
             .join(name);
         std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn obel_mono_names_its_mask_and_its_variants() {
-        let (features, gsub, _) = features_of("ObelMono[wght].ttf");
+        let (features, gsub, _) = features_of("ObelMono/ObelMono[wght].ttf");
         assert_eq!(
             named(&features, "ss01").and_then(|f| f.name.as_deref()),
             Some("Mask secrets")
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn jetbrains_mono_has_its_ligatures_and_a_broken_equals_set() {
-        let (features, gsub, _) = features_of("JetBrainsMono[wght].ttf");
+        let (features, gsub, _) = features_of("JetBrainsMono/JetBrainsMono[wght].ttf");
         assert!(named(&features, "calt").is_some());
         assert!(named(&features, "zero").is_some());
         assert_eq!(
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn a_truncated_or_damaged_table_answers_without_panicking() {
-        let (_, gsub, names) = features_of("ObelMono[wght].ttf");
+        let (_, gsub, names) = features_of("ObelMono/ObelMono[wght].ttf");
         for len in 0..=gsub.len() {
             let _ = parse(&gsub[..len], &names);
             let _ = has_default_rules(&gsub[..len]);

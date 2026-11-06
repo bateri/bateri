@@ -1,0 +1,13 @@
+Fira Code 6.2. Family name in the Font list: "Fira Code".
+
+Unmodified copy of the upstream variable font (weight axis covers regular and
+bold). Fira Code has no italic design: italic text uses the regular face.
+Ligatures live in `calt`.
+
+- `FiraCode-VF.ttf`: `variable_ttf/FiraCode-VF.ttf` from the GitHub release
+  6.2, https://github.com/tonsky/FiraCode/releases/tag/6.2
+  (Fira_Code_v6.2.zip, sha256
+  0949915ba8eb24d89fd93d10a7ff623f42830d7c5ffc3ecbf960e4ecad3e3e79)
+  sha256 04149681350f161aca538858b88d17443c586cacca83c165939a13423fe91a26.
+- `OFL.txt`: SIL Open Font License 1.1, the LICENSE file of the repository at
+  tag 6.2 (the release archive carries no license text).

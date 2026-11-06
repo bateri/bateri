@@ -8,20 +8,22 @@
 //! requested (`rules::open_chain`).
 
 use std::ffi::c_void;
+use std::path::Path;
 use std::ptr::{self, NonNull};
 
 use objc2_core_foundation::{
     CFArray, CFAttributedString, CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString,
-    CFType, CGAffineTransform, CGPoint, CGRect, CGSize,
+    CFType, CFURL, CFURLPathStyle, CGAffineTransform, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontTableOptions,
-    CTFontUIFontType, CTLine, CTRun, kCTFontAttributeName, kCTFontFamilyNameAttribute,
-    kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue,
-    kCTFontTraitsAttribute, kCTFontWeightTrait,
+    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorsFromURL,
+    CTFontManagerRegisterFontsForURL, CTFontManagerScope, CTFontOrientation, CTFontSymbolicTraits,
+    CTFontTableOptions, CTFontUIFontType, CTLine, CTRun, kCTFontAttributeName,
+    kCTFontFamilyNameAttribute, kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag,
+    kCTFontOpenTypeFeatureValue, kCTFontTraitsAttribute, kCTFontWeightTrait,
 };
 
 use crate::raster::DrawResult;
@@ -45,6 +47,17 @@ pub(crate) const LAST_RESORT: &str = "LastResort";
 
 /// CoreText and CoreGraphics behind [`FontSystem`].
 pub(crate) struct CoreText;
+
+/// A file URL for `path`: what the font manager's calls take.
+fn file_url(path: &Path) -> Option<CFRetained<CFURL>> {
+    let string = CFString::from_str(&path.to_string_lossy());
+    CFURL::with_file_system_path(
+        None,
+        Some(&string),
+        CFURLPathStyle::CFURLPOSIXPathStyle,
+        false,
+    )
+}
 
 /// The face's CoreText trait mask.
 ///
@@ -240,6 +253,35 @@ impl FontSystem for CoreText {
             .map(|name| name.to_string())
             .filter(|name| !name.starts_with('.'))
             .collect()
+    }
+
+    fn register_file(path: &Path) -> bool {
+        let Some(url) = file_url(path) else {
+            return false;
+        };
+        // SAFETY: `url` is alive; a null `error` is allowed.
+        unsafe {
+            CTFontManagerRegisterFontsForURL(&url, CTFontManagerScope::Process, ptr::null_mut())
+        }
+    }
+
+    fn file_family(path: &Path) -> Option<String> {
+        let url = file_url(path)?;
+        // SAFETY: `url` is alive; `None` when the file holds no valid font.
+        let descriptors = unsafe { CTFontManagerCreateFontDescriptorsFromURL(&url) }?;
+        // SAFETY: per the function's documentation, the array's elements are
+        // font descriptors.
+        let descriptors = unsafe { descriptors.cast_unchecked::<CTFontDescriptor>() };
+        // SAFETY: the key is a CoreText constant.
+        let family_key = unsafe { kCTFontFamilyNameAttribute };
+        // The first descriptor answers: every instance of a variable font and
+        // every face of a collection names the same family.
+        descriptors
+            .iter()
+            // SAFETY: the descriptor is alive in the array's hands.
+            .find_map(|descriptor| unsafe { descriptor.attribute(family_key) })
+            .and_then(|name| name.downcast::<CFString>().ok())
+            .map(|name| name.to_string())
     }
 
     fn glyph(font: &Self::Font, ch: char) -> Option<u32> {
@@ -1060,46 +1102,27 @@ pub mod fixture {
     /// [`register_test_fonts`].
     pub const JETBRAINS_MONO: &str = "JetBrains Mono";
 
-    /// Registers the fonts of `tests/fonts` (Obel Mono, regular and italic,
-    /// and JetBrains Mono) for **this process only**, once however many tests
-    /// ask: a second registration of the same file is an error, and the lib
-    /// tests run in parallel threads. Nothing is installed on the machine —
-    /// no installed font carries a shaping rule every Mac has — and a font
-    /// opened from an unregistered file would not find its italic.
+    /// Registers the test fonts of `assets/fonts` (Obel Mono, regular and
+    /// italic, and JetBrains Mono) for **this process only**, once however
+    /// many tests ask: a second registration of the same file is an error, and
+    /// the lib tests run in parallel threads. Nothing is installed on the
+    /// machine — no installed font carries a shaping rule every Mac has — and a
+    /// font opened from an unregistered file would not find its italic.
     pub fn register_test_fonts() {
         use std::path::Path;
         use std::sync::Once;
 
-        use objc2_core_foundation::{CFString, CFURL, CFURLPathStyle};
-        use objc2_core_text::{CTFontManagerRegisterFontsForURL, CTFontManagerScope};
-
         static REGISTER: Once = Once::new();
         REGISTER.call_once(|| {
-            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts");
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
             for file in [
-                "ObelMono[wght].ttf",
-                "ObelMono-Italic[wght].ttf",
-                "JetBrainsMono[wght].ttf",
+                "ObelMono/ObelMono[wght].ttf",
+                "ObelMono/ObelMono-Italic[wght].ttf",
+                "JetBrainsMono/JetBrainsMono[wght].ttf",
             ] {
                 let path = dir.join(file);
-                let string = CFString::from_str(&path.to_string_lossy());
-                let url = CFURL::with_file_system_path(
-                    None,
-                    Some(&string),
-                    CFURLPathStyle::CFURLPOSIXPathStyle,
-                    false,
-                )
-                .expect("a file URL");
-                // SAFETY: `url` is alive; a null `error` is allowed.
-                let registered = unsafe {
-                    CTFontManagerRegisterFontsForURL(
-                        &url,
-                        CTFontManagerScope::Process,
-                        std::ptr::null_mut(),
-                    )
-                };
                 assert!(
-                    registered,
+                    <super::CoreText as super::FontSystem>::register_file(&path),
                     "the test font {} did not register",
                     path.display()
                 );

@@ -40,6 +40,11 @@ Choices:
   libc++, libc++abi, libunwind and compiler-rt of LLVM). Their texts are kept beside the
   sources it is built from and travel in the crate (`pencere-sandbox`'s `licenses/`), and
   are given as they are.
+- The fonts that ship with the app (`assets/fonts/{Family}/`, one directory per family):
+  the copyright line and the license of each, read from the license file that lies beside
+  the font, and the SIL Open Font License text once. The Symbols Nerd Font combines icon
+  sets that keep their own licenses; they are listed as its README gives them, and the
+  attribution the Creative Commons ones ask for is written out.
 - The color schemes bateri adapts (`tools/import_themes.py`, the one list a
   theme is added to): the collection the values are read from and each
   project the schemes come from, with its copyright line and license — MIT
@@ -49,6 +54,7 @@ Choices:
 
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -252,6 +258,7 @@ def main():
     out += module_notices(pkgs)
 
     out += theme_notices("Version 2.0" in "\n".join(out))
+    out += font_notices()
     sys.stdout.write("\n".join(out))
 
 
@@ -356,6 +363,70 @@ def theme_notices(apache_given):
                                initial_indent="  ", subsequent_indent="    "),
                 ""]
     out += ["MIT License", "", MIT_TEXT, ""]
+    return out
+
+
+FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "fonts")
+OFL_MARK = "SIL OPEN FONT LICENSE Version 1.1"
+
+
+def font_notices():
+    """The notices of the fonts that ship with the app, from `assets/fonts/*/`: for each
+    family the title (the first sentence of its README), the copyright line its license file
+    opens with and the license; the SIL Open Font License text once, from the first family
+    that carries it. A family whose license is neither the OFL nor MIT stops the script."""
+    families = sorted(
+        d for d in os.listdir(FONTS_DIR) if os.path.isdir(os.path.join(FONTS_DIR, d)))
+    if not families:
+        sys.exit("fonts: assets/fonts holds no family")
+    out = [RULE,
+           "Fonts. bateri ships the following fonts, unmodified, in Contents/Resources/fonts;",
+           "each family's license text lies beside its font files. The SIL Open Font License",
+           "text follows the list.",
+           RULE, ""]
+    ofl_text = None
+    symbols = []
+    for family in families:
+        root = os.path.join(FONTS_DIR, family)
+        readme = read_first(root, ("README",))
+        if readme is None:
+            sys.exit(f"fonts: {family} has no README")
+        title = " ".join(readme.split("\n\n")[0].split()).split(". ")[0].rstrip(".")
+        text = read_first(root, ("OFL.txt", "LICENSE"))
+        if text is None:
+            sys.exit(f"fonts: {family} has no license file")
+        lines = text.replace("\u00a9", "(c)").splitlines()
+        if OFL_MARK in text:
+            kind = "SIL Open Font License, Version 1.1"
+            stop = next(i for i, l in enumerate(lines) if "This Font Software is licensed" in l)
+            holder = [l for l in lines[:stop] if l.strip()]
+            if ofl_text is None:
+                ofl_text = text[text.index(OFL_MARK):]
+        elif text.lstrip().startswith("The MIT License"):
+            kind = "MIT License"
+            holder = [l for l in lines if l.startswith("Copyright")]
+            symbols.append((family, readme, text))
+        else:
+            sys.exit(f"fonts: {family}: a license that is neither the OFL nor MIT")
+        out += [title, *(f"  {l}" for l in holder), f"  {kind}",
+                f"  Contents/Resources/fonts/{family}/", ""]
+    if ofl_text is None:
+        sys.exit("fonts: no OFL text found")
+    out += ["SIL Open Font License, Version 1.1", "", ofl_text.rstrip(), ""]
+    for family, readme, text in symbols:
+        sets = [l.rstrip() for l in readme.splitlines()
+                if re.match(r"^  \S.*\s{2,}\S", l)]
+        out += [RULE, f"{family}: the Nerd Fonts license and the icon sets in the font", RULE, "",
+                text.rstrip(), "", "The font combines icon sets that keep their own licenses:",
+                "", *sets, "",
+                "The MIT and Apache-2.0 sets are covered by the license texts given above.",
+                "The sets under the Creative Commons Attribution 4.0 International license",
+                "(https://creativecommons.org/licenses/by/4.0/) are attributed here: Codicons,",
+                "Copyright (c) Microsoft Corporation, https://github.com/microsoft/vscode-codicons;",
+                "Font Awesome, Copyright (c) Fonticons, Inc., https://fontawesome.com. The Nerd",
+                "Fonts project combined the icons into one font and scaled and aligned them; the",
+                "font is otherwise as released. Font Logos is released into the public domain",
+                "(the Unlicense).", ""]
     return out
 
 

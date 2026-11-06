@@ -230,6 +230,70 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     );
 }
 
+/// The fonts that ship with the app (`assets/fonts`) are exactly the files
+/// `assets/fonts/SHA256SUMS` lists, plus the list itself: `make bundle` copies
+/// the list's files and nothing else and checks each by its sum, so a font or a
+/// license text added to the tree without `make fonts-sums` would stay out of
+/// the package silently — and a license text is the one thing that must not.
+/// The sums themselves are `make bundle`'s to check; this is the inventory,
+/// which `make check` can see.
+#[test]
+fn font_inventory_is_exactly_what_the_sums_list() {
+    fn walk(dir: &Path, root: &Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("{} could not be read: {e}", dir.display()))
+        {
+            let path = entry.expect("directory entry could not be read").path();
+            if path.is_dir() {
+                walk(&path, root, found);
+            } else if path
+                .file_name()
+                .is_some_and(|n| n != ".DS_Store" && n != "SHA256SUMS")
+            {
+                found.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let mut found = Vec::new();
+    walk(&root, &root, &mut found);
+    found.sort();
+    let sums = std::fs::read_to_string(root.join("SHA256SUMS"))
+        .unwrap_or_else(|e| panic!("assets/fonts/SHA256SUMS could not be read: {e}"));
+    let mut listed: Vec<String> = sums
+        .lines()
+        .map(|line| {
+            let (sum, name) = line.split_once("  ").expect("a `sum  name` line");
+            assert_eq!(sum.len(), 64, "{line:?} is not a sha256 line");
+            name.to_owned()
+        })
+        .collect();
+    listed.sort();
+    assert_eq!(
+        found, listed,
+        "assets/fonts and its SHA256SUMS disagree; `make fonts-sums` writes the list again"
+    );
+    // Every family carries a license text beside its fonts.
+    for family in std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+    {
+        let name = family.file_name().to_string_lossy().into_owned();
+        assert!(
+            ["OFL.txt", "LICENSE"]
+                .iter()
+                .any(|license| family.path().join(license).is_file()),
+            "assets/fonts/{name} has no license text"
+        );
+    }
+}
+
 /// The fish wrapper's inventory is **exactly** two files, `vendor_conf.d/bateri.fish` and the
 /// dock's functions it reads, `dock.fish`, one level above `vendor_conf.d` (fish reads every file
 /// of that directory by itself, and this one is for the wrappers alone).
@@ -354,6 +418,21 @@ fn third_party_license_ships_with_attribution() {
         "Roblox Corporation",
         "wasi-libc",
         "libc++, libc++abi, libunwind and compiler-rt",
+        // The fonts that ship with the app: each family by name and the icon sets the symbol
+        // font combines, whose Creative Commons attribution is written out here.
+        "JetBrains Mono",
+        "Fira Code",
+        "Cascadia Code",
+        "Monaspace Neon",
+        "Geist Mono",
+        "Maple Mono",
+        "IBM Plex Mono",
+        "Obel Mono",
+        "Symbols Nerd Font Mono",
+        "SIL OPEN FONT LICENSE Version 1.1",
+        "Codicons",
+        "Font Awesome",
+        "https://creativecommons.org/licenses/by/4.0/",
     ] {
         assert!(
             licenses.contains(needle),
@@ -369,6 +448,17 @@ fn third_party_license_ships_with_attribution() {
         "Luau",
         "iTerm2-Color-Schemes",
         "THIRD-PARTY-LICENSES.txt",
+        "JetBrains Mono",
+        "Fira Code",
+        "Cascadia Code",
+        "Monaspace Neon",
+        "Geist Mono",
+        "Maple Mono",
+        "IBM Plex Mono",
+        "Obel Mono",
+        "Symbols Nerd Font Mono",
+        "SIL Open Font License",
+        "Creative Commons Attribution 4.0",
     ] {
         assert!(
             credits.contains(needle),

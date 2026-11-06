@@ -19,6 +19,7 @@ of every installed copy. A version without a section is not released.
 ### Changed
 
 - **Lists and text in a program's view stop at their ends**, as the terminal's history does, so a file tree or an editor no longer bounces past its end and squeezes its scroll bar. To have them bounce as macOS's own windows do, turn on Bounce at the Ends (`[motion] scroll_bounce = "on"`).
+- **Eight code fonts come with bateri.** JetBrains Mono, Fira Code, Cascadia Code, Monaspace Neon, Geist Mono, Maple Mono, IBM Plex Mono and Obel Mono are in the Font list in Settings and the command palette, and `family = "Fira Code"` works on a Mac that has never had it installed. They are loaded for bateri alone, so they do not appear in Font Book or in any other app, and a copy you installed yourself comes first. They add 9.3 MB to the app. Each font's license is in the app next to its files, and the About window and `THIRD-PARTY-LICENSES.txt` credit them.
 
 ### Fixed
 

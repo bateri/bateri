@@ -1,0 +1,33 @@
+Symbols Nerd Font Mono, Nerd Fonts 3.5.1. Not a Font list entry: bateri draws
+private-use-area symbols (git branch, folder, Powerline) from it when the
+selected font has none.
+
+Unmodified copy of the single-width ("Mono") build of the Symbols Only font:
+a glyph one cell wide fits one cell.
+
+- `SymbolsNerdFontMono-Regular.ttf`: NerdFontsSymbolsOnly.zip of the GitHub
+  release v3.5.1, https://github.com/ryanoasis/nerd-fonts/releases/tag/v3.5.1
+  (sha256 fdca3682534f6f65e1ccb2345b0362ccf67d9b8eca7c8025330946e93e2473bc)
+  sha256 fe471e538392f51910faab985fa8e192a39dd3426125edd15b71b3680df0e749.
+- `LICENSE`: MIT (the Nerd Fonts project), from the same archive.
+
+The font combines icon sets that keep their own licenses (Nerd Fonts'
+README for the release lists them):
+
+  Codicons 0.0.45 (Microsoft)           CC BY 4.0
+  Devicons 2.17.0                        MIT
+  extraglyphs (Hack)                     MIT
+  Font Awesome 6.5.1                     CC BY 4.0
+  Font Awesome Extension 0.0.3           MIT
+  Font Logos 1.3.0                       Unlicense (public domain)
+  Material Design Icons (Oct 6, 2022)    Apache-2.0
+  Octicons 18.3.0                        MIT
+  Seti-UI and original                   MIT
+  Pomicons 1.001                         OFL 1.1
+  Powerline Extra Symbols 1.200          MIT
+  Powerline Symbols                      MIT
+  Power Symbols (IEC)                    MIT
+  Weather Icons 2.0.10                   OFL 1.1
+
+Attribution for the CC BY 4.0 sets (https://creativecommons.org/licenses/by/4.0/)
+is in the bundle's THIRD-PARTY-LICENSES.txt.
