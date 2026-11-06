@@ -1428,7 +1428,7 @@ mod tests {
             read_context(&[third.clone(), second.clone()]).as_deref(),
             Some("other")
         );
-        assert_eq!(read_context(&[first.clone()]), None);
+        assert_eq!(read_context(std::slice::from_ref(&first)), None);
         assert_eq!(read_context(&[]), None);
         // Unknowable before the answer: a relative path, an unreadable value,
         // a directory.

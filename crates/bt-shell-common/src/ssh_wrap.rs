@@ -855,10 +855,10 @@ fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
     };
     let mut dirs: Vec<&str> = Vec::new();
     for (path, _) in &files {
-        if let Some((dir, _)) = path.rsplit_once('/') {
-            if !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
+        if let Some((dir, _)) = path.rsplit_once('/')
+            && !dirs.contains(&dir)
+        {
+            dirs.push(dir);
         }
     }
     let made = dirs

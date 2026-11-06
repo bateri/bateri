@@ -1741,7 +1741,7 @@ fn every_scene_draws_all_its_pipelines_together() {
         let pixels = w.render_offscreen(*edge, clear_color, frame);
         assert_eq!(pixels.len(), (*edge as usize).pow(2) * 4, "{name}: size");
         assert!(
-            pixels.chunks_exact(4).any(|px| px != clear),
+            pixels.as_chunks::<4>().0.iter().any(|px| *px != clear),
             "{name}: the frame left only the clear colour"
         );
     }

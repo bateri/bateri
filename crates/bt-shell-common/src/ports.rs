@@ -389,7 +389,7 @@ pub fn parse_proc_address(field: &str) -> Option<(std::net::IpAddr, u16)> {
         [word] => std::net::IpAddr::from(word.to_le_bytes()),
         [a, b, c, d] => {
             let mut v6 = [0u8; 16];
-            for (chunk, word) in v6.chunks_exact_mut(4).zip([a, b, c, d]) {
+            for (chunk, word) in v6.as_chunks_mut::<4>().0.iter_mut().zip([a, b, c, d]) {
                 chunk.copy_from_slice(&word.to_le_bytes());
             }
             std::net::IpAddr::from(v6)

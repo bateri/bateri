@@ -590,10 +590,10 @@ fn lower_gauge(items: &[Option<Item<'_>>; ITEMS], rungs: &mut [Option<Rung>; ITE
     for (item, rung) in items.iter().zip(rungs.iter_mut()) {
         if let (Some(Item::Gauge(stats)), Some(Rung::Gauge(step))) = (item, &rung) {
             let ladder = ladder(stats.form);
-            if let Some(at) = ladder.iter().position(|candidate| candidate == step) {
-                if let Some(&next) = ladder.get(at + 1) {
-                    *rung = Some(Rung::Gauge(next));
-                }
+            if let Some(at) = ladder.iter().position(|candidate| candidate == step)
+                && let Some(&next) = ladder.get(at + 1)
+            {
+                *rung = Some(Rung::Gauge(next));
             }
         }
     }

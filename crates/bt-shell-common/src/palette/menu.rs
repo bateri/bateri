@@ -353,7 +353,7 @@ fn walk(
                 "{}{}:{}",
                 Kind::Command.prefix(),
                 base,
-                slug(&[node.title.clone()])
+                slug(std::slice::from_ref(&node.title))
             );
         }
         row.id = unique(row.id, &node.title, seen);
@@ -783,7 +783,11 @@ mod tests {
         for entry in &menu.flat {
             let id = &entry.row.id;
             let text = format!("{}\n{id}\n", crate::palette::RECENT_HEADER);
-            assert_eq!(Recent::decode(&text).ids(), [id.clone()], "{id}");
+            assert_eq!(
+                Recent::decode(&text).ids(),
+                std::slice::from_ref(id),
+                "{id}"
+            );
         }
     }
 

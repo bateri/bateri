@@ -386,7 +386,7 @@ impl Backend for Fake {
         }
         if self
             .carry_fails
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "down"));
@@ -2311,7 +2311,7 @@ fn a_quit_that_ends_the_terminals_waits_for_them_to_have_ended() {
 
     let started = Instant::now();
     rig.service
-        .end_all(&[pane.clone()], Duration::from_secs(10));
+        .end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "told, not timed out"
@@ -2385,7 +2385,7 @@ fn a_quit_has_nothing_to_wait_for_when_nothing_can_be_asked() {
     let started = Instant::now();
     rig.service.end_all(&[pane], Duration::from_secs(10));
     assert!(started.elapsed() < Duration::from_secs(5), "not waited for");
-    assert_eq!(ledger.ending("u@rasp:22"), [terminal.clone()]);
+    assert_eq!(ledger.ending("u@rasp:22"), std::slice::from_ref(&terminal));
 
     // The network is back: the first thing the connection does is end the terminal.
     rig.world.carry_fails_with(None);
@@ -2499,7 +2499,7 @@ fn a_pane_is_told_when_the_terminal_it_shows_appears_and_when_it_goes() {
     until("it is back", || {
         rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
     });
-    assert_eq!(rig.world.changed(), [pane.clone()], "once");
+    assert_eq!(rig.world.changed(), std::slice::from_ref(&pane), "once");
     rig.world.bridge().exit(&terminal, Exit::Code(0));
     assert_eq!(holder.outcome(), Outcome::Exit(0));
     until("the pane told it went", || {
@@ -2624,7 +2624,7 @@ fn a_terminal_that_ended_unseen_is_exited_and_not_in_the_background() {
     until("listed", || background_names(&rig) == ["agent"]);
     assert_eq!(
         rig.service.exited(ACCOUNT),
-        [done.clone()],
+        std::slice::from_ref(&done),
         "the ended one, and not the one a pane shows"
     );
     let _ = (shown, agent);
@@ -3816,7 +3816,10 @@ fn a_pane_a_program_gave_a_number_to_is_started_under_that_number_and_not_counte
 
     rig.service.expect_name(&pane, name.clone());
     let _stream = open_local(&rig, &pane).expect("a terminal");
-    assert_eq!(ledger.terminals_of(local::ACCOUNT), [name.clone()]);
+    assert_eq!(
+        ledger.terminals_of(local::ACCOUNT),
+        std::slice::from_ref(&name)
+    );
     assert_eq!(ledger.pane_of(local::ACCOUNT, &name), Some(pane));
     assert!(world.bridge().has(&name));
     assert_eq!(world.count("number"), 0, "the number was given already");
@@ -3836,7 +3839,10 @@ fn a_pane_written_in_the_ledger_before_it_exists_is_shown_the_terminal_a_program
     world.bridge().write(&program, b"htop's screen");
 
     let mut mac = Pane::of(open_local(&rig, &pane).expect("its terminal"));
-    assert_eq!(ledger.terminals_of(local::ACCOUNT), [program.clone()]);
+    assert_eq!(
+        ledger.terminals_of(local::ACCOUNT),
+        std::slice::from_ref(&program)
+    );
     mac.reads(b"htop's screen");
     mac.master.write_all(b"q").expect("typed");
     until("the key typed", || world.bridge().typed(&program) == b"q");
@@ -3976,7 +3982,10 @@ fn a_pane_that_comes_back_is_shown_its_terminal_from_the_first_byte_and_told_how
         .expect("its terminal");
     // The terminal is the one the pane had, not a new one, and its program's process id comes
     // with the server's word.
-    assert_eq!(back.ledger.terminals_of(local::ACCOUNT), [id.clone()]);
+    assert_eq!(
+        back.ledger.terminals_of(local::ACCOUNT),
+        std::slice::from_ref(&id)
+    );
     assert_eq!(stream.pid, crate::kablo::fake::FAKE_PID);
     let mut mac = Pane::of(stream);
     let past = mac.silence.clone().expect("a terminal that has a past");
@@ -4037,7 +4046,10 @@ fn after_a_launch_that_did_not_settle_a_pane_is_shown_a_picture_that_is_all_past
     let stream = second
         .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
         .expect("its terminal");
-    assert_eq!(back.ledger.terminals_of(local::ACCOUNT), [id.clone()]);
+    assert_eq!(
+        back.ledger.terminals_of(local::ACCOUNT),
+        std::slice::from_ref(&id)
+    );
     let mut mac = Pane::of(stream);
     let past = mac.silence.clone().expect("a terminal shown again");
     // A picture of the screen from now on, and none of the bytes it was made of.

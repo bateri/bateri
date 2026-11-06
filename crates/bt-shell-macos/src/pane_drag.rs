@@ -729,10 +729,11 @@ impl Carry {
             }
         }
         self.opened.clear();
-        if self.raised && !crossed {
-            if let Some(window) = app.window(home) {
-                window.select();
-            }
+        if self.raised
+            && !crossed
+            && let Some(window) = app.window(home)
+        {
+            window.select();
         }
         self.raised = false;
     }

@@ -250,7 +250,7 @@ program's own.
 
 ## Building from source
 
-Requirements: macOS 14+ and a Rust toolchain (1.88 or later).
+Requirements: macOS 14+ and a Rust toolchain (1.99 or later).
 
 ```sh
 cargo run -p bateri   # run a debug build

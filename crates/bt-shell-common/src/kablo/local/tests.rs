@@ -1099,7 +1099,7 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
         .expect("its terminal");
     assert!(stream.pid > 1);
     assert!(stream.silence.is_some(), "a terminal that has a past");
-    assert_eq!(ledger.terminals_of(ACCOUNT), [id.clone()]);
+    assert_eq!(ledger.terminals_of(ACCOUNT), std::slice::from_ref(&id));
     let ends = Arc::new(Ends::default());
     let session =
         bt_core::Session::streamed(options, Arc::clone(&ends) as Arc<dyn bt_core::Wake>, stream)

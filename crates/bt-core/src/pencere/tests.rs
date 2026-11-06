@@ -2093,7 +2093,7 @@ fn script_open(token: &str) -> Vec<u8> {
             r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),
         token = token,
-        digest = Digest::of(SCRIPT).to_string(),
+        digest = Digest::of(SCRIPT),
         size = SCRIPT.len(),
     );
     [ALTERNATE_SCREEN, &wire("open", 2, None, None, &open)].concat()
@@ -2189,7 +2189,7 @@ fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_it
             r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),
         token = token_of(&welcome[0]),
-        digest = Digest::of(SCRIPT).to_string(),
+        digest = Digest::of(SCRIPT),
         size = SCRIPT.len(),
     );
     pane.feed(&[ALTERNATE_SCREEN, &wire("open", 2, None, None, &open)].concat());

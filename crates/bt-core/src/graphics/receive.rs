@@ -602,7 +602,7 @@ fn decode_raw(command: &Command, bytes: Vec<u8>, expected: usize) -> Result<Deco
     let pixels = match command.format {
         Format::Rgb => {
             let mut pixels = Vec::with_capacity(bytes.len() / 3 * 4);
-            for rgb in bytes.chunks_exact(3) {
+            for rgb in bytes.as_chunks::<3>().0 {
                 pixels.extend_from_slice(rgb);
                 pixels.push(u8::MAX);
             }
@@ -645,14 +645,16 @@ fn decode_png(bytes: &[u8], room: Room) -> Result<Decoded, Error> {
         png::ColorType::Rgba => samples.to_vec(),
         png::ColorType::Rgb => {
             let mut pixels = Vec::with_capacity(samples.len() / 3 * 4);
-            for rgb in samples.chunks_exact(3) {
+            for rgb in samples.as_chunks::<3>().0 {
                 pixels.extend_from_slice(rgb);
                 pixels.push(u8::MAX);
             }
             pixels
         }
         png::ColorType::GrayscaleAlpha => samples
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|pair| [pair[0], pair[0], pair[0], pair[1]])
             .collect(),
         png::ColorType::Grayscale => samples

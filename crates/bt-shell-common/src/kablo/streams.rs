@@ -452,7 +452,10 @@ impl Client {
                 }
             }
             stream::Message::Close => {
-                if self.streams.table.remove(&stream).is_some() {
+                // Removed here, not in a guard: a guard that changes the table would let a Close
+                // for a stream already gone fall through to the arm below.
+                let held = self.streams.table.remove(&stream);
+                if held.is_some() {
                     self.events.push_back(Event::TalkOver {
                         talk,
                         over: Over::Closed,

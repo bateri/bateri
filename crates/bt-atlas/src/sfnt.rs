@@ -57,7 +57,7 @@ pub(crate) fn read_style(file: &mut (impl Read + Seek)) -> Option<Style> {
     }
     let directory = bytes_at(file, 12, count * 16)?;
     let table = |tag: &[u8; 4]| -> Option<(u64, usize)> {
-        directory.chunks_exact(16).find_map(|entry| {
+        directory.as_chunks::<16>().0.iter().find_map(|entry| {
             (entry.get(..4)? == tag).then(|| {
                 let offset = u32_at(entry, 8)?;
                 let length = u32_at(entry, 12)?;

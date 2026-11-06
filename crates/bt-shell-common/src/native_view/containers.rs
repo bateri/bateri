@@ -877,10 +877,11 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
             text(c.name).weight(500).color(Role::Dim).truncate()
         });
     // Where the name has little room, the state is the dot's colour alone.
-    if width != Width::Tiny && width != Width::Narrow {
-        if let Some((label, tone)) = state_tag {
-            name = name.child(tag(&label, tone));
-        }
+    if width != Width::Tiny
+        && width != Width::Narrow
+        && let Some((label, tone)) = state_tag
+    {
+        name = name.child(tag(&label, tone));
     }
 
     let mut cells = vec![

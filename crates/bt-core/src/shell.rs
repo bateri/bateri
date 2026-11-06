@@ -6519,8 +6519,8 @@ pub(crate) fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
         rest => rest,
     };
     out.reserve(body.len() / 4 * 3 + 2);
-    let mut chunks = body.chunks_exact(4);
-    for chunk in chunks.by_ref() {
+    let (chunks, remainder) = body.as_chunks::<4>();
+    for chunk in chunks {
         // The four are looked up before any is judged and judged at once: a value of the
         // alphabet is under 64 and the table's invalid mark is not, so one test of the four
         // ORed together is the four tests — an image's megabytes of text come through here.
@@ -6532,7 +6532,7 @@ pub(crate) fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
         let [_, first, second, third] = ((a << 18) | (b << 12) | (c << 6) | d).to_be_bytes();
         out.extend_from_slice(&[first, second, third]);
     }
-    match chunks.remainder() {
+    match remainder {
         [] => Some(()),
         [a, b] => {
             let (a, b) = (b64_value(*a)?, b64_value(*b)?);
@@ -9063,7 +9063,11 @@ mod tests {
                 "source $ZDOTDIR/bateri.zsh; cd -q -- $T_DIR; __bateri_cwd",
                 &[("T_DIR", &path)],
             );
-            assert_eq!(cwd_events(&bytes), [path.clone()], "yol: {path}");
+            assert_eq!(
+                cwd_events(&bytes),
+                std::slice::from_ref(&path),
+                "yol: {path}"
+            );
         }
 
         // The root directory: the edge where the path is a single character.

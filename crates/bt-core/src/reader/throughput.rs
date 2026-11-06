@@ -576,10 +576,9 @@ fn kitty_benchmark_workloads() {
     }
 }
 
-const ASCII_PRINTABLE: &str = concat!(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ  `~!@#$%^&*()_+-=[]{}\\|;:'\",<.>/?",
-);
-const CONTROL_CHARS: &str = concat!("\n\t",);
+const ASCII_PRINTABLE: &str =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ  `~!@#$%^&*()_+-=[]{}\\|;:'\",<.>/?";
+const CONTROL_CHARS: &str = "\n\t";
 const CHINESE_LOREM_IPSUM: &str = concat!(
     "旦海司有幼雞讀松鼻種比門真目怪少：扒裝虎怕您跑綠蝶黃，位香法士錯乙音造活羽詞坡村目園尺封鳥朋；法松夕點我冬停雪因科對只貓息加黃住蝶，明鴨乾春呢風乙時昔孝助？小紅女父故去。",
     "飯躲裝個哥害共買去隻把氣年，己你校跟飛百拉！快石牙飽知唱想土人吹象毛吉每浪四又連見、欠耍外豆雞秋鼻。住步帶。",

@@ -9147,7 +9147,7 @@ impl Session {
     fn update_glide(&self, change: impl Fn(ScrollGlide) -> ScrollGlide) -> ScrollGlide {
         let word = self
             .scroll_glide
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
                 Some(change(ScrollGlide::unpack(word)).pack())
             })
             // The closure always gives `Some`, i.e. there is no `Err` arm; what
@@ -18643,10 +18643,11 @@ mod tests {
             let Some(cursor) = frame_if_damaged(&session, |c| cells.push(c)) else {
                 continue;
             };
-            if cursor.visible && (cursor.col, cursor.row) == (0, 0) {
-                if let Some(cell) = cells.iter().copied().find(|c| c.ch == Some('X')) {
-                    break (cursor, cell);
-                }
+            if cursor.visible
+                && (cursor.col, cursor.row) == (0, 0)
+                && let Some(cell) = cells.iter().copied().find(|c| c.ch == Some('X'))
+            {
+                break (cursor, cell);
             }
         };
 
@@ -27070,7 +27071,7 @@ e\\314\\201.'; sleep 5";
             std::thread::spawn(move || {
                 let mut swaps = 0u64;
                 while Instant::now() < deadline {
-                    let theme = if swaps % 2 == 0 {
+                    let theme = if swaps.is_multiple_of(2) {
                         Theme::BATERI_LIGHT
                     } else {
                         THEME
@@ -27122,7 +27123,7 @@ e\\314\\201.'; sleep 5";
             std::thread::spawn(move || {
                 let mut sets = 0u64;
                 while Instant::now() < deadline {
-                    let scrollback = if sets % 2 == 0 { 5 } else { 50 };
+                    let scrollback = if sets.is_multiple_of(2) { 5 } else { 50 };
                     let osc52 = if sets % 6 < 3 {
                         Osc52::Copy
                     } else {
@@ -28437,13 +28438,13 @@ e\\314\\201.'; sleep 5";
             std::thread::spawn(move || {
                 let mut steps = 0u64;
                 while Instant::now() < deadline {
-                    let direction = if steps % 2 == 0 {
+                    let direction = if steps.is_multiple_of(2) {
                         SearchDirection::Older
                     } else {
                         SearchDirection::Newer
                     };
-                    session.search_next(direction, OPEN, steps % 3 == 0);
-                    if steps % 5 == 0 {
+                    session.search_next(direction, OPEN, steps.is_multiple_of(3));
+                    if steps.is_multiple_of(5) {
                         session.set_search(&plain("alpha"));
                     }
                     steps += 1;
@@ -28485,7 +28486,7 @@ e\\314\\201.'; sleep 5";
                 let mut moves = 0u64;
                 while Instant::now() < deadline {
                     let top = (moves % 40) as f32 * 0.75;
-                    session.scroll_to(top, moves % 3 == 0);
+                    session.scroll_to(top, moves.is_multiple_of(3));
                     moves += 1;
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -29938,10 +29939,14 @@ e\\314\\201.'; sleep 5";
                 let mut steps = 0u64;
                 while Instant::now() < deadline {
                     session.search_step();
-                    if steps % 50 == 0 {
-                        session.set_search(&plain(if steps % 100 == 0 { "beta" } else { "alpha" }));
+                    if steps.is_multiple_of(50) {
+                        session.set_search(&plain(if steps.is_multiple_of(100) {
+                            "beta"
+                        } else {
+                            "alpha"
+                        }));
                     }
-                    if steps % 7 == 0 {
+                    if steps.is_multiple_of(7) {
                         session.search_next(SearchDirection::Older, OPEN, false);
                     }
                     steps += 1;
@@ -29988,7 +29993,7 @@ e\\314\\201.'; sleep 5";
                 let mut steps = 0u64;
                 while Instant::now() < deadline {
                     session.block_step();
-                    if steps % 40 == 0 {
+                    if steps.is_multiple_of(40) {
                         session.set_block_marks(false);
                         session.set_block_marks(true);
                     }
@@ -30470,7 +30475,7 @@ e\\314\\201.'; sleep 5";
             std::thread::spawn(move || {
                 let mut clears = 0u64;
                 while Instant::now() < deadline {
-                    let cleared = if clears % 3 == 0 {
+                    let cleared = if clears.is_multiple_of(3) {
                         session.clear_scrollback()
                     } else {
                         session.clear_to_start()

@@ -1457,7 +1457,7 @@ pub fn format_size(bytes: u64) -> String {
     let (unit, scale) = SIZE_UNITS
         .iter()
         .rev()
-        .find(|(_, scale)| bytes % scale == 0 && (bytes > 0 || *scale == 1))
+        .find(|(_, scale)| bytes.is_multiple_of(*scale) && (bytes > 0 || *scale == 1))
         .copied()
         .unwrap_or(("B", 1));
     format!("{}{unit}", bytes / scale)

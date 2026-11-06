@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- Building from source now needs Rust 1.99 or later.
+
 ## [0.25.0] - 2026-11-06
 
 ### Added
