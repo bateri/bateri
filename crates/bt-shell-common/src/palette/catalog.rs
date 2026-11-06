@@ -581,7 +581,7 @@ static CATALOG: [Setting; 39] = [
     number!(
         "font.line_height",
         Font,
-        "Line Spacing",
+        "Line Height",
         "line height leading rows",
         true,
         &[0.9, 1.0, 1.1, 1.2, 1.4],
@@ -718,7 +718,7 @@ static CATALOG: [Setting; 39] = [
     named!(
         "appearance.tab_details",
         Appearance,
-        "Tab Details",
+        "Details Under a Tab",
         "row folder branch question details activity",
         true,
         None,
@@ -729,7 +729,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "appearance.dim_unfocused_splits",
         Appearance,
-        "Dim Unfocused Splits",
+        "Dim the Other Panes",
         "pane veil focus",
         true,
         None,
@@ -739,7 +739,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "appearance.focus_frame",
         Appearance,
-        "Focus Frame",
+        "Frame the Focused Pane",
         "pane focus line border accent outline",
         true,
         None,
@@ -760,7 +760,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "appearance.tab_icons",
         Appearance,
-        "Tab Icons",
+        "Program Icons",
         "program icon tile",
         true,
         None,
@@ -781,7 +781,7 @@ static CATALOG: [Setting; 39] = [
     named!(
         "appearance.tab_running",
         Appearance,
-        "Running Tab",
+        "While a Command Runs",
         "tab running command line tail breathe animation",
         true,
         None,
@@ -803,7 +803,7 @@ static CATALOG: [Setting; 39] = [
     named!(
         "appearance.content_edge",
         Appearance,
-        "Content Edge",
+        "Where Text Meets the Tab Bar",
         "top edge fade",
         false,
         None,
@@ -825,7 +825,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "appearance.resize_in_steps",
         Appearance,
-        "Resize in Steps",
+        "Resize a Whole Cell at a Time",
         "window cell resize",
         false,
         None,
@@ -835,7 +835,7 @@ static CATALOG: [Setting; 39] = [
     number!(
         "terminal.scrollback",
         Terminal,
-        "Scrollback Lines",
+        "Scrollback",
         "history buffer lines",
         false,
         &[1000.0, 10000.0, 50000.0, 100000.0],
@@ -857,7 +857,7 @@ static CATALOG: [Setting; 39] = [
     named!(
         "terminal.restore_windows",
         Terminal,
-        "Restore Windows",
+        "Reopen After Quitting",
         "session reopen relaunch",
         false,
         None,
@@ -879,7 +879,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "clipboard.osc52",
         Terminal,
-        "Programs Can Copy to Clipboard",
+        "Let Programs Copy to the Clipboard",
         "clipboard osc52 copy pasteboard",
         false,
         None,
@@ -900,7 +900,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "shell.ports",
         Shell,
-        "Show Ports in the Dock",
+        "Listening Ports",
         "localhost server listening",
         false,
         None,
@@ -910,7 +910,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "shell.python_env",
         Shell,
-        "Show Python Environment",
+        "Python Environment",
         "venv conda virtualenv",
         false,
         None,
@@ -920,7 +920,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "shell.node_version",
         Shell,
-        "Show Node Version",
+        "Node Version",
         "nvm nodejs",
         false,
         None,
@@ -930,7 +930,7 @@ static CATALOG: [Setting; 39] = [
     toggle!(
         "remote.integration",
         Remote,
-        "Set Up Servers over ssh",
+        "Set Up Shell Integration on Servers",
         "ssh server remote integration",
         false,
         None,

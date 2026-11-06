@@ -108,6 +108,20 @@ goes with them.
   two keys of the load indicator (`stats`, `stats_interval`) and the eight
   preview and download keys of `[remote]`.
 
+Choices that change how something looks are shown as pictures drawn in the
+colours of the theme you have on screen (where the tabs sit, how split panes
+are drawn, where text meets the tab bar, the cursor's shape, the cursor in an
+inactive window and the running line on a tab); the other short choices are
+pop-up menus, and the three that are a few words (Icon colors, Details under a
+tab, Cursor motion) are segmented buttons. The Font list has the fonts that
+come with bateri under "Included with bateri" and the rest under "On this
+computer", each name in its own letters; the theme lists have Light and Dark
+headings with four of the theme's colours beside each name. The search field
+above the pages looks through every row's name, what it says about its current
+value and the names of its choices (a query with a `.` or `_` in it, such as
+`font.size`, also looks at the key in the file); a click on a result opens its
+page and lights the row for a moment.
+
 On folder rows Change… opens a folder picker (a folder under your home
 directory is written as `~/…`), on the preview folder Show in Finder opens it,
 and the "In use" row shows the total size of the copies in the folder — Clear

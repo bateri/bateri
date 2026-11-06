@@ -214,6 +214,26 @@ fn first_directory(candidates: [Option<PathBuf>; 2]) -> Option<PathBuf> {
         .find(|dir: &PathBuf| Path::is_dir(dir))
 }
 
+/// The families that ship with the app, as the launch pass found them: the ones it registered and
+/// the ones the user already had under the same name (their copy is what opens, but the family is
+/// still the app's own). Empty where the pass has not run or the app's fonts are not there (a
+/// build without them).
+pub fn bundled_families() -> Vec<String> {
+    let Some(dir) = app_fonts_dir() else {
+        return Vec::new();
+    };
+    // A second call answers what the first did, whatever `dir`; the first is the launch's.
+    let outcome = bt_gpu::register_app_fonts(&dir);
+    let mut names: Vec<String> = outcome
+        .registered
+        .iter()
+        .chain(&outcome.kept)
+        .cloned()
+        .collect();
+    names.sort();
+    names
+}
+
 /// The monospaced families of this machine, the list the settings window and the palette's Font
 /// page both show. Taken **once** per process and shared by the two: the answer opens every
 /// installed family and reads its tables, which takes a fraction of a second at the first call

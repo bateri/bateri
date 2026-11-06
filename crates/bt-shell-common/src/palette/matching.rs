@@ -7,7 +7,7 @@
 //! - **Letters in order, skipping** score 40, +8 for a letter that starts a word, +3 for one
 //!   next to the last, −1 for the rest — **unless the match is scattered**: every run of
 //!   matched letters must start a word ("spr" finds Split Right), or there are two runs at most
-//!   and the first starts a word. "theme" finding Show Python Environment (t-h in "python", e in
+//!   and the first starts a word. "theme" finding Python Environment (t-h in "python", e in
 //!   "environment") is noise, not a hit.
 //! - **A keyword** the word begins scores 60, **the second line** containing the word 45. The
 //!   row's cluster heading counts as a keyword ("themes" finds the themes).

@@ -6649,7 +6649,17 @@ impl AppDelegate {
             reduce: self.reduce_motion(),
             scrollbar: self.scrollbar_mode(),
         };
-        window.refresh(&settings, resolved, &state, &write, &embedded, &user);
+        // The theme on screen for the file's choice, read without watching it: the pictures are
+        // drawn in its colours.
+        let dark = self.dark_appearance();
+        let (theme, _) =
+            settings::load_theme(Some(&root), settings.theme_for(dark)).or_embedded(dark);
+        let themes = crate::settings_window::ThemeLists {
+            embedded: &embedded,
+            user: &user,
+            on_screen: &theme,
+        };
+        window.refresh(&settings, resolved, &state, &write, &themes);
         // On every refresh, not only on open: a changed `preview_dir` is
         // another folder. The scan is off the main thread.
         self.measure_preview_usage();

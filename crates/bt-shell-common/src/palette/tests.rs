@@ -81,11 +81,11 @@ fn letters_skipping_find_the_command_that_starts_each_run_at_a_word() {
 fn scattered_letters_are_noise_not_a_hit() {
     let theme = search(&everything(), "theme", Nearness::None);
     assert!(
-        !titles(&theme).contains(&"Show Python Environment"),
+        !titles(&theme).contains(&"Python Environment"),
         "t-h of python and e of environment are no word of 'theme'"
     );
     let nord = search(&everything(), "nord", Nearness::None);
-    assert!(!titles(&nord).contains(&"Programs Can Copy to Clipboard"));
+    assert!(!titles(&nord).contains(&"Let Programs Copy to the Clipboard"));
     assert_eq!(first("nord").as_deref(), Some("Nord"));
 }
 

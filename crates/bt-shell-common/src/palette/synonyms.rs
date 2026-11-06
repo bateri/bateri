@@ -8,7 +8,7 @@
 //!
 //! What a word must not do is find a command it does not describe. "side" is not a keyword of
 //! Split Right ("side by side" once was, and "side" then put Split Right above Tab Position);
-//! "theme" is not one of Show Python Environment's.
+//! "theme" is not one of Python Environment's.
 //!
 //! A command added to the menu adds its words here in the same change; one without an entry is
 //! still found by its title.

@@ -281,6 +281,21 @@ pub(super) fn unit(key: Key) -> Option<&'static str> {
     }
 }
 
+/// Whether the row's control has the width of the row to itself, under the name and the
+/// description: the font's list of switches and the pictured choices.
+pub(super) fn below(key: Key) -> bool {
+    matches!(
+        key,
+        Key::FontFeatures
+            | Key::ContentEdge
+            | Key::TabPosition
+            | Key::SplitStyle
+            | Key::Shape
+            | Key::Unfocused
+            | Key::TabRunning
+    )
+}
+
 /// How another setting changes a row: gone, or left in place but dimmed with its reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Dependency {

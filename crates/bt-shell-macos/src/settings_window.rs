@@ -26,6 +26,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::Path;
+use std::ptr::NonNull;
 
 use block2::RcBlock;
 use bt_core::{
@@ -34,28 +35,32 @@ use bt_core::{
     IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep,
     ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
     SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
-    SplitStyle, TabDetails, TabPosition, TabRunning, UnfocusedCaret,
+    SplitStyle, TabDetails, TabPosition, TabRunning, Theme, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{
-    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
+    msg_send, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl,
-    NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType,
-    NSFont, NSImage, NSImageScaling, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSBackingStoreType,
+    NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlStateValueOff,
+    NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType, NSFont, NSFontAttributeName,
+    NSFontDescriptor, NSImage, NSImageScaling, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLineBreakMode, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
-    NSScrollView, NSSlider, NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper,
-    NSSwitch, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTitlePosition,
+    NSScrollView, NSSearchField, NSSegmentSwitchTracking, NSSegmentedControl, NSSlider,
+    NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch, NSTableColumn,
+    NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
+    NSTableViewStyle, NSTextField, NSTitlePosition, NSUserInterfaceItemIdentification,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
     NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString, NSURL, ns_string,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
+    NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSURL, ns_string,
 };
 
 use crate::app;
@@ -65,11 +70,14 @@ use crate::remote_files::Sweep;
 use crate::settings::{self, FileState};
 use crate::upload::format_bytes;
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
+use pictures::{Palette, Picture, PictureChoice};
 
 mod font_options;
 mod keyboard;
 mod pages;
+mod pictures;
 mod recorder;
+mod search;
 
 /// Whether the keyboard is in a field of Settings ▸ Keyboard that listens for a shortcut: then
 /// a modifier pressed twice is a shortcut to give, not one to run.
@@ -556,6 +564,68 @@ impl Choice for KeepRunning {
             KeepRunning::Update => "Only during updates",
             KeepRunning::Crash => "Also after a crash",
             KeepRunning::Quit => "Also after quitting",
+        }
+    }
+}
+
+/// A choice that is shown as pictures: what each option looks like.
+trait Pictured: Choice {
+    fn picture(self) -> Picture;
+}
+
+impl Pictured for ContentEdge {
+    fn picture(self) -> Picture {
+        match self {
+            ContentEdge::Fade => Picture::EdgeFade,
+            ContentEdge::Line => Picture::EdgeLine,
+            ContentEdge::Cut => Picture::EdgeCut,
+        }
+    }
+}
+
+impl Pictured for TabPosition {
+    fn picture(self) -> Picture {
+        match self {
+            TabPosition::Top => Picture::TabsTop,
+            TabPosition::Side => Picture::TabsSide,
+        }
+    }
+}
+
+impl Pictured for SplitStyle {
+    fn picture(self) -> Picture {
+        match self {
+            SplitStyle::Cards => Picture::Cards,
+            SplitStyle::Lines => Picture::Lines,
+        }
+    }
+}
+
+impl Pictured for CaretShape {
+    fn picture(self) -> Picture {
+        match self {
+            CaretShape::Block => Picture::Block,
+            CaretShape::Underline => Picture::Underline,
+            CaretShape::Beam => Picture::Beam,
+        }
+    }
+}
+
+impl Pictured for UnfocusedCaret {
+    fn picture(self) -> Picture {
+        match self {
+            UnfocusedCaret::Hollow => Picture::Hollow,
+            UnfocusedCaret::Solid => Picture::Solid,
+        }
+    }
+}
+
+impl Pictured for TabRunning {
+    fn picture(self) -> Picture {
+        match self {
+            TabRunning::Tail => Picture::Tail,
+            TabRunning::TailRing => Picture::TailRing,
+            TabRunning::Breathe => Picture::Breathe,
         }
     }
 }
@@ -1094,6 +1164,37 @@ fn choice_titles<T: Choice>() -> Vec<&'static str> {
     T::names().iter().map(|&(_, value)| value.title()).collect()
 }
 
+/// The names of `key`'s choices, for the search; none for a key whose control is not a list of
+/// names (a switch, a number, the lists the machine fills).
+fn choice_labels(key: Key) -> Vec<&'static str> {
+    match key {
+        Key::ConfirmClose => choice_titles::<ConfirmClose>(),
+        Key::RestoreWindows => choice_titles::<RestoreWindows>(),
+        Key::KeepRunning => choice_titles::<KeepRunning>(),
+        Key::Scrollbar => choice_titles::<Scrollbar>(),
+        Key::ContentEdge => choice_titles::<ContentEdge>(),
+        Key::SplitStyle => choice_titles::<SplitStyle>(),
+        Key::TabDetails => choice_titles::<TabDetails>(),
+        Key::TabIconColors => choice_titles::<IconColors>(),
+        Key::TabRunning => choice_titles::<TabRunning>(),
+        Key::TabPosition => choice_titles::<TabPosition>(),
+        Key::ShellIntegration => choice_titles::<ShellIntegration>(),
+        Key::CommandLevel => choice_titles::<CommandLevel>(),
+        Key::Shape => choice_titles::<CaretShape>(),
+        Key::Blink => choice_titles::<CursorBlink>(),
+        Key::Unfocused => choice_titles::<UnfocusedCaret>(),
+        Key::CursorMotion => choice_titles::<CursorMotion>(),
+        Key::ReduceMotion => choice_titles::<ReduceMotion>(),
+        Key::Keypress => choice_titles::<Keypress>(),
+        Key::Erase => choice_titles::<Erase>(),
+        Key::DockArrival => choice_titles::<DockArrival>(),
+        Key::PreviewKeep => choice_titles::<PreviewKeep>(),
+        Key::DownloadConflict => choice_titles::<DownloadConflict>(),
+        Key::RemoteStats => choice_titles::<RemoteStatsMode>(),
+        _ => Vec::new(),
+    }
+}
+
 /// The selected item's variant; `-1` (no selection) or an overflowing index is `None`.
 fn choice_at<T: Choice>(index: NSInteger) -> Option<T> {
     let index = usize::try_from(index).ok()?;
@@ -1194,14 +1295,16 @@ enum ThemeItem {
     /// "Match System" — writes `SYSTEM_THEME`.
     System,
     Separator,
+    /// A line of text that is not a choice: the title of the section under it.
+    Header(&'static str),
     Named(String),
 }
 
-/// The theme popup's items and the selected one's index — the order of the
-/// Theme ▸ menu (`menu::fill_themes`): Match System, the embedded groups, the
-/// user's, a separator before each group; an embedded theme shows its title
-/// (`fill_themes`). If the name in the file is not in the list (a deleted theme) it is
-/// appended at the end: the popup does not hide what the user wrote (the
+/// The theme popup's items and the selected one's index: Match System where the row has it, the
+/// embedded themes under Light and Dark headings (each of the groups' own order kept inside a
+/// heading), the user's under a heading of their own, a separator before each. A theme is light or
+/// dark by its own colours ([`Theme::is_dark`]). If the name in the file is not in the list (a
+/// deleted theme) it is appended at the end: the popup does not hide what the user wrote (the
 /// Font popup's rule).
 fn theme_items(
     selected: &str,
@@ -1213,20 +1316,30 @@ fn theme_items(
     if with_system {
         items.push(ThemeItem::System);
     }
-    let groups = embedded
-        .iter()
-        .map(|group| group.iter().map(|name| (*name).to_owned()).collect())
-        .chain(std::iter::once(user.to_vec()));
-    for group in groups.filter(|group: &Vec<String>| !group.is_empty()) {
+    let mut light = Vec::new();
+    let mut dark = Vec::new();
+    for name in embedded.iter().flatten() {
+        match Theme::embedded(name) {
+            Some(theme) if theme.is_dark() => dark.push((*name).to_owned()),
+            _ => light.push((*name).to_owned()),
+        }
+    }
+    let sections = [
+        ("Light", light),
+        ("Dark", dark),
+        ("Your themes", user.to_vec()),
+    ];
+    for (title, names) in sections.into_iter().filter(|(_, names)| !names.is_empty()) {
         if !items.is_empty() {
             items.push(ThemeItem::Separator);
         }
-        items.extend(group.into_iter().map(ThemeItem::Named));
+        items.push(ThemeItem::Header(title));
+        items.extend(names.into_iter().map(ThemeItem::Named));
     }
     let position = |items: &[ThemeItem]| {
         items.iter().position(|item| match item {
             ThemeItem::System => selected == SYSTEM_THEME,
-            ThemeItem::Separator => false,
+            ThemeItem::Separator | ThemeItem::Header(_) => false,
             ThemeItem::Named(name) => name == selected,
         })
     };
@@ -1245,19 +1358,41 @@ enum FontItem {
     /// The chain: `family = ""`.
     Default,
     Separator,
+    /// A line of text that is not a choice: the title of the section under it.
+    Header(&'static str),
     Family(String),
     /// A family that is in the file but not in the list; choosing it writes nothing (it already is).
     Missing(String),
 }
 
-/// The font popup's items and the selected one's index. Matching is case
-/// insensitive: the chain finds the name that way too (`bt-atlas`'s
-/// `same_family`), so `family = "menlo"` is the listed `Menlo`.
-fn font_items(current: Option<&str>, families: &[String]) -> (Vec<FontItem>, usize) {
+/// The font popup's items and the selected one's index: the default, then the families that ship
+/// with the app under "Included with bateri" and the rest under "On this computer", a separator
+/// before each; a section nobody fills has no heading. Matching is case insensitive: the chain
+/// finds the name that way too (`bt-atlas`'s `same_family`), so `family = "menlo"` is the listed
+/// `Menlo`.
+fn font_items(
+    current: Option<&str>,
+    families: &[String],
+    bundled: &[String],
+) -> (Vec<FontItem>, usize) {
+    let ships = |name: &String| {
+        bundled
+            .iter()
+            .any(|own| own.to_lowercase() == name.to_lowercase())
+    };
+    let (included, local): (Vec<&String>, Vec<&String>) =
+        families.iter().partition(|name| ships(name));
     let mut items = vec![FontItem::Default];
-    if !families.is_empty() {
+    for (title, names) in [
+        ("Included with bateri", included),
+        ("On this computer", local),
+    ] {
+        if names.is_empty() {
+            continue;
+        }
         items.push(FontItem::Separator);
-        items.extend(families.iter().cloned().map(FontItem::Family));
+        items.push(FontItem::Header(title));
+        items.extend(names.into_iter().cloned().map(FontItem::Family));
     }
     let Some(current) = current else {
         return (items, 0);
@@ -1457,22 +1592,22 @@ struct Controls {
     line_height: Number,
     letter_spacing: Number,
     scrollbar: Retained<NSPopUpButton>,
-    content_edge: Retained<NSPopUpButton>,
-    split_style: Retained<NSPopUpButton>,
-    tab_details: Retained<NSPopUpButton>,
+    content_edge: Retained<PictureChoice>,
+    split_style: Retained<PictureChoice>,
+    tab_details: Retained<NSSegmentedControl>,
     tab_icons: Retained<NSSwitch>,
     font_smoothing: Retained<NSSwitch>,
-    tab_icon_colors: Retained<NSPopUpButton>,
-    tab_running: Retained<NSPopUpButton>,
-    tab_position: Retained<NSPopUpButton>,
+    tab_icon_colors: Retained<NSSegmentedControl>,
+    tab_running: Retained<PictureChoice>,
+    tab_position: Retained<PictureChoice>,
     minimum_contrast: Retained<NSPopUpButton>,
-    shape: Retained<NSPopUpButton>,
+    shape: Retained<PictureChoice>,
     blink: Retained<NSPopUpButton>,
     blink_speed: Slide,
     radius: Slide,
     glow: Slide,
-    unfocused: Retained<NSPopUpButton>,
-    cursor_motion: Retained<NSPopUpButton>,
+    unfocused: Retained<PictureChoice>,
+    cursor_motion: Retained<NSSegmentedControl>,
     smooth_scroll: Retained<NSSwitch>,
     scroll_bounce: Retained<NSSwitch>,
     reduce_motion: Retained<NSPopUpButton>,
@@ -1549,6 +1684,40 @@ impl Row {
         }
     }
 
+    /// Lights the row for a moment — a wash of the accent that fades — so a result that sent the
+    /// reader here shows which row it meant. With Reduce Motion the row is not animated.
+    fn glow(&self, mtm: MainThreadMarker) {
+        if self.hidden.get() || app::delegate(mtm).is_none_or(|app| app.reduce_motion()) {
+            return;
+        }
+        let wash = NSBox::new(mtm);
+        wash.setBoxType(NSBoxType::Custom);
+        wash.setTitlePosition(NSTitlePosition::NoTitle);
+        wash.setBorderWidth(0.0);
+        wash.setCornerRadius(0.0);
+        wash.setFillColor(&NSColor::controlAccentColor().colorWithAlphaComponent(0.22));
+        add_pinned(&self.view, &wash);
+        activate(&[
+            wash.leadingAnchor()
+                .constraintEqualToAnchor(&self.view.leadingAnchor()),
+            wash.trailingAnchor()
+                .constraintEqualToAnchor(&self.view.trailingAnchor()),
+            wash.topAnchor()
+                .constraintEqualToAnchor(&self.view.topAnchor()),
+            wash.bottomAnchor()
+                .constraintEqualToAnchor(&self.view.bottomAnchor()),
+        ]);
+        let fading = wash.clone();
+        let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+            // SAFETY: AppKit gives the block a live context, for the block's duration.
+            let context = unsafe { context.as_ref() };
+            context.setDuration(1.4);
+            fading.animator().setAlphaValue(0.0);
+        });
+        let done = RcBlock::new(move || wash.removeFromSuperview());
+        NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&done));
+    }
+
     /// Takes the row out of its group (it leaves no gap) or puts it back.
     fn set_hidden(&self, hidden: bool) {
         self.hidden.set(hidden);
@@ -1586,9 +1755,29 @@ impl Row {
     }
 }
 
+/// What the theme lists and the pictures are made from.
+pub(crate) struct ThemeLists<'a> {
+    /// The embedded themes' names, in groups (`Theme::embedded_groups`).
+    pub(crate) embedded: &'a [Vec<&'a str>],
+    /// The names of the themes in the user's folder.
+    pub(crate) user: &'a [String],
+    /// The theme on screen for the file's choice: the pictures are drawn in its colours.
+    pub(crate) on_screen: &'a Theme,
+}
+
 pub(crate) struct Ivars {
     window: OnceCell<Retained<NSWindow>>,
     sidebar: OnceCell<Retained<NSTableView>>,
+    /// The search field above the pages' list, and what it holds: a query shows the results in
+    /// place of the open page.
+    search: OnceCell<Retained<NSSearchField>>,
+    query: RefCell<String>,
+    /// Every row of every page as the search sees it, taken at each refresh.
+    entries: RefCell<Vec<search::Entry>>,
+    /// The results on screen: the page and the row each result opens.
+    found: RefCell<Vec<(Category, Option<Key>)>>,
+    /// The stack of results, the pages' last.
+    results: OnceCell<Retained<NSStackView>>,
     header: OnceCell<Retained<NSTextField>>,
     banner: OnceCell<BannerView>,
     /// Whether the window has been shown once (the gate of centring).
@@ -1631,6 +1820,8 @@ pub(crate) struct Ivars {
     /// born: the list opens every candidate with CoreText and is not worth rebuilding on every save.
     /// The palette shows the same list (`font_options::families`, warmed at launch).
     families: Vec<String>,
+    /// The families that ship with the app: the Font list's first section.
+    bundled: Vec<String>,
 }
 
 define_class!(
@@ -1686,6 +1877,8 @@ define_class!(
 
         #[unsafe(method(tableViewSelectionDidChange:))]
         fn selection_did_change(&self, _note: &NSNotification) {
+            // A page chosen in the list ends the search.
+            self.clear_search();
             self.show_selected();
         }
     }
@@ -1700,47 +1893,65 @@ define_class!(
             let Some(key) = Key::from_tag(popup.tag()) else {
                 return;
             };
-            let edit = match key {
-                Key::ConfirmClose => choice_at(index).map(SettingsEdit::ConfirmClose),
-                Key::RestoreWindows => choice_at(index).map(SettingsEdit::RestoreWindows),
-                Key::KeepRunning => choice_at(index).map(SettingsEdit::KeepRunning),
-                Key::Scrollbar => choice_at(index).map(SettingsEdit::Scrollbar),
-                Key::ContentEdge => choice_at(index).map(SettingsEdit::ContentEdge),
-                Key::SplitStyle => choice_at(index).map(SettingsEdit::SplitStyle),
-                Key::TabDetails => choice_at(index).map(SettingsEdit::TabDetails),
-                Key::TabIconColors => choice_at(index).map(SettingsEdit::IconColors),
-                Key::TabRunning => choice_at(index).map(SettingsEdit::TabRunning),
-                Key::TabPosition => choice_at(index).map(SettingsEdit::TabPosition),
-                Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
-                Key::CommandLevel => choice_at(index).map(SettingsEdit::CommandLevel),
-                Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
-                Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
-                Key::Unfocused => choice_at(index).map(SettingsEdit::CursorUnfocused),
-                Key::CursorMotion => choice_at(index).map(SettingsEdit::CursorMotion),
-                Key::ReduceMotion => choice_at(index).map(SettingsEdit::ReduceMotion),
-                Key::Keypress => choice_at(index).map(SettingsEdit::Keypress),
-                Key::Erase => choice_at(index).map(SettingsEdit::Erase),
-                Key::DockArrival => choice_at(index).map(SettingsEdit::DockArrival),
-                Key::Theme => theme_edit(&self.ivars().themes.borrow(), index)
-                    .map(SettingsEdit::Theme),
-                Key::LightTheme => theme_edit(&self.ivars().light_themes.borrow(), index)
-                    .map(SettingsEdit::LightTheme),
-                Key::DarkTheme => theme_edit(&self.ivars().dark_themes.borrow(), index)
-                    .map(SettingsEdit::DarkTheme),
-                Key::Font => font_edit(&self.ivars().fonts.borrow(), index)
-                    .map(SettingsEdit::FontFamily),
-                Key::MinimumContrast => contrast_edit(&self.ivars().contrasts.borrow(), index)
-                    .map(SettingsEdit::MinimumContrast),
-                Key::PreviewMaxSize => size_edit(&self.ivars().max_sizes.borrow(), index)
-                    .map(SettingsEdit::PreviewMaxSize),
-                Key::PreviewLimit => size_edit(&self.ivars().limits.borrow(), index)
-                    .map(SettingsEdit::PreviewLimit),
-                Key::PreviewKeep => choice_at(index).map(SettingsEdit::PreviewKeep),
-                Key::DownloadConflict => choice_at(index).map(SettingsEdit::DownloadConflict),
-                Key::RemoteStats => choice_at(index).map(SettingsEdit::RemoteStats),
-                _ => None,
+            self.save(self.choice_edit(key, index));
+        }
+
+        /// A pictured choice: the chosen picture's place is the option's place in the list.
+        #[unsafe(method(pictureChanged:))]
+        fn picture_changed(&self, sender: Option<&AnyObject>) {
+            let Some(choice) = sender.and_then(|s| s.downcast_ref::<PictureChoice>()) else {
+                return;
             };
-            self.save(edit);
+            let (Some(key), Some(index)) = (Key::from_tag(choice.tag()), choice.selected()) else {
+                return;
+            };
+            self.save(self.choice_edit(key, index as NSInteger));
+        }
+
+        /// A segmented choice: the segment's place is the option's place in the list. The key is
+        /// in the control's identifier, because a segmented control's tag is its selected
+        /// segment's.
+        #[unsafe(method(segmentChanged:))]
+        fn segment_changed(&self, sender: Option<&AnyObject>) {
+            let Some(control) = sender.and_then(|s| s.downcast_ref::<NSSegmentedControl>()) else {
+                return;
+            };
+            let Some(key) = control
+                .identifier()
+                .and_then(|identifier| identifier.to_string().parse().ok())
+                .and_then(Key::from_tag)
+            else {
+                return;
+            };
+            self.save(self.choice_edit(key, control.selectedSegment()));
+        }
+
+        /// The search field's text changed: the results take the page's place, or give it back.
+        #[unsafe(method(searchSettings:))]
+        fn search_settings(&self, sender: Option<&AnyObject>) {
+            let Some(field) = sender.and_then(|s| s.downcast_ref::<NSSearchField>()) else {
+                return;
+            };
+            let text = field.stringValue().to_string();
+            if self.ivars().query.replace(text.clone()) == text {
+                return;
+            }
+            self.rebuild_results();
+            self.show_selected();
+        }
+
+        /// A result was clicked: open its page, and bring its row into view.
+        #[unsafe(method(resultClicked:))]
+        fn result_clicked(&self, sender: Option<&AnyObject>) {
+            let Some(row) = sender.and_then(|s| s.downcast_ref::<search::ResultRow>()) else {
+                return;
+            };
+            let target = usize::try_from(row.tag())
+                .ok()
+                .and_then(|at| self.ivars().found.borrow().get(at).copied());
+            if let Some((category, key)) = target {
+                self.open_row(category, key);
+            }
         }
 
         /// An option of the selected font: its switch's tag is the option's place in the
@@ -1999,7 +2210,7 @@ fn theme_edit(items: &[ThemeItem], index: NSInteger) -> Option<String> {
     match items.get(usize::try_from(index).ok()?)? {
         ThemeItem::System => Some(SYSTEM_THEME.to_owned()),
         ThemeItem::Named(name) => Some(name.clone()),
-        ThemeItem::Separator => None,
+        ThemeItem::Separator | ThemeItem::Header(_) => None,
     }
 }
 
@@ -2009,7 +2220,7 @@ fn font_edit(items: &[FontItem], index: NSInteger) -> Option<String> {
     match items.get(usize::try_from(index).ok()?)? {
         FontItem::Default => Some(String::new()),
         FontItem::Family(name) => Some(name.clone()),
-        FontItem::Separator | FontItem::Missing(_) => None,
+        FontItem::Separator | FontItem::Header(_) | FontItem::Missing(_) => None,
     }
 }
 
@@ -2036,6 +2247,11 @@ impl SettingsWindow {
     /// Builds the window and all the controls; does not make it visible.
     pub(crate) fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars {
+            search: OnceCell::new(),
+            query: RefCell::new(String::new()),
+            entries: RefCell::new(Vec::new()),
+            found: RefCell::new(Vec::new()),
+            results: OnceCell::new(),
             window: OnceCell::new(),
             sidebar: OnceCell::new(),
             header: OnceCell::new(),
@@ -2059,6 +2275,7 @@ impl SettingsWindow {
             folders: RefCell::new((String::new(), String::new())),
             usage_generation: Cell::new(0),
             families: crate::font_options::families(),
+            bundled: crate::font_options::bundled_families(),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -2121,18 +2338,31 @@ impl SettingsWindow {
     /// the motion rows are overridden comes from Reduce Motion's
     /// ([`motion_override`]), not from the setting itself, and the scroll
     /// bar's note from the form "system" gives right now ([`scrollbar_note`]).
+    /// `themes` is what the theme lists and the pictures are made from.
     pub(crate) fn refresh(
         &self,
         settings: &Settings,
         resolved: Resolved,
         state: &FileState,
         write: &[String],
-        embedded: &[Vec<&str>],
-        user: &[String],
+        themes: &ThemeLists,
     ) {
         let Some(c) = self.ivars().controls.get() else {
             return;
         };
+        let (embedded, user) = (themes.embedded, themes.user);
+        // The pictures are drawn in the theme that is on screen.
+        let palette = Palette::of(themes.on_screen);
+        for choice in [
+            &c.content_edge,
+            &c.split_style,
+            &c.tab_running,
+            &c.tab_position,
+            &c.shape,
+            &c.unfocused,
+        ] {
+            choice.set_palette(palette);
+        }
         select_choice(&c.confirm_close, settings.confirm_close);
         select_choice(&c.restore_windows, settings.restore_windows);
         select_choice(&c.keep_running, settings.keep_running);
@@ -2158,8 +2388,23 @@ impl SettingsWindow {
         fill_contrasts(&c.minimum_contrast, &items, index);
         self.ivars().contrasts.replace(items);
 
-        let (items, index) = font_items(settings.font.family.as_deref(), &self.ivars().families);
-        fill_fonts(&c.font, &items, index);
+        let (items, index) = font_items(
+            settings.font.family.as_deref(),
+            &self.ivars().families,
+            &self.ivars().bundled,
+        );
+        // Each family is drawn in its own font, which costs a pass over the whole list: the
+        // popup is rebuilt only when the list changed (a family the file names that is not on
+        // the machine says why with the font notice, which can change on its own).
+        let same = *self.ivars().fonts.borrow() == items
+            && !items
+                .iter()
+                .any(|item| matches!(item, FontItem::Missing(_)));
+        if same {
+            c.font.selectItemAtIndex(index as NSInteger);
+        } else {
+            fill_fonts(&c.font, &items, index);
+        }
         self.ivars().fonts.replace(items);
         set_number(
             &c.size,
@@ -2177,16 +2422,16 @@ impl SettingsWindow {
             &decimal_label(settings.font.letter_spacing),
         );
         select_choice(&c.scrollbar, settings.scrollbar);
-        select_choice(&c.content_edge, settings.content_edge);
-        select_choice(&c.split_style, settings.split_style);
-        select_choice(&c.tab_details, settings.tab_details);
+        select_picture(&c.content_edge, settings.content_edge);
+        select_picture(&c.split_style, settings.split_style);
+        select_segment(&c.tab_details, settings.tab_details);
         set_switch(&c.tab_icons, settings.tab_icons);
         set_switch(&c.font_smoothing, settings.font.smoothing);
-        select_choice(&c.tab_icon_colors, settings.tab_icon_colors);
-        select_choice(&c.tab_running, settings.tab_running);
-        select_choice(&c.tab_position, settings.tab_position);
+        select_segment(&c.tab_icon_colors, settings.tab_icon_colors);
+        select_picture(&c.tab_running, settings.tab_running);
+        select_picture(&c.tab_position, settings.tab_position);
 
-        select_choice(&c.shape, settings.cursor);
+        select_picture(&c.shape, settings.cursor);
         select_choice(&c.blink, settings.cursor_blink);
         set_slide(
             &c.blink_speed,
@@ -2203,9 +2448,9 @@ impl SettingsWindow {
             settings.caret.glow,
             &glow_label(settings.caret.glow),
         );
-        select_choice(&c.unfocused, settings.caret.unfocused);
+        select_picture(&c.unfocused, settings.caret.unfocused);
 
-        select_choice(&c.cursor_motion, settings.cursor_motion);
+        select_segment(&c.cursor_motion, settings.cursor_motion);
         set_switch(&c.smooth_scroll, smooth_on(settings.smooth_scroll));
         set_switch(&c.scroll_bounce, bounce_on(settings.scroll_bounce));
         select_choice(&c.reduce_motion, settings.reduce_motion);
@@ -2293,6 +2538,13 @@ impl SettingsWindow {
         c.font_options
             .show(self, &options, &settings.font, !status.locked);
         self.ivars().font_options.replace(options);
+        // What the search can find follows the file: the descriptions and the rows that apply.
+        self.ivars()
+            .entries
+            .replace(search::entries(settings, resolved));
+        if self.searching() {
+            self.rebuild_results();
+        }
         if let Some(keyboard) = self.ivars().keyboard.get() {
             keyboard.refresh(settings, status.locked);
         }
@@ -2384,6 +2636,164 @@ impl SettingsWindow {
         panel.beginSheetModalForWindow_completionHandler(window, &answered);
     }
 
+    /// Ends the search: the field is emptied and the open page comes back.
+    fn clear_search(&self) {
+        if self.ivars().query.borrow().is_empty() {
+            return;
+        }
+        self.ivars().query.borrow_mut().clear();
+        if let Some(field) = self.ivars().search.get() {
+            field.setStringValue(ns_string!(""));
+        }
+    }
+
+    /// Whether a query is being shown.
+    fn searching(&self) -> bool {
+        !self.ivars().query.borrow().trim().is_empty()
+    }
+
+    /// Lists what the query finds, one box of rows with the page each is on; nothing found says so.
+    fn rebuild_results(&self) {
+        let Some(results) = self.ivars().results.get() else {
+            return;
+        };
+        for view in results.arrangedSubviews().iter() {
+            results.removeArrangedSubview(&view);
+            view.removeFromSuperview();
+        }
+        let mtm = self.mtm();
+        let query = self.ivars().query.borrow().clone();
+        let entries = self.ivars().entries.borrow();
+        let hits = search::hits(&query, &entries);
+        let mut found = Vec::with_capacity(hits.len());
+        if hits.is_empty() {
+            if !query.trim().is_empty() {
+                let none = NSTextField::labelWithString(
+                    &NSString::from_str(&format!(
+                        "No settings match \u{201c}{}\u{201d}.",
+                        query.trim()
+                    )),
+                    mtm,
+                );
+                none.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                results.addArrangedSubview(&none);
+            }
+        } else {
+            let (boxed, inner) = group_box(mtm);
+            for (at, entry) in hits.iter().enumerate() {
+                let row = search::ResultRow::new(mtm, entry, at > 0);
+                row.setTag(NSInteger::try_from(at).unwrap_or_default());
+                // SAFETY: the target is a weak reference to this object, which lives for the
+                // whole process; the selector is this class's own.
+                unsafe {
+                    row.setTarget(Some(self.target()));
+                    row.setAction(Some(sel!(resultClicked:)));
+                }
+                inner.addArrangedSubview(search::as_view(&row));
+                search::as_view(&row)
+                    .widthAnchor()
+                    .constraintEqualToAnchor(&inner.widthAnchor())
+                    .setActive(true);
+                found.push((entry.page, entry.key));
+            }
+            results.addArrangedSubview(&boxed);
+            boxed
+                .widthAnchor()
+                .constraintEqualToAnchor(&results.widthAnchor())
+                .setActive(true);
+        }
+        drop(entries);
+        self.ivars().found.replace(found);
+    }
+
+    /// Opens `category`'s page and brings the row of `key` into view, with a short glow on it.
+    fn open_row(&self, category: Category, key: Option<Key>) {
+        let Some(sidebar) = self.ivars().sidebar.get() else {
+            return;
+        };
+        self.clear_search();
+        self.rebuild_results();
+        sidebar.selectRowIndexes_byExtendingSelection(
+            &NSIndexSet::indexSetWithIndex(SideItem::row_of(category)),
+            false,
+        );
+        // Selecting the row that is already open changes nothing, so the page is shown here.
+        self.show_selected();
+        let (Some(key), Some(c), Some(scroll)) = (
+            key,
+            self.ivars().controls.get(),
+            self.ivars().pane_scroll.get(),
+        ) else {
+            return;
+        };
+        let Some(row) = c.rows.iter().find(|row| row.key == Some(key)) else {
+            return;
+        };
+        let Some(document) = scroll.documentView() else {
+            return;
+        };
+        document.layoutSubtreeIfNeeded();
+        let rect = row
+            .view
+            .convertRect_toView(row.view.bounds(), Some(&document));
+        // A row's own band plus some air, so its group's title is not cut off.
+        let wanted = NSRect::new(
+            NSPoint::new(rect.origin.x, (rect.origin.y - 40.0).max(0.0)),
+            NSSize::new(rect.size.width, rect.size.height + 56.0),
+        );
+        document.scrollRectToVisible(wanted);
+        row.glow(self.mtm());
+    }
+
+    /// The edit a choice of `key` at `index` writes: the place in the list the control was
+    /// filled from, which each key's type or list reads; `None` for a separator or a header.
+    fn choice_edit(&self, key: Key, index: NSInteger) -> Option<SettingsEdit> {
+        match key {
+            Key::ConfirmClose => choice_at(index).map(SettingsEdit::ConfirmClose),
+            Key::RestoreWindows => choice_at(index).map(SettingsEdit::RestoreWindows),
+            Key::KeepRunning => choice_at(index).map(SettingsEdit::KeepRunning),
+            Key::Scrollbar => choice_at(index).map(SettingsEdit::Scrollbar),
+            Key::ContentEdge => choice_at(index).map(SettingsEdit::ContentEdge),
+            Key::SplitStyle => choice_at(index).map(SettingsEdit::SplitStyle),
+            Key::TabDetails => choice_at(index).map(SettingsEdit::TabDetails),
+            Key::TabIconColors => choice_at(index).map(SettingsEdit::IconColors),
+            Key::TabRunning => choice_at(index).map(SettingsEdit::TabRunning),
+            Key::TabPosition => choice_at(index).map(SettingsEdit::TabPosition),
+            Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
+            Key::CommandLevel => choice_at(index).map(SettingsEdit::CommandLevel),
+            Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
+            Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
+            Key::Unfocused => choice_at(index).map(SettingsEdit::CursorUnfocused),
+            Key::CursorMotion => choice_at(index).map(SettingsEdit::CursorMotion),
+            Key::ReduceMotion => choice_at(index).map(SettingsEdit::ReduceMotion),
+            Key::Keypress => choice_at(index).map(SettingsEdit::Keypress),
+            Key::Erase => choice_at(index).map(SettingsEdit::Erase),
+            Key::DockArrival => choice_at(index).map(SettingsEdit::DockArrival),
+            Key::Theme => theme_edit(&self.ivars().themes.borrow(), index).map(SettingsEdit::Theme),
+            Key::LightTheme => {
+                theme_edit(&self.ivars().light_themes.borrow(), index).map(SettingsEdit::LightTheme)
+            }
+            Key::DarkTheme => {
+                theme_edit(&self.ivars().dark_themes.borrow(), index).map(SettingsEdit::DarkTheme)
+            }
+            Key::Font => {
+                font_edit(&self.ivars().fonts.borrow(), index).map(SettingsEdit::FontFamily)
+            }
+            Key::MinimumContrast => contrast_edit(&self.ivars().contrasts.borrow(), index)
+                .map(SettingsEdit::MinimumContrast),
+            Key::PreviewMaxSize => {
+                size_edit(&self.ivars().max_sizes.borrow(), index).map(SettingsEdit::PreviewMaxSize)
+            }
+            Key::PreviewLimit => {
+                size_edit(&self.ivars().limits.borrow(), index).map(SettingsEdit::PreviewLimit)
+            }
+            Key::PreviewKeep => choice_at(index).map(SettingsEdit::PreviewKeep),
+            Key::DownloadConflict => choice_at(index).map(SettingsEdit::DownloadConflict),
+            Key::RemoteStats => choice_at(index).map(SettingsEdit::RemoteStats),
+            _ => None,
+        }
+    }
+
     fn save(&self, edit: Option<SettingsEdit>) {
         let Some(delegate) = app::delegate(self.mtm()) else {
             return;
@@ -2426,6 +2836,7 @@ impl SettingsWindow {
         let Some(SideItem::Page(category)) = SideItem::at(selected) else {
             return;
         };
+        let searching = self.searching();
         // The rows draw their own selection: tell each whether it is the open page.
         for row in 0..SideItem::ALL.len() {
             let at = NSInteger::try_from(row).unwrap_or_default();
@@ -2434,11 +2845,20 @@ impl SettingsWindow {
                 .as_deref()
                 .and_then(|view| view.downcast_ref::<SideRow>())
             {
-                view.set_selected(at == selected);
+                view.set_selected(at == selected && !searching);
             }
         }
-        header.setStringValue(&NSString::from_str(category.title()));
-        let grid = category.grid();
+        // A search shows its results in the last pane, whatever page is open behind it.
+        header.setStringValue(&NSString::from_str(if searching {
+            "Search"
+        } else {
+            category.title()
+        }));
+        let grid = if searching {
+            panes.len().checked_sub(1)
+        } else {
+            category.grid()
+        };
         for (i, pane) in panes.iter().enumerate() {
             pane.setHidden(grid != Some(i));
         }
@@ -2446,8 +2866,9 @@ impl SettingsWindow {
             scroll.setHidden(grid.is_none());
         }
         if let Some(keyboard) = self.ivars().keyboard.get() {
-            keyboard.setHidden(category != Category::Keyboard);
-            if category == Category::Keyboard {
+            let shown = category == Category::Keyboard && !searching;
+            keyboard.setHidden(!shown);
+            if shown {
                 keyboard.appear();
             }
         }
@@ -2496,6 +2917,40 @@ impl SettingsWindow {
         let popup = new_popup(self.mtm());
         self.wire(&popup, key, sel!(popupChanged:));
         popup
+    }
+
+    /// A pictured choice: one picture for each of `T`'s options, in `NAMES` order.
+    fn picture_choice<T: Pictured>(&self, key: Key) -> Retained<PictureChoice> {
+        let items = T::names()
+            .iter()
+            .map(|&(_, value)| (value.title(), value.picture()))
+            .collect();
+        let choice = PictureChoice::new(self.mtm(), items, Palette::of(&Theme::BATERI));
+        self.wire(&choice, key, sel!(pictureChanged:));
+        choice
+    }
+
+    /// A segmented choice: one segment for each of `T`'s options, in `NAMES` order.
+    fn segmented<T: Choice>(&self, key: Key) -> Retained<NSSegmentedControl> {
+        let labels = NSArray::from_retained_slice(
+            &choice_titles::<T>()
+                .into_iter()
+                .map(NSString::from_str)
+                .collect::<Vec<_>>(),
+        );
+        // SAFETY: the target is a weak reference to this object, which lives for the whole
+        // process in `AppDelegate`'s ivar; the selector is this class's own.
+        let control = unsafe {
+            NSSegmentedControl::segmentedControlWithLabels_trackingMode_target_action(
+                &labels,
+                NSSegmentSwitchTracking::SelectOne,
+                Some(self.target()),
+                Some(sel!(segmentChanged:)),
+                self.mtm(),
+            )
+        };
+        control.setIdentifier(Some(&NSString::from_str(&key.tag().to_string())));
+        control
     }
 
     /// A push button with this object's `action`; `key` only when the button
@@ -2675,14 +3130,33 @@ impl SettingsWindow {
                 mtm,
             )
         };
+        let search = NSSearchField::new(mtm);
+        search.setPlaceholderString(Some(ns_string!("Search")));
+        search.setSendsSearchStringImmediately(true);
+        // SAFETY: the target is a weak reference and lives for the whole process; the selector is
+        // this class's `searchSettings:`.
+        unsafe {
+            search.setTarget(Some(self.target()));
+            search.setAction(Some(sel!(searchSettings:)));
+        }
         let side = NSView::new(mtm);
+        add_pinned(&side, &search);
         add_pinned(&side, &scroll);
         add_pinned(&side, &open);
         let safe = side.safeAreaLayoutGuide();
         activate(&[
+            search
+                .topAnchor()
+                .constraintEqualToAnchor_constant(&safe.topAnchor(), 6.0),
+            search
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&side.leadingAnchor(), SIDE_PAD),
+            search
+                .trailingAnchor()
+                .constraintEqualToAnchor_constant(&side.trailingAnchor(), -SIDE_PAD),
             scroll
                 .topAnchor()
-                .constraintEqualToAnchor_constant(&safe.topAnchor(), 4.0),
+                .constraintEqualToAnchor_constant(&search.bottomAnchor(), 8.0),
             scroll
                 .leadingAnchor()
                 .constraintEqualToAnchor(&side.leadingAnchor()),
@@ -2700,6 +3174,7 @@ impl SettingsWindow {
                 .constraintEqualToAnchor_constant(&side.bottomAnchor(), -12.0),
         ]);
         let _ = self.ivars().side_open.set(open);
+        let _ = self.ivars().search.set(search);
         let _ = self.ivars().sidebar.set(table);
         side
     }
@@ -2742,7 +3217,17 @@ impl SettingsWindow {
         // the banner when there is ([`SettingsWindow::layout_panes`]). A hidden banner takes no
         // room, so the panes move back up. The pages live in a flipped document inside a vertical
         // scroll view that fills the space below.
-        let (panes, controls) = self.build_panes();
+        let (mut panes, controls) = self.build_panes();
+        // The results of a search are one more pane, the last: shown in place of the open page.
+        let results = stack(
+            mtm,
+            &[],
+            NSUserInterfaceLayoutOrientation::Vertical,
+            GROUP_SPACING,
+            NSLayoutAttribute::Leading,
+        );
+        panes.push(results.clone());
+        let _ = self.ivars().results.set(results);
         let scroll = NSScrollView::new(mtm);
         scroll.setDrawsBackground(false);
         scroll.setHasVerticalScroller(true);
@@ -2873,22 +3358,22 @@ impl SettingsWindow {
             NUMBER_WIDTH,
         );
         let scrollbar = self.popup::<Scrollbar>(Key::Scrollbar);
-        let content_edge = self.popup::<ContentEdge>(Key::ContentEdge);
+        let content_edge = self.picture_choice::<ContentEdge>(Key::ContentEdge);
         let dim_splits = self.switch(Key::DimSplits);
         let focus_frame = self.switch(Key::FocusFrame);
-        let split_style = self.popup::<SplitStyle>(Key::SplitStyle);
-        let tab_details = self.popup::<TabDetails>(Key::TabDetails);
+        let split_style = self.picture_choice::<SplitStyle>(Key::SplitStyle);
+        let tab_details = self.segmented::<TabDetails>(Key::TabDetails);
         let resize_in_steps = self.switch(Key::ResizeInSteps);
         let tab_icons = self.switch(Key::TabIcons);
         let font_smoothing = self.switch(Key::FontSmoothing);
-        let tab_icon_colors = self.popup::<IconColors>(Key::TabIconColors);
-        let tab_running = self.popup::<TabRunning>(Key::TabRunning);
-        let tab_position = self.popup::<TabPosition>(Key::TabPosition);
+        let tab_icon_colors = self.segmented::<IconColors>(Key::TabIconColors);
+        let tab_running = self.picture_choice::<TabRunning>(Key::TabRunning);
+        let tab_position = self.picture_choice::<TabPosition>(Key::TabPosition);
         // The font's own options: its switches are rebuilt on every refresh (a new font is other
         // options), and the group is hidden when the font offers none.
         let font_options = font_options::Options::new(font_options::Options::stack(mtm));
 
-        let shape = self.popup::<CaretShape>(Key::Shape);
+        let shape = self.picture_choice::<CaretShape>(Key::Shape);
         let blink = self.popup::<CursorBlink>(Key::Blink);
         let blink_speed = self.slide(Key::BlinkSpeed, 0.0, 1.0);
         let radius = self.slide(
@@ -2901,9 +3386,9 @@ impl SettingsWindow {
             *CURSOR_GLOW_RANGE.start(),
             *CURSOR_GLOW_RANGE.end(),
         );
-        let unfocused = self.popup::<UnfocusedCaret>(Key::Unfocused);
+        let unfocused = self.picture_choice::<UnfocusedCaret>(Key::Unfocused);
 
-        let cursor_motion = self.popup::<CursorMotion>(Key::CursorMotion);
+        let cursor_motion = self.segmented::<CursorMotion>(Key::CursorMotion);
         let smooth_scroll = self.switch(Key::SmoothScroll);
         let scroll_bounce = self.switch(Key::ScrollBounce);
         let reduce_motion = self.popup::<ReduceMotion>(Key::ReduceMotion);
@@ -3021,14 +3506,9 @@ impl SettingsWindow {
                     let row = match *item {
                         pages::Item::Key(key) => {
                             let parts = controls.parts(mtm, key);
-                            // A row whose control is a list of switches has the width to itself.
-                            build_row(
-                                mtm,
-                                Some(key),
-                                pages::label(key),
-                                parts,
-                                key == Key::FontFeatures,
-                            )
+                            // A row whose control is a list of switches or of pictures has the width
+                            // to itself.
+                            build_row(mtm, Some(key), pages::label(key), parts, pages::below(key))
                         }
                         pages::Item::Usage => build_row(
                             mtm,
@@ -3817,6 +4297,16 @@ fn select_choice<T: Choice>(popup: &NSPopUpButton, value: T) {
     }
 }
 
+fn select_picture<T: Choice>(choice: &PictureChoice, value: T) {
+    choice.select(choice_index(value));
+}
+
+fn select_segment<T: Choice>(control: &NSSegmentedControl, value: T) {
+    if let Some(index) = choice_index(value) {
+        control.setSelectedSegment(index as NSInteger);
+    }
+}
+
 fn set_switch(switch: &NSSwitch, on: bool) {
     switch.setState(if on {
         NSControlStateValueOn
@@ -3851,30 +4341,50 @@ fn set_slide(slide: &Slide, position: f64, text: &str) {
 }
 
 fn fill_themes(popup: &NSPopUpButton, items: &[ThemeItem], selected: usize) {
-    let titles = items.iter().map(|item| match item {
-        ThemeItem::System => Some("Match System".to_owned()),
-        ThemeItem::Separator => None,
+    let entries = items.iter().map(|item| match item {
+        ThemeItem::System => Entry::item("Match System"),
+        ThemeItem::Separator => Entry::Separator,
+        ThemeItem::Header(title) => Entry::Header(title),
         ThemeItem::Named(name) => {
-            Some(bt_core::Theme::embedded_title(name).map_or_else(|| name.clone(), str::to_owned))
+            let title = Theme::embedded_title(name).map_or_else(|| name.clone(), str::to_owned);
+            // Four colours of the theme: its ground, red, green and blue. A theme of the user's is
+            // a file this list does not read, so it has none.
+            let swatch = Theme::embedded(name).map(|theme| {
+                [
+                    theme.background,
+                    theme.ansi[1],
+                    theme.ansi[2],
+                    theme.ansi[4],
+                ]
+            });
+            Entry::Item(
+                title,
+                Decor {
+                    family: None,
+                    swatch,
+                },
+            )
         }
     });
-    fill_popup(popup, titles, selected);
+    fill_popup(popup, entries, selected);
 }
 
 fn fill_sizes(popup: &NSPopUpButton, items: &[SizeItem], selected: usize) {
-    let titles = items.iter().map(|item| match item {
-        SizeItem::Preset(bytes) | SizeItem::Current(bytes) => Some(size_title(*bytes)),
-        SizeItem::Separator => None,
+    let entries = items.iter().map(|item| match item {
+        SizeItem::Preset(bytes) | SizeItem::Current(bytes) => Entry::item(size_title(*bytes)),
+        SizeItem::Separator => Entry::Separator,
     });
-    fill_popup(popup, titles, selected);
+    fill_popup(popup, entries, selected);
 }
 
 fn fill_contrasts(popup: &NSPopUpButton, items: &[ContrastItem], selected: usize) {
-    let titles = items.iter().map(|item| match item {
-        ContrastItem::Preset(ratio) | ContrastItem::Current(ratio) => Some(contrast_title(*ratio)),
-        ContrastItem::Separator => None,
+    let entries = items.iter().map(|item| match item {
+        ContrastItem::Preset(ratio) | ContrastItem::Current(ratio) => {
+            Entry::item(contrast_title(*ratio))
+        }
+        ContrastItem::Separator => Entry::Separator,
     });
-    fill_popup(popup, titles, selected);
+    fill_popup(popup, entries, selected);
 }
 
 /// The Font popup's first entry: the default font, named. The app's own default family where
@@ -3888,41 +4398,137 @@ fn default_font_title() -> String {
 }
 
 fn fill_fonts(popup: &NSPopUpButton, items: &[FontItem], selected: usize) {
-    let titles = items.iter().map(|item| match item {
-        FontItem::Default => Some(default_font_title()),
-        FontItem::Separator => None,
-        FontItem::Family(name) => Some(name.clone()),
-        FontItem::Missing(name) => Some(missing_font_title(name, bt_gpu::family_notice(name))),
+    let entries = items.iter().map(|item| match item {
+        FontItem::Default => Entry::item(default_font_title()),
+        FontItem::Separator => Entry::Separator,
+        FontItem::Header(title) => Entry::Header(title),
+        // Each family is named in its own letters.
+        FontItem::Family(name) => Entry::Item(
+            name.clone(),
+            Decor {
+                family: Some(name.clone()),
+                swatch: None,
+            },
+        ),
+        FontItem::Missing(name) => {
+            Entry::item(missing_font_title(name, bt_gpu::family_notice(name)))
+        }
     });
-    fill_popup(popup, titles, selected);
+    fill_popup(popup, entries, selected);
+}
+
+/// What a popup's menu item has besides its title.
+#[derive(Default)]
+struct Decor {
+    /// The family the title is written in.
+    family: Option<String>,
+    /// Four colours drawn in front of the title.
+    swatch: Option<[u32; 4]>,
+}
+
+/// An item of a popup's menu as [`fill_popup`] builds it.
+enum Entry {
+    Item(String, Decor),
+    Separator,
+    /// A line of text that cannot be chosen: the title of the section under it.
+    Header(&'static str),
+}
+
+impl Entry {
+    fn item(title: impl Into<String>) -> Entry {
+        Entry::Item(title.into(), Decor::default())
+    }
+}
+
+/// The title `name` in the family's own font, as the font list shows it; `None` when the system
+/// has no such family to draw with (the title stays plain).
+fn family_title(title: &str, family: &str) -> Option<Retained<NSAttributedString>> {
+    let descriptor = NSFontDescriptor::new().fontDescriptorWithFamily(&NSString::from_str(family));
+    let font = NSFont::fontWithDescriptor_size(&descriptor, NSFont::systemFontSize())?;
+    // SAFETY: AppKit's font attribute key (an extern static) with the value type it documents.
+    let attributes = unsafe {
+        NSDictionary::<NSAttributedStringKey, AnyObject>::from_slices(
+            &[NSFontAttributeName],
+            &[font.as_ref()],
+        )
+    };
+    // SAFETY: `attributes` is a dictionary of attribute keys and values AppKit reads.
+    Some(unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str(title),
+            Some(&attributes),
+        )
+    })
+}
+
+/// The picture of four colours in a menu item: a theme's ground, red, green and blue as stripes.
+fn swatch_image(colors: [u32; 4]) -> Retained<NSImage> {
+    const WIDTH: f64 = 4.0 * 7.0;
+    const HEIGHT: f64 = 12.0;
+    let draw = RcBlock::new(move |_: NSRect| -> Bool {
+        let face = NSRect::new(NSPoint::ZERO, NSSize::new(WIDTH, HEIGHT));
+        for (index, rgb) in colors.iter().enumerate() {
+            let stripe = NSRect::new(
+                NSPoint::new(index as f64 * 7.0, 0.0),
+                NSSize::new(7.0, HEIGHT),
+            );
+            crate::tab_bar::Tint::of(*rgb, 1.0).color().setFill();
+            NSBezierPath::fillRect(stripe);
+        }
+        NSColor::labelColor()
+            .colorWithAlphaComponent(0.25)
+            .setStroke();
+        let outline = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            NSRect::new(
+                NSPoint::new(face.origin.x + 0.5, face.origin.y + 0.5),
+                NSSize::new(WIDTH - 1.0, HEIGHT - 1.0),
+            ),
+            2.0,
+            2.0,
+        );
+        outline.stroke();
+        Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(WIDTH, HEIGHT), true, &draw)
 }
 
 /// Rebuilds the popup from scratch. Adding directly to the menu, **not**
 /// `addItemWithTitle:`: that method dedupes items with the same title and cannot add a separator.
-fn fill_popup(
-    popup: &NSPopUpButton,
-    titles: impl Iterator<Item = Option<String>>,
-    selected: usize,
-) {
+fn fill_popup(popup: &NSPopUpButton, entries: impl Iterator<Item = Entry>, selected: usize) {
     let mtm = popup.mtm();
     popup.removeAllItems();
     let Some(menu) = popup.menu() else {
         return;
     };
-    for title in titles {
-        let item = match title {
-            Some(title) => {
+    for entry in entries {
+        let item = match entry {
+            Entry::Item(title, decor) => {
                 // SAFETY: an action-less item; the popup's own action carries the selection.
-                unsafe {
+                let item = unsafe {
                     NSMenuItem::initWithTitle_action_keyEquivalent(
                         NSMenuItem::alloc(mtm),
                         &NSString::from_str(&title),
                         None,
                         ns_string!(""),
                     )
+                };
+                if let Some(styled) = decor
+                    .family
+                    .as_deref()
+                    .and_then(|family| family_title(&title, family))
+                {
+                    item.setAttributedTitle(Some(&styled));
                 }
+                if let Some(colors) = decor.swatch {
+                    item.setImage(Some(&swatch_image(colors)));
+                }
+                item
             }
-            None => NSMenuItem::separatorItem(mtm),
+            Entry::Separator => NSMenuItem::separatorItem(mtm),
+            Entry::Header(title) => {
+                NSMenuItem::sectionHeaderWithTitle(&NSString::from_str(title), mtm)
+            }
         };
         menu.addItem(&item);
     }
@@ -4452,39 +5058,99 @@ mod tests {
         assert_eq!(index, items.len() - 1);
         assert_eq!(items[index], ThemeItem::Named("gone".to_owned()));
         assert!(!items.contains(&ThemeItem::System));
-        // A separator writes nothing.
+        // A separator and a heading write nothing.
         let (items, _) = theme_items("bateri", true, &[vec!["bateri"]], &[]);
         assert_eq!(items[1], ThemeItem::Separator);
         assert_eq!(theme_edit(&items, 1), None);
-        // The embedded groups, a separator before each; an empty one leaves
-        // no doubled line.
-        let (items, _) = theme_items(
-            "nord",
-            false,
-            &[vec!["bateri"], vec![], vec!["nord"]],
-            &user,
-        );
+        assert_eq!(items[2], ThemeItem::Header("Dark"));
+        assert_eq!(theme_edit(&items, 2), None);
+    }
+
+    /// The themes are listed under Light and Dark headings by their own colours, the user's under
+    /// a heading of their own, a separator before each section; an empty one leaves no doubled
+    /// line.
+    #[test]
+    fn themes_are_listed_under_light_and_dark() {
+        let user = vec!["paper".to_owned()];
+        let light = Theme::embedded_groups()[2][0];
+        let dark = Theme::embedded_groups()[1][0];
+        assert!(!Theme::embedded(light).expect("embedded").is_dark());
+        assert!(Theme::embedded(dark).expect("embedded").is_dark());
+        let (items, index) = theme_items(dark, true, &[vec![dark, light]], &user);
         assert_eq!(
             items,
             [
-                ThemeItem::Named("bateri".to_owned()),
+                ThemeItem::System,
                 ThemeItem::Separator,
-                ThemeItem::Named("nord".to_owned()),
+                ThemeItem::Header("Light"),
+                ThemeItem::Named(light.to_owned()),
                 ThemeItem::Separator,
+                ThemeItem::Header("Dark"),
+                ThemeItem::Named(dark.to_owned()),
+                ThemeItem::Separator,
+                ThemeItem::Header("Your themes"),
                 ThemeItem::Named("paper".to_owned()),
             ]
+        );
+        assert_eq!(items[index], ThemeItem::Named(dark.to_owned()));
+        // Only dark ones: no Light heading and no line before the first heading.
+        let (items, _) = theme_items(dark, false, &[vec![dark]], &[]);
+        assert_eq!(
+            items,
+            [ThemeItem::Header("Dark"), ThemeItem::Named(dark.to_owned())]
+        );
+    }
+
+    /// Each option of a pictured choice has a picture of its own, and the rows whose control is
+    /// pictures (or the font's switches) are the ones that stand under their text.
+    #[test]
+    fn every_pictured_option_has_its_own_picture() {
+        fn check<T: Pictured>() -> usize {
+            let pictures: Vec<Picture> = T::names().iter().map(|&(_, v)| v.picture()).collect();
+            for (at, picture) in pictures.iter().enumerate() {
+                assert!(!pictures[..at].contains(picture), "{picture:?} twice");
+            }
+            pictures.len()
+        }
+        assert_eq!(check::<ContentEdge>(), 3);
+        assert_eq!(check::<TabPosition>(), 2);
+        assert_eq!(check::<SplitStyle>(), 2);
+        assert_eq!(check::<CaretShape>(), 3);
+        assert_eq!(check::<UnfocusedCaret>(), 2);
+        assert_eq!(check::<TabRunning>(), 3);
+        let under: Vec<Key> = Key::ALL
+            .into_iter()
+            .filter(|key| pages::below(*key))
+            .collect();
+        assert_eq!(
+            under,
+            [
+                Key::ContentEdge,
+                Key::TabPosition,
+                Key::SplitStyle,
+                Key::Shape,
+                Key::Unfocused,
+                Key::TabRunning,
+                Key::FontFeatures,
+            ]
+            .into_iter()
+            .fold(Vec::new(), |mut sorted, key| {
+                sorted.push(key);
+                sorted.sort_by_key(|key| key.tag());
+                sorted
+            })
         );
     }
 
     #[test]
     fn font_list_matches_case_insensitively_and_keeps_unknowns() {
         let families = vec!["Menlo".to_owned(), "SF Mono".to_owned()];
-        let (items, index) = font_items(None, &families);
+        let (items, index) = font_items(None, &families, &[]);
         assert_eq!((items[index].clone(), index), (FontItem::Default, 0));
         assert_eq!(font_edit(&items, 0).as_deref(), Some(""));
-        let (items, index) = font_items(Some("menlo"), &families);
+        let (items, index) = font_items(Some("menlo"), &families, &[]);
         assert_eq!(items[index], FontItem::Family("Menlo".to_owned()));
-        let (items, index) = font_items(Some("Comic Sans"), &families);
+        let (items, index) = font_items(Some("Comic Sans"), &families, &[]);
         assert_eq!(items[index], FontItem::Missing("Comic Sans".to_owned()));
         assert_eq!(font_edit(&items, index as NSInteger), None);
         assert_eq!(
@@ -4496,6 +5162,42 @@ mod tests {
             ),
             "Helvetica — not monospaced"
         );
+    }
+
+    /// The Font list has the app's own families first, under their heading, and the machine's after
+    /// them; a heading is not a choice, and the file's unknown family stays last.
+    #[test]
+    fn the_font_list_has_the_apps_families_and_the_machines() {
+        let families: Vec<String> = ["Fira Code", "JetBrains Mono", "Menlo", "Monaco"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let bundled = vec!["jetbrains mono".to_owned(), "Fira Code".to_owned()];
+        let (items, index) = font_items(Some("Menlo"), &families, &bundled);
+        assert_eq!(
+            items,
+            [
+                FontItem::Default,
+                FontItem::Separator,
+                FontItem::Header("Included with bateri"),
+                FontItem::Family("Fira Code".to_owned()),
+                FontItem::Family("JetBrains Mono".to_owned()),
+                FontItem::Separator,
+                FontItem::Header("On this computer"),
+                FontItem::Family("Menlo".to_owned()),
+                FontItem::Family("Monaco".to_owned()),
+            ]
+        );
+        assert_eq!(items[index], FontItem::Family("Menlo".to_owned()));
+        assert_eq!(font_edit(&items, 2), None);
+        // The file's family that is nowhere in the list comes after both sections.
+        let (items, index) = font_items(Some("Comic Sans"), &families, &bundled);
+        assert_eq!(index, items.len() - 1);
+        assert_eq!(items[index - 1], FontItem::Separator);
+        // Nothing of the app's own (a run without its fonts): one section, no empty heading.
+        let (items, _) = font_items(None, &families, &[]);
+        assert!(!items.contains(&FontItem::Header("Included with bateri")));
+        assert!(items.contains(&FontItem::Header("On this computer")));
     }
 
     /// Every settings key stands once in the page table, and the Keyboard page, a table of its
