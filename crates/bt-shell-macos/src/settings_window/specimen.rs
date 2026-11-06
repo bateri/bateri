@@ -31,14 +31,14 @@ use bt_core::{
 };
 use bt_gpu::{Snapshot, Stage, StageLook};
 use objc2::rc::Retained;
-use objc2::{AnyThread, MainThreadMarker};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSFont, NSImage, NSImageScaling, NSImageView, NSLayoutAttribute, NSStackView,
-    NSStackViewDistribution, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
+    NSStackViewDistribution, NSUserInterfaceLayoutOrientation, NSView,
 };
-use objc2_foundation::{NSSize, NSString};
+use objc2_foundation::{NSObjectProtocol, NSSize, NSString};
 
-use super::look::{self, Ink};
+use super::look;
 use super::pictures::{PICTURE_HEIGHT, PICTURE_WIDTH, Palette, Picture};
 use super::tabs_specimen::{self, TabsView};
 use super::{Category, DETAIL_WIDTH, PAGE_MARGIN};
@@ -613,13 +613,127 @@ struct CaretTile {
     drawn: RefCell<Option<(CaretDrawn, Retained<NSImage>)>>,
 }
 
+/// The title strip's height, in points.
+const STRIP_HEIGHT: f64 = 24.0;
+
+/// What a card's title strip shows.
+#[derive(Clone, Debug, PartialEq)]
+struct Strip {
+    title: String,
+    tag: Option<&'static str>,
+    palette: Palette,
+    focused: bool,
+}
+
+pub(super) struct StripIvars {
+    strip: RefCell<Option<Strip>>,
+}
+
+define_class!(
+    /// A card's title strip, drawn as a bateri window's: the theme's band, the three lights (the
+    /// theme's error, warning and success while the window is key, its dim role while not), the
+    /// name in the middle and the tag at the right in the accent.
+    // SAFETY: NSView has no subclassing requirement; Drop is not implemented.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriSettingsTitleStrip"]
+    #[ivars = StripIvars]
+    struct TitleStrip;
+
+    unsafe impl NSObjectProtocol for TitleStrip {}
+
+    impl TitleStrip {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: objc2_foundation::NSRect) {
+            if let Some(strip) = self.ivars().strip.borrow().as_ref() {
+                draw_strip(strip, self.bounds());
+            }
+        }
+    }
+);
+
+impl TitleStrip {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(StripIvars {
+            strip: RefCell::new(None),
+        });
+        // SAFETY: `init` is NSView's designated initializer (zero frame); the size comes from the
+        // card's constraints.
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        this.setTranslatesAutoresizingMaskIntoConstraints(false);
+        this
+    }
+
+    fn set(&self, strip: Strip) {
+        if self.ivars().strip.borrow().as_ref() != Some(&strip) {
+            self.ivars().strip.replace(Some(strip));
+            self.setNeedsDisplay(true);
+        }
+    }
+}
+
+fn draw_strip(strip: &Strip, bounds: objc2_foundation::NSRect) {
+    use objc2_app_kit::{NSBezierPath, NSStringDrawing};
+    use objc2_foundation::{NSPoint, NSRect};
+    let palette = &strip.palette;
+    Tint::of(palette.band, 1.0).color().setFill();
+    NSBezierPath::fillRect(bounds);
+    let middle = bounds.size.height / 2.0;
+    let lights = if strip.focused {
+        [palette.error, palette.warning, palette.success]
+    } else {
+        [palette.dim; 3]
+    };
+    for (i, rgb) in lights.into_iter().enumerate() {
+        let side = 9.0;
+        let dot = NSRect::new(
+            NSPoint::new(10.0 + i as f64 * 14.0, middle - side / 2.0),
+            NSSize::new(side, side),
+        );
+        Tint::of(rgb, 1.0).color().setFill();
+        NSBezierPath::bezierPathWithOvalInRect(dot).fill();
+    }
+    let text = |words: &str, font: &NSFont, rgb: u32, x: Option<f64>| {
+        let attributes = super::pictures::attributes(font, &Tint::of(rgb, 1.0).color());
+        let words = NSString::from_str(words);
+        // SAFETY: `attributes` holds the two keys `sizeWithAttributes:` and
+        // `drawAtPoint:withAttributes:` read, with the value types they document; drawing happens
+        // inside `drawRect:`.
+        unsafe {
+            let size = words.sizeWithAttributes(Some(&attributes));
+            let left = x.map_or((bounds.size.width - size.width) / 2.0, |right| {
+                right - size.width
+            });
+            words.drawAtPoint_withAttributes(
+                NSPoint::new(left, middle - size.height / 2.0),
+                Some(&attributes),
+            );
+        }
+    };
+    let name = NSFont::systemFontOfSize_weight(11.0, 0.23);
+    text(&strip.title, &name, palette.foreground, None);
+    if let Some(tag) = strip.tag {
+        text(
+            tag,
+            &NSFont::systemFontOfSize(10.0),
+            palette.accent,
+            Some(bounds.size.width - 10.0),
+        );
+    }
+}
+
 /// One card of a terminal example: the picture, and its name and tag under it.
 struct Card {
     column: Retained<NSStackView>,
+    /// The card itself: its title strip over its picture, in one rounded, framed shape.
+    shape: Retained<NSStackView>,
+    strip: Retained<TitleStrip>,
     image: Retained<NSImageView>,
-    line: Retained<NSStackView>,
-    caption: Retained<NSTextField>,
-    tag: Retained<NSTextField>,
     kept: RefCell<Option<Kept>>,
     drawn: RefCell<Option<Drawn>>,
     /// The picture on the card, kept to put back after a blink's dark half.
@@ -633,52 +747,47 @@ impl Card {
     fn new(mtm: MainThreadMarker) -> Self {
         let image = NSImageView::new(mtm);
         image.setImageScaling(NSImageScaling::ScaleProportionallyDown);
-        image.setWantsLayer(true);
-        if let Some(layer) = image.layer() {
+        let strip = TitleStrip::new(mtm);
+        strip
+            .heightAnchor()
+            .constraintEqualToConstant(STRIP_HEIGHT)
+            .setActive(true);
+        // A little bateri window: the title strip and the terminal under it, one shape with a
+        // group's corner and frame.
+        let shape = super::stack(
+            mtm,
+            &[&strip, &image],
+            NSUserInterfaceLayoutOrientation::Vertical,
+            0.0,
+            NSLayoutAttribute::Leading,
+        );
+        shape.setWantsLayer(true);
+        if let Some(layer) = shape.layer() {
             layer.setCornerRadius(super::GROUP_RADIUS);
             layer.setMasksToBounds(true);
             layer.setBorderWidth(0.5);
         }
-        let label = |mtm: MainThreadMarker| {
-            let label = super::text_label(&NSString::from_str(""), mtm);
-            label.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-            label.setTextColor(Some(&look::ink(Ink::Dim)));
-            label
-        };
-        let (caption, tag) = (label(mtm), label(mtm));
-        // "In use now" is the accent beside the name: the one of a pair the window is in.
-        tag.setTextColor(Some(&look::ink(Ink::Accent)));
-        // The name and its tag together, centred under the card, every card alike.
-        let line = super::stack(
-            mtm,
-            &[&caption, &tag],
-            NSUserInterfaceLayoutOrientation::Horizontal,
-            6.0,
-            NSLayoutAttribute::FirstBaseline,
-        );
-        // As wide as what it shows, or a line with its tag hidden spreads to the card's width and
-        // its name stands at the left.
-        line.setHuggingPriority_forOrientation(
-            objc2_app_kit::NSLayoutPriorityRequired - 1.0,
-            objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
-        );
+        for view in [&*strip as &NSView, &image] {
+            view.widthAnchor()
+                .constraintEqualToAnchor(&shape.widthAnchor())
+                .setActive(true);
+        }
         let column = super::stack(
             mtm,
-            &[&image, &line],
+            &[&shape],
             NSUserInterfaceLayoutOrientation::Vertical,
-            6.0,
+            0.0,
             NSLayoutAttribute::CenterX,
         );
-        image
+        shape
             .widthAnchor()
             .constraintEqualToAnchor(&column.widthAnchor())
             .setActive(true);
         Card {
             column,
+            shape,
+            strip,
             image,
-            line,
-            caption,
-            tag,
             kept: RefCell::new(None),
             drawn: RefCell::new(None),
             lit: RefCell::new(None),
@@ -687,13 +796,16 @@ impl Card {
         }
     }
 
+    /// The card's title strip: the face's name and tag in its theme, the window's lights lit
+    /// when the window it pictures is key; no strip for a face with no name.
     fn name(&self, face: &Face) {
-        self.line.setHidden(face.caption.is_none());
-        self.caption
-            .setStringValue(&NSString::from_str(face.caption.as_deref().unwrap_or("")));
-        self.tag
-            .setStringValue(&NSString::from_str(face.tag.unwrap_or("")));
-        self.tag.setHidden(face.tag.is_none());
+        self.strip.setHidden(face.caption.is_none());
+        self.strip.set(Strip {
+            title: face.caption.clone().unwrap_or_default(),
+            tag: face.tag,
+            palette: Palette::of(&face.theme),
+            focused: face.focused,
+        });
     }
 }
 
@@ -865,7 +977,7 @@ impl Specimens {
                         continue;
                     };
                     card.column.setHidden(false);
-                    if let Some(layer) = card.image.layer() {
+                    if let Some(layer) = card.shape.layer() {
                         layer.setBorderColor(Some(&frame));
                     }
                     card.name(face);

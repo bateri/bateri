@@ -87,6 +87,8 @@ pub(super) struct Palette {
     pub(super) error: u32,
     /// The theme is a dark one ([`Theme::is_dark`]).
     pub(super) dark: bool,
+    /// ANSI 1 to 6: red, green, yellow, blue, magenta, cyan — a theme's card shows them.
+    pub(super) ansi: [u32; 6],
 }
 
 fn pack(rgb: [u8; 3]) -> u32 {
@@ -114,6 +116,14 @@ impl Palette {
             warning: theme.warning,
             error: theme.error,
             dark: theme.is_dark(),
+            ansi: [
+                theme.ansi[1],
+                theme.ansi[2],
+                theme.ansi[3],
+                theme.ansi[4],
+                theme.ansi[5],
+                theme.ansi[6],
+            ],
         }
     }
 }

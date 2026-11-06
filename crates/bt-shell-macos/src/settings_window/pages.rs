@@ -287,6 +287,9 @@ pub(super) fn below(key: Key) -> bool {
     matches!(
         key,
         Key::FontFeatures
+            | Key::Theme
+            | Key::LightTheme
+            | Key::DarkTheme
             | Key::ContentEdge
             | Key::TabPosition
             | Key::SplitStyle

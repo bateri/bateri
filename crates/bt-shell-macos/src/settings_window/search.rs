@@ -71,6 +71,14 @@ pub(super) fn entries(settings: &Settings, resolved: Resolved) -> Vec<Entry> {
                     }
                     let titles: Vec<&str> = offered.iter().map(|option| option.title()).collect();
                     ("Font options".to_owned(), titles.join(" "))
+                } else if matches!(key, Key::Theme | Key::LightTheme | Key::DarkTheme) {
+                    // The galleries' cards: a theme is found by its name.
+                    let titles: Vec<&str> = bt_core::Theme::embedded_groups()
+                        .into_iter()
+                        .flatten()
+                        .map(|name| bt_core::Theme::embedded_title(name).unwrap_or(name))
+                        .collect();
+                    (pages::label(key).to_owned(), titles.join(" "))
                 } else {
                     (pages::label(key).to_owned(), choice_labels(key).join(" "))
                 };
@@ -312,6 +320,27 @@ mod tests {
         assert!(!matches("cursor", &row));
         assert!(!matches("   ", &row));
         assert!(!matches("", &row));
+    }
+
+    /// A theme is found by its name: the Theme row lists every embedded theme's.
+    #[test]
+    fn a_theme_is_found_by_its_name() {
+        let all = entries(
+            &Settings {
+                theme: "bateri".to_owned(),
+                ..Settings::default()
+            },
+            Resolved {
+                reduce: false,
+                scrollbar: bt_gpu::ScrollbarMode::Auto,
+            },
+        );
+        let found: Vec<_> = all
+            .iter()
+            .filter(|entry| matches("nord", entry))
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(found, [Some(Key::Theme)]);
     }
 
     /// The key in the file is searched only when the query looks like a key.

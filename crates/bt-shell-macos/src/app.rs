@@ -6675,9 +6675,16 @@ impl AppDelegate {
         } else {
             settings::load_theme(Some(&root), name).or_embedded(dark).0
         };
+        // The user's themes in their own colours, for the galleries' cards: read here, where the
+        // themes on screen are read, so the window reads no theme file.
+        let user_themes: Vec<Theme> = user
+            .iter()
+            .map(|name| settings::load_theme(Some(&root), name).or_embedded(dark).0)
+            .collect();
         let themes = crate::settings_window::ThemeLists {
             embedded: &embedded,
             user: &user,
+            user_themes: &user_themes,
             on_screen: &theme,
             light: &light,
             dark: &dark_theme,

@@ -74,6 +74,7 @@ use crate::zoom::{MAX_SIZE, MIN_SIZE};
 use look::Ink;
 use pictures::{Palette, Picture, PictureChoice};
 use switch::ThemeSwitch;
+use theme_gallery::ThemeGallery;
 
 mod font_options;
 mod keyboard;
@@ -86,6 +87,7 @@ mod search;
 mod specimen;
 mod switch;
 mod tabs_specimen;
+mod theme_gallery;
 
 /// Whether the keyboard is in a field of Settings ▸ Keyboard that listens for a shortcut: then
 /// a modifier pressed twice is a shortcut to give, not one to run.
@@ -935,8 +937,11 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         Key::PreviewReadOnly => Some("A preview you change is kept, never cleaned up."),
         Key::PreviewLimit => Some("Oldest go first, when bateri starts."),
         Key::DownloadNotify => Some("Only while bateri is in the background."),
+        Key::Theme if settings.theme == SYSTEM_THEME => {
+            Some("The light theme while the system is light, the dark one while it is dark.")
+        }
+        Key::Theme => Some("The same theme in light and dark."),
         Key::Scrollback
-        | Key::Theme
         | Key::LightTheme
         | Key::DarkTheme
         | Key::Font
@@ -1310,67 +1315,102 @@ fn parse_decimal(text: &str, range: std::ops::RangeInclusive<f64>) -> Option<f64
         .filter(|value| value.is_finite() && range.contains(value))
 }
 
-/// An item of the theme popup.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ThemeItem {
-    /// "Match System" — writes `SYSTEM_THEME`.
-    System,
-    Separator,
-    /// A line of text that is not a choice: the title of the section under it.
-    Header(&'static str),
-    Named(String),
+/// Which themes a gallery offers: all of them (one theme in light and dark), or the light or the
+/// dark ones (the pair that follows the system).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shade {
+    All,
+    Light,
+    Dark,
 }
 
-/// The theme popup's items and the selected one's index: Match System where the row has it, the
-/// embedded themes under Light and Dark headings (each of the groups' own order kept inside a
-/// heading), the user's under a heading of their own, a separator before each. A theme is light or
-/// dark by its own colours ([`Theme::is_dark`]). If the name in the file is not in the list (a
-/// deleted theme) it is appended at the end: the popup does not hide what the user wrote (the
+impl Shade {
+    fn takes(self, theme: &Theme) -> bool {
+        match self {
+            Shade::All => true,
+            Shade::Light => !theme.is_dark(),
+            Shade::Dark => theme.is_dark(),
+        }
+    }
+}
+
+/// A gallery's sections for `shade`: bateri's own themes, then the adapted dark and light ones
+/// (each group's own order kept), then the user's, each under its title; a theme is light or dark
+/// by its own colours ([`Theme::is_dark`]). If the name in the file is in none of them it gets a
+/// card of its own: a theme of the other shade under "Chosen", in its colours, a deleted one under
+/// "Not found", in the colours on screen — the gallery does not hide what the user wrote (the
 /// Font popup's rule).
-fn theme_items(
-    selected: &str,
-    with_system: bool,
-    embedded: &[Vec<&str>],
-    user: &[String],
-) -> (Vec<ThemeItem>, usize) {
-    let mut items = Vec::new();
-    if with_system {
-        items.push(ThemeItem::System);
-    }
-    let mut light = Vec::new();
-    let mut dark = Vec::new();
-    for name in embedded.iter().flatten() {
-        match Theme::embedded(name) {
-            Some(theme) if theme.is_dark() => dark.push((*name).to_owned()),
-            _ => light.push((*name).to_owned()),
-        }
-    }
-    let sections = [
-        ("Light", light),
-        ("Dark", dark),
-        ("Your themes", user.to_vec()),
-    ];
-    for (title, names) in sections.into_iter().filter(|(_, names)| !names.is_empty()) {
-        if !items.is_empty() {
-            items.push(ThemeItem::Separator);
-        }
-        items.push(ThemeItem::Header(title));
-        items.extend(names.into_iter().map(ThemeItem::Named));
-    }
-    let position = |items: &[ThemeItem]| {
-        items.iter().position(|item| match item {
-            ThemeItem::System => selected == SYSTEM_THEME,
-            ThemeItem::Separator | ThemeItem::Header(_) => false,
-            ThemeItem::Named(name) => name == selected,
-        })
+fn theme_sections(selected: &str, shade: Shade, lists: &ThemeLists) -> Vec<theme_gallery::Section> {
+    let card = |name: &str, theme: &Theme| theme_gallery::Card {
+        name: name.to_owned(),
+        title: Theme::embedded_title(name).unwrap_or(name).to_owned(),
+        palette: Palette::of(theme),
     };
-    if let Some(index) = position(&items) {
-        return (items, index);
+    let embedded = |names: &[&str]| -> Vec<theme_gallery::Card> {
+        names
+            .iter()
+            .filter_map(|name| Theme::embedded(name).map(|theme| (*name, theme)))
+            .filter(|(_, theme)| shade.takes(theme))
+            .map(|(name, theme)| card(name, &theme))
+            .collect()
+    };
+    let [own, dark, light] = [0, 1, 2].map(|at| {
+        lists
+            .embedded
+            .get(at)
+            .map(|names| embedded(names))
+            .unwrap_or_default()
+    });
+    let user: Vec<theme_gallery::Card> = lists
+        .user
+        .iter()
+        .zip(lists.user_themes)
+        .filter(|(_, theme)| shade.takes(theme))
+        .map(|(name, theme)| card(name, theme))
+        .collect();
+    // Under the Light or the Dark row the adapted themes need no shade in their title: the row
+    // says it.
+    let (dark_title, light_title) = match shade {
+        Shade::All => ("Dark", "Light"),
+        Shade::Light | Shade::Dark => ("Well known", "Well known"),
+    };
+    let mut sections: Vec<theme_gallery::Section> = [
+        ("bateri", own),
+        (dark_title, dark),
+        (light_title, light),
+        ("Your themes", user),
+    ]
+    .into_iter()
+    .filter(|(_, cards)| !cards.is_empty())
+    .map(|(title, cards)| theme_gallery::Section {
+        title: Some(title.to_owned()),
+        cards,
+    })
+    .collect();
+    let listed = sections
+        .iter()
+        .flat_map(|section| &section.cards)
+        .any(|card| card.name == selected);
+    if !listed && selected != SYSTEM_THEME {
+        // A theme of the other shade the file names for this one keeps its colours; a name no
+        // list has is drawn in the colours on screen.
+        let known = Theme::embedded(selected).or_else(|| {
+            lists
+                .user
+                .iter()
+                .position(|name| name == selected)
+                .and_then(|at| lists.user_themes.get(at).copied())
+        });
+        let (title, theme) = match known {
+            Some(theme) => ("Chosen", theme),
+            None => ("Not found", *lists.on_screen),
+        };
+        sections.push(theme_gallery::Section {
+            title: Some(title.to_owned()),
+            cards: vec![card(selected, &theme)],
+        });
     }
-    items.push(ThemeItem::Separator);
-    items.push(ThemeItem::Named(selected.to_owned()));
-    let index = items.len() - 1;
-    (items, index)
+    sections
 }
 
 /// An item of the font popup.
@@ -1631,9 +1671,12 @@ struct Controls {
     scrollback: Number,
     shell_integration: Retained<NSPopUpButton>,
     command_level: Retained<NSPopUpButton>,
-    theme: Retained<NSPopUpButton>,
-    light_theme: Retained<NSPopUpButton>,
-    dark_theme: Retained<NSPopUpButton>,
+    /// Theme: Match System or one theme, and the gallery of every theme for the one.
+    theme_mode: Retained<NSSegmentedControl>,
+    theme: Retained<ThemeGallery>,
+    /// The pair that follows the system: the light themes and the dark ones.
+    light_theme: Retained<ThemeGallery>,
+    dark_theme: Retained<ThemeGallery>,
     font: Retained<NSPopUpButton>,
     /// The switches of the options the selected font offers.
     font_options: font_options::Options,
@@ -1809,8 +1852,10 @@ impl Row {
 pub(crate) struct ThemeLists<'a> {
     /// The embedded themes' names, in groups (`Theme::embedded_groups`).
     pub(crate) embedded: &'a [Vec<&'a str>],
-    /// The names of the themes in the user's folder.
+    /// The names of the themes in the user's folder, and their colours (read by the app; the
+    /// window reads no theme file), in the same order.
     pub(crate) user: &'a [String],
+    pub(crate) user_themes: &'a [Theme],
     /// The theme on screen for the file's choice: the pictures are drawn in its colours.
     pub(crate) on_screen: &'a Theme,
     /// The themes the file names for the light and for the dark appearance, and whether the
@@ -1860,10 +1905,7 @@ pub(crate) struct Ivars {
     keyboard: OnceCell<Retained<KeyboardPage>>,
     controls: OnceCell<Controls>,
     /// The popups' item lists — the meaning of the selected index. Rebuilt on
-    /// every `refresh` (a new file in the theme directory).
-    themes: RefCell<Vec<ThemeItem>>,
-    light_themes: RefCell<Vec<ThemeItem>>,
-    dark_themes: RefCell<Vec<ThemeItem>>,
+    /// every `refresh`.
     fonts: RefCell<Vec<FontItem>>,
     /// The options the Options row shows, in the order of the switches' tags.
     /// Rebuilt on every `refresh`.
@@ -2271,6 +2313,43 @@ define_class!(
             }
         }
 
+        /// A theme's card clicked in one of the galleries: written for the gallery's row.
+        #[unsafe(method(themeChosen:))]
+        fn theme_chosen(&self, sender: Option<&AnyObject>) {
+            let Some(gallery) = sender.and_then(|s| s.downcast_ref::<ThemeGallery>()) else {
+                return;
+            };
+            let Some(name) = gallery.chosen() else {
+                return;
+            };
+            let edit = match Key::from_tag(gallery.tag()) {
+                Some(Key::Theme) => Some(SettingsEdit::Theme(name)),
+                Some(Key::LightTheme) => Some(SettingsEdit::LightTheme(name)),
+                Some(Key::DarkTheme) => Some(SettingsEdit::DarkTheme(name)),
+                _ => None,
+            };
+            self.save(edit);
+        }
+
+        /// Match System or One Theme: one theme is the one on screen now, so nothing changes
+        /// but the following.
+        #[unsafe(method(themeModeChanged:))]
+        fn theme_mode_changed(&self, sender: Option<&AnyObject>) {
+            let Some(control) = sender.and_then(|s| s.downcast_ref::<NSSegmentedControl>()) else {
+                return;
+            };
+            let edit = if control.selectedSegment() == 0 {
+                Some(SettingsEdit::Theme(SYSTEM_THEME.to_owned()))
+            } else {
+                // Read from the app now, not from what the window last showed.
+                app::delegate(self.mtm()).map(|app| {
+                    let file = app.file_settings();
+                    SettingsEdit::Theme(file.theme_for(app.dark_appearance()).to_owned())
+                })
+            };
+            self.save(edit);
+        }
+
         #[unsafe(method(stepperChanged:))]
         fn stepper_changed(&self, sender: Option<&AnyObject>) {
             let Some(stepper) = sender.and_then(|s| s.downcast_ref::<NSStepper>()) else {
@@ -2350,14 +2429,6 @@ define_class!(
 );
 
 /// The action's theme item → the name to write.
-fn theme_edit(items: &[ThemeItem], index: NSInteger) -> Option<String> {
-    match items.get(usize::try_from(index).ok()?)? {
-        ThemeItem::System => Some(SYSTEM_THEME.to_owned()),
-        ThemeItem::Named(name) => Some(name.clone()),
-        ThemeItem::Separator | ThemeItem::Header(_) => None,
-    }
-}
-
 /// The action's font item → the family to write; there is nothing to write
 /// when the file's value that is not in the list is selected again.
 fn font_edit(items: &[FontItem], index: NSInteger) -> Option<String> {
@@ -2411,9 +2482,6 @@ impl SettingsWindow {
             specimen_inputs: RefCell::new(None),
             keyboard: OnceCell::new(),
             controls: OnceCell::new(),
-            themes: RefCell::new(Vec::new()),
-            light_themes: RefCell::new(Vec::new()),
-            dark_themes: RefCell::new(Vec::new()),
             fonts: RefCell::new(Vec::new()),
             font_options: RefCell::new(Vec::new()),
             max_sizes: RefCell::new(Vec::new()),
@@ -2497,7 +2565,6 @@ impl SettingsWindow {
         let Some(c) = self.ivars().controls.get() else {
             return;
         };
-        let (embedded, user) = (themes.embedded, themes.user);
         // The window and its pictures are drawn in the theme that is on screen: its light or dark
         // for what AppKit draws, its roles for the rest.
         let palette = Palette::of(themes.on_screen);
@@ -2536,12 +2603,23 @@ impl SettingsWindow {
         select_choice(&c.shell_integration, settings.shell_integration);
         select_choice(&c.command_level, settings.commands_level);
 
-        let (items, index) = theme_items(&settings.theme, true, embedded, user);
-        show_themes(&c.theme, &self.ivars().themes, items, index);
-        let (items, index) = theme_items(&settings.light_theme, false, embedded, user);
-        show_themes(&c.light_theme, &self.ivars().light_themes, items, index);
-        let (items, index) = theme_items(&settings.dark_theme, false, embedded, user);
-        show_themes(&c.dark_theme, &self.ivars().dark_themes, items, index);
+        // Theme: Match System shows the pair's galleries in the rows under it; one theme shows
+        // every theme here.
+        let follows = settings.theme == SYSTEM_THEME;
+        c.theme_mode.setSelectedSegment(if follows { 0 } else { 1 });
+        c.theme.setHidden(follows);
+        c.theme.show(
+            theme_sections(&settings.theme, Shade::All, themes),
+            &settings.theme,
+        );
+        c.light_theme.show(
+            theme_sections(&settings.light_theme, Shade::Light, themes),
+            &settings.light_theme,
+        );
+        c.dark_theme.show(
+            theme_sections(&settings.dark_theme, Shade::Dark, themes),
+            &settings.dark_theme,
+        );
         let (items, index) = contrast_items(settings.minimum_contrast);
         fill_contrasts(&c.minimum_contrast, &items, index);
         self.ivars().contrasts.replace(items);
@@ -2942,13 +3020,6 @@ impl SettingsWindow {
             Key::Keypress => choice_at(index).map(SettingsEdit::Keypress),
             Key::Erase => choice_at(index).map(SettingsEdit::Erase),
             Key::DockArrival => choice_at(index).map(SettingsEdit::DockArrival),
-            Key::Theme => theme_edit(&self.ivars().themes.borrow(), index).map(SettingsEdit::Theme),
-            Key::LightTheme => {
-                theme_edit(&self.ivars().light_themes.borrow(), index).map(SettingsEdit::LightTheme)
-            }
-            Key::DarkTheme => {
-                theme_edit(&self.ivars().dark_themes.borrow(), index).map(SettingsEdit::DarkTheme)
-            }
             Key::Font => {
                 font_edit(&self.ivars().fonts.borrow(), index).map(SettingsEdit::FontFamily)
             }
@@ -3255,6 +3326,35 @@ impl SettingsWindow {
         control.setIdentifier(Some(&NSString::from_str(&key.tag().to_string())));
         control.setSelectedSegmentBezelColor(Some(&look::ink(Ink::Accent)));
         control
+    }
+
+    /// Theme's two ways: Match System, or one theme in light and dark.
+    fn theme_mode(&self) -> Retained<NSSegmentedControl> {
+        let labels = NSArray::from_retained_slice(&[
+            NSString::from_str("Match System"),
+            NSString::from_str("One Theme"),
+        ]);
+        // SAFETY: the target is a weak reference to this object, which lives for the whole
+        // process in `AppDelegate`'s ivar; the selector is this class's own.
+        let control = unsafe {
+            NSSegmentedControl::segmentedControlWithLabels_trackingMode_target_action(
+                &labels,
+                NSSegmentSwitchTracking::SelectOne,
+                Some(self.target()),
+                Some(sel!(themeModeChanged:)),
+                self.mtm(),
+            )
+        };
+        control.setTag(Key::Theme.tag());
+        control.setSelectedSegmentBezelColor(Some(&look::ink(Ink::Accent)));
+        control
+    }
+
+    /// A gallery of themes for `key`'s row; a card clicked is written by `themeChosen:`.
+    fn theme_gallery(&self, key: Key) -> Retained<ThemeGallery> {
+        let gallery = ThemeGallery::new(self.mtm());
+        self.wire(&gallery, key, sel!(themeChosen:));
+        gallery
     }
 
     /// A push button with this object's `action`; `key` only when the button
@@ -3717,9 +3817,10 @@ impl SettingsWindow {
         let node_version = self.switch(Key::NodeVersion);
         let command_level = self.popup::<CommandLevel>(Key::CommandLevel);
 
-        let theme = self.string_popup(Key::Theme);
-        let light_theme = self.string_popup(Key::LightTheme);
-        let dark_theme = self.string_popup(Key::DarkTheme);
+        let theme_mode = self.theme_mode();
+        let theme = self.theme_gallery(Key::Theme);
+        let light_theme = self.theme_gallery(Key::LightTheme);
+        let dark_theme = self.theme_gallery(Key::DarkTheme);
         let minimum_contrast = self.string_popup(Key::MinimumContrast);
         let font = self.string_popup(Key::Font);
         // Half a point a step: the size is a decimal, and a whole point is a large step at the
@@ -3812,6 +3913,7 @@ impl SettingsWindow {
             scrollback,
             shell_integration,
             command_level,
+            theme_mode,
             theme,
             light_theme,
             dark_theme,
@@ -4224,7 +4326,26 @@ impl Controls {
             Key::Scrollback => number(&self.scrollback),
             Key::ShellIntegration => Parts::of(&self.shell_integration),
             Key::CommandLevel => Parts::of(&self.command_level),
-            Key::Theme => Parts::of(&self.theme),
+            Key::Theme => {
+                let view = stack(
+                    mtm,
+                    &[
+                        self.theme_mode.as_super().as_super(),
+                        self.theme.as_super().as_super(),
+                    ],
+                    NSUserInterfaceLayoutOrientation::Vertical,
+                    12.0,
+                    NSLayoutAttribute::Leading,
+                );
+                Parts {
+                    view: Retained::into_super(view),
+                    controls: vec![
+                        Retained::into_super(self.theme_mode.clone()),
+                        Retained::into_super(self.theme.clone()),
+                    ],
+                    dim: Vec::new(),
+                }
+            }
             Key::LightTheme => Parts::of(&self.light_theme),
             Key::DarkTheme => Parts::of(&self.dark_theme),
             Key::Font => Parts::of(&self.font),
@@ -4794,52 +4915,6 @@ fn set_number(number: &Number, value: f64, text: &str) {
 fn set_slide(slide: &Slide, position: f64, text: &str) {
     slide.slider.setDoubleValue(position);
     slide.value.setStringValue(&NSString::from_str(text));
-}
-
-/// Shows `items` in a theme popup. Each item carries a swatch drawn for it, so a list that is
-/// the one on screen only moves the selection (a choice made in the popup writes the file and
-/// comes back here).
-fn show_themes(
-    popup: &NSPopUpButton,
-    shown: &RefCell<Vec<ThemeItem>>,
-    items: Vec<ThemeItem>,
-    selected: usize,
-) {
-    if *shown.borrow() == items {
-        popup.selectItemAtIndex(selected as NSInteger);
-    } else {
-        fill_themes(popup, &items, selected);
-    }
-    shown.replace(items);
-}
-
-fn fill_themes(popup: &NSPopUpButton, items: &[ThemeItem], selected: usize) {
-    let entries = items.iter().map(|item| match item {
-        ThemeItem::System => Entry::item("Match System"),
-        ThemeItem::Separator => Entry::Separator,
-        ThemeItem::Header(title) => Entry::Header(title),
-        ThemeItem::Named(name) => {
-            let title = Theme::embedded_title(name).map_or_else(|| name.clone(), str::to_owned);
-            // Four colours of the theme: its ground, red, green and blue. A theme of the user's is
-            // a file this list does not read, so it has none.
-            let swatch = Theme::embedded(name).map(|theme| {
-                [
-                    theme.background,
-                    theme.ansi[1],
-                    theme.ansi[2],
-                    theme.ansi[4],
-                ]
-            });
-            Entry::Item(
-                title,
-                Decor {
-                    family: None,
-                    swatch,
-                },
-            )
-        }
-    });
-    fill_popup(popup, entries, selected);
 }
 
 fn fill_sizes(popup: &NSPopUpButton, items: &[SizeItem], selected: usize) {
@@ -5509,67 +5584,88 @@ mod tests {
         assert_eq!(parse_decimal("1.3", LETTER_SPACING_RANGE), Some(1.3));
     }
 
-    #[test]
-    fn theme_list_keeps_the_file_value_visible() {
-        let user = vec!["paper".to_owned()];
-        let (items, index) =
-            theme_items(SYSTEM_THEME, true, &[vec!["bateri", "bateri-light"]], &user);
-        assert_eq!(items[index], ThemeItem::System);
-        assert_eq!(
-            theme_edit(&items, index as NSInteger).as_deref(),
-            Some(SYSTEM_THEME)
-        );
-        let (items, index) = theme_items("paper", true, &[vec!["bateri"]], &user);
-        assert_eq!(
-            theme_edit(&items, index as NSInteger).as_deref(),
-            Some("paper")
-        );
-        // A deleted theme: appended at the end and selected.
-        let (items, index) = theme_items("gone", false, &[vec!["bateri"]], &[]);
-        assert_eq!(index, items.len() - 1);
-        assert_eq!(items[index], ThemeItem::Named("gone".to_owned()));
-        assert!(!items.contains(&ThemeItem::System));
-        // A separator and a heading write nothing.
-        let (items, _) = theme_items("bateri", true, &[vec!["bateri"]], &[]);
-        assert_eq!(items[1], ThemeItem::Separator);
-        assert_eq!(theme_edit(&items, 1), None);
-        assert_eq!(items[2], ThemeItem::Header("Dark"));
-        assert_eq!(theme_edit(&items, 2), None);
+    fn lists<'a>(
+        embedded: &'a [Vec<&'a str>],
+        user: &'a [String],
+        user_themes: &'a [Theme],
+        on_screen: &'a Theme,
+    ) -> ThemeLists<'a> {
+        ThemeLists {
+            embedded,
+            user,
+            user_themes,
+            on_screen,
+            light: on_screen,
+            dark: on_screen,
+            dark_appearance: false,
+        }
     }
 
-    /// The themes are listed under Light and Dark headings by their own colours, the user's under
-    /// a heading of their own, a separator before each section; an empty one leaves no doubled
-    /// line.
+    /// One theme's gallery has every theme, bateri's own first, then the dark, the light and the
+    /// user's, each under its title; the pair's galleries have only the light or only the dark
+    /// ones, by each theme's own colours.
     #[test]
-    fn themes_are_listed_under_light_and_dark() {
-        let user = vec!["paper".to_owned()];
-        let light = Theme::embedded_groups()[2][0];
-        let dark = Theme::embedded_groups()[1][0];
-        assert!(!Theme::embedded(light).expect("embedded").is_dark());
-        assert!(Theme::embedded(dark).expect("embedded").is_dark());
-        let (items, index) = theme_items(dark, true, &[vec![dark, light]], &user);
-        assert_eq!(
-            items,
-            [
-                ThemeItem::System,
-                ThemeItem::Separator,
-                ThemeItem::Header("Light"),
-                ThemeItem::Named(light.to_owned()),
-                ThemeItem::Separator,
-                ThemeItem::Header("Dark"),
-                ThemeItem::Named(dark.to_owned()),
-                ThemeItem::Separator,
-                ThemeItem::Header("Your themes"),
-                ThemeItem::Named("paper".to_owned()),
-            ]
+    fn the_galleries_hold_their_themes_under_titles() {
+        let embedded = Theme::embedded_groups();
+        let user = vec!["paper".to_owned(), "ink".to_owned()];
+        let user_themes = [Theme::LINEN, Theme::BATERI];
+        let lists = lists(&embedded, &user, &user_themes, &Theme::BATERI);
+        let titles = |sections: &[theme_gallery::Section]| -> Vec<String> {
+            sections.iter().filter_map(|s| s.title.clone()).collect()
+        };
+        let all = theme_sections("bateri", Shade::All, &lists);
+        assert_eq!(titles(&all), ["bateri", "Dark", "Light", "Your themes"]);
+        let count: usize = all.iter().map(|s| s.cards.len()).sum();
+        assert_eq!(count, embedded.iter().flatten().count() + user.len());
+        assert_eq!(all[0].cards[0].name, "bateri");
+        assert_eq!(all[0].cards[0].title, "bateri");
+        for (shade, dark, chosen) in [
+            (Shade::Light, false, "bateri-light"),
+            (Shade::Dark, true, "bateri"),
+        ] {
+            let sections = theme_sections(chosen, shade, &lists);
+            for card in sections.iter().flat_map(|s| &s.cards) {
+                let theme = Theme::embedded(&card.name).unwrap_or(if card.name == "paper" {
+                    Theme::LINEN
+                } else {
+                    Theme::BATERI
+                });
+                assert_eq!(
+                    theme.is_dark(),
+                    dark,
+                    "{} in the {shade:?} gallery",
+                    card.name
+                );
+            }
+            assert!(
+                sections
+                    .iter()
+                    .any(|s| s.title.as_deref() == Some("Your themes"))
+            );
+        }
+    }
+
+    /// A theme the file names that no list has (a deleted file) gets a card of its own, so the
+    /// gallery still shows what the file says; Match System is no card.
+    #[test]
+    fn a_theme_the_lists_lack_keeps_a_card() {
+        let embedded = Theme::embedded_groups();
+        let lists = lists(&embedded, &[], &[], &Theme::BATERI);
+        let sections = theme_sections("gone", Shade::All, &lists);
+        let last = sections.last().expect("a section");
+        assert_eq!(last.title.as_deref(), Some("Not found"));
+        assert_eq!(last.cards[0].name, "gone");
+        let system = theme_sections(SYSTEM_THEME, Shade::All, &lists);
+        assert!(
+            !system
+                .iter()
+                .any(|s| s.title.as_deref() == Some("Not found"))
         );
-        assert_eq!(items[index], ThemeItem::Named(dark.to_owned()));
-        // Only dark ones: no Light heading and no line before the first heading.
-        let (items, _) = theme_items(dark, false, &[vec![dark]], &[]);
-        assert_eq!(
-            items,
-            [ThemeItem::Header("Dark"), ThemeItem::Named(dark.to_owned())]
-        );
+        // A dark theme the file names for the light appearance is shown, in its own colours.
+        let other = theme_sections("bateri", Shade::Light, &lists);
+        let last = other.last().expect("a section");
+        assert_eq!(last.title.as_deref(), Some("Chosen"));
+        assert_eq!(last.cards[0].palette, Palette::of(&Theme::BATERI));
     }
 
     /// Each option of a pictured choice has a picture of its own, and the rows whose control is
@@ -5596,20 +5692,17 @@ mod tests {
         assert_eq!(
             under,
             [
-                Key::ContentEdge,
-                Key::TabPosition,
-                Key::SplitStyle,
+                Key::Theme,
+                Key::LightTheme,
+                Key::DarkTheme,
+                Key::FontFeatures,
                 Key::Shape,
                 Key::Unfocused,
+                Key::ContentEdge,
+                Key::SplitStyle,
                 Key::TabRunning,
-                Key::FontFeatures,
+                Key::TabPosition,
             ]
-            .into_iter()
-            .fold(Vec::new(), |mut sorted, key| {
-                sorted.push(key);
-                sorted.sort_by_key(|key| key.tag());
-                sorted
-            })
         );
     }
 
@@ -6118,7 +6211,10 @@ mod tests {
             of(Key::StatsInterval, &plain),
             Some("Pauses in hidden tabs and while idle.")
         );
-        assert_eq!(of(Key::Theme, &plain), None);
+        assert_eq!(
+            of(Key::Theme, &plain),
+            Some("The light theme while the system is light, the dark one while it is dark.")
+        );
         // No text anywhere still speaks of "this Mac" or lists the values.
         for key in Key::ALL {
             if let Some(text) = of(key, &plain) {

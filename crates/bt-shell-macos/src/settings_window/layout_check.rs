@@ -48,6 +48,7 @@ impl SettingsWindow {
         let themes = ThemeLists {
             embedded: &embedded,
             user: &[],
+            user_themes: &[],
             on_screen: &light,
             light: &light,
             dark: &dark,
@@ -287,6 +288,7 @@ impl SettingsWindow {
                 );
             }
         }
+        self.gallery_problems(&themes, resolved, shots, &mut problems);
         self.theme_change_problems(&themes, resolved, &dark, shots, &mut problems);
         self.window_ground_problems(&themes, resolved, &mut problems);
         problems
@@ -351,6 +353,100 @@ impl SettingsWindow {
                 "General: another dark theme left the window in the colours of the one before"
                     .to_owned(),
             );
+        }
+    }
+
+    /// The theme galleries ring the file's choice: the pair's while the theme follows the system
+    /// (the one-theme gallery hidden), the one theme's while it does not (Light and Dark hidden),
+    /// and a theme of the user's folder like an embedded one.
+    fn gallery_problems(
+        &self,
+        themes: &ThemeLists<'_>,
+        resolved: Resolved,
+        shots: Option<&Path>,
+        problems: &mut Vec<String>,
+    ) {
+        let ivars = self.ivars();
+        let (Some(window), Some(sidebar), Some(controls)) = (
+            ivars.window.get(),
+            ivars.sidebar.get(),
+            ivars.controls.get(),
+        ) else {
+            return;
+        };
+        let row_shown = |key: Key| {
+            controls
+                .rows
+                .iter()
+                .find(|row| row.key == Some(key))
+                .is_some_and(|row| !row.view.isHidden())
+        };
+        let user = ["paper".to_owned()];
+        let user_themes = [Theme::LINEN];
+        let cases = [
+            (Settings::default(), false),
+            (
+                Settings {
+                    theme: "linen".to_owned(),
+                    ..Settings::default()
+                },
+                false,
+            ),
+            (
+                Settings {
+                    theme: "paper".to_owned(),
+                    ..Settings::default()
+                },
+                true,
+            ),
+        ];
+        for (settings, with_user) in cases {
+            let themes = ThemeLists {
+                user: if with_user { &user } else { &[] },
+                user_themes: if with_user { &user_themes } else { &[] },
+                ..*themes
+            };
+            self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+            let follows = settings.theme == bt_core::SYSTEM_THEME;
+            let mut say =
+                |what: String| problems.push(format!("Appearance ({}): {what}", settings.theme));
+            if controls.theme.isHidden() != follows {
+                say("the one-theme gallery is shown with the wrong way".to_owned());
+            }
+            if follows {
+                for (gallery, name) in [
+                    (&controls.light_theme, &settings.light_theme),
+                    (&controls.dark_theme, &settings.dark_theme),
+                ] {
+                    if gallery.chosen().as_ref() != Some(name) {
+                        say(format!("{:?} is ringed, not {name}", gallery.chosen()));
+                    }
+                }
+            } else {
+                if controls.theme.chosen().as_ref() != Some(&settings.theme) {
+                    say(format!("{:?} is ringed", controls.theme.chosen()));
+                }
+                if row_shown(Key::LightTheme) || row_shown(Key::DarkTheme) {
+                    say("Light and Dark show under one theme".to_owned());
+                }
+            }
+            if with_user && let Some(dir) = shots {
+                sidebar.selectRowIndexes_byExtendingSelection(
+                    &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Appearance)),
+                    false,
+                );
+                self.show_selected();
+                if let (Some(content), Some(document)) = (
+                    window.contentView(),
+                    ivars
+                        .pane_scroll
+                        .get()
+                        .and_then(|scroll| scroll.documentView()),
+                ) {
+                    content.layoutSubtreeIfNeeded();
+                    picture(&document, &dir.join("appearance-user.png"));
+                }
+            }
         }
     }
 
