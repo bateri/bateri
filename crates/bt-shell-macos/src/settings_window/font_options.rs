@@ -633,6 +633,7 @@ impl Options {
                     )
                 };
                 button.setControlSize(NSControlSize::Small);
+                super::ink_button(&button, true);
                 self.stack.addArrangedSubview(&button);
             }
             tiles = Some((control, shown));

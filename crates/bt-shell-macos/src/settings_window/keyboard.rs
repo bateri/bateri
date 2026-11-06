@@ -672,6 +672,7 @@ impl KeyboardPage {
                 mtm,
             )
         };
+        super::ink_button(&find, true);
         let weak = Weak::new(self);
         let find_field = ShortcutRecorder::new(mtm, "Type shortcut", move |heard| {
             if let Some(page) = weak.load() {
@@ -688,6 +689,7 @@ impl KeyboardPage {
                 mtm,
             )
         };
+        super::ink_button(&restore, true);
 
         let finder = stack(
             mtm,
@@ -920,7 +922,7 @@ impl KeyboardPage {
                 false,
             ),
         };
-        views.find.setTitle(&NSString::from_str(&title));
+        super::retitle(&views.find, &title);
         views.find.setHidden(listening);
         views.find_field.setHidden(!listening);
         views.find.setEnabled(true);
@@ -1151,6 +1153,7 @@ impl KeyboardPage {
         button.setBezelStyle(NSBezelStyle::Push);
         button.setControlSize(NSControlSize::Small);
         button.setTag(tag);
+        super::ink_button(&button, true);
         button
     }
 

@@ -120,6 +120,8 @@ const HEAD_HEIGHT: f64 = 52.0;
 /// The sidebar's rows: the room at each side of a row's face, how far in the tile stands, the
 /// face's corner and the tile's (the tab tile's own: `tab_bar`'s `TILE_ROUND`).
 const SIDE_PAD: f64 = 10.0;
+/// A number field's box: the height of the system's field it stands for.
+const FIELD_HEIGHT: f64 = 22.0;
 const SIDE_TILE_LEFT: f64 = 8.0;
 const SIDE_ROW_RADIUS: f64 = 14.0;
 const SIDE_TILE_RADIUS: f64 = 6.0;
@@ -1608,6 +1610,8 @@ struct Folder {
 /// A number field and its stepper.
 struct Number {
     field: Retained<NSTextField>,
+    /// The theme's box the bare field stands in.
+    frame: Retained<NSBox>,
     stepper: Retained<NSStepper>,
     /// The stepper's own range; if the file's value is outside it, it is
     /// widened to include that value too ([`set_number`]).
@@ -1759,6 +1763,13 @@ impl Row {
     fn set_enabled(&self, enabled: bool) {
         for control in &self.controls {
             control.setEnabled(enabled);
+            // A title in the theme's colour is not greyed by AppKit: it is faded here.
+            let any: &AnyObject = control.as_ref();
+            if let Some(popup) = any.downcast_ref::<NSPopUpButton>() {
+                ink_items(popup, enabled);
+            } else if let Some(button) = any.downcast_ref::<NSButton>() {
+                ink_button(button, enabled);
+            }
         }
         let color = if enabled {
             look::ink(Ink::Text)
@@ -3283,6 +3294,7 @@ impl SettingsWindow {
         for title in choice_titles::<T>() {
             popup.addItemWithTitle(&NSString::from_str(title));
         }
+        ink_items(&popup, true);
         self.wire(&popup, key, sel!(popupChanged:));
         popup
     }
@@ -3370,6 +3382,7 @@ impl SettingsWindow {
                 self.mtm(),
             )
         };
+        ink_button(&button, true);
         if let Some(key) = key {
             button.setTag(key.tag());
         }
@@ -3399,7 +3412,15 @@ impl SettingsWindow {
         let mtm = self.mtm();
         let field = NSTextField::new(mtm);
         field.setAlignment(objc2_app_kit::NSTextAlignment::Right);
-        width_constraint(&field, width);
+        // The field in the theme: the system's bezeled field draws its own grey in a dark
+        // appearance whatever colour it is given, so the field is bare and stands in a box of the
+        // theme's: a step over the card, framed by its line, its digits in the text colour.
+        field.setBezeled(false);
+        field.setBordered(false);
+        field.setDrawsBackground(false);
+        field.setTextColor(Some(&look::ink(Ink::Text)));
+        let frame = theme_box(mtm, &field, 6.0);
+        width_constraint(&frame, width);
         self.wire(&field, key, sel!(fieldChanged:));
         if let Some(cell) = field.cell() {
             // An action on leaving focus too: "on Enter or on
@@ -3414,6 +3435,7 @@ impl SettingsWindow {
         self.wire(&stepper, key, sel!(stepperChanged:));
         Number {
             field,
+            frame,
             stepper,
             range: (min, max),
             shown: RefCell::new((0.0, String::new())),
@@ -3542,7 +3564,9 @@ impl SettingsWindow {
                 mtm,
             )
         };
+        ink_button(&open, true);
         let search = NSSearchField::new(mtm);
+        search.setTextColor(Some(&look::ink(Ink::Text)));
         search.setPlaceholderString(Some(ns_string!("Search")));
         search.setSendsSearchStringImmediately(true);
         // SAFETY: the target is a weak reference and lives for the whole process; the selector is
@@ -4147,6 +4171,7 @@ impl BannerView {
                 mtm,
             )
         };
+        ink_button(&action, true);
         let content = NSView::new(mtm);
         add_pinned(&content, &icon);
         add_pinned(&content, &text);
@@ -4216,7 +4241,7 @@ impl BannerView {
         match banner.action {
             BannerAction::None => self.action.setHidden(true),
             BannerAction::OpenFile => {
-                self.action.setTitle(ns_string!("Open settings.toml"));
+                retitle(&self.action, "Open settings.toml");
                 // SAFETY: the selector is one of the window's actions; the target was set at birth.
                 unsafe { self.action.setAction(Some(sel!(openFile:))) };
                 // On a lock, repairing the file is one click — Enter — away.
@@ -4224,7 +4249,7 @@ impl BannerView {
                 self.action.setHidden(false);
             }
             BannerAction::ShowInFinder => {
-                self.action.setTitle(ns_string!("Show in Finder"));
+                retitle(&self.action, "Show in Finder");
                 // SAFETY: as above.
                 unsafe { self.action.setAction(Some(sel!(showSettingsFile:))) };
                 self.action.setKeyEquivalent(ns_string!(""));
@@ -4259,11 +4284,17 @@ struct Parts {
 }
 
 impl Parts {
-    /// A single control that is the whole of the row's control side.
+    /// A single control that is the whole of the row's control side; a pop-up stands in its theme
+    /// box.
     fn of(control: &NSControl) -> Parts {
         let view: &NSView = control;
+        let any: &AnyObject = control.as_ref();
+        let view = match any.downcast_ref::<NSPopUpButton>() {
+            Some(popup) => Retained::into_super(theme_box(popup.mtm(), popup, POPUP_PAD)),
+            None => view.retain(),
+        };
         Parts {
-            view: view.retain(),
+            view,
             controls: vec![control.retain()],
             dim: Vec::new(),
         }
@@ -4283,7 +4314,7 @@ impl Controls {
                     .setActive(true);
                 label
             });
-            let mut views: Vec<&NSView> = vec![&number.field, &number.stepper];
+            let mut views: Vec<&NSView> = vec![&number.frame, &number.stepper];
             if let Some(unit) = &unit {
                 views.push(unit);
             }
@@ -4636,17 +4667,121 @@ fn hstack(mtm: MainThreadMarker, views: &[&NSView], spacing: f64) -> Retained<NS
     Retained::into_super(stack)
 }
 
+/// A pop-up of the window's: bare, as it stands in a theme box ([`theme_box`], made by
+/// [`Parts::of`]) — the system's bordered pop-up draws its title in its own colour, whatever the
+/// item's title says.
 fn new_popup(mtm: MainThreadMarker) -> Retained<NSPopUpButton> {
     let popup = NSPopUpButton::new(mtm);
     popup.setPullsDown(false);
-    width_constraint(&popup, POPUP_WIDTH);
+    popup.setBordered(false);
+    width_constraint(&popup, POPUP_WIDTH - 2.0 * POPUP_PAD);
     popup
+}
+
+/// The room a pop-up keeps from its box's sides.
+const POPUP_PAD: f64 = 5.0;
+
+/// `content` in a box of the theme's — a step over the card, framed by its line, with a
+/// field's corner — where the system's control would draw its own grey on any theme. `content`
+/// stands `pad` in from the sides, in the middle of the box's height.
+fn theme_box(mtm: MainThreadMarker, content: &NSView, pad: f64) -> Retained<NSBox> {
+    let frame = NSBox::new(mtm);
+    frame.setBoxType(NSBoxType::Custom);
+    frame.setTitlePosition(NSTitlePosition::NoTitle);
+    frame.setCornerRadius(6.0);
+    frame.setBorderWidth(0.5);
+    frame.setBorderColor(&look::ink(Ink::Line));
+    frame.setFillColor(&look::ink(Ink::Field));
+    frame.setContentViewMargins(NSSize::new(0.0, 0.0));
+    frame.setContentView(Some(content));
+    frame.setTranslatesAutoresizingMaskIntoConstraints(false);
+    content.setTranslatesAutoresizingMaskIntoConstraints(false);
+    activate(&[
+        content
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&frame.leadingAnchor(), pad),
+        content
+            .trailingAnchor()
+            .constraintEqualToAnchor_constant(&frame.trailingAnchor(), -pad),
+        content
+            .centerYAnchor()
+            .constraintEqualToAnchor(&frame.centerYAnchor()),
+        frame.heightAnchor().constraintEqualToConstant(FIELD_HEIGHT),
+    ]);
+    frame
 }
 
 fn width_constraint(view: &NSView, width: f64) {
     view.widthAnchor()
         .constraintEqualToConstant(width)
         .setActive(true);
+}
+
+/// `title` in the theme's text colour, or faded for a control that is off, in `font`.
+pub(super) fn inked(title: &str, font: &NSFont, enabled: bool) -> Retained<NSAttributedString> {
+    let color = if enabled {
+        look::ink(Ink::Text)
+    } else {
+        look::faded(Ink::Dim, 0.55)
+    };
+    let attributes = pictures::attributes(font, &color);
+    // SAFETY: `attributes` is a dictionary of attribute keys and values AppKit reads.
+    unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str(title),
+            Some(&attributes),
+        )
+    }
+}
+
+/// A button's title in the theme's text colour: the system's is black or white whatever the
+/// theme. Again after its title changes ([`retitle`]) or it is turned off or on.
+pub(super) fn ink_button(button: &NSButton, enabled: bool) {
+    let font = button
+        .font()
+        .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
+    button.setAttributedTitle(&inked(&button.title().to_string(), &font, enabled));
+}
+
+/// Gives `button` another title, in the theme's text colour.
+pub(super) fn retitle(button: &NSButton, title: &str) {
+    button.setTitle(&NSString::from_str(title));
+    ink_button(button, button.isEnabled());
+}
+
+/// Every item of `popup` titled in the theme's text colour, the one shown on the button among
+/// them; an item set in a font of its own (a font's name in its letters) keeps that font.
+pub(super) fn ink_items(popup: &NSPopUpButton, enabled: bool) {
+    let font = popup
+        .font()
+        .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
+    for item in popup.itemArray().iter() {
+        if item.isSeparatorItem() || item.isSectionHeader() {
+            continue;
+        }
+        let own = item.attributedTitle().and_then(|title| {
+            if title.length() == 0 {
+                return None;
+            }
+            // SAFETY: the font attribute key (an extern static); a null range is "not asked".
+            let value = unsafe {
+                title.attribute_atIndex_effectiveRange(NSFontAttributeName, 0, std::ptr::null_mut())
+            }?;
+            value.downcast::<NSFont>().ok()
+        });
+        let font = own.as_deref().unwrap_or(&font);
+        item.setAttributedTitle(Some(&inked(&item.title().to_string(), font, enabled)));
+    }
+    // The button draws the selected item's title in its own colour unless tinted.
+    let tint = if enabled {
+        look::ink(Ink::Text)
+    } else {
+        look::faded(Ink::Dim, 0.55)
+    };
+    popup.setContentTintColor(Some(&tint));
+    let view: &NSView = popup;
+    view.setNeedsDisplay(true);
 }
 
 /// A label in the theme's text colour; a caller that says less sets the dim one after.
@@ -5078,6 +5213,7 @@ fn fill_popup(popup: &NSPopUpButton, entries: impl Iterator<Item = Entry>, selec
         };
         menu.addItem(&item);
     }
+    ink_items(popup, popup.isEnabled());
     popup.selectItemAtIndex(selected as NSInteger);
 }
 

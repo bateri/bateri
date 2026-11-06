@@ -46,6 +46,9 @@ pub(super) enum Ink {
     Card,
     /// A group's frame and the rule between two rows.
     Line,
+    /// Inside a field the user types in: two steps over the card, as a tab chip stands over the
+    /// content.
+    Field,
     Warning,
     Error,
 }
@@ -61,6 +64,7 @@ impl Ink {
             Ink::Band => palette.band,
             Ink::Card => palette.background,
             Ink::Line => palette.separator,
+            Ink::Field => palette.raised,
             Ink::Warning => palette.warning,
             Ink::Error => palette.error,
         }
