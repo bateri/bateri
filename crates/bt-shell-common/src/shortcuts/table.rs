@@ -326,6 +326,16 @@ pub const COMMANDS: &[Command] = &[
         Family::Arrows,
     ),
     command("new_floating_pane", "newFloatingPane", &[]),
+    command(
+        "minimize_floating_pane",
+        "minimizeFloatingPane",
+        &["ctrl+cmd+m"],
+    ),
+    command(
+        "toggle_floating_panes",
+        "toggleFloatingPanes",
+        &["option+shift+cmd+return"],
+    ),
     command("move_split_to_new_tab", "movePaneToNewTab", &[]),
     command("move_split_to_new_window", "movePaneToNewWindow", &[]),
     command(
@@ -519,6 +529,8 @@ mod tests {
             ("equalizeSplits", "=", "ck"),
             ("toggleSplitZoom", "\r", "cs"),
             ("toggleFloatPane", "\r", "co"),
+            ("minimizeFloatingPane", "m", "ck"),
+            ("toggleFloatingPanes", "\r", "cos"),
             ("movePaneToPreviousTab", "{", "co"),
             ("movePaneToNextTab", "}", "co"),
         ];

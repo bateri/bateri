@@ -709,6 +709,35 @@ impl TabDetails {
     }
 }
 
+/// `[appearance] minimized_panes`: where the capsules of minimized floating panes stand —
+/// in a row of their own under the splits, or gathered at the tab's top right corner.
+///
+/// Only the platform shell reads it (the container's layout and the capsules' drawing); its own
+/// field in [`Changes`]. An ordinary key: a value that isn't accepted is the default at launch
+/// and leaves the value in effect at save time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinimizedPanes {
+    /// A row under the splits, which slide up to make room for it while a capsule is there and
+    /// grow back when the last one goes.
+    #[default]
+    Strip,
+    /// Over the tab's top right corner, under the first pane's bar, standing on the content: the
+    /// splits keep their size.
+    TopRight,
+}
+
+impl MinimizedPanes {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] =
+        &[("strip", Self::Strip), ("top_right", Self::TopRight)];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[appearance] tab_icon_colors`: whether a tab's icon takes the theme's
 /// colors or its program's own brand color where it has one.
 ///
@@ -1662,6 +1691,9 @@ pub struct Settings {
     /// `[appearance] tab_details`: what a row of the side column says beyond its
     /// name ([`TabDetails`]). Doesn't enter `TerminalOptions`.
     pub tab_details: TabDetails,
+    /// `[appearance] minimized_panes`: where the capsules of minimized floating panes stand
+    /// ([`MinimizedPanes`]). Doesn't enter `TerminalOptions`.
+    pub minimized_panes: MinimizedPanes,
     /// `[appearance] resize_in_steps`: whether a window dragged by its edge
     /// grows and shrinks a whole cell at a time, so a lone pane's text keeps
     /// the same margin on both sides and the top edge's strip its least
@@ -1781,6 +1813,7 @@ impl Default for Settings {
             focus_frame: false,
             split_style: SplitStyle::default(),
             tab_details: TabDetails::default(),
+            minimized_panes: MinimizedPanes::default(),
             resize_in_steps: false,
             tab_icons: true,
             tab_icon_colors: IconColors::default(),
@@ -1907,6 +1940,8 @@ pub enum SettingsEdit {
     SplitStyle(SplitStyle),
     /// The settings window's "Tab details": `[appearance] tab_details`.
     TabDetails(TabDetails),
+    /// The settings window's "Minimized panes": `[appearance] minimized_panes`.
+    MinimizedPanes(MinimizedPanes),
     /// The settings window's "Resize in steps": `[appearance]
     /// resize_in_steps`.
     ResizeInSteps(bool),
@@ -2029,6 +2064,11 @@ impl SettingsEdit {
             Self::FocusFrame(_) => ("appearance", "focus_frame", "appearance.focus_frame"),
             Self::SplitStyle(_) => ("appearance", "split_style", "appearance.split_style"),
             Self::TabDetails(_) => ("appearance", "tab_details", "appearance.tab_details"),
+            Self::MinimizedPanes(_) => (
+                "appearance",
+                "minimized_panes",
+                "appearance.minimized_panes",
+            ),
             Self::ResizeInSteps(_) => (
                 "appearance",
                 "resize_in_steps",
@@ -2103,6 +2143,7 @@ impl SettingsEdit {
             Self::ContentEdge(edge) => edge.name().into(),
             Self::SplitStyle(style) => style.name().into(),
             Self::TabDetails(details) => details.name().into(),
+            Self::MinimizedPanes(place) => place.name().into(),
             Self::IconColors(colors) => colors.name().into(),
             Self::TabRunning(running) => running.name().into(),
             Self::TabPosition(position) => position.name().into(),
@@ -2276,6 +2317,11 @@ split_style = "cards"
 # server) and, while it asks for permission, what it asks. "smart" says it in
 # Activity only, "always" in every row with a program to speak of.
 tab_details = "smart"
+# "strip" | "top_right". Where the capsules of minimized floating panes stand:
+# "strip" in a row of their own under the splits, which slide up to make room
+# for it; "top_right" over the tab's top right corner, under the first pane's
+# bar, where the splits keep their size.
+minimized_panes = "strip"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
 # strip at its top its least height. Off: the window follows the pointer, and
@@ -2790,6 +2836,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("minimized_panes") {
+                    parsed.settings.minimized_panes = named_enum(
+                        text,
+                        item,
+                        "appearance.minimized_panes",
+                        MinimizedPanes::NAMES,
+                        fallback.minimized_panes,
+                        &mut parsed.diagnostics,
+                    );
+                }
                 if let Some(item) = appearance.get("resize_in_steps") {
                     parsed.settings.resize_in_steps = boolean(
                         text,
@@ -2849,6 +2905,7 @@ stats_interval = 3
                 parsed.settings.focus_frame = fallback.focus_frame;
                 parsed.settings.split_style = fallback.split_style;
                 parsed.settings.tab_details = fallback.tab_details;
+                parsed.settings.minimized_panes = fallback.minimized_panes;
                 parsed.settings.resize_in_steps = fallback.resize_in_steps;
                 parsed.settings.tab_icons = fallback.tab_icons;
                 parsed.settings.tab_icon_colors = fallback.tab_icon_colors;
@@ -3245,6 +3302,7 @@ stats_interval = 3
             focus_frame: self.focus_frame != new.focus_frame,
             split_style: self.split_style != new.split_style,
             tab_details: self.tab_details != new.tab_details,
+            minimized_panes: self.minimized_panes != new.minimized_panes,
             resize_in_steps: self.resize_in_steps != new.resize_in_steps,
             tab_icons: self.tab_icons != new.tab_icons
                 || self.tab_icon_colors != new.tab_icon_colors
@@ -4016,6 +4074,10 @@ pub struct Changes {
     /// [`Settings::tab_details`] changed: the platform shell lays every side
     /// column out again. A field of its own, for [`Self::caret`]'s reason.
     pub tab_details: bool,
+    /// [`Settings::minimized_panes`] changed: the platform shell lays every tab's container
+    /// out again, with the capsules in their new place. A field of its own, for
+    /// [`Self::caret`]'s reason.
+    pub minimized_panes: bool,
     /// [`Settings::tab_position`] changed: the platform shell moves every
     /// window's tabs between the bar and the column in place. A field of its
     /// own, for [`Self::caret`]'s reason.
@@ -4888,6 +4950,7 @@ mod tests {
             ("appearance", "focus_frame"),
             ("appearance", "split_style"),
             ("appearance", "tab_details"),
+            ("appearance", "minimized_panes"),
             ("appearance", "resize_in_steps"),
             ("appearance", "tab_icons"),
             ("appearance", "tab_icon_colors"),
@@ -5077,6 +5140,7 @@ mod tests {
                 focus_frame: false,
                 split_style: false,
                 tab_details: false,
+                minimized_panes: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -5122,6 +5186,7 @@ mod tests {
             focus_frame: true,
             split_style: SplitStyle::Lines,
             tab_details: TabDetails::Always,
+            minimized_panes: MinimizedPanes::TopRight,
             resize_in_steps: true,
             tab_icons: false,
             tab_icon_colors: IconColors::Brand,
@@ -5332,6 +5397,7 @@ mod tests {
             focus_frame: false,
             split_style: false,
             tab_details: false,
+            minimized_panes: false,
             resize_in_steps: false,
             tab_icons: false,
             tab_position: false,
@@ -5400,6 +5466,7 @@ mod tests {
                 dim_splits: true,
                 split_style: false,
                 tab_details: false,
+                minimized_panes: false,
                 tab_icons: false,
                 ..Changes::default()
             }
@@ -5568,6 +5635,7 @@ mod tests {
                 focus_frame: false,
                 split_style: false,
                 tab_details: false,
+                minimized_panes: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -5729,6 +5797,7 @@ found {found}; using \"spring\""
                 focus_frame: false,
                 split_style: false,
                 tab_details: false,
+                minimized_panes: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -5830,6 +5899,7 @@ found {found}; using \"system\""
                 focus_frame: false,
                 split_style: false,
                 tab_details: false,
+                minimized_panes: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -6636,6 +6706,31 @@ hosts = [
     }
 
     #[test]
+    fn minimized_panes_is_read_and_defaults_to_the_strip() {
+        assert_eq!(clean("").minimized_panes, MinimizedPanes::Strip);
+        for (value, expected) in [
+            ("strip", MinimizedPanes::Strip),
+            ("top_right", MinimizedPanes::TopRight),
+        ] {
+            let text = format!("[appearance]\nminimized_panes = \"{value}\"\n");
+            assert_eq!(clean(&text).minimized_panes, expected, "{value}");
+            assert_eq!(expected.name(), value);
+        }
+        // A value nobody knows is the default, with a word about it.
+        let (odd, why) = rejected("[appearance]\nminimized_panes = \"bottom\"\n");
+        assert_eq!(odd.minimized_panes, MinimizedPanes::Strip);
+        assert_eq!(why.key, Some("appearance.minimized_panes"));
+        // A change is its own, so every open tab is laid out again; the edit writes the one line.
+        let corner = clean("[appearance]\nminimized_panes = \"top_right\"\n");
+        assert!(clean("").changes(&corner).minimized_panes);
+        assert!(!clean("").changes(&clean("")).minimized_panes);
+        let written =
+            Settings::with_edit("", &SettingsEdit::MinimizedPanes(MinimizedPanes::TopRight))
+                .expect("writable text");
+        assert_eq!(written, "[appearance]\nminimized_panes = \"top_right\"\n");
+    }
+
+    #[test]
     fn tab_position_is_read_and_defaults_to_top() {
         assert_eq!(clean("").tab_position, TabPosition::Top);
         for (value, expected) in [("top", TabPosition::Top), ("side", TabPosition::Side)] {
@@ -7325,6 +7420,7 @@ hosts = [
                     focus_frame: false,
                     split_style: false,
                     tab_details: false,
+                    minimized_panes: false,
                     resize_in_steps: false,
                     tab_icons: false,
                     tab_position: false,
@@ -7435,6 +7531,7 @@ hosts = [
                 focus_frame: false,
                 split_style: false,
                 tab_details: false,
+                minimized_panes: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -7549,6 +7646,7 @@ hosts = [
                 focus_frame: false,
                 split_style: false,
                 tab_details: false,
+                minimized_panes: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -8092,6 +8190,7 @@ cursor = \"spring\"
             SettingsEdit::FocusFrame(on) => settings.focus_frame = on,
             SettingsEdit::SplitStyle(style) => settings.split_style = style,
             SettingsEdit::TabDetails(details) => settings.tab_details = details,
+            SettingsEdit::MinimizedPanes(place) => settings.minimized_panes = place,
             SettingsEdit::ResizeInSteps(on) => settings.resize_in_steps = on,
             SettingsEdit::TabIcons(on) => settings.tab_icons = on,
             SettingsEdit::IconColors(colors) => settings.tab_icon_colors = colors,
@@ -8218,6 +8317,7 @@ cursor = \"spring\"
             SettingsEdit::FocusFrame(true),
             SettingsEdit::SplitStyle(SplitStyle::Lines),
             SettingsEdit::TabDetails(TabDetails::Always),
+            SettingsEdit::MinimizedPanes(MinimizedPanes::TopRight),
             SettingsEdit::ResizeInSteps(true),
             SettingsEdit::TabIcons(false),
             SettingsEdit::IconColors(IconColors::Brand),

@@ -903,6 +903,97 @@ impl Layers {
     }
 }
 
+/// Where a capsule stands (`[appearance] minimized_panes`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapsulePlace {
+    /// In a row of their own under the splits, which the splits make room for.
+    Strip,
+    /// Over the tab's top right corner, under the first pane bar, on top of the content.
+    TopRight,
+}
+
+/// The capsules a minimized card leaves: their measures (points, from the design canvas) and the
+/// row they stand in, so the AppKit part only draws what this answers with.
+pub mod capsule {
+    use super::CapsulePlace;
+    use crate::split::Rect;
+
+    /// A capsule's height; its radius is half of it.
+    pub const HEIGHT: f64 = 26.0;
+    /// Between two capsules.
+    pub const GAP: f64 = 6.0;
+    /// The widest a capsule is; a longer title fades out at the end.
+    pub const MAX_WIDTH: f64 = 200.0;
+    /// Left of the mark.
+    pub const PAD_LEFT: f64 = 8.0;
+    /// The pane's mark (icon or agent indicator) is square.
+    pub const MARK: f64 = 14.0;
+    /// Between the mark and the title.
+    pub const MARK_GAP: f64 = 6.0;
+    /// Right of the title.
+    pub const PAD_RIGHT: f64 = 12.0;
+    /// What the splits give up for the strip: a capsule and 8 points.
+    pub const STRIP: f64 = HEIGHT + 8.0;
+    /// How far in from the tab's right edge the top right capsules stand, and how far under the
+    /// first pane bar.
+    pub const CORNER: f64 = 8.0;
+
+    /// The strip's height for `capsules` capsules: none when there is no capsule or they stand
+    /// at the corner.
+    pub fn strip(place: CapsulePlace, capsules: usize) -> f64 {
+        if place == CapsulePlace::Strip && capsules > 0 {
+            STRIP
+        } else {
+            0.0
+        }
+    }
+
+    /// A capsule's width for a title `text` points wide.
+    pub fn width(text: f64) -> f64 {
+        (PAD_LEFT + MARK + MARK_GAP + text + PAD_RIGHT)
+            .ceil()
+            .min(MAX_WIDTH)
+    }
+
+    /// The room a title has in a capsule of `width`.
+    pub fn text_room(width: f64) -> f64 {
+        (width - (PAD_LEFT + MARK + MARK_GAP + PAD_RIGHT)).max(0.0)
+    }
+
+    /// The frames of `widths` (oldest first) in one row: the newest, last, stands at the right
+    /// end, and each older one is a gap to its left. `area` is the splits' area (the content
+    /// without the strip): the strip row stands under it at its right edge — 4 points down, 8
+    /// when the panes are cards of their own (`carded`) — and the corner row stands 8 in from
+    /// the right and `head` + 8 down. A row that is longer than the area runs off its left edge
+    /// rather than stack.
+    pub fn row(
+        place: CapsulePlace,
+        area: Rect,
+        carded: bool,
+        head: f64,
+        widths: &[f64],
+    ) -> Vec<Rect> {
+        let (y, mut right) = match place {
+            CapsulePlace::Strip => (
+                area.y + area.height + if carded { 8.0 } else { 4.0 },
+                area.x + area.width,
+            ),
+            CapsulePlace::TopRight => (area.y + head + CORNER, area.x + area.width - CORNER),
+        };
+        let mut frames: Vec<Rect> = widths
+            .iter()
+            .rev()
+            .map(|width| {
+                let frame = Rect::new(right - width, y, *width, HEIGHT);
+                right = frame.x - GAP;
+                frame
+            })
+            .collect();
+        frames.reverse();
+        frames
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1743,5 +1834,57 @@ mod tests {
         assert!(near(rect.x, 200.0) && near(rect.y, 120.0));
         assert!(near(rect.width, 400.0) && near(rect.height, 240.0));
         assert_eq!(inner.panes.len(), 1);
+    }
+
+    #[test]
+    fn a_capsule_is_as_wide_as_its_title_and_no_wider_than_the_most() {
+        // 8 + 14 + 6 + 41.2 + 12 = 81.2, rounded up.
+        assert!(near(capsule::width(41.2), 82.0));
+        assert!(near(capsule::width(900.0), capsule::MAX_WIDTH));
+        assert!(near(capsule::text_room(capsule::MAX_WIDTH), 160.0));
+        assert!(near(capsule::text_room(10.0), 0.0));
+    }
+
+    #[test]
+    fn only_the_strip_makes_the_splits_give_room() {
+        assert!(near(capsule::strip(CapsulePlace::Strip, 0), 0.0));
+        assert!(near(capsule::strip(CapsulePlace::Strip, 3), 34.0));
+        assert!(near(capsule::strip(CapsulePlace::TopRight, 3), 0.0));
+    }
+
+    #[test]
+    fn the_newest_capsule_stands_at_the_right_end_of_the_strip_and_the_older_ones_to_its_left() {
+        let area = Rect::new(10.0, 40.0, 800.0, 500.0);
+        let frames = capsule::row(CapsulePlace::Strip, area, false, 30.0, &[100.0, 80.0, 60.0]);
+        assert_eq!(frames.len(), 3);
+        // The newest, the last, ends at the area's right edge.
+        assert!(near(frames[2].x + frames[2].width, 810.0));
+        assert!(near(
+            frames[1].x + frames[1].width,
+            frames[2].x - capsule::GAP
+        ));
+        assert!(near(
+            frames[0].x + frames[0].width,
+            frames[1].x - capsule::GAP
+        ));
+        // Under the splits, the same row.
+        assert!(
+            frames
+                .iter()
+                .all(|frame| near(frame.y, 544.0) && near(frame.height, 26.0))
+        );
+        // The cards of the card style stand 8 down, not 4.
+        let carded = capsule::row(CapsulePlace::Strip, area, true, 30.0, &[100.0]);
+        assert!(near(carded[0].y, 548.0));
+    }
+
+    #[test]
+    fn the_corner_row_stands_under_the_first_pane_bar_and_in_from_the_right() {
+        let area = Rect::new(0.0, 0.0, 800.0, 500.0);
+        let frames = capsule::row(CapsulePlace::TopRight, area, false, 30.0, &[100.0, 80.0]);
+        assert!(near(frames[1].x + frames[1].width, 792.0));
+        assert!(near(frames[0].x, 792.0 - 80.0 - capsule::GAP - 100.0));
+        assert!(frames.iter().all(|frame| near(frame.y, 38.0)));
+        assert!(capsule::row(CapsulePlace::TopRight, area, false, 30.0, &[]).is_empty());
     }
 }

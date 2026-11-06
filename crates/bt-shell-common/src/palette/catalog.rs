@@ -25,9 +25,9 @@
 
 use bt_core::{
     CaretShape, ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, Erase,
-    IconColors, KeepRunning, Keypress, Osc52, ReduceMotion, RemoteStatsMode, RestoreWindows,
-    SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
-    SplitStyle, TabDetails, TabPosition, TabRunning,
+    IconColors, KeepRunning, Keypress, MinimizedPanes, Osc52, ReduceMotion, RemoteStatsMode,
+    RestoreWindows, SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, SplitStyle, TabDetails, TabPosition, TabRunning,
 };
 
 use super::row::{Kind, Preview, Row, Scope, Slot, Tone};
@@ -352,6 +352,11 @@ fn capitalized(token: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A spelling with its underscores as spaces: `top_right` is "Top right".
+fn spaced(token: &str) -> String {
+    capitalized(&token.replace('_', " "))
+}
+
 fn with_number(token: &str, show: fn(f64) -> String) -> String {
     token.parse::<f64>().map_or_else(|_| token.to_owned(), show)
 }
@@ -513,7 +518,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 39] = [
+static CATALOG: [Setting; 40] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -726,6 +731,19 @@ static CATALOG: [Setting; 39] = [
         |s| s.tab_details,
         SettingsEdit::TabDetails
     ),
+    Setting {
+        key: "appearance.minimized_panes",
+        section: Section::Appearance,
+        title: "Minimized Panes",
+        keywords: "floating pane capsule minimize strip corner",
+        control: Control::Choices,
+        live: true,
+        note: None,
+        read: |s| s.minimized_panes.name().to_owned(),
+        write: |t| pick(MinimizedPanes::NAMES, t).map(SettingsEdit::MinimizedPanes),
+        tokens: || names(MinimizedPanes::NAMES),
+        label: spaced,
+    },
     toggle!(
         "appearance.dim_unfocused_splits",
         Appearance,
@@ -977,8 +995,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_thirty_nine_settings_once_each() {
-        assert_eq!(all().len(), 39);
+    fn the_catalog_lists_the_forty_settings_once_each() {
+        assert_eq!(all().len(), 40);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -1118,8 +1136,8 @@ mod tests {
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
         // The font's own options are the machine's, so only the table is counted.
-        assert_eq!(all().len(), 39);
-        assert_eq!(rows(&settings).len(), 39 + font_rows(&settings).len());
+        assert_eq!(all().len(), 40);
+        assert_eq!(rows(&settings).len(), 40 + font_rows(&settings).len());
     }
 
     #[test]
@@ -1189,6 +1207,7 @@ mod tests {
                 "terminal.cursor",
                 "appearance.split_style",
                 "appearance.tab_details",
+                "appearance.minimized_panes",
                 "appearance.dim_unfocused_splits",
                 "appearance.focus_frame",
                 "appearance.tab_position",

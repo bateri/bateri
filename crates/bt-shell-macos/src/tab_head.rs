@@ -53,11 +53,11 @@ use crate::pencere_view::face::{self as program_face};
 use crate::tabs::{self, Indicator};
 use bt_shell_common::view_icon::Lay;
 
-/// The mark's side, points: the program's own glyph, no tile.
-const MARK: f64 = 14.0;
+/// The mark's side, points: the program's own glyph, no tile. A capsule's mark is the same.
+pub(super) const MARK: f64 = 14.0;
 /// The status dot on the mark's corner, and the ring of the ground cut round it.
-const DOT: f64 = 5.0;
-const DOT_RING: f64 = 1.0;
+pub(super) const DOT: f64 = 5.0;
+pub(super) const DOT_RING: f64 = 1.0;
 /// A tool's box, and the space between two.
 const TOOL_WIDTH: f64 = 22.0;
 const TOOL_HEIGHT: f64 = 18.0;
@@ -65,8 +65,8 @@ const TOOL_GAP: f64 = 2.0;
 /// The band's inner margin above and below its parts: the terminal's gutter, so the mark stands
 /// on the grid's left line and the pane's text starts the same distance under the band.
 const GUTTER: f64 = 8.0;
-/// The title's type, points: a row's.
-const TITLE_TEXT: f64 = 12.5;
+/// The title's type, points: a row's. A capsule's too.
+pub(super) const TITLE_TEXT: f64 = 12.5;
 /// How long the tools take to come and go under the pointer: a chip's `×`'s pace.
 const TOOLS_SECS: f64 = 0.12;
 /// A tool's face's corner radius.
@@ -109,6 +109,8 @@ enum Tool {
     Float,
     /// A floating pane docks (lit while it floats).
     Dock,
+    /// A floating pane's card becomes a capsule.
+    Minimize,
     NewTab,
     Close,
 }
@@ -116,10 +118,17 @@ enum Tool {
 impl Tool {
     /// The tools of a pane: Float on a flat pane and Dock on a floating one — one button, the
     /// menu item's own; Open in New Tab only on a flat pane beside other panes — a tab's only
-    /// pane is the tab already, and a floating pane docks before it leaves.
+    /// pane is the tab already, and a floating pane docks before it leaves — and is the only one
+    /// that minimizes.
     fn of(alone: bool, floating: bool) -> &'static [Tool] {
         match (floating, alone) {
-            (true, _) => &[Tool::SplitRight, Tool::SplitDown, Tool::Dock, Tool::Close],
+            (true, _) => &[
+                Tool::SplitRight,
+                Tool::SplitDown,
+                Tool::Dock,
+                Tool::Minimize,
+                Tool::Close,
+            ],
             (false, true) => &[Tool::SplitRight, Tool::SplitDown, Tool::Float, Tool::Close],
             (false, false) => &[
                 Tool::SplitRight,
@@ -137,6 +146,7 @@ impl Tool {
             Tool::SplitDown => "Split Down",
             Tool::Float => "Float Pane",
             Tool::Dock => "Dock Pane",
+            Tool::Minimize => "Minimize Floating Pane",
             Tool::NewTab => "Open in New Tab",
             Tool::Close => "Close Split",
         }
@@ -146,6 +156,7 @@ impl Tool {
     fn command(self) -> Option<&'static str> {
         match self {
             Tool::Float | Tool::Dock => Some("float_pane"),
+            Tool::Minimize => Some("minimize_floating_pane"),
             Tool::SplitRight | Tool::SplitDown | Tool::NewTab | Tool::Close => None,
         }
     }
@@ -156,6 +167,7 @@ impl Tool {
             Tool::SplitRight => sel!(splitRight:),
             Tool::SplitDown => sel!(splitDown:),
             Tool::Float | Tool::Dock => sel!(toggleFloatPane:),
+            Tool::Minimize => sel!(minimizeFloatingPane:),
             Tool::NewTab => sel!(movePaneToNewTab:),
             Tool::Close => sel!(closeTab:),
         }
@@ -175,8 +187,11 @@ mod tests {
         );
         // A tab's only pane is the tab: no Open in New Tab, and Float stays — dim.
         assert_eq!(Tool::of(true, false), [SplitRight, SplitDown, Float, Close]);
-        // A floating pane docks before it leaves its tab.
-        assert_eq!(Tool::of(false, true), [SplitRight, SplitDown, Dock, Close]);
+        // A floating pane docks before it leaves its tab, and minimizes.
+        assert_eq!(
+            Tool::of(false, true),
+            [SplitRight, SplitDown, Dock, Minimize, Close]
+        );
         assert_eq!(Tool::of(true, true), Tool::of(false, true));
     }
 
@@ -191,6 +206,16 @@ mod tests {
         assert_eq!(command.defaults, ["option+cmd+return"]);
         // The other tools name no key: the tip says what they do.
         assert_eq!(Tool::Close.command(), None);
+    }
+
+    #[test]
+    fn minimize_is_the_menus_item_with_its_key_on_the_tip() {
+        assert_eq!(Tool::Minimize.action(), sel!(minimizeFloatingPane:));
+        assert_eq!(Tool::Minimize.name(), "Minimize Floating Pane");
+        let command =
+            bt_shell_common::shortcuts::by_name("minimize_floating_pane").expect("in the table");
+        assert_eq!(Tool::Minimize.command(), Some(command.name));
+        assert_eq!(command.defaults, ["ctrl+cmd+m"]);
     }
 }
 
@@ -1051,6 +1076,11 @@ fn draw_tool(tool: Tool, rect: NSRect, color: u32, strength: f64) {
                 1.6 * unit,
             );
             path.lineToPoint(at(8.6, 8.0));
+        }
+        // A short bar (the mockup's `min`).
+        Tool::Minimize => {
+            path.moveToPoint(at(3.2, 6.4));
+            path.lineToPoint(at(8.8, 6.4));
         }
         Tool::NewTab => {
             path.moveToPoint(at(5.2, 1.75));

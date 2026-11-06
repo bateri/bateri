@@ -140,7 +140,7 @@ use crate::sheets::{self, Asker};
 use crate::split::{Axis, Direction, Tree};
 use crate::split_view::{Hairline, SplitView};
 use crate::tab::{self, TerminalTab};
-use crate::tab_bar::{Heading, Label, RowClaim, SwitchRow, Switcher, TabBar, counted};
+use crate::tab_bar::{Capsule, Heading, Label, RowClaim, SwitchRow, Switcher, TabBar, counted};
 use crate::tabs::{self, Card, Column, Finish, Tabs};
 use crate::undo::{Record, Scene, Shape};
 
@@ -1058,6 +1058,17 @@ define_class!(
                     ns_string!("Float Pane")
                 });
                 tab.can_float_or_dock()
+            } else if action == Some(sel!(minimizeFloatingPane:)) {
+                // A floating pane's card goes; in the flat area the last capsule comes back.
+                tab.can_minimize_floating()
+            } else if action == Some(sel!(toggleFloatingPanes:)) {
+                // The title says which way they go; without a card there is nothing to do.
+                item.setTitle(if tab.floating_hidden() {
+                    ns_string!("Show Floating Panes")
+                } else {
+                    ns_string!("Hide Floating Panes")
+                });
+                tab.has_floating()
             } else if [
                 sel!(selectPreviousSplit:),
                 sel!(selectNextSplit:),
@@ -1231,6 +1242,29 @@ define_class!(
         #[unsafe(method(toggleFloatPane:))]
         fn toggle_float_pane_action(&self, _sender: Option<&AnyObject>) {
             self.selected_tab().float_or_dock();
+        }
+
+        /// Window ▸ Minimize Floating Pane (⌃⌘M): the focused floating pane's card becomes a
+        /// capsule; with the keyboard in the flat area the last capsule opens again.
+        #[unsafe(method(minimizeFloatingPane:))]
+        fn minimize_floating_pane_action(&self, _sender: Option<&AnyObject>) {
+            self.selected_tab().minimize_floating();
+        }
+
+        /// A press on a capsule (`Capsule`): its card opens where it was and takes the keyboard.
+        /// The sender is the capsule, which knows its pane.
+        #[unsafe(method(showMinimizedPane:))]
+        fn show_minimized_pane_action(&self, sender: Option<&AnyObject>) {
+            if let Some(capsule) = sender.and_then(|sender| sender.downcast_ref::<Capsule>()) {
+                self.selected_tab().show_capsule(capsule.pane());
+            }
+        }
+
+        /// Window ▸ Hide / Show Floating Panes (⌥⇧⌘↩): every shown card becomes a capsule, or —
+        /// with none shown — every capsule opens.
+        #[unsafe(method(toggleFloatingPanes:))]
+        fn toggle_floating_panes_action(&self, _sender: Option<&AnyObject>) {
+            self.selected_tab().toggle_floating_panes();
         }
 
         /// Window ▸ New Floating Pane: a new pane floating in front, from the focused one.

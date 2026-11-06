@@ -32,10 +32,11 @@ use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, CommandLevel,
     ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase,
-    IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep,
-    ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
-    SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
-    SplitStyle, TabDetails, TabPosition, TabRunning, Theme, UnfocusedCaret,
+    IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MinimizedPanes,
+    Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX,
+    STATS_INTERVAL_RANGE, SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, SplitStyle, TabDetails, TabPosition, TabRunning, Theme,
+    UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
@@ -305,6 +306,7 @@ enum Key {
     FocusFrame,
     SplitStyle,
     TabDetails,
+    MinimizedPanes,
     TabIcons,
     TabIconColors,
     TabRunning,
@@ -317,7 +319,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 55] = [
+    const ALL: [Key; 56] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -365,6 +367,7 @@ impl Key {
         Key::FocusFrame,
         Key::SplitStyle,
         Key::TabDetails,
+        Key::MinimizedPanes,
         Key::TabIcons,
         Key::TabIconColors,
         Key::TabRunning,
@@ -404,6 +407,7 @@ impl Key {
             Key::FocusFrame => "appearance.focus_frame",
             Key::SplitStyle => "appearance.split_style",
             Key::TabDetails => "appearance.tab_details",
+            Key::MinimizedPanes => "appearance.minimized_panes",
             Key::ResizeInSteps => "appearance.resize_in_steps",
             Key::TabIcons => "appearance.tab_icons",
             Key::TabIconColors => "appearance.tab_icon_colors",
@@ -727,6 +731,18 @@ impl Choice for TabDetails {
     }
 }
 
+impl Choice for MinimizedPanes {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            MinimizedPanes::Strip => "Strip",
+            MinimizedPanes::TopRight => "Top right",
+        }
+    }
+}
+
 impl Choice for TabPosition {
     fn names() -> &'static [(&'static str, Self)] {
         Self::NAMES
@@ -879,6 +895,12 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
                 Some("Where the program stands and what it asks, under every tab.")
             }
         },
+        Key::MinimizedPanes => Some(match settings.minimized_panes {
+            MinimizedPanes::Strip => "A row of capsules under the splits, which make room for it.",
+            MinimizedPanes::TopRight => {
+                "Capsules at the tab\u{2019}s top right corner, over the text."
+            }
+        }),
         Key::SplitStyle => Some(match settings.split_style {
             SplitStyle::Lines => "Panes touch, with one thin line between them.",
             SplitStyle::Cards => "Each pane stands on the ground with a gap round it.",
@@ -1203,6 +1225,7 @@ fn choice_labels(key: Key) -> Vec<&'static str> {
         Key::ContentEdge => choice_titles::<ContentEdge>(),
         Key::SplitStyle => choice_titles::<SplitStyle>(),
         Key::TabDetails => choice_titles::<TabDetails>(),
+        Key::MinimizedPanes => choice_titles::<MinimizedPanes>(),
         Key::TabIconColors => choice_titles::<IconColors>(),
         Key::TabRunning => choice_titles::<TabRunning>(),
         Key::TabPosition => choice_titles::<TabPosition>(),
@@ -1691,6 +1714,7 @@ struct Controls {
     content_edge: Retained<PictureChoice>,
     split_style: Retained<PictureChoice>,
     tab_details: Retained<NSSegmentedControl>,
+    minimized_panes: Retained<NSSegmentedControl>,
     tab_icons: Retained<ThemeSwitch>,
     font_smoothing: Retained<ThemeSwitch>,
     tab_icon_colors: Retained<NSSegmentedControl>,
@@ -2672,6 +2696,7 @@ impl SettingsWindow {
         select_picture(&c.content_edge, settings.content_edge);
         select_picture(&c.split_style, settings.split_style);
         select_segment(&c.tab_details, settings.tab_details);
+        select_segment(&c.minimized_panes, settings.minimized_panes);
         set_switch(&c.tab_icons, settings.tab_icons);
         set_switch(&c.font_smoothing, settings.font.smoothing);
         select_segment(&c.tab_icon_colors, settings.tab_icon_colors);
@@ -3018,6 +3043,7 @@ impl SettingsWindow {
             Key::ContentEdge => choice_at(index).map(SettingsEdit::ContentEdge),
             Key::SplitStyle => choice_at(index).map(SettingsEdit::SplitStyle),
             Key::TabDetails => choice_at(index).map(SettingsEdit::TabDetails),
+            Key::MinimizedPanes => choice_at(index).map(SettingsEdit::MinimizedPanes),
             Key::TabIconColors => choice_at(index).map(SettingsEdit::IconColors),
             Key::TabRunning => choice_at(index).map(SettingsEdit::TabRunning),
             Key::TabPosition => choice_at(index).map(SettingsEdit::TabPosition),
@@ -3870,6 +3896,7 @@ impl SettingsWindow {
         let focus_frame = self.switch(Key::FocusFrame);
         let split_style = self.picture_choice::<SplitStyle>(Key::SplitStyle);
         let tab_details = self.segmented::<TabDetails>(Key::TabDetails);
+        let minimized_panes = self.segmented::<MinimizedPanes>(Key::MinimizedPanes);
         let resize_in_steps = self.switch(Key::ResizeInSteps);
         let tab_icons = self.switch(Key::TabIcons);
         let font_smoothing = self.switch(Key::FontSmoothing);
@@ -3950,6 +3977,7 @@ impl SettingsWindow {
             content_edge,
             split_style,
             tab_details,
+            minimized_panes,
             tab_icons,
             font_smoothing,
             tab_icon_colors,
@@ -4393,6 +4421,7 @@ impl Controls {
             Key::ContentEdge => Parts::of(&self.content_edge),
             Key::SplitStyle => Parts::of(&self.split_style),
             Key::TabDetails => Parts::of(&self.tab_details),
+            Key::MinimizedPanes => Parts::of(&self.minimized_panes),
             Key::TabIcons => Parts::of(&self.tab_icons),
             Key::TabIconColors => Parts::of(&self.tab_icon_colors),
             Key::TabRunning => Parts::of(&self.tab_running),
@@ -5321,7 +5350,7 @@ mod tests {
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
-                    focus_frame = []\nsplit_style = []\ntab_details = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_running = []\ntab_position = []\n\
+                    focus_frame = []\nsplit_style = []\ntab_details = []\nminimized_panes = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_running = []\ntab_position = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\nfeatures = []\nsmoothing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
@@ -5397,6 +5426,7 @@ mod tests {
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),
                 Key::SplitStyle => SettingsEdit::SplitStyle(SplitStyle::Lines),
                 Key::TabDetails => SettingsEdit::TabDetails(TabDetails::Always),
+                Key::MinimizedPanes => SettingsEdit::MinimizedPanes(MinimizedPanes::TopRight),
                 Key::TabIcons => SettingsEdit::TabIcons(false),
                 Key::TabIconColors => SettingsEdit::IconColors(IconColors::Brand),
                 Key::TabRunning => SettingsEdit::TabRunning(TabRunning::Breathe),

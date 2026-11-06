@@ -6317,8 +6317,9 @@ impl AppDelegate {
                 window.refresh_split_look();
             }
         }
-        // Cards or lines: every split tab is laid out again.
-        if changes.split_style {
+        // Cards or lines, and where the capsules of minimized floating panes stand: every split
+        // tab is laid out again.
+        if changes.split_style || changes.minimized_panes {
             for window in &windows {
                 window.apply_split_style();
             }

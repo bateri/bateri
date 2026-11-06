@@ -353,6 +353,11 @@ split_style = "cards"
 # server) and, while it asks for permission, what it asks. "smart" says it in
 # Activity only, "always" in every row with a program to speak of.
 tab_details = "smart"
+# "strip" | "top_right". Where the capsules of minimized floating panes stand:
+# "strip" in a row of their own under the splits, which slide up to make room
+# for it; "top_right" over the tab's top right corner, under the first pane's
+# bar, where the splits keep their size.
+minimized_panes = "strip"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
 # strip at its top its least height. Off: the window follows the pointer, and
@@ -1173,6 +1178,7 @@ dim_unfocused_splits = false
 focus_frame = false
 split_style = "cards"
 tab_details = "smart"
+minimized_panes = "strip"
 resize_in_steps = false
 tab_icons = true
 tab_icon_colors = "theme"
@@ -1191,6 +1197,7 @@ tab_position = "top"
 | `focus_frame` | `true` \| `false` | `false` | a 2 pt line in the accent round the focused pane of a split tab |
 | `split_style` | `"cards"` \| `"lines"` | `"cards"` | how a tab sets its panes apart: cards on a ground, one pane's too, or panes divided by a line |
 | `tab_details` | `"off"` \| `"smart"` \| `"always"` | `"smart"` | what a row of the side column says beyond its name: folder and branch (or server) and what a program asks |
+| `minimized_panes` | `"strip"` \| `"top_right"` | `"strip"` | where the capsules of minimized floating panes stand: in a row of their own under the splits, which slide up to make room, or over the tab's top right corner under the first pane's bar |
 | `resize_in_steps` | `true` \| `false` | `false` | resize a window a whole cell at a time while its edge is dragged |
 | `tab_icons` | `true` \| `false` | `true` | show the program a tab runs as an icon on a tile before its title |
 | `tab_icon_colors` | `"theme"` \| `"brand"` | `"theme"` | whether the icon uses the theme's colors only, or keeps the program's own color where it has one |

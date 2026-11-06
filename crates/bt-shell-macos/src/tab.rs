@@ -46,7 +46,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, ProgramState, Settings, Theme};
-use bt_shell_common::floating::{Gone, Layers};
+use bt_shell_common::floating::{Focus, Gone, Layers};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -1035,6 +1035,71 @@ impl TerminalTab {
     /// Whether the focused pane floats: what the menu item's and the tool's name says.
     pub(crate) fn focused_floats(&self) -> bool {
         self.ivars().container.floating(self.focused_pane().id())
+    }
+
+    /// Whether ⌃⌘M has something to do: the focused pane floats (its card goes), or — from the
+    /// flat area — a capsule is there to open.
+    pub(crate) fn can_minimize_floating(&self) -> bool {
+        let layers = self.ivars().container.layers();
+        layers.floating(self.focused_pane().id()) || layers.cards.iter().any(|card| card.minimized)
+    }
+
+    /// Whether the tab has a floating card, shown or minimized.
+    pub(crate) fn has_floating(&self) -> bool {
+        !self.ivars().container.layers().cards.is_empty()
+    }
+
+    /// Whether every floating card is minimized: ⌥⇧⌘↩ shows them then, and hides them otherwise.
+    pub(crate) fn floating_hidden(&self) -> bool {
+        let layers = self.ivars().container.layers();
+        !layers.cards.is_empty() && layers.cards.iter().all(|card| card.minimized)
+    }
+
+    /// ⌃⌘M: the focused floating pane's card becomes a capsule and the keyboard goes back to the
+    /// pane that had it before; from a flat pane the capsule minimized last opens and takes the
+    /// keyboard. A beep when there is nothing to do.
+    pub(crate) fn minimize_floating(&self) {
+        let focus = self.focused_pane().id();
+        let mut layers = self.ivars().container.layers();
+        match layers.minimize_key(focus) {
+            Some(next) => self.apply_cards(layers, next, focus),
+            None => crate::preview::beep(),
+        }
+    }
+
+    /// ⌥⇧⌘↩: with a card shown every card becomes a capsule, otherwise every capsule opens, each
+    /// where it was. A beep when the tab has no floating card.
+    pub(crate) fn toggle_floating_panes(&self) {
+        let focus = self.focused_pane().id();
+        let mut layers = self.ivars().container.layers();
+        match layers.hide_key(focus) {
+            Some(next) => self.apply_cards(layers, next, focus),
+            None => crate::preview::beep(),
+        }
+    }
+
+    /// A press on a capsule: its card opens where it was and takes the keyboard.
+    pub(crate) fn show_capsule(&self, id: u64) {
+        if let Some(pane) = self.ivars().container.pane(id) {
+            self.focus_pane(&pane);
+        }
+    }
+
+    /// The cards `layers` holds after a minimize rule, and where the keyboard goes from `from`
+    /// ([`Focus`]): to a pane, back to where it was before, or nowhere.
+    fn apply_cards(&self, layers: Layers, next: Focus, from: u64) {
+        let container = &self.ivars().container;
+        container.set_cards(layers.cards);
+        let target = match next {
+            Focus::Keep => None,
+            Focus::Pane(id) => container.pane(id),
+            Focus::Back => self.fallback_pane(from),
+        };
+        match target {
+            Some(pane) => self.focus_pane(&pane),
+            None => self.refresh_look(),
+        }
+        self.layout_changed();
     }
 
     /// ⌥⌘↩: the focused pane floats, or docks if it floats. A beep when the layers refuse (the
@@ -2609,5 +2674,34 @@ mod tests {
         assert_eq!(handover(2, 1, Holder::Pane(1), true), Handover::Nothing);
         assert_eq!(handover(2, 1, Holder::Elsewhere, false), Handover::Nothing);
         assert_eq!(handover(2, 1, Holder::Window, true), Handover::Nothing);
+    }
+
+    #[test]
+    fn the_two_minimize_keys_ask_the_model_and_the_keyboard_goes_where_it_says() {
+        let source = include_str!("tab.rs");
+        let body = |name: &str| {
+            let at = source.find(name).expect(name);
+            &source[at..at + source[at..].find("\n    }\n").expect("its end")]
+        };
+        // ⌃⌘M and ⌥⇧⌘↩ are the model's rules, nothing is decided here...
+        assert!(body("pub(crate) fn minimize_floating(").contains("layers.minimize_key(focus)"));
+        assert!(body("pub(crate) fn toggle_floating_panes(").contains("layers.hide_key(focus)"));
+        // ...and a rule that does nothing is a beep.
+        assert!(body("pub(crate) fn minimize_floating(").contains("preview::beep()"));
+        assert!(body("pub(crate) fn toggle_floating_panes(").contains("preview::beep()"));
+        // The keyboard: to a pane, back to where it was before (a pane that is not in a capsule),
+        // or where it is.
+        let apply = body("fn apply_cards(");
+        for part in [
+            "Focus::Keep",
+            "Focus::Pane(id)",
+            "Focus::Back",
+            "self.fallback_pane(from)",
+        ] {
+            assert!(apply.contains(part), "{part}");
+        }
+        // A capsule's press and the keyboard arriving in one are the same road: the card opens
+        // and the pane takes the keyboard.
+        assert!(body("pub(crate) fn show_capsule(").contains("self.focus_pane(&pane)"));
     }
 }

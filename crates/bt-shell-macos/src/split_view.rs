@@ -69,12 +69,15 @@
 
 use std::cell::{Cell, RefCell};
 
-use bt_core::{ContentEdge, SplitStyle, Theme};
-use bt_shell_common::floating::{self, Area, Card, Gone, Grip, Ground, Layers};
+use bt_core::{ContentEdge, MinimizedPanes, SplitStyle, Theme};
+use bt_shell_common::floating::{
+    self, Area, CapsulePlace, Card, Gone, Grip, Ground, Layers, capsule,
+};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSBox, NSBoxType, NSColor, NSCursor, NSEvent, NSTitlePosition, NSView, NSWindowOrderingMode,
+    NSBox, NSBoxType, NSColor, NSCursor, NSEvent, NSTitlePosition, NSView, NSWindowOcclusionState,
+    NSWindowOrderingMode,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
@@ -84,7 +87,7 @@ use crate::sheets::{self, OwnerSlot};
 use crate::split::{
     self, Axis, Direction, Divider, Placement, Rect, Removal, Room, Size, Spacing, Tree, Verdict,
 };
-use crate::tab_bar::{HeadLook, PaneHead};
+use crate::tab_bar::{Capsule, HeadLook, PaneHead};
 use crate::window::RootView;
 
 /// Half of the least width of a divider's hit area, in points. A design
@@ -505,6 +508,16 @@ pub(crate) struct SplitIvars {
     grips: RefCell<Option<Retained<CardGrips>>>,
     /// The press on a card's border or header that is being dragged.
     card_drag: Cell<Option<CardDrag>>,
+    /// The capsules of the minimized cards, oldest first, the newest at the right end
+    /// ([`Layers::capsules`]): subviews over everything of the container.
+    capsules: RefCell<Vec<Retained<Capsule>>>,
+    /// Each pane's last look ([`SplitView::set_head_looks`]): what a capsule born between two
+    /// refreshes shows at once.
+    looks: RefCell<Vec<(u64, HeadLook)>>,
+    /// The strip's ground and the line along its top, under [`SplitStyle::Lines`] while the
+    /// strip stands (cards stand on the window's ground, which the strip shows).
+    floor: Retained<Hairline>,
+    floor_line: Retained<Hairline>,
     /// The tab's panes, the flat area's and the cards'. The container also holds them as
     /// subviews; this list is for typed access. **Never becomes empty**: removing the last pane
     /// means closing the window ([`Removal::Last`]).
@@ -578,6 +591,8 @@ impl SplitView {
         first: &TerminalPane,
     ) -> Retained<Self> {
         let hairline = Hairline::new(mtm);
+        let floor = Hairline::new(mtm);
+        let floor_line = Hairline::new(mtm);
         let focus_ring = card::FocusRing::new(mtm);
         let backdrop = NSBox::new(mtm);
         backdrop.setBoxType(NSBoxType::Custom);
@@ -592,6 +607,10 @@ impl SplitView {
             outlines: RefCell::new(Vec::new()),
             grips: RefCell::new(None),
             card_drag: Cell::new(None),
+            capsules: RefCell::new(Vec::new()),
+            looks: RefCell::new(Vec::new()),
+            floor: floor.clone(),
+            floor_line: floor_line.clone(),
             panes: RefCell::new(vec![first.retain()]),
             backdrop: backdrop.clone(),
             hairline: hairline.clone(),
@@ -614,6 +633,8 @@ impl SplitView {
         this.addSubview(first);
         this.addSubview(&hairline);
         this.addSubview(&focus_ring);
+        this.addSubview(&floor);
+        this.addSubview(&floor_line);
         this.layout_panes();
         this
     }
@@ -702,9 +723,48 @@ impl SplitView {
             .map_or(1.0, |window| window.backingScaleFactor())
     }
 
+    /// The room the splits and the cards share, in points: the container less the strip the
+    /// capsules stand in ([`SplitView::strip_height`]). What every layout is asked in.
     fn bounds_rect(&self) -> Rect {
         let size = self.bounds().size;
+        Rect::new(
+            0.0,
+            0.0,
+            size.width,
+            (size.height - self.strip_height()).max(0.0),
+        )
+    }
+
+    /// The whole container, strip included: what the window's corners are measured against.
+    fn full_rect(&self) -> Rect {
+        let size = self.bounds().size;
         Rect::new(0.0, 0.0, size.width, size.height)
+    }
+
+    /// `[appearance] minimized_panes`, as the capsules' model says it. Read at every layout; a
+    /// change lays every container out again.
+    fn capsule_place(&self) -> CapsulePlace {
+        let place = crate::app::delegate(self.mtm()).map_or(MinimizedPanes::default(), |app| {
+            app.settings().minimized_panes
+        });
+        match place {
+            MinimizedPanes::Strip => CapsulePlace::Strip,
+            MinimizedPanes::TopRight => CapsulePlace::TopRight,
+        }
+    }
+
+    /// The height the splits give up for the capsules' strip under `cards`: a capsule and 8
+    /// points while a card is minimized and the capsules are set to the strip, nothing otherwise.
+    fn strip_of(&self, cards: &[Card]) -> f64 {
+        capsule::strip(
+            self.capsule_place(),
+            cards.iter().filter(|card| card.minimized).count(),
+        )
+    }
+
+    /// [`SplitView::strip_of`] for the cards now.
+    fn strip_height(&self) -> f64 {
+        self.strip_of(&self.ivars().cards.borrow())
     }
 
     /// `id`'s two halves were it split (in points): the frames the pane and
@@ -931,10 +991,31 @@ impl SplitView {
             return false;
         }
         layers.reveal(pane);
-        self.ivars().cards.replace(layers.cards);
+        self.set_cards(layers.cards);
+        true
+    }
+
+    /// Takes `cards` as the cards — a change of which are minimized or of their order, the
+    /// panes the same. The splits give up the strip's height or take it back as the capsules
+    /// come and go, sliding there as they slide from one pane to two. The pane views may be
+    /// taken out and put back ([`SplitView::restack`]): the keyboard is the caller's to give
+    /// again.
+    pub(crate) fn set_cards(&self, cards: Vec<Card>) {
+        let before = (self.strip_of(&cards) != self.strip_height()).then(|| self.snapshot());
+        self.ivars().cards.replace(cards);
         self.layout_panes();
         self.restack();
-        true
+        // A minimized card's panes are hidden now — their frames stop, the programs run on — and
+        // an opened one's ask for a frame again.
+        let visible = self.window().is_some_and(|window| {
+            window
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible)
+        });
+        self.apply_visibility(visible);
+        if let Some(before) = before {
+            self.slide(&before, None, card::MOVE_SECS);
+        }
     }
 
     /// Takes `id` out of its layer ([`Layers::remove`]); the pane stays in the view and the list —
@@ -996,6 +1077,12 @@ impl SplitView {
         // behind it, never a pane's.
         if let Some(grips) = iv.grips.borrow().as_ref() {
             let view: &NSView = grips;
+            wanted.push(view.retain());
+        }
+        // The capsules stand over the cards and the grips: a capsule at the corner is on the
+        // content, and a press on it is its own.
+        for capsule in iv.capsules.borrow().iter() {
+            let view: &NSView = capsule;
             wanted.push(view.retain());
         }
         let subviews = self.subviews();
@@ -1655,7 +1742,11 @@ impl SplitView {
     /// or more are in view.
     fn sync_backdrop(&self) {
         let backdrop = &self.ivars().backdrop;
-        backdrop.setFrame(self.bounds());
+        let splits = self.bounds_rect();
+        backdrop.setFrame(NSRect::new(
+            NSPoint::new(splits.x, splits.y),
+            NSSize::new(splits.width, splits.height),
+        ));
         let shown = self.flat_split() && self.style() == SplitStyle::Lines;
         backdrop.setHidden(!shown);
     }
@@ -1806,6 +1897,7 @@ impl SplitView {
         placed.extend(self.layout_cards(&layers));
         self.place_heads(&placed);
         self.sync_handles(&layout.dividers);
+        self.place_capsules();
         self.restack();
         self.place_ring();
         self.ground_follows();
@@ -2087,6 +2179,96 @@ impl SplitView {
                 head.set(look.clone(), theme, radius);
             }
         }
+        // The capsules say what the headers would: a title that changed there changes here, and
+        // the width with it.
+        self.ivars().looks.replace(looks);
+        self.ivars().ring_theme.set(Some(*theme));
+        if !self.ivars().capsules.borrow().is_empty() {
+            self.place_capsules();
+        }
+    }
+
+    /// The capsules of the minimized cards, oldest first, in the row the setting says
+    /// ([`capsule::row`]), and the strip's floor under lines. A capsule is made when a card is
+    /// minimized and dropped when it opens; each shows its pane's last look.
+    fn place_capsules(&self) {
+        let iv = self.ivars();
+        let wanted: Vec<u64> = iv
+            .cards
+            .borrow()
+            .iter()
+            .filter(|card| card.minimized)
+            .map(|card| card.tree.leaves()[0])
+            .collect();
+        {
+            let mut views = iv.capsules.borrow_mut();
+            views.retain(|view| {
+                let keep = wanted.contains(&view.pane());
+                if !keep {
+                    view.removeFromSuperview();
+                }
+                keep
+            });
+            for id in &wanted {
+                if !views.iter().any(|view| view.pane() == *id) {
+                    let view = Capsule::new(self.mtm(), *id);
+                    self.addSubview(&view);
+                    views.push(view);
+                }
+            }
+            views.sort_by_key(|view| wanted.iter().position(|id| *id == view.pane()));
+        }
+        let views = iv.capsules.borrow();
+        let place = self.capsule_place();
+        let theme = iv.ring_theme.get();
+        if let Some(theme) = &theme {
+            let looks = iv.looks.borrow();
+            for (index, view) in views.iter().enumerate() {
+                if let Some((_, look)) = looks.iter().find(|(id, _)| *id == view.pane()) {
+                    view.set(look, theme, place, index + 1 == views.len());
+                }
+            }
+        }
+        let widths: Vec<f64> = views.iter().map(|view| view.width()).collect();
+        let frames = capsule::row(
+            place,
+            self.bounds_rect(),
+            self.carded(),
+            card::HEAD_PT,
+            &widths,
+        );
+        for (view, frame) in views.iter().zip(&frames) {
+            view.place(NSRect::new(
+                NSPoint::new(frame.x, frame.y),
+                NSSize::new(frame.width, frame.height),
+            ));
+        }
+        // Under lines the strip is the panes' own ground with a line along its top; under cards
+        // it is the window's ground, which stands there already.
+        let strip = self.strip_height();
+        let floor = strip > 0.0 && self.style() == SplitStyle::Lines;
+        iv.floor.setHidden(!floor);
+        iv.floor_line.setHidden(!floor);
+        if floor {
+            let size = self.bounds().size;
+            let top = (size.height - strip).max(0.0);
+            iv.floor.setFrame(NSRect::new(
+                NSPoint::new(0.0, top),
+                NSSize::new(size.width, strip),
+            ));
+            iv.floor_line.setFrame(NSRect::new(
+                NSPoint::new(0.0, top),
+                NSSize::new(size.width, 1.0 / self.scale()),
+            ));
+            if let Some(theme) = &theme {
+                let tone = |rgb: [u8; 3]| {
+                    let [r, g, b] = rgb.map(|byte| f64::from(byte) / 255.0);
+                    NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
+                };
+                iv.floor.setFillColor(&tone(theme.background_srgb()));
+                iv.floor_line.setFillColor(&tone(theme.separator_srgb()));
+            }
+        }
     }
 
     /// The card `pane` is, in this container's space: its frame and, while it stands in view,
@@ -2115,7 +2297,7 @@ impl SplitView {
     fn corners_of(&self, rect: Rect, carded: bool) -> (f64, f64) {
         bottom_corners(
             rect,
-            self.bounds_rect(),
+            self.full_rect(),
             carded,
             self.beside_tabs(),
             card::window_corner_pt(self.window().as_deref()),
@@ -2390,6 +2572,70 @@ mod tests {
         assert_eq!(
             bottom_corners(bounds, bounds, false, false, 0.0, 12.5),
             (0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn a_pane_standing_over_the_strip_is_off_the_windows_bottom_edge() {
+        // The container less the strip is the splits' room: a pane filling it stands 34 points
+        // above the window's bottom, so the window's curve is not its corner — measured against
+        // the whole container, as `corners_of` does.
+        let full = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        let above = Rect::new(0.0, 0.0, 1000.0, 600.0 - capsule::STRIP);
+        assert_eq!(
+            bottom_corners(above, full, false, false, 20.5, 12.5),
+            (0.0, 0.0)
+        );
+        // Without a strip the same pane is on the edge and takes it.
+        assert_eq!(
+            bottom_corners(full, full, false, false, 20.5, 12.5),
+            (20.5, 20.5)
+        );
+    }
+
+    /// The text of a function of this file, to its closing brace at the margin of the impl.
+    fn body_of(name: &str) -> &'static str {
+        let source = include_str!("split_view.rs");
+        let at = source.find(name).expect(name);
+        let end = source[at..].find("\n    }\n").expect("its end");
+        &source[at..at + end]
+    }
+
+    #[test]
+    fn the_strips_height_comes_off_every_layout_but_not_off_the_windows_corners() {
+        assert!(body_of("fn bounds_rect(").contains("self.strip_height()"));
+        assert!(body_of("fn corners_of(").contains("self.full_rect()"));
+        assert!(!body_of("fn corners_of(").contains("self.bounds_rect()"));
+    }
+
+    #[test]
+    fn the_splits_slide_only_when_the_strip_comes_or_goes() {
+        let body = body_of("pub(crate) fn set_cards(");
+        assert!(body.contains("self.strip_of(&cards) != self.strip_height()"));
+        assert!(body.contains("self.slide(&before, None, card::MOVE_SECS)"));
+        // A pane that is hidden now draws no frames, and one that is opened asks for one.
+        assert!(body.contains("self.apply_visibility("));
+        // Opening a card from its capsule takes the same road.
+        assert!(body_of("pub(crate) fn reveal(").contains("self.set_cards(layers.cards)"));
+    }
+
+    #[test]
+    fn the_capsules_are_placed_with_every_layout_and_stand_over_the_grips() {
+        let layout = body_of("pub(crate) fn layout_panes(");
+        let placed = layout
+            .find("self.place_capsules()")
+            .expect("capsules placed");
+        let stacked = layout.rfind("self.restack()").expect("restacked");
+        assert!(
+            placed < stacked,
+            "the capsules exist before the stack is put in order"
+        );
+        let restack = body_of("fn restack(");
+        let grips = restack.find("iv.grips.borrow()").expect("the grips");
+        let capsules = restack.find("iv.capsules.borrow()").expect("the capsules");
+        assert!(
+            grips < capsules,
+            "a capsule at the corner stands over the grips"
         );
     }
 }

@@ -74,6 +74,14 @@ const WORDS: &[(&str, &str)] = &[
         "pane dock undock overlay window popup detach",
     ),
     ("newFloatingPane", "pane overlay window popup"),
+    (
+        "minimizeFloatingPane",
+        "pane float overlay window popup hide capsule",
+    ),
+    (
+        "toggleFloatingPanes",
+        "pane float overlay window popup hide show capsule minimize",
+    ),
     ("equalizeSplits", "balance even panes"),
     ("selectNextSplit", "pane focus"),
     ("selectPreviousSplit", "pane focus"),
@@ -142,6 +150,8 @@ mod tests {
             "toggleSplitZoom",
             "toggleFloatPane",
             "newFloatingPane",
+            "minimizeFloatingPane",
+            "toggleFloatingPanes",
             "moveFloatingPane",
             "movePaneToNewTab",
             "movePaneToNewWindow",

@@ -732,6 +732,11 @@ pub(crate) fn install(
             // or docks it (`validateMenuItem:` writes its title), and a new pane that floats.
             item(mtm, "Float Pane", sel!(toggleFloatPane:)),
             item(mtm, "New Floating Pane", sel!(newFloatingPane:)),
+            // A card shrinks to a capsule and comes back: the focused one goes, or the last
+            // one to go returns; and all of them go, or all of them return
+            // (`validateMenuItem:` writes the second title).
+            item(mtm, "Minimize Floating Pane", sel!(minimizeFloatingPane:)),
+            item(mtm, "Hide Floating Panes", sel!(toggleFloatingPanes:)),
             submenu(mtm, "Move Floating Pane", &move_floating),
             NSMenuItem::separatorItem(mtm),
             // A split leaves for a tab or a window (`TerminalWindow`'s

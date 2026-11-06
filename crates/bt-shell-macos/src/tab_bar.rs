@@ -205,6 +205,10 @@ mod tab_title;
 #[path = "tab_head.rs"]
 mod pane_head;
 pub(crate) use pane_head::{HeadLook, PaneHead};
+// What a minimized floating pane leaves: a capsule with its mark and title.
+#[path = "tab_capsule.rs"]
+mod pane_capsule;
+pub(crate) use pane_capsule::Capsule;
 
 /// Space between the zoom button's right edge and the strip — the design's
 /// strip starts at 84 pt beside lights ending at 72 pt. In full screen the

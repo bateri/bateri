@@ -120,6 +120,7 @@ const TABS: &[Group] = &[
             row(Key::SplitStyle),
             row(Key::DimSplits),
             row(Key::FocusFrame),
+            row(Key::MinimizedPanes),
         ],
     ),
 ];
@@ -237,6 +238,7 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::TabRunning => "While a command runs",
         Key::TabDetails => "Details under a tab",
         Key::SplitStyle => "Panes",
+        Key::MinimizedPanes => "Minimized floating panes",
         Key::DimSplits => "Dim the other panes",
         Key::FocusFrame => "Frame the focused pane",
         Key::Shape => "Shape",
