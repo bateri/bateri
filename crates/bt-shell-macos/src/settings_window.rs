@@ -4723,8 +4723,9 @@ pub(super) fn theme_box_sized(
 }
 
 /// A search field in the theme: bare (the system's draws its own grey on any theme) in a box of
-/// the theme's, typing in its text colour, `placeholder` in its dim one. The field, and the box
-/// that is to be placed.
+/// the theme's, typing in its text colour, `placeholder` in its dim one. The magnifier stands in
+/// the box beside the field, not in it: a bare search field types its text from its left edge,
+/// under its own magnifier. The field, and the box that is to be placed.
 pub(super) fn themed_search(
     mtm: MainThreadMarker,
     placeholder: &str,
@@ -4735,6 +4736,12 @@ pub(super) fn themed_search(
     search.setDrawsBackground(false);
     search.setFocusRingType(objc2_app_kit::NSFocusRingType::None);
     search.setTextColor(Some(&look::ink(Ink::Text)));
+    if let Some(cell) = search
+        .cell()
+        .and_then(|cell| cell.downcast::<objc2_app_kit::NSSearchFieldCell>().ok())
+    {
+        cell.setSearchButtonCell(None);
+    }
     let font = search
         .font()
         .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
@@ -4748,7 +4755,23 @@ pub(super) fn themed_search(
         )
     };
     search.setPlaceholderAttributedString(Some(&hint));
-    let frame = theme_box_sized(mtm, &search, 6.0, SEARCH_HEIGHT, 8.0);
+    let icon = NSImageView::new(mtm);
+    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(12.0, 0.0);
+    if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        ns_string!("magnifyingglass"),
+        None,
+    )
+    .and_then(|image| image.imageWithSymbolConfiguration(&config))
+    {
+        icon.setImage(Some(&image));
+    }
+    icon.setContentTintColor(Some(&look::ink(Ink::Dim)));
+    icon.setContentHuggingPriority_forOrientation(
+        objc2_app_kit::NSLayoutPriorityRequired,
+        objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
+    );
+    let line = hstack(mtm, &[&icon, &search], 6.0);
+    let frame = theme_box_sized(mtm, &line, 8.0, SEARCH_HEIGHT, 8.0);
     (search, frame)
 }
 

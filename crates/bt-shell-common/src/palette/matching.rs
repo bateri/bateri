@@ -112,6 +112,17 @@ pub(crate) fn fuzzy(query: &[char], title: &Folded) -> Option<Match> {
 /// A whole query against a row; `None` when the row is not a hit. An empty query matches
 /// everything with no score.
 pub fn score(row: &Row, query: &str) -> Option<Match> {
+    score_with(row, query, true)
+}
+
+/// [`score`] in a list of one kind's rows (the settings window's Keyboard page, every row a
+/// command): the kind's own word is not a keyword there, or "command" would find every row.
+pub fn score_in_kind(row: &Row, query: &str) -> Option<Match> {
+    score_with(row, query, false)
+}
+
+/// [`score`], with the kind's cluster title among the keywords when `kind_words`.
+fn score_with(row: &Row, query: &str, kind_words: bool) -> Option<Match> {
     let words: Vec<Vec<char>> = query
         .split_whitespace()
         .map(word)
@@ -125,10 +136,11 @@ pub fn score(row: &Row, query: &str) -> Option<Match> {
     }
     let title = Folded::new(&row.title);
     let subtitle = Folded::new(&row.subtitle);
+    let kind = if kind_words { row.kind.cluster() } else { "" };
     let keywords: Vec<Folded> = row
         .keywords
         .split_whitespace()
-        .chain(row.kind.cluster().split_whitespace())
+        .chain(kind.split_whitespace())
         .map(Folded::new)
         .collect();
     let mut total = 0.0;

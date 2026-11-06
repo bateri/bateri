@@ -17,7 +17,9 @@ use bt_core::{CursorBlink, Settings, Theme};
 use bt_gpu::ScrollbarMode;
 use objc2::{DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{NSBitmapImageFileType, NSView};
-use objc2_foundation::{NSDate, NSDictionary, NSIndexSet, NSObjectProtocol, NSRect, NSRunLoop};
+use objc2_foundation::{
+    NSDate, NSDictionary, NSIndexSet, NSObjectProtocol, NSRect, NSRunLoop, ns_string,
+};
 
 use super::{Category, Key, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
 use crate::settings::{self, FileState};
@@ -503,8 +505,17 @@ impl SettingsWindow {
                 constraint.setActive(true);
             }
             content.layoutSubtreeIfNeeded();
-            let _ = &search;
             picture(&frame, &dir.join(format!("search-{name}.png")));
+            // Typed into, with the keyboard in it: the words stand clear of the magnifier.
+            search.setStringValue(ns_string!("command"));
+            if let Some(window) = self.ivars().window.get() {
+                window.makeFirstResponder(Some(&search));
+            }
+            content.layoutSubtreeIfNeeded();
+            picture(&frame, &dir.join(format!("search-{name}-typed.png")));
+            if let Some(window) = self.ivars().window.get() {
+                window.makeFirstResponder(None);
+            }
             frame.removeFromSuperview();
         }
     }

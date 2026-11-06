@@ -10,8 +10,9 @@
 //! carries its second shortcut) is the same row, and the items of a family are one row, titled
 //! after the submenu that holds them.
 //!
-//! A search is the palette's: [`crate::palette::score`] over a row made of the title, the menu
-//! as its second line, and the words the palette finds the command by (its synonyms, its name).
+//! A search is the palette's: [`crate::palette::score_in_kind`] over a row made of the title, the
+//! menu as its second line, and the words the palette finds the command by (its synonyms, its
+//! name) — the palette's matcher without the kind's own word, as every row here is a command.
 
 use bt_core::{Chord, Mods, Shortcut};
 
@@ -19,7 +20,7 @@ use super::mapping::glyphs;
 use super::resolve::{Resolved, SharedKeys};
 use super::table::{COMMANDS, Command, Family, by_id};
 use crate::keys::{LINE_EDITING, line_editing};
-use crate::palette::{Kind, MenuNode, Row, command_words, menu_item_id, score};
+use crate::palette::{Kind, MenuNode, Row, command_words, menu_item_id, score_in_kind};
 
 /// What the page lists: all of the commands, the ones whose shortcuts the file changed, or the
 /// ones that have none.
@@ -334,7 +335,7 @@ impl Page {
                         Filter::NoShortcut => row.chips.is_empty(),
                     })
                     .filter(|row| key.is_none_or(|key| row.chords.contains(key)))
-                    .filter(|row| score(&row.search, query).is_some())
+                    .filter(|row| score_in_kind(&row.search, query).is_some())
                     .collect();
                 (section.title.as_str(), rows)
             })
@@ -348,7 +349,7 @@ impl Page {
                 query.is_empty() || {
                     let mut row = Row::new(Kind::Command, "", line.title).keywords(line.effect);
                     row.subtitle = BUILT_IN_HEADING.to_owned();
-                    score(&row, query).is_some()
+                    score_in_kind(&row, query).is_some()
                 }
             })
             .collect();
@@ -685,6 +686,11 @@ mod tests {
             "{theme:?}"
         );
         assert!(find("zzzz").is_empty());
+        // Every row here is a command: the kind's own word finds only the rows that say it,
+        // not all of them (in the palette it is a keyword of every command row).
+        let command = find("command");
+        assert!(!command.contains(&"Split Right".to_owned()), "{command:?}");
+        assert!(command.len() < find("").len(), "{command:?}");
     }
 
     #[test]
