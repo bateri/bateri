@@ -73,6 +73,8 @@ struct Fake {
     lives: Mutex<Vec<String>>,
     /// The install is refused ([`Refusal::plain`]): no kablo can be put there now.
     install_refuses: AtomicBool,
+    /// How long the install takes, in milliseconds: a machine too busy to answer at once.
+    install_millis: AtomicU64,
     pane: AtomicBool,
     /// What the pane lookup says of the pane when there is one.
     info: Mutex<PaneInfo>,
@@ -132,6 +134,7 @@ impl Fake {
             log: Mutex::new(Vec::new()),
             lives: Mutex::new(Vec::new()),
             install_refuses: AtomicBool::new(false),
+            install_millis: AtomicU64::new(0),
             pane: AtomicBool::new(true),
             info: Mutex::new(PaneInfo::default()),
             kablo: AtomicBool::new(true),
@@ -336,6 +339,9 @@ impl Backend for Fake {
             .lock()
             .expect("lock")
             .push(format!("install:{}", names(live)));
+        thread::sleep(Duration::from_millis(
+            self.install_millis.load(Ordering::SeqCst),
+        ));
         if self.install_refuses.load(Ordering::SeqCst) {
             return Err(Refusal::plain());
         }
@@ -3510,6 +3516,39 @@ fn an_account_of_this_mac_that_cannot_be_made_is_told_and_leaves_nothing_behind(
     until("the bridge", || world.count("carry") == 1);
 }
 
+/// A launch on a machine too busy to make this Mac's account in a pane's wait: the pane that gave
+/// up is an ordinary one, and the panes right after it are turned away without waiting — but only
+/// while the account is still being made. Once it is there, the next pane is given its terminal
+/// (before, every pane for a minute after the first was an ordinary shell, and the programs the
+/// terminals of a quit kept were shown by none of them).
+#[test]
+fn a_pane_that_gave_up_on_a_slow_account_does_not_turn_away_the_panes_after_it_is_made() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_millis.store(1500, Ordering::SeqCst);
+    let rig = Rig::kept("here-slow", world.clone(), ledger.clone(), END_GRACE);
+
+    let wait = Duration::from_millis(300);
+    assert!(
+        rig.service
+            .open_local(&a_pane(), a_shell(), MAC, wait)
+            .is_err(),
+        "the first pane gives up while the account is being made"
+    );
+    assert!(
+        rig.service
+            .open_local(&a_pane(), a_shell(), MAC, wait)
+            .is_err(),
+        "and the next one is not made to wait for it too"
+    );
+    until("the account", || ledger.known(local::ACCOUNT).is_some());
+    let stream = rig
+        .service
+        .open_local(&a_pane(), a_shell(), MAC, Duration::from_secs(15))
+        .expect("a terminal once the account is there");
+    assert!(stream.silence.is_none());
+}
+
 #[test]
 fn a_terminal_is_this_macs_by_its_account_alone() {
     let shown = |account: &str| Shown {
@@ -3760,9 +3799,11 @@ fn a_pane_that_gave_up_waiting_leaves_no_terminal_behind() {
             .is_some_and(|id| world.bridge().terminated(id) == Some(false))
     });
 
-    // The wait that ran out is not paid again by the next pane: it is an ordinary one at once.
+    // The account was made meanwhile: the next pane is given a terminal at once, on the bridge
+    // that is there, and no wait is paid again
+    // ([`a_pane_that_gave_up_on_a_slow_account_does_not_turn_away_the_panes_after_it_is_made`]).
     let again = Instant::now();
-    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert!(open_local(&rig, &a_pane()).is_ok());
     assert!(again.elapsed() < Duration::from_secs(1));
     assert_eq!(world.count("carry"), 1);
 }

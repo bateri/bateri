@@ -1137,8 +1137,9 @@ pub struct Service {
     /// The terminals each account's server lists that are no longer running and that no pane
     /// shows, as the loop last wrote them ([`Service::exited`]).
     exited: Arc<Mutex<BTreeMap<String, Vec<SessionId>>>>,
-    /// When a pane last gave up waiting for a terminal of this Mac ([`Service::open_local`]).
-    local_gave_up: Mutex<Option<Instant>>,
+    /// When a pane last gave up waiting for a terminal of this Mac ([`Service::open_local`]);
+    /// the loop lifts it once this Mac's account is made.
+    local_gave_up: Arc<Mutex<Option<Instant>>>,
     /// The names panes of this Mac are to have for their terminals ([`Service::expect_name`]).
     names: Mutex<HashMap<PaneUuid, SessionId>>,
     /// What [`Service::stage_of`] reads.
@@ -1220,11 +1221,13 @@ impl Service {
         let background = Arc::new(Mutex::new(BTreeMap::new()));
         let exited = Arc::new(Mutex::new(BTreeMap::new()));
         let stages = Arc::new(Mutex::new(HashMap::new()));
+        let local_gave_up = Arc::new(Mutex::new(None));
         let core = Core {
             shared: Arc::new(Shared {
                 backend,
                 tx: tx.clone(),
                 ledger,
+                local_gave_up: Arc::clone(&local_gave_up),
                 stages: Arc::clone(&stages),
             }),
             hub: Hub::new(),
@@ -1276,7 +1279,7 @@ impl Service {
             local_programs,
             background,
             exited,
-            local_gave_up: Mutex::new(None),
+            local_gave_up,
             names: Mutex::new(HashMap::new()),
             stages,
             backend: kept_backend,
@@ -1723,6 +1726,9 @@ struct Shared {
     backend: Arc<dyn Backend>,
     tx: Sender<Msg>,
     ledger: Arc<Ledger>,
+    /// [`Service::open_local`]'s mark of a pane that gave up, lifted when this Mac's account is
+    /// made ([`Core::here_made`]): the panes after it wait for their terminals again.
+    local_gave_up: Arc<Mutex<Option<Instant>>>,
     /// The folder of each server account for a program's files, as it is made
     /// ([`Service::stage_of`]).
     stages: Arc<Mutex<HashMap<String, Staged>>>,
@@ -3381,6 +3387,13 @@ impl Core {
     fn here_made(&mut self, outcome: Result<Installed, Refusal>, pending: &Pending, now: Instant) {
         match outcome {
             Ok(installed) => {
+                // The account is there now: a pane that gave up waiting for it while it was
+                // being made does not turn the next ones away ([`Service::open_local`]).
+                *self
+                    .shared
+                    .local_gave_up
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
                 // A second request that was made while the first was still putting kablo there.
                 if !self.accounts.contains_key(local::ACCOUNT) {
                     let host = local::host();
