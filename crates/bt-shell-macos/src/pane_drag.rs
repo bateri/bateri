@@ -781,6 +781,11 @@ impl Session {
         let (window, tab) = windows
             .iter()
             .find_map(|window| window.tab_holding(pane).map(|tab| (window.clone(), tab)))?;
+        // A floating pane is not carried to a place among the splits, a tab or a window: its
+        // card moves where it stands, and a pane that leaves docks first.
+        if tab.container().floating(pane) {
+            return None;
+        }
         if window.tab_count() <= 1 && tab.panes().len() <= 1 && windows.len() <= 1 {
             return None;
         }

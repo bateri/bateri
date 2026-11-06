@@ -3706,11 +3706,11 @@ impl AppDelegate {
                 tab,
                 tree,
                 name,
-                // The view has no floating card yet to lay out.
-                cards: _,
+                cards,
             } => {
                 if let Some(window) = self.window(window) {
-                    window.reshape_tab(tab, tree, name, &mut hands.panes);
+                    let layers = bt_shell_common::floating::Layers { flat: tree, cards };
+                    window.reshape_tab(tab, layers, name, &mut hands.panes);
                 }
                 true
             }
@@ -4344,6 +4344,16 @@ impl AppDelegate {
     ) {
         let (launch, _) = self.pane_launch(tab.id(), Some(from), Opening::Split, start);
         if let Err(e) = tab.add_pane(self.mtm(), launch, from.id(), axis) {
+            eprintln!("bateri: {e}");
+        }
+    }
+
+    /// Window ▸ New Floating Pane (`TerminalWindow`'s `newFloatingPane:`, through
+    /// [`TerminalTab::new_floating`]): a new pane floating in `tab`, with `from`'s inheritance
+    /// ([`Opening::Split`]) as a split has. The error goes to stderr; the tab stays open.
+    pub(crate) fn open_floating(&self, tab: &TerminalTab, from: &TerminalPane) {
+        let (launch, _) = self.pane_launch(tab.id(), Some(from), Opening::Split, None);
+        if let Err(e) = tab.add_floating(self.mtm(), launch, None, None) {
             eprintln!("bateri: {e}");
         }
     }

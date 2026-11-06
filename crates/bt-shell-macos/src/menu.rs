@@ -727,6 +727,10 @@ pub(crate) fn install(
             submenu(mtm, "Swap Split", &swap_split),
             item(mtm, "Equalize Splits", sel!(equalizeSplits:)),
             item(mtm, "Zoom Split", sel!(toggleSplitZoom:)),
+            // A pane floating over the splits as a card: one item that floats the focused pane
+            // or docks it (`validateMenuItem:` writes its title), and a new pane that floats.
+            item(mtm, "Float Pane", sel!(toggleFloatPane:)),
+            item(mtm, "New Floating Pane", sel!(newFloatingPane:)),
             NSMenuItem::separatorItem(mtm),
             // A split leaves for a tab or a window (`TerminalWindow`'s
             // appliers); the shortcuts are Previous / Next Tab's with ⌥ —

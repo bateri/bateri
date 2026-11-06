@@ -70,6 +70,7 @@
 use std::cell::{Cell, RefCell};
 
 use bt_core::{ContentEdge, SplitStyle, Theme};
+use bt_shell_common::floating::{Card, Gone, Ground, Layers};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
@@ -123,6 +124,13 @@ fn spaced(scale: f64, style: SplitStyle, beside_tabs: bool) -> Spacing {
     }
 }
 
+/// The space inside one floating card: a gap between its panes and no margin round them (the
+/// card's edge is its own frame), each pane's header above it. A floating pane is a card
+/// under either split style.
+fn card_spacing(scale: f64) -> Spacing {
+    Spacing::gapped(GAP_PT, 0.0, scale).with_head(card::HEAD_PT, scale)
+}
+
 /// How far a pane's edge may stand from the container's and still be on it,
 /// in points: the frames' sub-pixel rounding, not a gap. The smallest pane is
 /// far larger than this, so no pane stands this close to an edge it is not on.
@@ -161,6 +169,9 @@ fn bottom_corners(
 }
 
 pub(crate) struct HandleIvars {
+    /// The floating card whose tree it divides (its place in the cards, back to front); `None`
+    /// for the flat area.
+    card: Cell<Option<usize>>,
     /// Its index in [`split::Layout::dividers`] - [`Tree::drag`]'s index.
     index: Cell<usize>,
     /// The axis of the split it separates: the handle of a side-by-side split
@@ -214,7 +225,11 @@ define_class!(
                 return;
             };
             if let Some(container) = self.container() {
-                container.drag_divider(self.ivars().index.get(), along - self.ivars().grab.get());
+                container.drag_divider(
+                    self.ivars().card.get(),
+                    self.ivars().index.get(),
+                    along - self.ivars().grab.get(),
+                );
             }
         }
 
@@ -232,6 +247,7 @@ define_class!(
 impl DividerHandle {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(HandleIvars {
+            card: Cell::new(None),
             index: Cell::new(0),
             axis: Cell::new(Axis::Horizontal),
             line: Cell::new(0.0),
@@ -262,8 +278,9 @@ impl DividerHandle {
     /// Sits on the divider: its index, axis, the gap's leading edge and its
     /// frame — the gap itself, widened to twice [`HANDLE_PT`] if narrower
     /// (clipped to the container's bounds).
-    fn place(&self, index: usize, divider: Divider, bounds: NSSize) {
+    fn place(&self, card: Option<usize>, index: usize, divider: Divider, bounds: NSSize) {
         let iv = self.ivars();
+        iv.card.set(card);
         iv.index.set(index);
         iv.axis.set(divider.axis);
         let rect = divider.rect;
@@ -327,10 +344,20 @@ impl Hairline {
 }
 
 pub(crate) struct SplitIvars {
-    /// The split tree; its leaves are the ids of [`SplitIvars::panes`].
+    /// The flat area's split tree; its leaves are ids of [`SplitIvars::panes`], as are the
+    /// leaves of every card's.
     tree: RefCell<Tree>,
-    /// The tab's panes. The container also holds them as subviews; this list
-    /// is for typed access. **Never becomes empty**: removing the last pane
+    /// The floating cards over the flat area, back to front (the model is
+    /// [`bt_shell_common::floating`]).
+    cards: RefCell<Vec<Card>>,
+    /// Each card's shadow, in the order of `cards`: a subview of this container standing just
+    /// under the card's panes, so a card's shadow falls on the cards behind it and not on its own.
+    shades: RefCell<Vec<Retained<card::Shade>>>,
+    /// The dividers' drag handles of the cards' own splits, per card, in the order of
+    /// `cards`.
+    card_handles: RefCell<Vec<Vec<Retained<DividerHandle>>>>,
+    /// The tab's panes, the flat area's and the cards'. The container also holds them as
+    /// subviews; this list is for typed access. **Never becomes empty**: removing the last pane
     /// means closing the window ([`Removal::Last`]).
     panes: RefCell<Vec<Retained<TerminalPane>>>,
     /// The divider's fill under [`SplitStyle::Lines`]: a box in the theme's
@@ -410,6 +437,9 @@ impl SplitView {
         backdrop.setHidden(true);
         let this = Self::alloc(mtm).set_ivars(SplitIvars {
             tree: RefCell::new(Tree::Leaf(first.id())),
+            cards: RefCell::new(Vec::new()),
+            shades: RefCell::new(Vec::new()),
+            card_handles: RefCell::new(Vec::new()),
             panes: RefCell::new(vec![first.retain()]),
             backdrop: backdrop.clone(),
             hairline: hairline.clone(),
@@ -446,8 +476,20 @@ impl SplitView {
         );
     }
 
-    /// The panes, in tree order (left to right, top to bottom).
+    /// Every pane of the tab: the flat area's in tree order (left to right, top to bottom),
+    /// then each card's, back to front.
     pub(crate) fn panes(&self) -> Vec<Retained<TerminalPane>> {
+        let panes = self.ivars().panes.borrow();
+        self.layers()
+            .panes()
+            .into_iter()
+            .filter_map(|id| panes.iter().find(|pane| pane.id() == id).cloned())
+            .collect()
+    }
+
+    /// The panes of the flat area, in tree order. What the window's ground stands under, and
+    /// what a zoom is among.
+    pub(crate) fn flat_panes(&self) -> Vec<Retained<TerminalPane>> {
         let panes = self.ivars().panes.borrow();
         self.ivars()
             .tree
@@ -456,6 +498,36 @@ impl SplitView {
             .into_iter()
             .filter_map(|id| panes.iter().find(|pane| pane.id() == id).cloned())
             .collect()
+    }
+
+    /// The tab's two layers as the model sees them ([`Layers`]): a copy.
+    pub(crate) fn layers(&self) -> Layers {
+        Layers {
+            flat: self.ivars().tree.borrow().clone(),
+            cards: self.ivars().cards.borrow().clone(),
+        }
+    }
+
+    /// Whether pane `id` floats.
+    pub(crate) fn floating(&self, id: u64) -> bool {
+        self.ivars()
+            .cards
+            .borrow()
+            .iter()
+            .any(|card| card.tree.leaves().contains(&id))
+    }
+
+    /// The ground a question about the layers stands on: the container's area, the flat
+    /// area's spacing, a card's and the panes' smallest sizes (`min`, from [`Self::limits`]).
+    fn ground<'a>(&self, min: &'a dyn Fn(u64) -> Size) -> Ground<'a> {
+        let scale = self.scale();
+        Ground {
+            bounds: self.bounds_rect(),
+            scale,
+            flat: spacing(scale, self.style(), self.beside_tabs()),
+            card: card_spacing(scale),
+            min,
+        }
     }
 
     /// The pane whose id is `id`.
@@ -493,12 +565,29 @@ impl SplitView {
     /// pane.
     pub(crate) fn halves(&self, id: u64, axis: Axis) -> Option<(NSSize, NSSize)> {
         let scale = self.scale();
-        let mut tree = self.ivars().tree.borrow().clone();
-        if !tree.split(id, axis, HYPOTHETICAL) {
-            return None;
-        }
-        let spacing = spacing(scale, self.style(), self.beside_tabs());
-        let layout = tree.layout_spaced(self.bounds_rect(), scale, spacing);
+        let layout = if let Some(card) = self
+            .ivars()
+            .cards
+            .borrow()
+            .iter()
+            .find(|card| card.tree.leaves().contains(&id))
+        {
+            // A floating pane is split inside its card, in the card's own room.
+            let min = self.limits();
+            let ground = self.ground(&min);
+            let mut tree = card.tree.clone();
+            if !tree.split(id, axis, HYPOTHETICAL) {
+                return None;
+            }
+            tree.layout_spaced(ground.rect_of(card), scale, ground.card)
+        } else {
+            let mut tree = self.ivars().tree.borrow().clone();
+            if !tree.split(id, axis, HYPOTHETICAL) {
+                return None;
+            }
+            let spacing = spacing(scale, self.style(), self.beside_tabs());
+            tree.layout_spaced(self.bounds_rect(), scale, spacing)
+        };
         let frame_of = |wanted: u64| {
             let (_, rect) = layout.panes.iter().find(|(pane, _)| *pane == wanted)?;
             Some(NSSize::new(rect.width, rect.height))
@@ -510,46 +599,55 @@ impl SplitView {
     /// or below). If the target is not in the tree, `false` and nothing changes.
     pub(crate) fn insert(&self, target: u64, axis: Axis, pane: &TerminalPane) -> bool {
         let before = self.snapshot();
-        if !self
+        let split = self
             .ivars()
             .tree
             .borrow_mut()
             .split(target, axis, pane.id())
-        {
+            || self
+                .ivars()
+                .cards
+                .borrow_mut()
+                .iter_mut()
+                .any(|card| card.tree.split(target, axis, pane.id()));
+        if !split {
             return false;
         }
         self.ivars().panes.borrow_mut().push(pane.retain());
         self.add_pane(pane);
         self.layout_panes();
+        self.restack();
         // One pane became two: the first slides into its card, the newcomer
         // grows from the edge it was split off.
-        if before.len() == 1 {
+        if before.len() == 1 && !self.floating(target) {
             self.slide(&before, Some((pane.id(), axis)), card::SLIDE_SECS);
         }
         true
     }
 
-    /// Session restore's bulk placement: the saved `tree` replaces the
-    /// single-pane one, `extra` (every pane but the one the container was
+    /// Session restore's bulk placement: the saved `layers` replace the
+    /// single-pane tree, `extra` (every pane but the one the container was
     /// born with) join as subviews and all are laid out with the saved
     /// ratios at once — no pane passes through an intermediate size. `false`
-    /// and nothing changes unless the tree's leaves are exactly the born pane
+    /// and nothing changes unless the panes of `layers` are exactly the born pane
     /// and `extra`.
-    pub(crate) fn adopt(&self, tree: Tree, extra: &[Retained<TerminalPane>]) -> bool {
+    pub(crate) fn adopt_layers(&self, layers: Layers, extra: &[Retained<TerminalPane>]) -> bool {
         let mut wanted: Vec<u64> = self.ivars().panes.borrow().iter().map(|p| p.id()).collect();
         wanted.extend(extra.iter().map(|pane| pane.id()));
         wanted.sort_unstable();
-        let mut leaves = tree.leaves();
+        let mut leaves = layers.panes();
         leaves.sort_unstable();
         if leaves != wanted {
             return false;
         }
-        self.ivars().tree.replace(tree);
+        self.ivars().tree.replace(layers.flat);
+        self.ivars().cards.replace(layers.cards);
         for pane in extra {
             self.ivars().panes.borrow_mut().push(pane.retain());
             self.add_pane(pane);
         }
         self.layout_panes();
+        self.restack();
         true
     }
 
@@ -559,15 +657,195 @@ impl SplitView {
     /// size, so its program is resized once. A single pane becoming several
     /// slides into its card as it does when it splits ([`SplitView::insert`]).
     /// `false` and nothing changes if the leaves are not exactly those.
+    ///
+    /// The cards stay as they are: `tree` is the flat area's.
     pub(crate) fn receive(&self, tree: Tree, panes: &[Retained<TerminalPane>]) -> bool {
+        let cards = self.ivars().cards.borrow().clone();
+        self.receive_layers(Layers { flat: tree, cards }, panes)
+    }
+
+    /// [`SplitView::receive`] for layers: a pane that floats or docks (the card structure
+    /// changed) slides from where it stood to where it stands.
+    pub(crate) fn receive_layers(&self, layers: Layers, panes: &[Retained<TerminalPane>]) -> bool {
         let before = self.snapshot();
-        if !self.adopt(tree, panes) {
+        let had_cards = !self.ivars().cards.borrow().is_empty();
+        let has_cards = !layers.cards.is_empty();
+        if !self.adopt_layers(layers, panes) {
             return false;
         }
         if before.len() == 1 {
             self.slide(&before, None, card::SLIDE_SECS);
+        } else if had_cards || has_cards {
+            self.slide(&before, None, card::MOVE_SECS);
         }
         true
+    }
+
+    /// A new pane floats in front, where and as big as the wish says (`None`: the opening place
+    /// and size, [`floating::NEW_SHARE`]). `false` and nothing changes when the model refuses.
+    pub(crate) fn open_card(
+        &self,
+        pane: &TerminalPane,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+    ) -> bool {
+        let mut layers = self.layers();
+        let opened = {
+            let min = self.limits();
+            let ground = self.ground(&min);
+            layers.open(pane.id(), at, size, &ground)
+        };
+        if !opened {
+            return false;
+        }
+        self.ivars().cards.replace(layers.cards);
+        self.ivars().panes.borrow_mut().push(pane.retain());
+        self.add_pane(pane);
+        self.layout_panes();
+        self.restack();
+        true
+    }
+
+    /// The layers as they would be were flat pane `pane` floated ([`Layers::float_out`]): in its
+    /// own card, `at` and `size` as the wish says (`None`: the middle of the place it stands in,
+    /// four fifths of it). `None` when the model refuses — the flat area's only pane, or a pane
+    /// that does not stand in it. Nothing changes here: [`Move::Float`] carries the layers.
+    pub(crate) fn floated(
+        &self,
+        pane: u64,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+    ) -> Option<Layers> {
+        let mut layers = self.layers();
+        let min = self.limits();
+        let ground = self.ground(&min);
+        layers.float_out(pane, at, size, &ground).then_some(layers)
+    }
+
+    /// The layers as they would be were floating pane `pane` docked ([`Layers::dock`]),
+    /// `beside` the flat pane the keyboard was in. `None` when there is no room or `pane` does
+    /// not float.
+    pub(crate) fn docked(&self, pane: u64, beside: u64) -> Option<Layers> {
+        let mut layers = self.layers();
+        let min = self.limits();
+        let ground = self.ground(&min);
+        layers.dock(pane, beside, &ground).then_some(layers)
+    }
+
+    /// The card holding `pane` comes to the front and opens if it was a capsule: a click on it,
+    /// the keyboard arriving in it. `true` when something changed (a card already in front and
+    /// shown changes nothing); the pane views were taken out and put back, so the keyboard
+    /// is the caller's to give again.
+    pub(crate) fn reveal(&self, pane: u64) -> bool {
+        let mut layers = self.layers();
+        let Some(index) = layers.card_of(pane) else {
+            return false;
+        };
+        if index + 1 == layers.cards.len() && !layers.cards[index].minimized {
+            return false;
+        }
+        layers.reveal(pane);
+        self.ivars().cards.replace(layers.cards);
+        self.layout_panes();
+        self.restack();
+        true
+    }
+
+    /// Takes `id` out of its layer ([`Layers::remove`]); the pane stays in the view and the list —
+    /// the caller first moves the keyboard, then calls [`SplitView::detach`] (a window whose view
+    /// carrying the first responder is removed would be left without a responder).
+    pub(crate) fn remove_pane(&self, id: u64) -> Gone {
+        let mut layers = self.layers();
+        let gone = layers.remove(id);
+        if matches!(gone, Gone::Closed { .. } | Gone::Landed { .. }) {
+            self.ivars().tree.replace(layers.flat);
+            self.ivars().cards.replace(layers.cards);
+        }
+        gone
+    }
+
+    /// The views of the cards, back to front — each card's shadow, panes, headers and handles, in
+    /// that order — stand above everything of the flat area, and the focus frame stands over them
+    /// when it is round a floating pane (that card is the front one: a card the keyboard goes to
+    /// comes to the front) and under them otherwise. Only the views that are out of place are
+    /// moved: taking a pane out of its superview puts the keyboard down.
+    fn restack(&self) {
+        let iv = self.ivars();
+        let cards = iv.cards.borrow();
+        let shades = iv.shades.borrow();
+        let card_handles = iv.card_handles.borrow();
+        let heads = iv.heads.borrow();
+        let ring: &NSView = &iv.focus_ring;
+        let framed = iv.framed.get();
+        let mut wanted: Vec<Retained<NSView>> = Vec::new();
+        let mut ring_over = false;
+        for (index, card) in cards.iter().enumerate() {
+            if let Some(shade) = shades.get(index) {
+                let view: &NSView = shade;
+                wanted.push(view.retain());
+            }
+            let ids = card.tree.leaves();
+            for id in &ids {
+                if let Some(pane) = self.pane(*id) {
+                    let view: &NSView = &pane;
+                    wanted.push(view.retain());
+                }
+                if let Some(head) = heads.iter().find(|head| head.pane() == *id) {
+                    let view: &NSView = head;
+                    wanted.push(view.retain());
+                }
+            }
+            if let Some(list) = card_handles.get(index) {
+                for handle in list {
+                    let view: &NSView = handle;
+                    wanted.push(view.retain());
+                }
+            }
+            ring_over = framed.is_some_and(|id| ids.contains(&id));
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        let subviews = self.subviews();
+        let at = |view: &NSView| {
+            subviews
+                .iter()
+                .position(|candidate| std::ptr::eq(&*candidate, view))
+        };
+        let own = |view: &NSView| {
+            std::ptr::eq(view, ring) || wanted.iter().any(|mine| std::ptr::eq(&**mine, view))
+        };
+        // The highest view of the flat area: what the cards stand on.
+        let mut anchor: Option<Retained<NSView>> = subviews
+            .iter()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .find(|view| !own(view));
+        let put = |view: &NSView, anchor: &mut Option<Retained<NSView>>| {
+            let in_place = match (anchor.as_deref(), at(view)) {
+                (Some(under), Some(now)) => at(under).is_some_and(|below| now == below + 1),
+                (None, Some(now)) => now == 0,
+                _ => false,
+            };
+            if !in_place {
+                self.addSubview_positioned_relativeTo(
+                    view,
+                    NSWindowOrderingMode::Above,
+                    anchor.as_deref(),
+                );
+            }
+            *anchor = Some(view.retain());
+        };
+        if !ring_over {
+            put(ring, &mut anchor);
+        }
+        for view in &wanted {
+            put(view, &mut anchor);
+        }
+        if ring_over {
+            put(ring, &mut anchor);
+        }
     }
 
     /// Where the pane of a terminal a program on a server asked for goes beside `anchor` of this
@@ -827,14 +1105,6 @@ impl SplitView {
         self.ivars().tree.borrow().fits(&self.room(&limits))
     }
 
-    /// Removes `id` from the tree ([`Tree::remove`]); the pane stays in the
-    /// view and the list - the caller first moves focus, then calls
-    /// [`SplitView::detach`] (a window whose view carrying the first
-    /// responder is removed would be left without a responder).
-    pub(crate) fn remove_leaf(&self, id: u64) -> Removal {
-        self.ivars().tree.borrow_mut().remove(id)
-    }
-
     /// Removes a pane that left the tree from the view and the list, and lays
     /// out the rest again. The pane's last strong reference drops at the caller.
     pub(crate) fn detach(&self, id: u64) -> Option<Retained<TerminalPane>> {
@@ -888,25 +1158,18 @@ impl SplitView {
         }
     }
 
-    /// The tree's plain (unzoomed) layout: navigation asks for it.
-    fn plain_layout(&self) -> split::Layout {
-        let scale = self.scale();
-        let tree = self.ivars().tree.borrow();
-        tree.layout_spaced(
-            self.bounds_rect(),
-            scale,
-            spacing(scale, self.style(), self.beside_tabs()),
-        )
-    }
-
-    /// `from`'s neighbour in the direction (⌥⌘ + arrow; [`split::Layout::neighbour`]).
+    /// `from`'s neighbour in the direction (⌥⌘ + arrow; [`Layers::toward`]): in the flat area
+    /// the neighbour there, in a card the one inside it and else the flat pane beyond its edge.
     pub(crate) fn neighbour(&self, from: u64, direction: Direction) -> Option<u64> {
-        self.plain_layout().neighbour(from, direction)
+        let min = self.limits();
+        let ground = self.ground(&min);
+        self.layers().toward(from, direction, &ground)
     }
 
-    /// The next or previous pane (⌘] / ⌘[; [`Tree::cycle`]).
+    /// The next or previous pane (⌘] / ⌘[; [`Layers::cycle`]): the flat area, then the shown
+    /// cards from the front to the back.
     pub(crate) fn cycle(&self, from: u64, forward: bool) -> Option<u64> {
-        self.ivars().tree.borrow().cycle(from, forward)
+        self.layers().cycle(from, forward)
     }
 
     /// The smallest-pane limit, per leaf: from the pane's own
@@ -959,14 +1222,31 @@ impl SplitView {
 
     /// The handle's drag: the `index`th divider to `position`
     /// ([`Tree::drag`]).
-    fn drag_divider(&self, index: usize, position: f64) {
+    fn drag_divider(&self, card: Option<usize>, index: usize, position: f64) {
         let limits = self.limits();
-        let room = self.room(&limits);
-        let moved = self
-            .ivars()
-            .tree
-            .borrow_mut()
-            .drag_within(index, position, &room);
+        let moved = match card {
+            None => {
+                let room = self.room(&limits);
+                self.ivars()
+                    .tree
+                    .borrow_mut()
+                    .drag_within(index, position, &room)
+            }
+            Some(at) => {
+                let ground = self.ground(&limits);
+                let mut cards = self.ivars().cards.borrow_mut();
+                let Some(card) = cards.get_mut(at) else {
+                    return;
+                };
+                let room = Room {
+                    bounds: ground.rect_of(card),
+                    scale: ground.scale,
+                    spacing: ground.card,
+                    min: &limits,
+                };
+                card.tree.drag_within(index, position, &room)
+            }
+        };
         if moved {
             self.layout_panes();
         }
@@ -980,15 +1260,47 @@ impl SplitView {
             for handle in handles.drain(..) {
                 handle.removeFromSuperview();
             }
+            // Above the panes of the flat area and under the cards.
+            let mut under: Retained<NSView> =
+                self.ivars().hairline.retain().into_super().into_super();
             for _ in dividers {
                 let handle = DividerHandle::new(self.mtm());
-                self.addSubview(&handle);
+                self.addSubview_positioned_relativeTo(
+                    &handle,
+                    NSWindowOrderingMode::Above,
+                    Some(&under),
+                );
+                under = (&*handle as &NSView).retain();
                 handles.push(handle);
             }
         }
         let size = self.bounds().size;
         for (index, (handle, divider)) in handles.iter().zip(dividers).enumerate() {
-            handle.place(index, *divider, size);
+            handle.place(None, index, *divider, size);
+        }
+    }
+
+    /// The handles of card `at`'s own dividers: built again when their number changed, each above
+    /// the card's last view (the restack settles the order).
+    fn sync_card_handles(&self, at: usize, dividers: &[Divider], last: Option<&NSView>) {
+        let mut all = self.ivars().card_handles.borrow_mut();
+        while all.len() <= at {
+            all.push(Vec::new());
+        }
+        let handles = &mut all[at];
+        if handles.len() != dividers.len() {
+            for handle in handles.drain(..) {
+                handle.removeFromSuperview();
+            }
+            for _ in dividers {
+                let handle = DividerHandle::new(self.mtm());
+                self.addSubview_positioned_relativeTo(&handle, NSWindowOrderingMode::Above, last);
+                handles.push(handle);
+            }
+        }
+        let size = self.bounds().size;
+        for (index, (handle, divider)) in handles.iter().zip(dividers).enumerate() {
+            handle.place(Some(at), index, *divider, size);
         }
     }
 
@@ -1002,6 +1314,9 @@ impl SplitView {
         self.ivars().hairline.setFillColor(&color);
         self.ivars().backdrop.setFillColor(&color);
         self.ivars().ring_theme.set(Some(*theme));
+        for shade in self.ivars().shades.borrow().iter() {
+            shade.paint(theme);
+        }
         self.place_ring();
     }
 
@@ -1023,11 +1338,6 @@ impl SplitView {
             return;
         };
         let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
-        let top = if self.carded() {
-            card::corner_pt()
-        } else {
-            0.0
-        };
         let at = iv
             .framed
             .get()
@@ -1036,6 +1346,12 @@ impl SplitView {
             .filter(|pane| !pane.isHidden())
             .map(|pane| {
                 let (left, right) = pane.corners();
+                // A floating pane is a card under either style.
+                let top = if self.carded() || self.floating(pane.id()) {
+                    card::corner_pt()
+                } else {
+                    0.0
+                };
                 (pane.id(), self.card_frame(&pane), (top, left, right))
             });
         iv.focus_ring.place(at, &theme, still);
@@ -1086,6 +1402,21 @@ impl SplitView {
     /// Two or more panes in view: not one pane, not a zoomed one. The focus
     /// frame and the lines' divider fill show only then.
     pub(crate) fn shows_split(&self) -> bool {
+        let flat = if self.flat_split() { 2 } else { 1 };
+        let floating: usize = self
+            .ivars()
+            .cards
+            .borrow()
+            .iter()
+            .filter(|card| !card.minimized)
+            .map(|card| card.tree.leaves().len())
+            .sum();
+        flat + floating > 1
+    }
+
+    /// Two panes or more of the flat area in view: not one pane, not a zoomed one. The lines'
+    /// divider fill shows only then.
+    fn flat_split(&self) -> bool {
         let zoomed = self.ivars().zoomed.get();
         let tree = self.ivars().tree.borrow();
         let leaves = tree.leaves();
@@ -1115,7 +1446,7 @@ impl SplitView {
     fn sync_backdrop(&self) {
         let backdrop = &self.ivars().backdrop;
         backdrop.setFrame(self.bounds());
-        let shown = self.shows_split() && self.style() == SplitStyle::Lines;
+        let shown = self.flat_split() && self.style() == SplitStyle::Lines;
         backdrop.setHidden(!shown);
     }
 
@@ -1231,7 +1562,17 @@ impl SplitView {
             zoomed,
             spacing(scale, self.style(), self.beside_tabs()),
         );
+        let layers = self.layers();
+        let in_cards = layers
+            .cards
+            .iter()
+            .flat_map(|card| card.tree.leaves())
+            .collect::<Vec<_>>();
         for pane in &panes {
+            // The cards' panes are laid out below, with their cards.
+            if in_cards.contains(&pane.id()) {
+                continue;
+            }
             match layout.panes.iter().find(|(id, _)| *id == pane.id()) {
                 Some((_, rect)) => {
                     pane.setHidden(false);
@@ -1251,10 +1592,93 @@ impl SplitView {
                 None => pane.setHidden(true),
             }
         }
-        self.place_heads(&layout.panes);
+        let mut placed = layout.panes.clone();
+        placed.extend(self.layout_cards(&layers));
+        self.place_heads(&placed);
         self.sync_handles(&layout.dividers);
+        self.restack();
         self.place_ring();
         self.ground_follows();
+    }
+
+    /// Lays the floating cards out over the flat area: each card's frame, its panes in it, its
+    /// shadow and its own dividers' handles. The panes of a card shown, with their frames,
+    /// for the headers to stand over.
+    fn layout_cards(&self, layers: &Layers) -> Vec<(u64, Rect)> {
+        let iv = self.ivars();
+        let min = self.limits();
+        let ground = self.ground(&min);
+        let arranged = layers.layout(&ground).cards;
+        let theme = iv.ring_theme.get();
+        let bounds = self.bounds();
+        // One shadow per card, made and dropped as cards come and go.
+        {
+            let mut shades = iv.shades.borrow_mut();
+            while shades.len() > layers.cards.len() {
+                if let Some(shade) = shades.pop() {
+                    shade.removeFromSuperview();
+                }
+            }
+            while shades.len() < layers.cards.len() {
+                let shade = card::Shade::new(self.mtm(), bounds);
+                if let Some(theme) = &theme {
+                    shade.paint(theme);
+                }
+                self.addSubview(&shade);
+                shades.push(shade);
+            }
+            let mut handles = iv.card_handles.borrow_mut();
+            while handles.len() > layers.cards.len() {
+                if let Some(gone) = handles.pop() {
+                    for handle in gone {
+                        handle.removeFromSuperview();
+                    }
+                }
+            }
+        }
+        let mut placed = Vec::new();
+        for (index, (card, (rect, inner))) in layers.cards.iter().zip(&arranged).enumerate() {
+            let mut focused = false;
+            let mut last: Option<Retained<NSView>> = None;
+            for (id, frame) in &inner.panes {
+                let Some(pane) = self.pane(*id) else {
+                    continue;
+                };
+                pane.setHidden(card.minimized);
+                pane.set_headed(true);
+                pane.set_card(true);
+                focused |= pane.shows_focus();
+                let (left, right) = self.corners_of(*frame, true);
+                pane.place(
+                    NSRect::new(
+                        NSPoint::new(frame.x, frame.y),
+                        NSSize::new(frame.width, frame.height),
+                    ),
+                    left,
+                    right,
+                );
+                if !card.minimized {
+                    placed.push((*id, *frame));
+                }
+                let view: &NSView = &pane;
+                last = Some(view.retain());
+            }
+            let outline = NSRect::new(
+                NSPoint::new(rect.x, rect.y),
+                NSSize::new(rect.width, rect.height),
+            );
+            if let Some(shade) = iv.shades.borrow().get(index) {
+                shade.setFrame(bounds);
+                shade.set_cards(if card.minimized {
+                    Vec::new()
+                } else {
+                    vec![(outline, focused)]
+                });
+            }
+            let dividers: &[Divider] = if card.minimized { &[] } else { &inner.dividers };
+            self.sync_card_handles(index, dividers, last.as_deref());
+        }
+        placed
     }
 
     /// Puts a header over each pane `placed` (its id and frame), and takes the others away. Each
@@ -1427,6 +1851,21 @@ mod tests {
         assert_eq!((above.top_px(), above.left_px()), (0.0, GAP_PT * 2.0));
         // Lines touch, whatever the tabs do.
         assert_eq!(spaced(2.0, SplitStyle::Lines, true), Spacing::DIVIDED);
+    }
+
+    #[test]
+    fn inside_a_floating_card_panes_keep_a_gap_a_header_and_no_margin() {
+        // The card's edge is its own frame: no margin round its panes, whatever the split style,
+        // and the gap between panes is the card gap.
+        let inside = card_spacing(2.0);
+        assert_eq!(inside.between_px(), GAP_PT * 2.0);
+        assert_eq!(inside.around_px(), 0.0);
+        assert_eq!(
+            inside,
+            Spacing::gapped(GAP_PT, 0.0, 2.0).with_head(card::HEAD_PT, 2.0)
+        );
+        // Lines touch in the flat area; a floating card does not follow it.
+        assert_ne!(inside, spaced(2.0, SplitStyle::Lines, false));
     }
 
     #[test]

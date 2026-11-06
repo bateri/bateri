@@ -386,6 +386,26 @@ impl Layers {
         out
     }
 
+    /// Where each pane stands in the tab as fractions of it (0 to 1, top-down): the flat area's
+    /// in tree order, then each card's — inside its [`Area`] — back to front, so a later pane
+    /// stands over an earlier one. The tab's picture, for the summary card's map.
+    pub fn fractions(&self) -> Vec<(u64, Rect)> {
+        let mut out = self.flat.fractions();
+        for card in &self.cards {
+            let area = card.area;
+            out.extend(card.tree.fractions().into_iter().map(|(id, inside)| {
+                let rect = Rect::new(
+                    area.x + inside.x * area.width,
+                    area.y + inside.y * area.height,
+                    inside.width * area.width,
+                    inside.height * area.height,
+                );
+                (id, rect)
+            }));
+        }
+        out
+    }
+
     /// The index of the card holding `pane`.
     pub fn card_of(&self, pane: u64) -> Option<usize> {
         self.cards
@@ -844,6 +864,19 @@ mod tests {
             flat: pair(),
             cards,
         }
+    }
+
+    #[test]
+    fn the_picture_of_a_tab_puts_each_card_inside_its_area_after_the_flat_panes() {
+        let layers = with_cards(vec![card(7)]);
+        let all = layers.fractions();
+        assert_eq!(
+            all.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            layers.panes()
+        );
+        let (_, inside) = all.iter().find(|(id, _)| *id == 7).unwrap();
+        assert!(near(inside.x, 0.2) && near(inside.y, 0.2));
+        assert!(near(inside.width, 0.4) && near(inside.height, 0.4));
     }
 
     fn card(pane: u64) -> Card {

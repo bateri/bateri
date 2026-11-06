@@ -46,6 +46,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, ProgramState, Settings, Theme};
+use bt_shell_common::floating::{Gone, Layers};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -59,13 +60,14 @@ use crate::app;
 use crate::embed;
 use crate::ids::Kind as IdKind;
 use crate::launch::Closing;
+use crate::moves::Move;
 use crate::notices::Source;
 use crate::pane::{PaneHost, TerminalPane};
 use crate::pencere_view::face::FaceId;
 use crate::program::identity::Kind;
-use crate::restore::{SavedTab, Shape};
+use crate::restore::SavedTab;
 use crate::sheets;
-use crate::split::{Axis, Direction, Placement, Removal, Tree};
+use crate::split::{Axis, Direction, Placement, Tree};
 use crate::split_view::SplitView;
 use crate::tab_bar::{AgentLine, AgentTone, Emblem, HeadLook, Upload};
 use crate::tabs::{self, Card, CardCommand, CardPane, Finish, Indicator, Signals, Tally, Unseen};
@@ -361,31 +363,31 @@ fn pane_containing(view: Retained<NSView>) -> Option<Retained<TerminalPane>> {
 }
 
 /// Session restore's first tab half, before the window exists: the saved
-/// `shape` matched against the panes' ids and every pane born, in the
-/// launches' order. The error returns before anything is shown: a tree that
-/// does not match its panes, a pane whose renderer cannot be built.
+/// flat tree and floating cards matched against the panes' ids and every pane born, in the
+/// launches' order. The error returns before anything is shown: layers that
+/// do not match their panes, a pane whose renderer cannot be built.
 pub(crate) fn restored_panes(
     mtm: MainThreadMarker,
-    shape: &Shape,
+    saved: &SavedTab,
     launches: Vec<embed::Config>,
-) -> Result<(Tree, Vec<Retained<TerminalPane>>), String> {
+) -> Result<(Layers, Vec<Retained<TerminalPane>>), String> {
     let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
-    let tree = shape
-        .to_tree(&ids)
+    let layers = saved
+        .layers(&ids)
         .ok_or_else(|| "the saved split tree does not match its panes".to_owned())?;
-    born_panes(mtm, tree, launches)
+    born_panes(mtm, layers, launches)
 }
 
-/// Every pane of `launches` born, in their order, for the tree that lays them out: the
+/// Every pane of `launches` born, in their order, for the layers that lay them out: the
 /// second half of [`restored_panes`], and what a tab opened with several panes at once starts
-/// from ([`TerminalWindow::open_arranged_tab`]). The tree's leaves must be the launches' ids.
+/// from ([`TerminalWindow::open_arranged_tab`]). The layers' panes must be the launches' ids.
 pub(crate) fn born_panes(
     mtm: MainThreadMarker,
-    tree: Tree,
+    layers: Layers,
     launches: Vec<embed::Config>,
-) -> Result<(Tree, Vec<Retained<TerminalPane>>), String> {
+) -> Result<(Layers, Vec<Retained<TerminalPane>>), String> {
     let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
-    let mut leaves = tree.leaves();
+    let mut leaves = layers.panes();
     leaves.sort_unstable();
     let mut wanted = ids;
     wanted.sort_unstable();
@@ -397,7 +399,7 @@ pub(crate) fn born_panes(
         .into_iter()
         .map(|launch| embed::open(mtm, rect, launch).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((tree, panes))
+    Ok((layers, panes))
 }
 
 /// The tab's state: the splits container and the focused pane. The
@@ -428,6 +430,10 @@ pub(crate) struct TabIvars {
     /// ([`TerminalTab::focused_pane`]). Written by the pane's
     /// `PaneHost::focused` event when `BateriView` becomes first responder.
     focused: Cell<u64>,
+    /// The pane that had the focus before [`TabIvars::focused`] did: where the keyboard goes
+    /// back to when a floating card empties and takes the focused pane with it
+    /// ([`TerminalTab::close_pane`]).
+    back: Cell<u64>,
     /// Commands and transfers that ended while the tab was not selected — the
     /// chip's tick and dot until the tab is selected
     /// ([`TerminalTab::activity_changed`], [`TerminalTab::upload_ended`],
@@ -486,6 +492,7 @@ impl TerminalTab {
             name: RefCell::new(None),
             container,
             focused: Cell::new(pane.id()),
+            back: Cell::new(pane.id()),
             unseen: Cell::new(Unseen::default()),
             tallies: RefCell::new(Vec::new()),
             ends: RefCell::new(Vec::new()),
@@ -634,6 +641,25 @@ impl TerminalTab {
         )
     }
 
+    /// Where the keyboard goes when pane `leaving` was its floating card's last and so has no
+    /// neighbour: back to the pane that had it before, if that is still here and shown, else to
+    /// where the layers rest ([`Layers::resting`]).
+    fn fallback_pane(&self, leaving: u64) -> Option<Retained<TerminalPane>> {
+        let container = &self.ivars().container;
+        let layers = container.layers();
+        let back = self.ivars().back.get();
+        let shown = layers
+            .card_of(back)
+            .is_none_or(|index| !layers.cards[index].minimized);
+        if back != leaving
+            && shown
+            && let Some(pane) = container.pane(back)
+        {
+            return Some(pane);
+        }
+        container.pane(layers.resting())
+    }
+
     /// The focus goes to the neighbour `next` as `handover` says: the
     /// keyboard and the memory, the memory alone, or nothing.
     fn hand_over(&self, handover: Handover, next: Option<Retained<TerminalPane>>) {
@@ -656,34 +682,60 @@ impl TerminalTab {
     /// be the old view at that moment and [`Self::focused_pane`] asks it
     /// before the ivar — the title would be written from the old pane. The
     /// job captures the id (the pattern of the window's `windowWillClose:`).
+    ///
+    /// A click can put the focus in a card that is behind another or a capsule (a pane the
+    /// keyboard reaches by [`Self::focus_pane`] has raised its card already): that card comes
+    /// to the front in the same turn as the title, and the keyboard is given again, because the
+    /// views were taken out and put back ([`SplitView::reveal`]).
     pub(crate) fn pane_focused(&self, id: u64) {
-        if self.ivars().focused.replace(id) == id {
+        let before = self.ivars().focused.replace(id);
+        if before == id {
             return;
         }
+        self.ivars().back.set(before);
         self.layout_changed();
         let tab = self.id();
         DispatchQueue::main().exec_async(move || {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(tab) = app::delegate(mtm).and_then(|app| app.tab(tab)) {
+                tab.raise_card_of(id);
                 tab.refresh_title();
                 tab.refresh_look();
             }
         });
     }
 
+    /// The card holding pane `id` comes to the front and opens, when it is not there and
+    /// shown already, and the keyboard goes back to the pane if it was there. What the
+    /// keyboard arriving in a card does.
+    fn raise_card_of(&self, id: u64) {
+        let container = &self.ivars().container;
+        let held = self.responder_pane().is_some_and(|pane| pane.id() == id);
+        if !container.reveal(id) {
+            return;
+        }
+        if held && let Some(pane) = container.pane(id) {
+            let _ = pane.focus();
+        }
+        self.layout_changed();
+    }
+
     /// Gives the keyboard to `pane` (first responder) and moves the focus to
     /// it. If another pane is zoomed the zoom is dropped first: the keyboard
     /// is never given to a hidden pane (navigation, the closing's neighbour,
     /// `bateri://tab/`).
+    ///
+    /// A floating pane stands over a zoom (the zoom is the flat area's) and its card comes to
+    /// the front first, opening if it was a capsule.
     pub(crate) fn focus_pane(&self, pane: &TerminalPane) {
-        if self
-            .ivars()
-            .container
-            .zoomed()
-            .is_some_and(|zoomed| zoomed != pane.id())
-        {
+        let container = &self.ivars().container;
+        let floating = container.floating(pane.id());
+        if focus_ends_zoom(container.zoomed(), pane.id(), floating) {
             self.set_zoom(None);
+        }
+        if floating && container.reveal(pane.id()) {
+            self.layout_changed();
         }
         // Through the pane's own gate: a pane that shows a program's view has its keyboard in
         // the view, not in the terminal that the view covers.
@@ -730,6 +782,7 @@ impl TerminalTab {
         let focused = self.focused_pane().id();
         let carded = container.carded();
         let alone = self.panes().len() == 1;
+        let flat_alone = container.flat_panes().len() == 1;
         let (hidden, away) = (self.hidden(), self.away());
         let looks = self
             .panes()
@@ -746,8 +799,10 @@ impl TerminalTab {
                             .unwrap_or_default(),
                         indicator: tabs::indicator(self.signals_of(pane, hidden, away)),
                         focused: own,
-                        carded,
+                        carded: carded || container.floating(pane.id()),
+                        floating: container.floating(pane.id()),
                         alone,
+                        flat_alone,
                         view: pane.view_head(),
                     },
                 )
@@ -765,7 +820,8 @@ impl TerminalTab {
     /// or the zoomed one. A split tab's panes share the area, so none of them
     /// alone decides the window's size.
     pub(crate) fn filling_pane(&self) -> Option<Retained<TerminalPane>> {
-        let panes = self.panes();
+        // The flat area's: a floating card covers a part of what the pane under it fills.
+        let panes = self.ivars().container.flat_panes();
         match self.zoomed() {
             Some(id) => panes.into_iter().find(|pane| pane.id() == id),
             None if panes.len() == 1 => panes.into_iter().next(),
@@ -870,7 +926,11 @@ impl TerminalTab {
     /// that is not on screen has none to take), or gives the tab back if it filled it already. A
     /// no-op with a single pane.
     pub(crate) fn zoom_pane(&self, pane: &TerminalPane, take_keyboard: bool) {
-        if self.panes().len() < 2 {
+        // The zoom is the flat area's: a floating pane has none, and the flat area's only pane
+        // fills it already.
+        if self.ivars().container.flat_panes().len() < 2
+            || self.ivars().container.floating(pane.id())
+        {
             return;
         }
         if self.ivars().container.zoomed() == Some(pane.id()) {
@@ -905,15 +965,151 @@ impl TerminalTab {
     /// ⇧⌘↩: zooms the focused pane or undoes the zoom. A no-op
     /// with a single pane.
     pub(crate) fn toggle_split_zoom(&self) {
-        if self.panes().len() < 2 {
+        let container = &self.ivars().container;
+        if !self.can_zoom() {
             return;
         }
-        let zoomed = match self.ivars().container.zoomed() {
+        let zoomed = match container.zoomed() {
             Some(_) => None,
+            // A floating pane has no zoom to turn on; one that is on ends.
+            None if container.floating(self.focused_pane().id()) => return,
             None => Some(self.focused_pane().id()),
         };
         self.set_zoom(zoomed);
         self.layout_changed();
+    }
+
+    /// Whether Float Pane / Dock Pane has something to do for the focused pane: a floating pane
+    /// docks, a flat one floats unless it is the flat area's only pane (Karar 3: the flat area
+    /// always holds a pane).
+    pub(crate) fn can_float_or_dock(&self) -> bool {
+        let container = &self.ivars().container;
+        float_available(
+            container.flat_panes().len(),
+            container.floating(self.focused_pane().id()),
+        )
+    }
+
+    /// Whether Zoom Split has something to do: the flat area holds several panes and the focus
+    /// is in one of them — a floating pane has no zoom to turn on, and a zoom that is on ends
+    /// from anywhere.
+    pub(crate) fn can_zoom(&self) -> bool {
+        let container = &self.ivars().container;
+        zoom_available(
+            container.flat_panes().len(),
+            container.zoomed().is_some(),
+            container.floating(self.focused_pane().id()),
+        )
+    }
+
+    /// Whether the focused pane floats: what the menu item's and the tool's name says.
+    pub(crate) fn focused_floats(&self) -> bool {
+        self.ivars().container.floating(self.focused_pane().id())
+    }
+
+    /// ⌥⌘↩: the focused pane floats, or docks if it floats. A beep when the layers refuse (the
+    /// flat area's only pane, no room to dock); the move's own refusals beep for themselves.
+    pub(crate) fn float_or_dock(&self) {
+        let pane = self.focused_pane().id();
+        let wanted = if self.ivars().container.floating(pane) {
+            self.dock_move(pane)
+        } else {
+            self.float_move(pane, None, None)
+        };
+        match wanted {
+            Some(wanted) => {
+                self.relayer(wanted);
+            }
+            None => crate::preview::beep(),
+        }
+    }
+
+    /// The move that floats flat pane `pane` ([`Move::Float`]): a card of its own in front, where
+    /// its place is and as the wish (`at`, `size`; fractions of the tab) says — if the layers
+    /// let it ([`SplitView::floated`]): not the flat area's only pane.
+    fn float_move(
+        &self,
+        pane: u64,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+    ) -> Option<Move> {
+        let layers = self.ivars().container.floated(pane, at, size)?;
+        Some(Move::Float { pane, layers })
+    }
+
+    /// The move that docks floating pane `pane` ([`Move::Dock`], the place [`Layers::dock`]
+    /// decides), if the layers let it ([`SplitView::docked`]): beside the flat pane the
+    /// keyboard is in, or was in before it went to a card.
+    fn dock_move(&self, pane: u64) -> Option<Move> {
+        let container = &self.ivars().container;
+        let focused = self.focused_pane().id();
+        let beside = if container.floating(focused) {
+            self.ivars().back.get()
+        } else {
+            focused
+        };
+        let layers = container.docked(pane, beside)?;
+        Some(Move::Dock { pane, layers })
+    }
+
+    /// A float or a dock as the move the application plans and carries out
+    /// ([`AppDelegate::make_move`]). Taking a pane's view out of its layer puts the keyboard
+    /// down, so the pane that held it takes it again once the move is made.
+    fn relayer(&self, wanted: Move) -> bool {
+        let Some(window) = self.window() else {
+            return false;
+        };
+        let held = self.responder_pane().map(|pane| pane.id());
+        if !window.make_move(wanted) {
+            return false;
+        }
+        if let Some(pane) = held.and_then(|id| self.ivars().container.pane(id)) {
+            let _ = pane.focus();
+        }
+        self.refresh_look();
+        true
+    }
+
+    /// Window ▸ New Floating Pane: a new pane floating in front, from the focused pane
+    /// (`AppDelegate::open_floating`: directory, point-size delta, theme and remote line from
+    /// it). The zoom stays: it is the flat area's.
+    pub(crate) fn new_floating(&self) {
+        let Some(app) = app::delegate(self.mtm()) else {
+            return;
+        };
+        let from = self.focused_pane();
+        if let Some(this) = app.tab(self.id()) {
+            app.open_floating(&this, &from);
+        }
+    }
+
+    /// A new floating pane in front — `at`, `size` as [`Layers::open`] reads them — with its
+    /// session opened and the keyboard. The order is [`Self::add_pane`]'s; the pane is laid
+    /// out in its card before it starts, so its shell's first size is the final one. If the
+    /// session cannot be born the pane is taken apart again and the error goes to the caller.
+    pub(crate) fn add_floating(
+        &self,
+        mtm: MainThreadMarker,
+        launch: embed::Config,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+    ) -> Result<(), String> {
+        let container = &self.ivars().container;
+        let pane = embed::open(mtm, initial_rect(), launch).map_err(|e| e.to_string())?;
+        if !container.open_card(&pane, at, size) {
+            drop(pane.begin_close());
+            return Err("no room for the pane".to_owned());
+        }
+        pane.observe_frame();
+        if let Err(e) = pane.start(mtm) {
+            drop(pane.begin_close());
+            let _ = container.remove_pane(pane.id());
+            drop(container.detach(pane.id()));
+            return Err(format!("could not start the shell: {e}"));
+        }
+        self.focus_pane(&pane);
+        self.layout_changed();
+        Ok(())
     }
 
     /// A layout edge, for the layout on disk (`AppDelegate::layout_changed`).
@@ -941,8 +1137,11 @@ impl TerminalTab {
     /// no-op if it would drop below the limit.
     pub(crate) fn split(&self, axis: Axis) {
         // The zoom is dropped first: the split's limit is asked from
-        // the layout without zoom (`can_split`) and the new pane must be visible.
-        self.set_zoom(None);
+        // the layout without zoom (`can_split`) and the new pane must be visible. A floating
+        // pane splits inside its card, over the zoom.
+        if !self.ivars().container.floating(self.focused_pane().id()) {
+            self.set_zoom(None);
+        }
         if !self.can_split(axis) {
             return;
         }
@@ -961,7 +1160,9 @@ impl TerminalTab {
     /// instead.
     pub(crate) fn split_with_line(&self, start: &app::Start) -> bool {
         use bt_shell_common::palette::{Beside, beside};
-        self.set_zoom(None);
+        if !self.ivars().container.floating(self.focused_pane().id()) {
+            self.set_zoom(None);
+        }
         let axis = match beside(
             self.can_split(Axis::Horizontal),
             self.can_split(Axis::Vertical),
@@ -1009,7 +1210,7 @@ impl TerminalTab {
         pane.observe_frame();
         if let Err(e) = pane.start(mtm) {
             drop(pane.begin_close());
-            let _ = container.remove_leaf(pane.id());
+            let _ = container.remove_pane(pane.id());
             drop(container.detach(pane.id()));
             return Err(format!("could not start the shell: {e}"));
         }
@@ -1061,7 +1262,7 @@ impl TerminalTab {
         pane.observe_frame();
         if let Err(e) = pane.start(mtm) {
             drop(pane.begin_close());
-            let _ = container.remove_leaf(pane.id());
+            let _ = container.remove_pane(pane.id());
             drop(container.detach(pane.id()));
             return Err(format!("could not start the shell: {e}"));
         }
@@ -1088,16 +1289,26 @@ impl TerminalTab {
             return;
         };
         let handover = self.handover(id);
-        match container.remove_leaf(id) {
-            Removal::Missing => {}
-            Removal::Last => {
+        let floating = container.floating(id);
+        match container.remove_pane(id) {
+            Gone::Missing => {}
+            Gone::Last => {
                 if let Some(window) = self.window() {
                     window.close_tab_now(self.id());
                 }
             }
-            Removal::Removed { focus } => {
-                self.set_zoom(None);
-                self.hand_over(handover, container.pane(focus));
+            gone @ (Gone::Closed { .. } | Gone::Landed { .. }) => {
+                // The zoom is the flat area's: a floating pane's closing leaves it as it is.
+                if !floating {
+                    self.set_zoom(None);
+                }
+                let next = match gone {
+                    Gone::Closed { focus: Some(focus) } | Gone::Landed { focus } => {
+                        container.pane(focus)
+                    }
+                    _ => self.fallback_pane(id),
+                };
+                self.hand_over(handover, next);
                 // Closed by the user (or by its program's end, which leaves
                 // nothing to end): a terminal a server keeps for it goes with it.
                 pane.end_kept_terminal();
@@ -1171,12 +1382,16 @@ impl TerminalTab {
             return None;
         }
         let handover = self.handover(id);
-        self.set_zoom(None);
-        let Removal::Removed { focus } = container.remove_leaf(id) else {
-            return None;
+        if !container.floating(id) {
+            self.set_zoom(None);
+        }
+        let next = match container.remove_pane(id) {
+            Gone::Closed { focus: Some(focus) } | Gone::Landed { focus } => container.pane(focus),
+            Gone::Closed { focus: None } => self.fallback_pane(id),
+            Gone::Last | Gone::Missing => return None,
         };
         sheets::lift(&pane);
-        self.hand_over(handover, container.pane(focus));
+        self.hand_over(handover, next);
         let released = container.detach(id)?;
         self.refresh_title();
         self.refresh_look();
@@ -1211,6 +1426,25 @@ impl TerminalTab {
         if !self.ivars().container.receive(tree, panes) {
             return false;
         }
+        self.received(panes);
+        true
+    }
+
+    /// [`Self::receive`] for a tab whose floating cards change too: `layers` hold exactly this
+    /// tab's panes and `panes` — an Undo Move that gives a tab its floating panes back, a pane
+    /// that floats or docks.
+    pub(crate) fn receive_layers(&self, panes: &[Retained<TerminalPane>], layers: Layers) -> bool {
+        self.set_zoom(None);
+        if !self.ivars().container.receive_layers(layers, panes) {
+            return false;
+        }
+        self.received(panes);
+        true
+    }
+
+    /// What panes that arrived (or were laid out again) learn: whose they are, that what ended
+    /// before is not news, whether they are on screen and where they stand.
+    fn received(&self, panes: &[Retained<TerminalPane>]) {
         for pane in panes {
             pane.host().rehomed(pane.id(), self.id());
             self.take_as_seen(pane);
@@ -1227,7 +1461,6 @@ impl TerminalTab {
             pane.refresh_geometry();
         }
         self.refresh_look();
-        true
     }
 
     /// `pane`'s ended-command counts so far are seen: the baseline the next
@@ -1746,7 +1979,8 @@ impl TerminalTab {
     }
 
     /// The card's map: every pane of the tab where it stands in the tab (the split tree's own
-    /// proportions, so a zoomed pane does not fold the map; a tab of one pane is a map of one
+    /// proportions, so a zoomed pane does not fold the map, and a floating pane over the panes it
+    /// covers; a tab of one pane is a map of one
     /// tile over the whole area), with the program it shows, its name and what it reports — the
     /// tab's indicator rule over the pane's signals alone ([`Self::signals_of`]). While a pane
     /// shows a tick or a dot the program is the one that ended, as the chip's emblem has it
@@ -1762,8 +1996,8 @@ impl TerminalTab {
         let focused = self.focused_pane().id();
         let mut lines: Vec<AgentLine> = self
             .container()
-            .tree()
-            .leaves()
+            .layers()
+            .panes()
             .into_iter()
             .filter_map(|id| {
                 let pane = panes.iter().find(|pane| pane.id() == id)?;
@@ -1844,7 +2078,7 @@ impl TerminalTab {
         let (hidden, away) = (self.hidden(), self.away());
         let focused = self.focused_pane().id();
         self.container()
-            .tree()
+            .layers()
             .fractions()
             .into_iter()
             .filter_map(|(id, place)| {
@@ -1933,13 +2167,12 @@ impl TerminalTab {
             saved.push(entry);
         }
         let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
-        let shape = Shape::from_tree(&self.ivars().container.tree(), &ids)?;
+        let (shape, cards) = SavedTab::shapes(&self.ivars().container.layers(), &ids)?;
         let position = |id: u64| ids.iter().position(|candidate| *candidate == id);
         let tab = SavedTab {
             shape,
             panes: saved,
-            // No floating pane is saved yet: the view has no card to ask.
-            cards: Vec::new(),
+            cards,
             focused: position(self.focused_pane().id()).unwrap_or(0),
             zoomed: self.ivars().container.zoomed().and_then(position),
             name: self.name(),
@@ -1956,13 +2189,13 @@ impl TerminalTab {
     }
 
     /// Session restore's second tab half, once the window exists: the saved
-    /// `tree` replaces the single-pane one and `extra` (every pane but the
+    /// `layers` replace the single-pane tree and `extra` (every pane but the
     /// one the tab was born with) join, laid out with the saved ratios at
-    /// once ([`SplitView::adopt`]); their frame observers after.
-    pub(crate) fn adopt(&self, tree: Tree, extra: &[Retained<TerminalPane>]) {
+    /// once ([`SplitView::adopt_layers`]); their frame observers after.
+    pub(crate) fn adopt(&self, layers: Layers, extra: &[Retained<TerminalPane>]) {
         // Cannot fail: the leaves were matched against the panes
         // (`restored_panes`).
-        let adopted = self.ivars().container.adopt(tree, extra);
+        let adopted = self.ivars().container.adopt_layers(layers, extra);
         debug_assert!(adopted, "the checked tree must be adopted");
         for pane in extra {
             pane.observe_frame();
@@ -1990,15 +2223,18 @@ impl TerminalTab {
         if !container.fits() {
             container.equalize();
         }
-        // The zoom after the plain layout: the hidden panes keep real frames.
-        let zoomed = zoomed.and_then(|index| ids.get(index).copied());
-        if ids.len() > 1 {
+        // The zoom after the plain layout: the hidden panes keep real frames. It is the flat
+        // area's: a saved zoom on a floating pane is not one.
+        let zoomed = zoomed
+            .and_then(|index| ids.get(index).copied())
+            .filter(|id| !container.floating(*id));
+        if container.flat_panes().len() > 1 {
             container.set_zoomed(zoomed);
         }
         for pane in self.panes() {
             if let Err(e) = pane.start(mtm) {
                 eprintln!("bateri: could not start a restored pane's shell: {e}");
-                if let Removal::Last = container.remove_leaf(pane.id()) {
+                if let Gone::Last = container.remove_pane(pane.id()) {
                     return Err(format!("could not start the shell: {e}"));
                 }
                 drop(pane.begin_close());
@@ -2145,6 +2381,26 @@ enum Handover {
     Nothing,
 }
 
+/// Whether the keyboard going to pane `target` ends the zoom `zoomed`: it does for a flat pane
+/// other than the zoomed one — the keyboard is never given to a hidden pane — and never for a
+/// floating pane, which stands over the zoom.
+fn focus_ends_zoom(zoomed: Option<u64>, target: u64, floating: bool) -> bool {
+    !floating && zoomed.is_some_and(|zoomed| zoomed != target)
+}
+
+/// Whether Zoom Split has something to do in a tab whose flat area holds `flat` panes, zoomed
+/// or not (`zoomed`), with the focus on a floating pane or not: a zoom that is on ends from
+/// anywhere, one that is off starts only from a flat pane that has others beside it.
+fn zoom_available(flat: usize, zoomed: bool, focus_floating: bool) -> bool {
+    flat > 1 && (zoomed || !focus_floating)
+}
+
+/// Whether Float Pane / Dock Pane has something to do: a floating pane docks, a flat one floats
+/// unless it is the flat area's only pane (which always holds one).
+fn float_available(flat: usize, focus_floating: bool) -> bool {
+    focus_floating || flat > 1
+}
+
 /// What becomes of the focus when pane `leaving` leaves a tab whose
 /// remembered focus ([`TabIvars::focused`]) is `remembered`, with the
 /// window's keyboard at `holder` and the tab on screen or not (`shown`)
@@ -2186,6 +2442,37 @@ mod tests {
         let body = &source[at..at + source[at..].find("\n    }\n").expect("its end")];
         assert!(!body.contains("apply_focus(false)"), "{body}");
         assert!(body.contains("window.isKeyWindow()"), "{body}");
+    }
+
+    #[test]
+    fn a_floating_pane_stands_over_a_zoom_and_a_flat_one_ends_it() {
+        // The keyboard reaching a floating pane leaves the zoom as it is; one reaching another
+        // flat pane ends it (it would sit in a hidden view); the zoomed pane itself, nothing.
+        assert!(!focus_ends_zoom(Some(1), 9, true));
+        assert!(focus_ends_zoom(Some(1), 2, false));
+        assert!(!focus_ends_zoom(Some(1), 1, false));
+        assert!(!focus_ends_zoom(None, 2, false));
+    }
+
+    #[test]
+    fn zoom_is_off_on_a_floating_pane_and_on_a_flat_area_of_several() {
+        // Several flat panes, the focus on one of them: it zooms.
+        assert!(zoom_available(2, false, false));
+        // The focus on a floating pane: nothing to turn on...
+        assert!(!zoom_available(2, false, true));
+        // ...but a zoom that is on ends from there too.
+        assert!(zoom_available(2, true, true));
+        // The flat area's only pane fills it already, with cards over it or not.
+        assert!(!zoom_available(1, false, false));
+        assert!(!zoom_available(1, false, true));
+    }
+
+    #[test]
+    fn the_flat_areas_only_pane_cannot_float_and_a_floating_pane_can_always_dock() {
+        assert!(!float_available(1, false));
+        assert!(float_available(2, false));
+        assert!(float_available(1, true));
+        assert!(float_available(3, true));
     }
 
     #[test]

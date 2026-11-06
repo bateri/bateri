@@ -94,6 +94,7 @@ use std::time::Duration;
 use block2::RcBlock;
 use bt_core::{ConfirmClose, ContentEdge, PointerShape, Settings, TabPosition, Theme};
 use bt_gpu::GpuError;
+use bt_shell_common::floating::Layers;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -1045,7 +1046,15 @@ define_class!(
                 } else {
                     NSControlStateValueOff
                 });
-                tab.panes().len() > 1
+                tab.can_zoom()
+            } else if action == Some(sel!(toggleFloatPane:)) {
+                // The title says which way the pane goes. The flat area's only pane stays in it.
+                item.setTitle(if tab.focused_floats() {
+                    ns_string!("Dock Pane")
+                } else {
+                    ns_string!("Float Pane")
+                });
+                tab.can_float_or_dock()
             } else if [
                 sel!(selectPreviousSplit:),
                 sel!(selectNextSplit:),
@@ -1204,6 +1213,19 @@ define_class!(
         #[unsafe(method(toggleSplitZoom:))]
         fn toggle_split_zoom_action(&self, _sender: Option<&AnyObject>) {
             self.selected_tab().toggle_split_zoom();
+        }
+
+        /// Window ▸ Float Pane / Dock Pane (⌥⌘↩): the focused pane floats as a card over the
+        /// splits, or — if it floats — docks into them.
+        #[unsafe(method(toggleFloatPane:))]
+        fn toggle_float_pane_action(&self, _sender: Option<&AnyObject>) {
+            self.selected_tab().float_or_dock();
+        }
+
+        /// Window ▸ New Floating Pane: a new pane floating in front, from the focused one.
+        #[unsafe(method(newFloatingPane:))]
+        fn new_floating_pane_action(&self, _sender: Option<&AnyObject>) {
+            self.selected_tab().new_floating();
         }
 
         /// Shell ▸ Split Right (⌘D): splits the focused pane in two, the new
@@ -1746,7 +1768,7 @@ impl RootView {
         let shade = &self.ivars().shade;
         let cards = shown.as_ref().map_or_else(Vec::new, |container| {
             container
-                .panes()
+                .flat_panes()
                 .iter()
                 .filter(|pane| !pane.isHidden())
                 .map(|pane| {
@@ -2358,7 +2380,7 @@ impl TerminalWindow {
         place: impl FnOnce(&Retained<Self>),
     ) -> Result<Retained<Self>, String> {
         let run = launches.first().and_then(|launch| launch.run);
-        let (tree, panes) = tab::restored_panes(mtm, &saved.shape, launches)?;
+        let (layers, panes) = tab::restored_panes(mtm, saved, launches)?;
         let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
         let (first, extra) = panes
             .split_first()
@@ -2366,7 +2388,7 @@ impl TerminalWindow {
         let this = Self::with_pane(mtm, id, tab, run, first, (number, saved.id));
         let tab = this.selected_tab();
         tab.set_name(saved.name.clone());
-        tab.adopt(tree, extra);
+        tab.adopt(layers, extra);
         place(&this);
         if let Err(e) = tab.start_restored(mtm, &ids, saved.focused, saved.zoomed) {
             this.close();
@@ -2391,7 +2413,7 @@ impl TerminalWindow {
         launches: Vec<embed::Config>,
         look: (Theme, ContentEdge),
     ) -> Result<Retained<TerminalTab>, String> {
-        let (tree, panes) = tab::restored_panes(mtm, &saved.shape, launches)?;
+        let (layers, panes) = tab::restored_panes(mtm, saved, launches)?;
         let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
         let (first, extra) = panes
             .split_first()
@@ -2400,7 +2422,7 @@ impl TerminalWindow {
         tab.set_name(saved.name.clone());
         self.add_tab(&tab, look);
         first.observe_frame();
-        tab.adopt(tree, extra);
+        tab.adopt(layers, extra);
         if let Err(e) = tab.start_restored(mtm, &ids, saved.focused, saved.zoomed) {
             self.close_tab_now(tab.id());
             return Err(e);
@@ -2423,7 +2445,7 @@ impl TerminalWindow {
         launches: Vec<embed::Config>,
         look: (Theme, ContentEdge),
     ) -> Result<Retained<TerminalTab>, String> {
-        let (tree, panes) = tab::born_panes(mtm, tree, launches)?;
+        let (layers, panes) = tab::born_panes(mtm, Layers::flat(tree), launches)?;
         let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
         let (first, extra) = panes
             .split_first()
@@ -2431,7 +2453,7 @@ impl TerminalWindow {
         let tab = TerminalTab::new(mtm, tab, self.id(), first, None);
         self.add_tab(&tab, look);
         first.observe_frame();
-        tab.adopt(tree, extra);
+        tab.adopt(layers, extra);
         if let Err(e) = tab.start_restored(mtm, &ids, 0, None) {
             self.close_tab_now(tab.id());
             return Err(e);
@@ -3482,13 +3504,15 @@ impl TerminalWindow {
             tabs: self
                 .tabs()
                 .iter()
-                .map(|tab| Shape {
-                    tab: tab.id(),
-                    name: tab.name(),
-                    tree: tab.container().tree(),
-                    // The view has no floating card yet.
-                    cards: Vec::new(),
-                    focus: tab.focused_pane().id(),
+                .map(|tab| {
+                    let layers = tab.container().layers();
+                    Shape {
+                        tab: tab.id(),
+                        name: tab.name(),
+                        tree: layers.flat,
+                        cards: layers.cards,
+                        focus: tab.focused_pane().id(),
+                    }
                 })
                 .collect(),
             asking: !self.selection_free(),
@@ -3543,7 +3567,7 @@ impl TerminalWindow {
     pub(crate) fn reshape_tab(
         &self,
         id: u64,
-        tree: Tree,
+        layers: Layers,
         name: Option<String>,
         pool: &mut Vec<Retained<TerminalPane>>,
     ) {
@@ -3551,23 +3575,23 @@ impl TerminalWindow {
             let have: Vec<u64> = tab.panes().iter().map(|pane| pane.id()).collect();
             let incoming = take_panes(
                 pool,
-                tree.leaves().into_iter().filter(|id| !have.contains(id)),
+                layers.panes().into_iter().filter(|id| !have.contains(id)),
             );
-            let placed = tab.receive(&incoming, tree);
+            let placed = tab.receive_layers(&incoming, layers);
             debug_assert!(placed, "the picture holds, so its tree is these panes");
             for pane in &incoming {
                 sheets::reopen_later(pane);
             }
             tab
         } else {
-            let mut panes = take_panes(pool, tree.leaves()).into_iter();
+            let mut panes = take_panes(pool, layers.panes()).into_iter();
             let Some(first) = panes.next() else {
                 return;
             };
             let rest: Vec<Retained<TerminalPane>> = panes.collect();
             let tab = self.born_tab(id, &first);
             self.settle_born(&tab, &first);
-            let placed = tab.receive(&rest, tree);
+            let placed = tab.receive_layers(&rest, layers);
             debug_assert!(placed, "the picture holds, so its tree is these panes");
             sheets::reopen_later(&first);
             for pane in &rest {

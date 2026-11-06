@@ -175,6 +175,11 @@ impl AppDelegate {
 
     /// The block's verdict over the host's panes.
     fn weigh(aim: &Aim) -> Verdict {
+        // A tab with floating panes joins no other tab's splits: the cards have nowhere to be
+        // ([`bt_shell_common::moves`] refuses it), so no region is offered.
+        if !aim.carried.container().layers().cards.is_empty() {
+            return Verdict::Nothing;
+        }
         let incoming = aim.carried.container().tree();
         let moving = aim.carried.panes();
         aim.host

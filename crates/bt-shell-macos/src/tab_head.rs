@@ -104,18 +104,29 @@ enum Part {
 enum Tool {
     SplitRight,
     SplitDown,
+    /// A flat pane floats (dim when it is the flat area's only pane).
+    Float,
+    /// A floating pane docks (lit while it floats).
+    Dock,
     NewTab,
     Close,
 }
 
 impl Tool {
-    /// The tools of a pane: Open in New Tab only beside other panes — a tab's only pane is the
-    /// tab already.
-    fn of(alone: bool) -> &'static [Tool] {
-        if alone {
-            &[Tool::SplitRight, Tool::SplitDown, Tool::Close]
-        } else {
-            &[Tool::SplitRight, Tool::SplitDown, Tool::NewTab, Tool::Close]
+    /// The tools of a pane: Float on a flat pane and Dock on a floating one — one button, the
+    /// menu item's own; Open in New Tab only on a flat pane beside other panes — a tab's only
+    /// pane is the tab already, and a floating pane docks before it leaves.
+    fn of(alone: bool, floating: bool) -> &'static [Tool] {
+        match (floating, alone) {
+            (true, _) => &[Tool::SplitRight, Tool::SplitDown, Tool::Dock, Tool::Close],
+            (false, true) => &[Tool::SplitRight, Tool::SplitDown, Tool::Float, Tool::Close],
+            (false, false) => &[
+                Tool::SplitRight,
+                Tool::SplitDown,
+                Tool::Float,
+                Tool::NewTab,
+                Tool::Close,
+            ],
         }
     }
 
@@ -123,8 +134,18 @@ impl Tool {
         match self {
             Tool::SplitRight => "Split Right",
             Tool::SplitDown => "Split Down",
+            Tool::Float => "Float Pane",
+            Tool::Dock => "Dock Pane",
             Tool::NewTab => "Open in New Tab",
             Tool::Close => "Close Split",
+        }
+    }
+
+    /// The command of the shortcut table the tool's tip names the key of, if it has one.
+    fn command(self) -> Option<&'static str> {
+        match self {
+            Tool::Float | Tool::Dock => Some("float_pane"),
+            Tool::SplitRight | Tool::SplitDown | Tool::NewTab | Tool::Close => None,
         }
     }
 
@@ -133,9 +154,42 @@ impl Tool {
         match self {
             Tool::SplitRight => sel!(splitRight:),
             Tool::SplitDown => sel!(splitDown:),
+            Tool::Float | Tool::Dock => sel!(toggleFloatPane:),
             Tool::NewTab => sel!(movePaneToNewTab:),
             Tool::Close => sel!(closeTab:),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_flat_pane_has_float_and_a_floating_one_dock_in_the_same_place() {
+        use Tool::*;
+        assert_eq!(
+            Tool::of(false, false),
+            [SplitRight, SplitDown, Float, NewTab, Close]
+        );
+        // A tab's only pane is the tab: no Open in New Tab, and Float stays — dim.
+        assert_eq!(Tool::of(true, false), [SplitRight, SplitDown, Float, Close]);
+        // A floating pane docks before it leaves its tab.
+        assert_eq!(Tool::of(false, true), [SplitRight, SplitDown, Dock, Close]);
+        assert_eq!(Tool::of(true, true), Tool::of(false, true));
+    }
+
+    #[test]
+    fn float_and_dock_are_one_command_with_one_key_and_two_names() {
+        assert_eq!(Tool::Float.action(), Tool::Dock.action());
+        assert_eq!(Tool::Float.command(), Tool::Dock.command());
+        assert_eq!(Tool::Float.name(), "Float Pane");
+        assert_eq!(Tool::Dock.name(), "Dock Pane");
+        // The command is the table's, and its key is the tip's.
+        let command = bt_shell_common::shortcuts::by_name("float_pane").expect("in the table");
+        assert_eq!(command.defaults, ["option+cmd+return"]);
+        // The other tools name no key: the tip says what they do.
+        assert_eq!(Tool::Close.command(), None);
     }
 }
 
@@ -148,8 +202,12 @@ pub(crate) struct HeadLook {
     pub(crate) focused: bool,
     /// The pane is a card: the band takes its top corners and its light.
     pub(crate) carded: bool,
+    /// The pane floats: its Float tool is Dock, and lit.
+    pub(crate) floating: bool,
     /// The tab's only pane: no Open in New Tab among its tools.
     pub(crate) alone: bool,
+    /// The flat area's only pane: it cannot float, and its Float tool is dim.
+    pub(crate) flat_alone: bool,
     /// What covers the pane, when a program's view does: its words, icon and way out stand in
     /// the band in place of the pane's title and mark.
     pub(crate) view: Option<ViewHead>,
@@ -346,8 +404,12 @@ impl PaneHead {
     /// view —, in the band's space.
     fn tool_boxes(&self) -> Vec<(Tool, NSRect)> {
         let iv = self.ivars();
-        let alone = iv.look.borrow().as_ref().is_some_and(|look| look.alone);
-        let tools = Tool::of(alone);
+        let (alone, floating) = iv
+            .look
+            .borrow()
+            .as_ref()
+            .map_or((false, false), |look| (look.alone, look.floating));
+        let tools = Tool::of(alone, floating);
         let right = self.quit_box().map_or_else(
             || self.bounds().size.width - iv.margins.get().1,
             |quit| quit.origin.x - QUIT_GAP,
@@ -434,6 +496,11 @@ impl PaneHead {
                 })
                 .collect(),
             palette,
+            // Dock stands lit while its pane floats; Float stands dim where nothing can float.
+            Marks {
+                lit: look.floating.then_some(Tool::Dock),
+                dim: (!look.floating && look.flat_alone).then_some(Tool::Float),
+            },
         );
         let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
         fade(
@@ -459,7 +526,16 @@ impl PaneHead {
         if iv.tools.set_hot(tool) | lit {
             let look = iv.look.borrow();
             let tip = match part {
-                Some(Part::Tool(tool)) => Some(tool.name().to_owned()),
+                Some(Part::Tool(tool)) => Some(
+                    match tool
+                        .command()
+                        .and_then(|command| crate::menu::keys::glyphs_of(self.mtm(), command))
+                    {
+                        // The name and, after two spaces, the key the command has now.
+                        Some(key) => format!("{}  {key}", tool.name()),
+                        None => tool.name().to_owned(),
+                    },
+                ),
                 Some(Part::Quit) => look
                     .as_ref()
                     .and_then(|look| look.view.as_ref())
@@ -758,9 +834,22 @@ fn draw_quit(rect: NSRect, lit: bool, palette: Palette) {
     ));
 }
 
+/// Which of a pane's tools stand out: one in the accent, one faded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Marks {
+    lit: Option<Tool>,
+    dim: Option<Tool>,
+}
+
+/// A dim tool's strength: the design's 0.35.
+const DIM_TOOL: f64 = 0.35;
+/// The ground a lit tool stands on: the accent at the design's 0.14.
+const LIT_FILL: f64 = 0.14;
+
 pub(crate) struct ToolsIvars {
     /// Each tool and its box, in the view's space.
     boxes: RefCell<Vec<(Tool, NSRect)>>,
+    marks: Cell<Marks>,
     palette: Cell<Option<Palette>>,
     /// The tool under the pointer: on a face, in full ink.
     hot: Cell<Option<Tool>>,
@@ -796,10 +885,18 @@ define_class!(
             let Some(palette) = iv.palette.get() else {
                 return;
             };
+            let marks = iv.marks.get();
             for &(tool, rect) in iv.boxes.borrow().iter() {
-                let hot = iv.hot.get() == Some(tool);
-                if hot {
-                    palette.close_hover.color().setFill();
+                let dim = marks.dim == Some(tool);
+                let lit = marks.lit == Some(tool);
+                let hot = iv.hot.get() == Some(tool) && !dim;
+                let plate = if lit {
+                    Some(Tint::of(palette.accent, LIT_FILL))
+                } else {
+                    hot.then_some(palette.close_hover)
+                };
+                if let Some(plate) = plate {
+                    plate.color().setFill();
                     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
                         rect,
                         TOOL_RADIUS,
@@ -807,7 +904,12 @@ define_class!(
                     )
                     .fill();
                 }
-                draw_tool(tool, rect, if hot { palette.title } else { palette.dim });
+                let ink = match (lit, hot) {
+                    (true, _) => palette.accent,
+                    (false, true) => palette.title,
+                    (false, false) => palette.dim,
+                };
+                draw_tool(tool, rect, ink, if dim { DIM_TOOL } else { 1.0 });
             }
         }
     }
@@ -817,6 +919,7 @@ impl HeadTools {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ToolsIvars {
             boxes: RefCell::new(Vec::new()),
+            marks: Cell::new(Marks::default()),
             palette: Cell::new(None),
             hot: Cell::new(None),
         });
@@ -824,11 +927,12 @@ impl HeadTools {
         unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
     }
 
-    /// The tools' boxes and the palette they are drawn in.
-    fn set(&self, boxes: Vec<(Tool, NSRect)>, palette: Palette) {
+    /// The tools' boxes, the palette they are drawn in and which of them stand out.
+    fn set(&self, boxes: Vec<(Tool, NSRect)>, palette: Palette, marks: Marks) {
         let iv = self.ivars();
-        let changed =
-            (*iv.boxes.borrow() != boxes) | (iv.palette.replace(Some(palette)) != Some(palette));
+        let changed = (*iv.boxes.borrow() != boxes)
+            | (iv.palette.replace(Some(palette)) != Some(palette))
+            | (iv.marks.replace(marks) != marks);
         iv.boxes.replace(boxes);
         if changed {
             self.setNeedsDisplay(true);
@@ -870,8 +974,8 @@ fn top_rounded(rect: NSRect, radius: f64) -> Retained<NSBezierPath> {
     path
 }
 
-/// A tool's glyph in its box, on the design's 12-unit grid drawn 14 pt.
-fn draw_tool(tool: Tool, rect: NSRect, color: u32) {
+/// A tool's glyph in its box, on the design's 12-unit grid drawn 14 pt, at `strength`.
+fn draw_tool(tool: Tool, rect: NSRect, color: u32, strength: f64) {
     let unit = 14.0 / 12.0;
     let middle = NSPoint::new(
         rect.origin.x + rect.size.width / 2.0,
@@ -897,6 +1001,31 @@ fn draw_tool(tool: Tool, rect: NSRect, color: u32) {
             window(&path);
             path.moveToPoint(at(1.15, 6.0));
             path.lineToPoint(at(10.85, 6.0));
+        }
+        // One glyph for both: a card standing over another (the mockup's `FLOAT_D`).
+        Tool::Float | Tool::Dock => {
+            path.appendBezierPathWithRoundedRect_xRadius_yRadius(
+                NSRect::new(at(1.0, 4.25), NSSize::new(7.5 * unit, 7.5 * unit)),
+                1.6 * unit,
+                1.6 * unit,
+            );
+            path.moveToPoint(at(4.25, 4.1));
+            path.appendBezierPathWithArcFromPoint_toPoint_radius(
+                at(4.25, 1.25),
+                at(11.0, 1.25),
+                1.6 * unit,
+            );
+            path.appendBezierPathWithArcFromPoint_toPoint_radius(
+                at(11.0, 1.25),
+                at(11.0, 8.0),
+                1.6 * unit,
+            );
+            path.appendBezierPathWithArcFromPoint_toPoint_radius(
+                at(11.0, 8.0),
+                at(8.6, 8.0),
+                1.6 * unit,
+            );
+            path.lineToPoint(at(8.6, 8.0));
         }
         Tool::NewTab => {
             path.moveToPoint(at(5.2, 1.75));
@@ -935,6 +1064,6 @@ fn draw_tool(tool: Tool, rect: NSRect, color: u32) {
     path.setLineWidth(1.15 * unit);
     path.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
     path.setLineJoinStyle(objc2_app_kit::NSLineJoinStyle::Round);
-    Tint::of(color, 1.0).color().setStroke();
+    Tint::of(color, strength).color().setStroke();
     path.stroke();
 }
