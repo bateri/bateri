@@ -27,6 +27,7 @@ use objc2_foundation::{
     NSString,
 };
 
+use super::look::{self, Ink};
 use crate::tab_bar::{Tint, rounded, stroke};
 
 /// The picture's width and height, in points.
@@ -62,7 +63,8 @@ pub(super) enum Picture {
     Breathe,
 }
 
-/// The theme's colours the pictures are drawn in, as sRGB `0xRRGGBB`.
+/// The theme's colours the window is drawn in, its pictures and its own surfaces and text
+/// ([`super::look`]), as sRGB `0xRRGGBB`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Palette {
     pub(super) background: u32,
@@ -80,6 +82,9 @@ pub(super) struct Palette {
     pub(super) separator: u32,
     /// A tab chip two steps over the content.
     pub(super) raised: u32,
+    /// The file's warnings: a value not taken, a file that cannot be read.
+    pub(super) warning: u32,
+    pub(super) error: u32,
 }
 
 fn pack(rgb: [u8; 3]) -> u32 {
@@ -104,6 +109,8 @@ impl Palette {
             band: pack(theme.band_srgb()),
             separator: pack(theme.separator_srgb()),
             raised: pack([byte(raised[0]), byte(raised[1]), byte(raised[2])]),
+            warning: theme.warning,
+            error: theme.error,
         }
     }
 }
@@ -306,19 +313,19 @@ impl PictureChoice {
                 );
                 path.setLineWidth(2.0);
                 let accent = if enabled {
-                    NSColor::controlAccentColor()
+                    look::ink(Ink::Accent)
                 } else {
-                    NSColor::disabledControlTextColor()
+                    look::faded(Ink::Dim, 0.55)
                 };
                 accent.setStroke();
                 path.stroke();
             }
             let color = if !enabled {
-                NSColor::disabledControlTextColor()
+                look::faded(Ink::Dim, 0.55)
             } else if chosen {
-                NSColor::labelColor()
+                look::ink(Ink::Text)
             } else {
-                NSColor::secondaryLabelColor()
+                look::ink(Ink::Dim)
             };
             let attributes = attributes(&font, &color);
             let name = NSString::from_str(title);

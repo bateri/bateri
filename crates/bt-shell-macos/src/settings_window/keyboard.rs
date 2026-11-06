@@ -45,6 +45,7 @@ use objc2_foundation::{
     ns_string,
 };
 
+use super::look::{self, Ink};
 use super::recorder::{Recorded, ShortcutRecorder};
 use crate::app;
 use crate::palette::menu_nodes;
@@ -438,7 +439,7 @@ define_class!(
 
 /// A label of one line.
 fn text(mtm: MainThreadMarker, text: &str, size: f64, color: &NSColor) -> Retained<NSTextField> {
-    let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    let label = super::text_label(&NSString::from_str(text), mtm);
     label.setFont(Some(&NSFont::systemFontOfSize(size)));
     label.setTextColor(Some(color));
     label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
@@ -452,7 +453,7 @@ fn text(mtm: MainThreadMarker, text: &str, size: f64, color: &NSColor) -> Retain
 
 /// A note that wraps under a row.
 fn note(mtm: MainThreadMarker, text: &str, color: &NSColor) -> Retained<NSTextField> {
-    let label = NSTextField::wrappingLabelWithString(&NSString::from_str(text), mtm);
+    let label = super::wrapping_text_label(&NSString::from_str(text), mtm);
     label.setFont(Some(&NSFont::systemFontOfSize(
         NSFont::smallSystemFontSize(),
     )));
@@ -660,6 +661,7 @@ impl KeyboardPage {
             )
         };
         filter.setSelectedSegment(0);
+        filter.setSelectedSegmentBezelColor(Some(&look::ink(Ink::Accent)));
 
         // SAFETY: as above.
         let find = unsafe {
@@ -956,8 +958,8 @@ impl KeyboardPage {
         name: &'static str,
     ) -> Option<(Retained<NSView>, Option<Retained<ShortcutRecorder>>)> {
         let row = st.page.row(name)?;
-        let primary = NSColor::labelColor();
-        let secondary = NSColor::secondaryLabelColor();
+        let primary = look::ink(Ink::Text);
+        let secondary = look::ink(Ink::Dim);
         let title = text(mtm, &row.title, 13.0, &primary);
         let mut texts: Vec<&NSView> = vec![&title];
         let submenu = row
@@ -1017,8 +1019,8 @@ impl KeyboardPage {
         let top = row_line(mtm, &words, &chips);
 
         let mut rows: Vec<Retained<NSView>> = vec![top.clone()];
-        let orange = NSColor::systemOrangeColor();
-        let red = NSColor::systemRedColor();
+        let orange = look::ink(Ink::Warning);
+        let red = look::ink(Ink::Error);
         if let Some(pending) = st.pending.as_ref().filter(|pending| pending.name == name) {
             if let Some(words) = &pending.outcome.note {
                 rows.push(as_view(note(mtm, words, &orange)));
@@ -1362,26 +1364,21 @@ impl KeyboardPage {
 
 /// A section's heading.
 fn heading_cell(mtm: MainThreadMarker, title: &str) -> Retained<NSView> {
-    let label = text(mtm, title, 11.0, &NSColor::secondaryLabelColor());
+    let label = text(mtm, title, 11.0, &look::ink(Ink::Dim));
     label.setFont(Some(&NSFont::boldSystemFontOfSize(11.0)));
     fill(mtm, &label, 2.0)
 }
 
 /// The page when nothing matches.
 fn empty_cell(mtm: MainThreadMarker) -> Retained<NSView> {
-    let label = text(
-        mtm,
-        "No command matches.",
-        13.0,
-        &NSColor::secondaryLabelColor(),
-    );
+    let label = text(mtm, "No command matches.", 13.0, &look::ink(Ink::Dim));
     fill(mtm, &label, 12.0)
 }
 
 /// `text` crossed out, in the secondary colour.
 fn struck(text: &str, size: f64) -> Retained<NSAttributedString> {
     let single = NSNumber::new_isize(1);
-    let color = NSColor::secondaryLabelColor();
+    let color = look::ink(Ink::Dim);
     let font = NSFont::systemFontOfSize(size);
     let values: [&AnyObject; 3] = [single.as_ref(), color.as_ref(), font.as_ref()];
     // SAFETY: AppKit's three attribute keys (extern statics), each with the value type it
@@ -1401,15 +1398,15 @@ fn struck(text: &str, size: f64) -> Retained<NSAttributedString> {
 
 /// A line key that is built in: what it does and the key, struck through when a command took it.
 fn built_in_cell(mtm: MainThreadMarker, line: &shortcuts::BuiltIn) -> Retained<NSView> {
-    let title = text(mtm, line.title, 13.0, &NSColor::labelColor());
-    let effect = text(mtm, line.effect, 11.0, &NSColor::secondaryLabelColor());
+    let title = text(mtm, line.title, 13.0, &look::ink(Ink::Text));
+    let effect = text(mtm, line.effect, 11.0, &look::ink(Ink::Dim));
     let words = stack(
         mtm,
         &[&title, &effect],
         NSUserInterfaceLayoutOrientation::Vertical,
         1.0,
     );
-    let key = text(mtm, &line.glyph, 13.0, &NSColor::secondaryLabelColor());
+    let key = text(mtm, &line.glyph, 13.0, &look::ink(Ink::Dim));
     if line.taken_by.is_some() {
         // The key is a command's now: the line no longer has it.
         key.setAttributedStringValue(&struck(&line.glyph, 13.0));
@@ -1420,7 +1417,7 @@ fn built_in_cell(mtm: MainThreadMarker, line: &shortcuts::BuiltIn) -> Retained<N
             mtm,
             &format!("now {taker}’s"),
             11.0,
-            &NSColor::secondaryLabelColor(),
+            &look::ink(Ink::Dim),
         )));
     }
     right.push(as_view(key));

@@ -33,11 +33,12 @@ use bt_gpu::{Snapshot, Stage, StageLook};
 use objc2::rc::Retained;
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSColor, NSFont, NSImage, NSImageScaling, NSImageView, NSLayoutAttribute, NSStackView,
+    NSFont, NSImage, NSImageScaling, NSImageView, NSLayoutAttribute, NSStackView,
     NSStackViewDistribution, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{NSSize, NSString};
 
+use super::look::{self, Ink};
 use super::pictures::{PICTURE_HEIGHT, PICTURE_WIDTH, Palette, Picture};
 use super::tabs_specimen::{self, TabsView};
 use super::{Category, DETAIL_WIDTH, PAGE_MARGIN};
@@ -638,9 +639,9 @@ impl Card {
             layer.setMasksToBounds(true);
         }
         let label = |mtm: MainThreadMarker| {
-            let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            let label = super::text_label(&NSString::from_str(""), mtm);
             label.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-            label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            label.setTextColor(Some(&look::ink(Ink::Dim)));
             label
         };
         let (caption, tag) = (label(mtm), label(mtm));

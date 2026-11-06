@@ -27,13 +27,14 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSBezierPath, NSColor, NSEvent, NSEventType, NSFont, NSTextField, NSView,
+    NSApplication, NSBezierPath, NSEvent, NSEventType, NSFont, NSTextField, NSView,
 };
 use objc2_foundation::{
     NSArray, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect,
     NSRunLoopCommonModes, NSSize, NSString,
 };
 
+use super::look::{self, Ink};
 use crate::arrange;
 
 /// What the field heard.
@@ -153,13 +154,13 @@ define_class!(
                 NSSize::new(bounds.size.width - 2.0, bounds.size.height - 2.0),
             );
             let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inner, 5.0, 5.0);
-            NSColor::controlBackgroundColor().setFill();
+            look::ink(Ink::Card).setFill();
             path.fill();
             if self.ivars().listening.get() {
-                NSColor::controlAccentColor().setStroke();
+                look::ink(Ink::Accent).setStroke();
                 path.setLineWidth(2.0);
             } else {
-                NSColor::separatorColor().setStroke();
+                look::ink(Ink::Line).setStroke();
                 path.setLineWidth(1.0);
             }
             path.stroke();
@@ -174,11 +175,11 @@ impl ShortcutRecorder {
         prompt: &str,
         news: impl Fn(Recorded) + 'static,
     ) -> Retained<Self> {
-        let label = NSTextField::labelWithString(&NSString::from_str(prompt), mtm);
+        let label = super::text_label(&NSString::from_str(prompt), mtm);
         label.setFont(Some(&NSFont::systemFontOfSize(
             NSFont::smallSystemFontSize(),
         )));
-        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        label.setTextColor(Some(&look::ink(Ink::Dim)));
         let this = Self::alloc(mtm).set_ivars(RecorderIvars {
             held: Cell::new(Mods::default()),
             taps: RefCell::new(arrange::taps()),
@@ -278,9 +279,9 @@ impl ShortcutRecorder {
         };
         iv.label.setStringValue(&NSString::from_str(&text));
         let color = if quiet {
-            NSColor::secondaryLabelColor()
+            look::ink(Ink::Dim)
         } else {
-            NSColor::labelColor()
+            look::ink(Ink::Text)
         };
         iv.label.setTextColor(Some(&color));
         self.setNeedsDisplay(true);

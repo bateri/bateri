@@ -21,6 +21,7 @@ use objc2_foundation::{
     NSString,
 };
 
+use super::look::{self, Ink};
 use super::{Category, Key, Resolved, choice_labels, pages, row_description};
 
 /// A row of the window as the search sees it.
@@ -216,23 +217,20 @@ impl ResultRow {
         let ivars = self.ivars();
         let bounds = self.bounds();
         if ivars.separated {
-            NSColor::separatorColor().setFill();
+            look::ink(Ink::Line).setFill();
             objc2_app_kit::NSBezierPath::fillRect(NSRect::new(
                 NSPoint::new(PAD_X, 0.0),
                 NSSize::new(bounds.size.width - 2.0 * PAD_X, 1.0),
             ));
         }
-        let page_attributes = attributes(
-            &NSFont::systemFontOfSize(12.0),
-            &NSColor::secondaryLabelColor(),
-        );
+        let page_attributes = attributes(&NSFont::systemFontOfSize(12.0), &look::ink(Ink::Dim));
         let name_attributes = attributes(
             &NSFont::systemFontOfSize(NSFont::systemFontSize()),
-            &NSColor::labelColor(),
+            &look::ink(Ink::Text),
         );
         let note_attributes = attributes(
             &NSFont::systemFontOfSize(NSFont::smallSystemFontSize()),
-            &NSColor::secondaryLabelColor(),
+            &look::ink(Ink::Dim),
         );
         let page = NSString::from_str(ivars.page);
         // SAFETY: the attribute dictionaries hold the keys AppKit reads, with the value types it

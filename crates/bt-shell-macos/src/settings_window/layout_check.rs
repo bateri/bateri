@@ -11,9 +11,11 @@
 
 use std::path::Path;
 
+use objc2::rc::Retained;
+
 use bt_core::{CursorBlink, Settings, Theme};
 use bt_gpu::ScrollbarMode;
-use objc2::DefinedClass;
+use objc2::{DefinedClass, Message};
 use objc2_app_kit::{NSBitmapImageFileType, NSView};
 use objc2_foundation::{NSDate, NSDictionary, NSIndexSet, NSRect, NSRunLoop};
 
@@ -26,7 +28,8 @@ const SLACK: f64 = 0.5;
 
 impl SettingsWindow {
     /// Lays out every page and lists what overlaps; with `shots`, writes `{page}.png` (the whole
-    /// page), `{page}-window.png` (the window) and `{page}-sidebar.png` (the sidebar) there.
+    /// page), `{page}-window.png` (the window) and `{page}-sidebar.png` (the sidebar) there, and
+    /// the same with `-dark` in a dark theme.
     pub(crate) fn layout_problems(&self, shots: Option<&Path>) -> Vec<String> {
         let ivars = self.ivars();
         let (Some(window), Some(sidebar), Some(controls), Some(scroll), Some(panes)) = (
@@ -170,11 +173,46 @@ impl SettingsWindow {
                 picture(&content, &dir.join(format!("{slug}-window.png")));
                 // The window's picture leaves the sidebar out (its material is the window
                 // server's); its rows draw themselves.
-                picture(sidebar, &dir.join(format!("{slug}-sidebar.png")));
+                picture(&column(sidebar), &dir.join(format!("{slug}-sidebar.png")));
             }
         }
         self.blink_problems(&themes, resolved, shots, &mut problems);
         self.drag_problems(shots, &mut problems);
+        if let Some(dir) = shots {
+            // The same pages in a dark theme of the terminal's: the window is drawn in it.
+            let settings = Settings {
+                theme: "bateri".to_owned(),
+                ..Settings::default()
+            };
+            let themes = ThemeLists {
+                on_screen: &dark,
+                dark_appearance: true,
+                ..themes
+            };
+            self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+            // The Keyboard page is left out here as above: drawn off screen, its window comes back
+            // empty (before this palette as after it).
+            for category in Category::ALL.into_iter().filter(|c| c.grid().is_some()) {
+                sidebar.selectRowIndexes_byExtendingSelection(
+                    &NSIndexSet::indexSetWithIndex(SideItem::row_of(category)),
+                    false,
+                );
+                self.show_selected();
+                let Some(content) = window.contentView() else {
+                    continue;
+                };
+                content.layoutSubtreeIfNeeded();
+                let slug = category.title().to_lowercase().replace(' ', "-");
+                if let Some(document) = scroll.documentView() {
+                    picture(&document, &dir.join(format!("{slug}-dark.png")));
+                }
+                picture(&content, &dir.join(format!("{slug}-dark-window.png")));
+                picture(
+                    &column(sidebar),
+                    &dir.join(format!("{slug}-dark-sidebar.png")),
+                );
+            }
+        }
         problems
     }
 
@@ -275,6 +313,16 @@ impl SettingsWindow {
         self.cancel_blink();
         specimens.stop_blink();
     }
+}
+
+/// The sidebar's column: the table's scroll view's parent, which holds its ground, the search
+/// field and the button too; the table itself when it stands alone.
+fn column(table: &NSView) -> Retained<NSView> {
+    table
+        .enclosingScrollView()
+        // SAFETY: the window is built and open for the check; its views are alive.
+        .and_then(|scroll| unsafe { scroll.superview() })
+        .unwrap_or_else(|| table.retain())
 }
 
 /// `view`'s frame in the pages' document (flipped: y grows downwards).

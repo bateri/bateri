@@ -45,18 +45,19 @@ use objc2::{
     msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSBackingStoreType,
-    NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlStateValueOff,
-    NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType, NSFont, NSFontAttributeName,
-    NSFontDescriptor, NSImage, NSImageScaling, NSImageSymbolConfiguration, NSImageView,
-    NSLayoutAttribute, NSLayoutConstraint, NSLineBreakMode, NSMenuItem, NSModalResponse,
-    NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSScrollView, NSSearchField,
-    NSSegmentSwitchTracking, NSSegmentedControl, NSSlider, NSSplitViewController, NSSplitViewItem,
-    NSStackView, NSStepper, NSSwitch, NSTableColumn, NSTableView, NSTableViewDataSource,
-    NSTableViewDelegate, NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField,
-    NSTitlePosition, NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView,
-    NSViewController, NSWindow, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSAppearanceCustomization, NSApplication,
+    NSBackingStoreType, NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl,
+    NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType,
+    NSFont, NSFontAttributeName, NSFontDescriptor, NSImage, NSImageScaling,
+    NSImageSymbolConfiguration, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
+    NSLineBreakMode, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
+    NSScrollView, NSSearchField, NSSegmentSwitchTracking, NSSegmentedControl, NSSlider,
+    NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch, NSTableColumn,
+    NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
+    NSTableViewStyle, NSTextField, NSTitlePosition, NSUserInterfaceItemIdentification,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowDelegate,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
@@ -71,11 +72,13 @@ use crate::remote_files::Sweep;
 use crate::settings::{self, FileState};
 use crate::upload::format_bytes;
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
+use look::Ink;
 use pictures::{Palette, Picture, PictureChoice};
 
 mod font_options;
 mod keyboard;
 mod layout_check;
+mod look;
 mod pages;
 mod pictures;
 mod recorder;
@@ -1677,15 +1680,15 @@ impl Row {
             control.setEnabled(enabled);
         }
         let color = if enabled {
-            NSColor::labelColor()
+            look::ink(Ink::Text)
         } else {
-            NSColor::disabledControlTextColor()
+            look::faded(Ink::Dim, 0.55)
         };
         self.label.setTextColor(Some(&color));
         let reading = if enabled {
-            NSColor::secondaryLabelColor()
+            look::ink(Ink::Dim)
         } else {
-            NSColor::disabledControlTextColor()
+            look::faded(Ink::Dim, 0.55)
         };
         for label in &self.dim {
             label.setTextColor(Some(&reading));
@@ -1703,7 +1706,7 @@ impl Row {
         wash.setTitlePosition(NSTitlePosition::NoTitle);
         wash.setBorderWidth(0.0);
         wash.setCornerRadius(0.0);
-        wash.setFillColor(&NSColor::controlAccentColor().colorWithAlphaComponent(0.22));
+        wash.setFillColor(&look::faded(Ink::Accent, 0.22));
         // Under the row's own views: a wash on top would take the next click.
         wash.setTranslatesAutoresizingMaskIntoConstraints(false);
         self.view
@@ -1749,12 +1752,10 @@ impl Row {
         enabled: bool,
     ) {
         let (text, color) = match (diagnostic, reason, description) {
-            (Some(diagnostic), _, _) => (diagnostic, NSColor::systemOrangeColor()),
-            (None, Some(reason), _) => (reason, NSColor::secondaryLabelColor()),
-            (None, None, Some(description)) if enabled => {
-                (description, NSColor::secondaryLabelColor())
-            }
-            (None, None, Some(description)) => (description, NSColor::tertiaryLabelColor()),
+            (Some(diagnostic), _, _) => (diagnostic, look::ink(Ink::Warning)),
+            (None, Some(reason), _) => (reason, look::ink(Ink::Dim)),
+            (None, None, Some(description)) if enabled => (description, look::ink(Ink::Dim)),
+            (None, None, Some(description)) => (description, look::faded(Ink::Dim, 0.7)),
             (None, None, None) => {
                 self.note.setHidden(true);
                 return;
@@ -2448,8 +2449,17 @@ impl SettingsWindow {
             return;
         };
         let (embedded, user) = (themes.embedded, themes.user);
-        // The pictures are drawn in the theme that is on screen.
+        // The window and its pictures are drawn in the theme that is on screen: its light or dark
+        // for what AppKit draws, its roles for the rest.
         let palette = Palette::of(themes.on_screen);
+        if let Some(window) = self.ivars().window.get() {
+            window.setAppearance(look::appearance(themes.on_screen).as_deref());
+            if look::set(palette)
+                && let Some(content) = window.contentView()
+            {
+                look::redraw(&content);
+            }
+        }
         for choice in [
             &c.content_edge,
             &c.split_style,
@@ -2777,14 +2787,14 @@ impl SettingsWindow {
         let mut found = Vec::with_capacity(hits.len());
         if hits.is_empty() {
             if !query.trim().is_empty() {
-                let none = NSTextField::labelWithString(
+                let none = text_label(
                     &NSString::from_str(&format!(
                         "No settings match \u{201c}{}\u{201d}.",
                         query.trim()
                     )),
                     mtm,
                 );
-                none.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                none.setTextColor(Some(&look::ink(Ink::Dim)));
                 results.addArrangedSubview(&none);
             }
         } else {
@@ -3160,6 +3170,7 @@ impl SettingsWindow {
             )
         };
         control.setIdentifier(Some(&NSString::from_str(&key.tag().to_string())));
+        control.setSelectedSegmentBezelColor(Some(&look::ink(Ink::Accent)));
         control
     }
 
@@ -3184,8 +3195,8 @@ impl SettingsWindow {
 
     /// A folder row's path label and Change… button.
     fn folder(&self, key: Key) -> Folder {
-        let path = NSTextField::labelWithString(ns_string!(""), self.mtm());
-        path.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        let path = text_label(ns_string!(""), self.mtm());
+        path.setTextColor(Some(&look::ink(Ink::Dim)));
         path.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
         path.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(12.0, 0.0)));
         path.widthAnchor()
@@ -3229,13 +3240,15 @@ impl SettingsWindow {
     fn slide(&self, key: Key, min: f64, max: f64) -> Slide {
         let mtm = self.mtm();
         let slider = NSSlider::new(mtm);
+        // The filled part of the track is the value: the accent.
+        slider.setTrackFillColor(Some(&look::ink(Ink::Accent)));
         slider.setMinValue(min);
         slider.setMaxValue(max);
         slider.setContinuous(true);
         width_constraint(&slider, SLIDER_WIDTH);
         self.wire(&slider, key, sel!(sliderChanged:));
-        let value = NSTextField::labelWithString(ns_string!(""), mtm);
-        value.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        let value = text_label(ns_string!(""), mtm);
+        value.setTextColor(Some(&look::ink(Ink::Dim)));
         value.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
             NSFont::systemFontSize(),
             0.0,
@@ -3271,6 +3284,8 @@ impl SettingsWindow {
         // The title is in the pane's header; the window title is for the Window menu.
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setTitlebarAppearsTransparent(true);
+        // A page stands on the theme's ground, the head row with it.
+        window.setBackgroundColor(Some(&look::ink(Ink::Ground)));
         // ⌘T must not add a tab to the settings window.
         window.setTabbingMode(NSWindowTabbingMode::Disallowed);
 
@@ -3354,6 +3369,10 @@ impl SettingsWindow {
             search.setAction(Some(sel!(searchSettings:)));
         }
         let side = NSView::new(mtm);
+        // The column stands on the theme's band, over the system's material.
+        let ground = surface(mtm, Ink::Band);
+        add_pinned(&side, &ground);
+        pin_to_edges(&ground, &side);
         add_pinned(&side, &search);
         add_pinned(&side, &scroll);
         add_pinned(&side, &open);
@@ -3396,9 +3415,13 @@ impl SettingsWindow {
     fn build_detail(&self) -> Retained<NSView> {
         let mtm = self.mtm();
         let detail = NSView::new(mtm);
+        // The pages stand on the theme's ground, as the terminal's cards do.
+        let ground = surface(mtm, Ink::Ground);
+        add_pinned(&detail, &ground);
+        pin_to_edges(&ground, &detail);
 
         // The page's name: the row 52 points high at the top, which the traffic lights share.
-        let header = NSTextField::labelWithString(ns_string!(""), mtm);
+        let header = text_label(ns_string!(""), mtm);
         header.setFont(Some(&NSFont::boldSystemFontOfSize(15.0)));
         add_pinned(&detail, &header);
         activate(&[
@@ -3619,12 +3642,12 @@ impl SettingsWindow {
         let show_previews = self.button("Show in Finder", None, sel!(showPreviewFolder:));
         let preview_keep = self.popup::<PreviewKeep>(Key::PreviewKeep);
         let preview_limit = self.string_popup(Key::PreviewLimit);
-        let usage = NSTextField::labelWithString(&NSString::from_str(&usage_label(None)), mtm);
+        let usage = text_label(&NSString::from_str(&usage_label(None)), mtm);
         usage.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
             NSFont::systemFontSize(),
             0.0,
         )));
-        usage.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        usage.setTextColor(Some(&look::ink(Ink::Dim)));
         let clear = self.button("Clear Now", None, sel!(clearPreviews:));
         let download_dir = self.folder(Key::DownloadDir);
         let download_conflict = self.popup::<DownloadConflict>(Key::DownloadConflict);
@@ -3846,21 +3869,21 @@ impl BannerView {
         ) {
             icon.setImage(Some(&image));
         }
-        let title = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        let title = wrapping_text_label(ns_string!(""), mtm);
         title.setFont(Some(&NSFont::boldSystemFontOfSize(
             NSFont::smallSystemFontSize() + 1.5,
         )));
         title.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
-        let lines = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        let lines = wrapping_text_label(ns_string!(""), mtm);
         lines.setFont(Some(&NSFont::systemFontOfSize(
             NSFont::smallSystemFontSize() + 1.5,
         )));
         lines.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
-        let hint = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        let hint = wrapping_text_label(ns_string!(""), mtm);
         hint.setFont(Some(&NSFont::systemFontOfSize(
             NSFont::smallSystemFontSize() + 1.5,
         )));
-        hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        hint.setTextColor(Some(&look::ink(Ink::Dim)));
         hint.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
 
         let text = NSStackView::stackViewWithViews(
@@ -3927,8 +3950,8 @@ impl BannerView {
             return;
         }
         let tint = match banner.action {
-            BannerAction::ShowInFinder => NSColor::systemRedColor(),
-            BannerAction::None | BannerAction::OpenFile => NSColor::systemOrangeColor(),
+            BannerAction::ShowInFinder => look::ink(Ink::Error),
+            BannerAction::None | BannerAction::OpenFile => look::ink(Ink::Warning),
         };
         self.frame.setFillColor(&tint.colorWithAlphaComponent(0.10));
         self.frame
@@ -4012,8 +4035,8 @@ impl Controls {
     fn parts(&self, mtm: MainThreadMarker, key: Key) -> Parts {
         let number = |number: &Number| {
             let unit = pages::unit(key).map(|unit| {
-                let label = NSTextField::labelWithString(&NSString::from_str(unit), mtm);
-                label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                let label = text_label(&NSString::from_str(unit), mtm);
+                label.setTextColor(Some(&look::ink(Ink::Dim)));
                 label
                     .widthAnchor()
                     .constraintGreaterThanOrEqualToConstant(UNIT_WIDTH)
@@ -4127,8 +4150,8 @@ fn group_box(mtm: MainThreadMarker) -> (Retained<NSBox>, Retained<NSStackView>) 
     boxed.setTitlePosition(NSTitlePosition::NoTitle);
     boxed.setCornerRadius(GROUP_RADIUS);
     boxed.setBorderWidth(0.5);
-    boxed.setBorderColor(&NSColor::separatorColor());
-    boxed.setFillColor(&NSColor::controlBackgroundColor());
+    boxed.setBorderColor(&look::ink(Ink::Line));
+    boxed.setFillColor(&look::ink(Ink::Card));
     boxed.setContentViewMargins(NSSize::new(0.0, 0.0));
     let inner = stack(
         mtm,
@@ -4180,13 +4203,13 @@ fn group_view(
     let mut aside = None;
     let mut heading = None;
     if let Some(title) = spec.title {
-        let title = NSTextField::labelWithString(&NSString::from_str(title), mtm);
+        let title = text_label(&NSString::from_str(title), mtm);
         title.setFont(Some(
             &NSFont::boldSystemFontOfSize(NSFont::systemFontSize()),
         ));
         heading = Some(title.clone());
-        let note = NSTextField::labelWithString(ns_string!(""), mtm);
-        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        let note = text_label(ns_string!(""), mtm);
+        note.setTextColor(Some(&look::ink(Ink::Dim)));
         note.setFont(Some(&NSFont::systemFontOfSize(12.0)));
         let line = stack(
             mtm,
@@ -4222,9 +4245,9 @@ fn build_row(
     below: bool,
 ) -> Row {
     let view = NSView::new(mtm);
-    let name = NSTextField::labelWithString(&NSString::from_str(label), mtm);
+    let name = text_label(&NSString::from_str(label), mtm);
     name.setHidden(label.is_empty());
-    let note = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+    let note = wrapping_text_label(ns_string!(""), mtm);
     note.setFont(Some(&NSFont::systemFontOfSize(
         NSFont::smallSystemFontSize(),
     )));
@@ -4245,8 +4268,8 @@ fn build_row(
         2.0,
         NSLayoutAttribute::Leading,
     );
-    let separator = NSBox::new(mtm);
-    separator.setBoxType(NSBoxType::Separator);
+    // The rule between two rows, in the theme's separator: a pane's split line.
+    let separator = surface(mtm, Ink::Line);
     add_pinned(&view, &separator);
     add_pinned(&view, &text);
     add_pinned(&view, &parts.view);
@@ -4367,6 +4390,49 @@ fn width_constraint(view: &NSView, width: f64) {
         .setActive(true);
 }
 
+/// A label in the theme's text colour; a caller that says less sets the dim one after.
+fn text_label(text: &NSString, mtm: MainThreadMarker) -> Retained<NSTextField> {
+    let label = NSTextField::labelWithString(text, mtm);
+    label.setTextColor(Some(&look::ink(Ink::Text)));
+    label
+}
+
+/// [`text_label`] that wraps.
+fn wrapping_text_label(text: &NSString, mtm: MainThreadMarker) -> Retained<NSTextField> {
+    let label = NSTextField::wrappingLabelWithString(text, mtm);
+    label.setTextColor(Some(&look::ink(Ink::Text)));
+    label
+}
+
+/// A plain surface in `ink`, to stand behind the views of a column or a page.
+fn surface(mtm: MainThreadMarker, ink: Ink) -> Retained<NSBox> {
+    let surface = NSBox::new(mtm);
+    surface.setBoxType(NSBoxType::Custom);
+    surface.setTitlePosition(NSTitlePosition::NoTitle);
+    surface.setBorderWidth(0.0);
+    surface.setCornerRadius(0.0);
+    surface.setFillColor(&look::ink(ink));
+    surface
+}
+
+/// Ties `child` to `parent`'s four edges.
+fn pin_to_edges(child: &NSView, parent: &NSView) {
+    activate(&[
+        child
+            .topAnchor()
+            .constraintEqualToAnchor(&parent.topAnchor()),
+        child
+            .bottomAnchor()
+            .constraintEqualToAnchor(&parent.bottomAnchor()),
+        child
+            .leadingAnchor()
+            .constraintEqualToAnchor(&parent.leadingAnchor()),
+        child
+            .trailingAnchor()
+            .constraintEqualToAnchor(&parent.trailingAnchor()),
+    ]);
+}
+
 fn add_pinned(parent: &NSView, child: &NSView) {
     child.setTranslatesAutoresizingMaskIntoConstraints(false);
     parent.addSubview(child);
@@ -4443,8 +4509,7 @@ define_class!(
                     NSPoint::new(SIDE_PAD, 0.0),
                     NSSize::new(bounds.size.width - 2.0 * SIDE_PAD, bounds.size.height),
                 );
-                NSColor::labelColor()
-                    .colorWithAlphaComponent(0.08)
+                look::faded(Ink::Text, 0.08)
                     .setFill();
                 crate::tab_bar::shaped(face, SIDE_ROW_RADIUS).fill();
             }
@@ -4459,9 +4524,9 @@ define_class!(
                 ),
             );
             let fill = if selected {
-                NSColor::controlAccentColor()
+                look::ink(Ink::Accent)
             } else {
-                NSColor::labelColor().colorWithAlphaComponent(0.14)
+                look::faded(Ink::Text, 0.14)
             };
             fill.setFill();
             crate::tab_bar::shaped(tile, SIDE_TILE_RADIUS).fill();
@@ -4479,7 +4544,7 @@ impl SideRow {
         // SAFETY: `init` is NSView's designated initializer (zero frame); the size comes from the
         // table and the constraints below.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
-        let label = NSTextField::labelWithString(&NSString::from_str(category.title()), mtm);
+        let label = text_label(&NSString::from_str(category.title()), mtm);
         let icon = NSImageView::new(mtm);
         let config =
             NSImageSymbolConfiguration::configurationWithPointSize_weight(SIDE_SYMBOL_SIZE, 0.0);
@@ -4529,9 +4594,9 @@ impl SideRow {
         let selected = self.ivars().selected.get();
         if let Some(icon) = self.ivars().icon.get() {
             let tint = if selected {
-                NSColor::whiteColor()
+                look::ink(Ink::OnAccent)
             } else {
-                NSColor::secondaryLabelColor()
+                look::ink(Ink::Dim)
             };
             icon.setContentTintColor(Some(&tint));
         }
@@ -4750,9 +4815,7 @@ fn swatch_image(colors: [u32; 4]) -> Retained<NSImage> {
             crate::tab_bar::Tint::of(*rgb, 1.0).color().setFill();
             NSBezierPath::fillRect(stripe);
         }
-        NSColor::labelColor()
-            .colorWithAlphaComponent(0.25)
-            .setStroke();
+        look::faded(Ink::Text, 0.25).setStroke();
         let outline = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
             NSRect::new(
                 NSPoint::new(face.origin.x + 0.5, face.origin.y + 0.5),

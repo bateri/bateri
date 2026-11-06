@@ -172,6 +172,9 @@ objc2-foundation = { workspace = true, features = [
 # what it composes and the system forgets it (`discardMarkedText`), and a caret that moved moves
 # the input method's window (`invalidateCharacterCoordinates`), both `NSTextInputContext`'s. Only
 # a header flag over headers already in the set; `Cargo.lock` did not move.
+# The settings window draws in the theme's roles with colours that read the theme when drawn
+# (`NSColor::colorWithName_dynamicProvider`), whose name parameter is `NSColorList`'s type. Only a
+# header flag; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSSegmentedControl", "NSSegmentedCell", "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -189,7 +192,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
     "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
     "NSGraphicsContext", "NSAffineTransform", "objc2-core-graphics", "NSGraphics", "NSImageRep",
-    "NSBitmapImageRep", "NSAccessibilityElement", "NSTextInputContext",
+    "NSBitmapImageRep", "NSAccessibilityElement", "NSTextInputContext", "NSColorList",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

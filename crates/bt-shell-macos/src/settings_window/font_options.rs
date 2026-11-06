@@ -40,6 +40,7 @@ use objc2_foundation::{
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 
+use super::look::{self, Ink};
 use super::pictures::attributes;
 use super::{ROW_WIDTH, SettingsWindow, set_switch};
 
@@ -118,8 +119,8 @@ fn piece(text: &str, font: &NSFont, color: &NSColor) -> Retained<NSAttributedStr
 /// The example of a row: `text` without the option, an arrow, `text` with it.
 fn example(text: &str, before: &NSFont, after: &NSFont) -> Retained<NSMutableAttributedString> {
     let whole = NSMutableAttributedString::new();
-    let ink = NSColor::labelColor();
-    let faint = NSColor::secondaryLabelColor();
+    let ink = look::ink(Ink::Text);
+    let faint = look::ink(Ink::Dim);
     let arrow = NSFont::systemFontOfSize(12.0);
     whole.appendAttributedString(&piece(text, before, &ink));
     whole.appendAttributedString(&piece("   \u{2192}   ", &arrow, &faint));
@@ -234,7 +235,7 @@ fn tile_at(point: NSPoint, count: usize) -> Option<usize> {
 /// `name` cut with an ellipsis until it takes at most `width` in `attributes`' font.
 fn fitted(name: &str, width: f64, font: &NSFont) -> String {
     let measure = |text: &str| -> f64 {
-        let attributes = attributes(font, &NSColor::labelColor());
+        let attributes = attributes(font, &look::ink(Ink::Text));
         // SAFETY: `attributes` holds the two keys `sizeWithAttributes:` reads.
         unsafe {
             NSString::from_str(text)
@@ -325,9 +326,7 @@ impl LetterTiles {
             let chosen = on.get(index).copied().unwrap_or(false);
             let face =
                 NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(area, CORNER, CORNER);
-            NSColor::labelColor()
-                .colorWithAlphaComponent(0.05 * strength)
-                .setFill();
+            look::faded(Ink::Text, 0.05 * strength).setFill();
             face.fill();
             if chosen {
                 let frame = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
@@ -339,13 +338,11 @@ impl LetterTiles {
                     CORNER - 1.0,
                 );
                 frame.setLineWidth(2.0);
-                NSColor::controlAccentColor()
-                    .colorWithAlphaComponent(strength)
-                    .setStroke();
+                look::faded(Ink::Accent, strength).setStroke();
                 frame.stroke();
             }
-            let ink = NSColor::labelColor().colorWithAlphaComponent(strength);
-            let faint = NSColor::secondaryLabelColor().colorWithAlphaComponent(strength);
+            let ink = look::faded(Ink::Text, strength);
+            let faint = look::faded(Ink::Dim, strength);
             // The letters: before, an arrow, after — or "in context" for an option the font
             // does not say the letters of.
             let line_top = origin.y + 8.0;
@@ -551,18 +548,18 @@ impl Options {
                 switch.setTarget(Some(window.target()));
                 switch.setAction(Some(sel!(fontOptionChanged:)));
             }
-            let title = NSTextField::labelWithString(&NSString::from_str(option.title()), mtm);
+            let title = super::text_label(&NSString::from_str(option.title()), mtm);
             title.setFont(Some(&NSFont::systemFontOfSize(NSFont::systemFontSize())));
             let mut texts: Vec<Retained<NSView>> =
                 vec![Retained::into_super(Retained::into_super(title))];
             if let Some((about, sample)) = option.about() {
-                let about = NSTextField::labelWithString(&NSString::from_str(about), mtm);
+                let about = super::text_label(&NSString::from_str(about), mtm);
                 about.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-                about.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                about.setTextColor(Some(&look::ink(Ink::Dim)));
                 texts.push(Retained::into_super(Retained::into_super(about)));
                 let before = sample_font(family, EXAMPLE, &option.features(false));
                 let after = sample_font(family, EXAMPLE, &option.features(true));
-                let line = NSTextField::labelWithString(ns_string!(""), mtm);
+                let line = super::text_label(ns_string!(""), mtm);
                 line.setAttributedStringValue(&example(sample, &before, &after));
                 texts.push(Retained::into_super(Retained::into_super(line)));
             }
@@ -586,9 +583,9 @@ impl Options {
         }
         let mut tiles = None;
         if !tile_options.is_empty() {
-            let heading = NSTextField::labelWithString(ns_string!("Alternate letters"), mtm);
+            let heading = super::text_label(ns_string!("Alternate letters"), mtm);
             heading.setFont(Some(&NSFont::boldSystemFontOfSize(12.0)));
-            heading.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            heading.setTextColor(Some(&look::ink(Ink::Dim)));
             self.stack.addArrangedSubview(&heading);
             let shown_count = tiles_shown(tile_options.len(), signature.all);
             let shown: Vec<usize> = tile_options[..shown_count].to_vec();
@@ -639,9 +636,9 @@ impl Options {
             }
             tiles = Some((control, shown));
         }
-        let warning = NSTextField::labelWithString(ns_string!(""), mtm);
+        let warning = super::text_label(ns_string!(""), mtm);
         warning.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-        warning.setTextColor(Some(&NSColor::systemOrangeColor()));
+        warning.setTextColor(Some(&look::ink(Ink::Warning)));
         warning.setHidden(true);
         self.stack.addArrangedSubview(&warning);
         Built {
