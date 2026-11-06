@@ -45,8 +45,8 @@ use std::time::{Duration, Instant};
 use bt_core::pencere::{Action, ShellGroup, State, ViewOptions, font_stack};
 use bt_core::{
     BlockHandle, BlockInfo, Chord, CommandId, CommandPhase, ContentEdge, FontOptions, Osc52,
-    PaneUuid, ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
-    SearchStatus, Session, SessionOptions, Settings, Theme, TtyModes, Wake,
+    PaneUuid, ProgramBar, RemoteFiles, RemoteTarget, ScrollBounce, SearchCover, SearchDirection,
+    SearchReport, SearchStatus, Session, SessionOptions, Settings, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{
@@ -665,6 +665,11 @@ fn paint_surface(surface: &NSBox, theme: &Theme) {
 /// The terminal layer's ground: the theme's background, what shows where a picture smaller
 /// than the layer does not reach (a resize's frame that has not come yet, [`pin_picture`]).
 /// Without an animation: the layer is the view's own and a ground that fades would show.
+/// Whether a page's boxes are pulled past their ends: the one reading of `[motion] scroll_bounce`.
+fn bounces(settings: &Settings) -> bool {
+    settings.scroll_bounce == ScrollBounce::On
+}
+
 fn paint_layer(layer: &CAMetalLayer, theme: &Theme) {
     let ground = srgb_color(theme.background_srgb()).CGColor();
     CATransaction::begin();
@@ -2015,6 +2020,9 @@ pub struct PaneIvars {
     /// Resolved mode of the wheel — the search's trip to a match looks at it
     /// too; its live change is [`TerminalPane::set_smooth_scroll`].
     smooth_scroll: Cell<bool>,
+    /// Whether a page's boxes are pulled past their ends (`[motion] scroll_bounce`), read by
+    /// [`TerminalPane::page_scrolling`]; its live change is [`TerminalPane::set_scroll_bounce`].
+    scroll_bounce: Cell<bool>,
     /// Resolved form of the scroll bar: the grid's reserve
     /// ([`TerminalPane::sync_geometry`]) reads it from the first geometry on,
     /// the link gets it in `start_session`; its live change is
@@ -2794,6 +2802,7 @@ impl TerminalPane {
         paint_layer(&layer, &theme);
         let font = settings.font.clone();
         let content_edge = settings.content_edge;
+        let scroll_bounce = bounces(&settings);
         let remote_files = settings.remote_files.clone();
         let stats_seat = StatsSeat::new(settings.remote_stats);
         let ports_on = run.is_none() && settings.shell_ports;
@@ -2831,6 +2840,7 @@ impl TerminalPane {
             font: RefCell::new(font),
             reduce_motion: Cell::new(reduce_motion),
             smooth_scroll: Cell::new(smooth_scroll),
+            scroll_bounce: Cell::new(scroll_bounce),
             scrollbar: Cell::new(scrollbar),
             content_edge: Cell::new(content_edge),
             corners: Cell::new((0.0, 0.0)),
@@ -4662,6 +4672,20 @@ impl TerminalPane {
         }
     }
 
+    /// `[motion] scroll_bounce` changed: a page that is up is told how its boxes scroll now
+    /// ([`TerminalPane::page_scrolling`]); one shown later reads it when it comes.
+    pub(crate) fn set_scroll_bounce(&self, settings: &Settings) {
+        let bounce = bounces(settings);
+        if self.ivars().scroll_bounce.replace(bounce) == bounce {
+            return;
+        }
+        if let Some(handle) = self.page_handle() {
+            let scrolling = self.page_scrolling();
+            handle.page().set_scrolling(scrolling);
+            self.drain_page();
+        }
+    }
+
     /// A key was pressed in this pane: the dock's arrival, if it is still
     /// waiting or playing, ends at the dock's last state. Silent before the
     /// link is born.
@@ -6260,8 +6284,10 @@ impl TerminalPane {
     }
 
     /// How a page's boxes scroll here: their bars as the pane's own scroll bar is (the setting, or
-    /// the system's overlay or legacy scrollers), pulled past their ends as AppKit's views are, and
-    /// a click in a bar's track doing what the system's "Click in the scroll bar to" says.
+    /// the system's overlay or legacy scrollers), pulled past their ends as AppKit's views are only
+    /// when `[motion] scroll_bounce` asks for it (otherwise they stop at their ends as the
+    /// terminal's history does), and a click in a bar's track doing what the system's "Click in
+    /// the scroll bar to" says.
     fn page_scrolling(&self) -> Scrolling {
         let bars = match self.ivars().scrollbar.get() {
             ScrollbarMode::Auto => Bars::Overlay,
@@ -6272,7 +6298,7 @@ impl TerminalPane {
             .boolForKey(ns_string!("AppleScrollerPagingBehavior"));
         Scrolling {
             bars,
-            elastic: true,
+            elastic: self.ivars().scroll_bounce.get(),
             track_jumps,
         }
     }

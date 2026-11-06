@@ -6222,6 +6222,7 @@ impl AppDelegate {
         if motion_changed {
             for pane in &panes {
                 pane.set_cursor_motion(&new);
+                pane.set_scroll_bounce(&new);
             }
         }
         // The cursor's drawing numbers go to the link too, for the same reason: they change

@@ -355,6 +355,11 @@ reduce_motion = "system"
 # line by line. Reduce Motion and cursor_motion = "snap" also move line by
 # line.
 smooth_scroll = "on"
+# "on" | "off". Whether lists and text in a program's view, such as a file tree
+# or an editor, are pulled past their ends and spring back, as macOS's own
+# windows do. off stops them at the end, as the terminal's history does, and
+# keeps their scroll bars from squeezing.
+scroll_bounce = "off"
 # "off" | "fade" | "rise" | "pop" | "extrude" | "heat" | "echo" | "drop" |
 # "ink" | "squeeze". How a letter you type in the dock at the bottom of the
 # window appears: fade brings it in from clear, rise slides it up into place,
@@ -1494,6 +1499,7 @@ osc52 = "copy"
 cursor_motion = "spring"
 reduce_motion = "system"
 smooth_scroll = "on"
+scroll_bounce = "off"
 keypress = "fade"
 erase = "recede"
 dock_arrival = "ripple"
@@ -1504,6 +1510,7 @@ dock_arrival = "ripple"
 | `cursor_motion` | `"snap"`, `"ease"` or `"spring"` | `"spring"` | how the cursor travels between cells |
 | `reduce_motion` | `"system"`, `"on"` or `"off"` | `"system"` | whether animations are toned down |
 | `smooth_scroll` | `"on"` or `"off"` | `"on"` | whether scrolling through history is smooth or line by line |
+| `scroll_bounce` | `"on"` or `"off"` | `"off"` | whether lists and text in a program's view bounce at their ends |
 | `keypress` | `"off"`, `"fade"`, `"rise"`, `"pop"`, `"extrude"`, `"heat"`, `"echo"`, `"drop"`, `"ink"` or `"squeeze"` | `"fade"` | how a letter typed in the dock arrives |
 | `erase` | `"off"`, `"iris"`, `"undertow"`, `"echo"`, `"bleed"`, `"unravel"`, `"recede"`, `"sublime"` or `"shatter"` | `"recede"` | how a letter deleted in the dock goes |
 | `dock_arrival` | `"off"`, `"type"`, `"dust"` or `"ripple"` | `"ripple"` | how the dock of a new window or tab arrives |
@@ -1606,6 +1613,21 @@ dock_arrival = "ripple"
   choose `"off"` so the two do not stack. How it behaves with such tools has
   not been measured.
 - It takes effect the moment you save.
+- An unrecognized value (`"yes"`, `"On"`, `true`) only affects this key.
+
+`scroll_bounce` says what happens at the end of a list or a text that scrolls
+in a **program's view** (a file tree, an editor, a table):
+
+- **`"off"`** — it stops at the end, as the terminal's own history does. The
+  scroll bar's knob keeps its length.
+- **`"on"`** — a trackpad pulls it a little past the end while your fingers
+  hold it, a flick carries it a little past the end, and it springs back, as
+  the lists of macOS's own windows do. While it is pulled, its scroll bar's
+  knob grows shorter.
+- With Reduce Motion on it stops at the end whatever this says; in the
+  settings window (Motion) the row appears disabled and says why.
+- The terminal's history is not affected: it always stops at its ends.
+- It takes effect the moment you save, in views that are open too.
 - An unrecognized value (`"yes"`, `"On"`, `true`) only affects this key.
 
 `keypress` and `erase` say how letters arrive and go in the **dock** at the

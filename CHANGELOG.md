@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- **Lists and text in a program's view stop at their ends**, as the terminal's history does, so a file tree or an editor no longer bounces past its end and squeezes its scroll bar. To have them bounce as macOS's own windows do, turn on Bounce at the Ends (`[motion] scroll_bounce = "on"`).
+
 ### Fixed
 
 - A program with a lot of output keeps what bateri knows about it through later updates of kablo: its folder, its blocks and that a command is running. The first update to this version cannot do that yet, and 0.24.1's check covers it.

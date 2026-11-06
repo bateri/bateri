@@ -26,8 +26,8 @@
 use bt_core::{
     CaretShape, ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, Erase,
     IconColors, KeepRunning, Keypress, Osc52, ReduceMotion, RemoteStatsMode, RestoreWindows,
-    SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabDetails, TabPosition, TabRunning,
+    SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
+    SplitStyle, TabDetails, TabPosition, TabRunning,
 };
 
 use super::row::{Kind, Preview, Row, Scope, Slot, Tone};
@@ -438,7 +438,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 37] = [
+static CATALOG: [Setting; 38] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -615,6 +615,20 @@ static CATALOG: [Setting; 37] = [
             SmoothScroll::On
         } else {
             SmoothScroll::Off
+        })
+    ),
+    toggle!(
+        "motion.scroll_bounce",
+        Motion,
+        "Bounce at the Ends",
+        "elastic rubber band overscroll scroll bar squeeze program view",
+        false,
+        None,
+        |s| s.scroll_bounce == ScrollBounce::On,
+        |on| SettingsEdit::ScrollBounce(if on {
+            ScrollBounce::On
+        } else {
+            ScrollBounce::Off
         })
     ),
     named!(
@@ -889,8 +903,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_thirty_seven_settings_once_each() {
-        assert_eq!(all().len(), 37);
+    fn the_catalog_lists_the_thirty_eight_settings_once_each() {
+        assert_eq!(all().len(), 38);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -1021,7 +1035,7 @@ mod tests {
         assert_eq!(dark.opens, Some(Scope::Theme(Slot::Dark)));
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
-        assert_eq!(rows(&settings).len(), 37);
+        assert_eq!(rows(&settings).len(), 38);
     }
 
     #[test]

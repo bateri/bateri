@@ -867,6 +867,35 @@ impl SmoothScroll {
     }
 }
 
+/// `[motion] scroll_bounce`: whether what scrolls in a program's view (its lists, its text)
+/// is pulled past its ends and springs back, as macOS's own views are, or stops at them.
+///
+/// **Off by default**, so a program's view stops where the terminal's history stops: the
+/// terminal's own scrolling has never bounced, and two feels side by side in one window read
+/// as a fault. Pulled past its end, a box also shortens its scroll bar's knob, which is the
+/// squeeze people notice. A string enum for the file's convention ([`SmoothScroll`]).
+///
+/// Its consumer is `bt-shell`, which hands it to the page's drive as a single `bool`
+/// (`pencere_drive::Scrolling::elastic`); the terminal's grid does not read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollBounce {
+    /// Pulled past an end while the fingers hold it, springing back when they let go.
+    On,
+    /// Stops at the ends.
+    #[default]
+    Off,
+}
+
+impl ScrollBounce {
+    /// The single list of spellings in the settings file.
+    pub const NAMES: &'static [(&'static str, Self)] = &[("on", Self::On), ("off", Self::Off)];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[motion] keypress`: how a glyph typed in the dock arrives.
 ///
 /// **Only drawable names** ([`Self::NAMES`]) and today the reference list in
@@ -1620,6 +1649,8 @@ pub struct Settings {
     pub reduce_motion: ReduceMotion,
     /// `[motion] smooth_scroll`: whether scrolling in scrollback is smooth.
     pub smooth_scroll: SmoothScroll,
+    /// `[motion] scroll_bounce`: whether a program view's boxes bounce at their ends.
+    pub scroll_bounce: ScrollBounce,
     /// `[motion] keypress`: the effect of a glyph typed in the dock.
     pub keypress: Keypress,
     /// `[motion] erase`: the effect of a glyph erased in the dock.
@@ -1715,6 +1746,7 @@ impl Default for Settings {
             cursor_motion: CursorMotion::default(),
             reduce_motion: ReduceMotion::default(),
             smooth_scroll: SmoothScroll::default(),
+            scroll_bounce: ScrollBounce::default(),
             keypress: Keypress::default(),
             erase: Erase::default(),
             dock_arrival: DockArrival::default(),
@@ -1808,6 +1840,7 @@ pub enum SettingsEdit {
     CursorMotion(CursorMotion),
     ReduceMotion(ReduceMotion),
     SmoothScroll(SmoothScroll),
+    ScrollBounce(ScrollBounce),
     Keypress(Keypress),
     Erase(Erase),
     DockArrival(DockArrival),
@@ -1961,6 +1994,7 @@ impl SettingsEdit {
             Self::CursorMotion(_) => ("motion", "cursor_motion", "motion.cursor_motion"),
             Self::ReduceMotion(_) => ("motion", "reduce_motion", "motion.reduce_motion"),
             Self::SmoothScroll(_) => ("motion", "smooth_scroll", "motion.smooth_scroll"),
+            Self::ScrollBounce(_) => ("motion", "scroll_bounce", "motion.scroll_bounce"),
             Self::Keypress(_) => ("motion", "keypress", "motion.keypress"),
             Self::Erase(_) => ("motion", "erase", "motion.erase"),
             Self::DockArrival(_) => ("motion", "dock_arrival", "motion.dock_arrival"),
@@ -2016,6 +2050,7 @@ impl SettingsEdit {
             Self::CursorMotion(motion) => motion.name().into(),
             Self::ReduceMotion(reduce) => reduce.name().into(),
             Self::SmoothScroll(smooth) => smooth.name().into(),
+            Self::ScrollBounce(bounce) => bounce.name().into(),
             Self::Keypress(keypress) => keypress.name().into(),
             Self::Erase(erase) => erase.name().into(),
             Self::DockArrival(arrival) => arrival.name().into(),
@@ -2238,6 +2273,11 @@ reduce_motion = "system"
 # line by line. Reduce Motion and cursor_motion = "snap" also move line by
 # line.
 smooth_scroll = "on"
+# "on" | "off". Whether lists and text in a program's view, such as a file tree
+# or an editor, are pulled past their ends and spring back, as macOS's own
+# windows do. off stops them at the end, as the terminal's history does, and
+# keeps their scroll bars from squeezing.
+scroll_bounce = "off"
 # "off" | "fade" | "rise" | "pop" | "extrude" | "heat" | "echo" | "drop" |
 # "ink" | "squeeze". How a letter you type in the dock at the bottom of the
 # window appears: fade brings it in from clear, rise slides it up into place,
@@ -2819,6 +2859,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = motion.get("scroll_bounce") {
+                    parsed.settings.scroll_bounce = named_enum(
+                        text,
+                        item,
+                        "motion.scroll_bounce",
+                        ScrollBounce::NAMES,
+                        fallback.scroll_bounce,
+                        &mut parsed.diagnostics,
+                    );
+                }
                 if let Some(item) = motion.get("keypress") {
                     parsed.settings.keypress = named_enum(
                         text,
@@ -2854,6 +2904,7 @@ stats_interval = 3
                 parsed.settings.cursor_motion = fallback.cursor_motion;
                 parsed.settings.reduce_motion = fallback.reduce_motion;
                 parsed.settings.smooth_scroll = fallback.smooth_scroll;
+                parsed.settings.scroll_bounce = fallback.scroll_bounce;
                 parsed.settings.keypress = fallback.keypress;
                 parsed.settings.erase = fallback.erase;
                 parsed.settings.dock_arrival = fallback.dock_arrival;
@@ -3092,6 +3143,7 @@ stats_interval = 3
             motion: self.cursor_motion != new.cursor_motion
                 || self.reduce_motion != new.reduce_motion
                 || self.smooth_scroll != new.smooth_scroll
+                || self.scroll_bounce != new.scroll_bounce
                 || self.keypress != new.keypress
                 || self.erase != new.erase
                 || self.dock_arrival != new.dock_arrival,
@@ -3821,7 +3873,8 @@ pub struct Changes {
     /// one. Since [`Settings::reduce_motion`] is three-valued `bt-shell` has to
     /// resolve it anyway, and [`Settings::smooth_scroll`] collapses with the
     /// other two to a single `bool` (for the view's wheel); the difference only
-    /// says "something changed".
+    /// says "something changed". [`Settings::scroll_bounce`] rides along: the
+    /// same loop over the panes hands it to their pages.
     pub motion: bool,
     /// [`Settings::caret`] changed: the cursor's drawing numbers go to `bt-gpu`
     /// (`bt_gpu::DisplayLink::set_caret_style`).
@@ -4756,6 +4809,7 @@ mod tests {
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
             ("motion", "smooth_scroll"),
+            ("motion", "scroll_bounce"),
             ("motion", "keypress"),
             ("motion", "erase"),
             ("motion", "dock_arrival"),
@@ -4986,6 +5040,7 @@ mod tests {
             cursor_motion: CursorMotion::Spring,
             reduce_motion: ReduceMotion::System,
             smooth_scroll: SmoothScroll::On,
+            scroll_bounce: ScrollBounce::Off,
             keypress: Keypress::Fade,
             erase: Erase::Recede,
             dock_arrival: DockArrival::Ripple,
@@ -6955,6 +7010,41 @@ hosts = [
     }
 
     #[test]
+    fn scroll_bounce_is_read_and_is_off_unless_asked_for() {
+        // `off` if not in the file: a program's view stops at its ends as the history does.
+        assert_eq!(clean("").scroll_bounce, ScrollBounce::Off);
+        assert_eq!(
+            Settings::for_unusable_file().scroll_bounce,
+            ScrollBounce::Off
+        );
+        for &(name, bounce) in ScrollBounce::NAMES {
+            let settings = clean(&format!("[motion]\nscroll_bounce = \"{name}\"\n"));
+            assert_eq!(settings.scroll_bounce, bounce, "{name}");
+            assert_eq!(bounce.name(), name);
+        }
+        // A value that isn't accepted keeps the key's value, as any ordinary key.
+        let current = clean("[motion]\nscroll_bounce = \"on\"\n");
+        let parsed = Settings::parse_keeping("[motion]\nscroll_bounce = true\n", &current)
+            .expect("parseable text");
+        assert_eq!(parsed.settings.scroll_bounce, ScrollBounce::On);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        // It is a motion change, and its neighbor is not overridden.
+        let all = clean("[motion]\nsmooth_scroll = \"off\"\nscroll_bounce = \"on\"\n");
+        assert_eq!(all.smooth_scroll, SmoothScroll::Off);
+        assert!(Settings::default().changes(&all).motion);
+        // Written in place, beside what the file already says.
+        let edited = Settings::with_edit(
+            "[motion]\nsmooth_scroll = \"off\"\n",
+            &SettingsEdit::ScrollBounce(ScrollBounce::On),
+        )
+        .expect("writable text");
+        assert_eq!(
+            edited,
+            "[motion]\nsmooth_scroll = \"off\"\nscroll_bounce = \"on\"\n"
+        );
+    }
+
+    #[test]
     fn keypress_and_erase_are_read() {
         // `fade` / `recede` if not in the file: the animation must be visible out
         // of the box.
@@ -7853,6 +7943,7 @@ cursor = \"spring\"
             SettingsEdit::CursorMotion(motion) => settings.cursor_motion = motion,
             SettingsEdit::ReduceMotion(reduce) => settings.reduce_motion = reduce,
             SettingsEdit::SmoothScroll(smooth) => settings.smooth_scroll = smooth,
+            SettingsEdit::ScrollBounce(bounce) => settings.scroll_bounce = bounce,
             SettingsEdit::Keypress(keypress) => settings.keypress = keypress,
             SettingsEdit::Erase(erase) => settings.erase = erase,
             SettingsEdit::DockArrival(arrival) => settings.dock_arrival = arrival,
@@ -7955,6 +8046,7 @@ cursor = \"spring\"
             SettingsEdit::CursorMotion(CursorMotion::Ease),
             SettingsEdit::ReduceMotion(ReduceMotion::On),
             SettingsEdit::SmoothScroll(SmoothScroll::Off),
+            SettingsEdit::ScrollBounce(ScrollBounce::On),
             SettingsEdit::Keypress(Keypress::Off),
             SettingsEdit::Erase(Erase::Off),
             SettingsEdit::DockArrival(DockArrival::Dust),
@@ -8553,6 +8645,13 @@ cursor = \"spring\"
             "motion",
             "smooth_scroll",
             |s| s.smooth_scroll,
+        );
+        check(
+            ScrollBounce::NAMES,
+            ScrollBounce::name,
+            "motion",
+            "scroll_bounce",
+            |s| s.scroll_bounce,
         );
         check(
             DockArrival::NAMES,

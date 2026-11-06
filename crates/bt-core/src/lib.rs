@@ -15,7 +15,7 @@
 //! `DockContext`, the dock surface's `Dock`, the typing animations'
 //! `DockEdit`, `EditCells` and the text's column (`DOCK_TEXT_COL`),
 //! `Wake` and the settings model's `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
-//! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`, `RestoreWindows`,
+//! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ScrollBounce`, `ConfirmClose`, `RestoreWindows`,
 //! `KeepRunning`, `Scrollbar` and the tables
 //! of valid values (`NAMES`, `*_RANGE`) (the full list is the `pub use` block
 //! below) and, in `pencere`, a pane's desk for the view
@@ -119,10 +119,10 @@ pub use settings::{
     LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MAX_LETTER_SPACING, MAX_LINE_HEIGHT, MAX_SHORTCUTS,
     MIN_SPACING, MINIMUM_CONTRAST, MINIMUM_CONTRAST_RANGE, MarkSubject, Modifier, Mods, NamedKey,
     Parsed, PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode, RemoteStatsSettings,
-    RestoreWindows, SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar,
-    Settings, SettingsEdit, ShellIntegration, Shortcut, ShortcutError, SmoothScroll, SplitStyle,
-    TabDetails, TabPosition, TabRunning, UnfocusedCaret, bare_host, expand_home, format_size,
-    host_mark, parse_size,
+    RestoreWindows, SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE, SYSTEM_THEME, ScrollBounce,
+    Scrollbar, Settings, SettingsEdit, ShellIntegration, Shortcut, ShortcutError, SmoothScroll,
+    SplitStyle, TabDetails, TabPosition, TabRunning, UnfocusedCaret, bare_host, expand_home,
+    format_size, host_mark, parse_size,
 };
 pub use shell::{
     ButtonState, DockContext, DockEnvironment, DockFault, DockState, DockStatus,

@@ -32,8 +32,8 @@ use bt_core::{
     ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase,
     IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep,
     ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
-    SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabDetails, TabPosition, TabRunning, UnfocusedCaret,
+    SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
+    SplitStyle, TabDetails, TabPosition, TabRunning, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
@@ -211,6 +211,7 @@ enum Key {
     Unfocused,
     CursorMotion,
     SmoothScroll,
+    ScrollBounce,
     ReduceMotion,
     Keypress,
     Erase,
@@ -248,7 +249,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 52] = [
+    const ALL: [Key; 53] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -268,6 +269,7 @@ impl Key {
         Key::Unfocused,
         Key::CursorMotion,
         Key::SmoothScroll,
+        Key::ScrollBounce,
         Key::ReduceMotion,
         Key::Keypress,
         Key::Erase,
@@ -349,6 +351,7 @@ impl Key {
             Key::Unfocused => "terminal.cursor_unfocused",
             Key::CursorMotion => "motion.cursor_motion",
             Key::SmoothScroll => "motion.smooth_scroll",
+            Key::ScrollBounce => "motion.scroll_bounce",
             Key::ReduceMotion => "motion.reduce_motion",
             Key::Keypress => "motion.keypress",
             Key::Erase => "motion.erase",
@@ -866,6 +869,7 @@ fn motion_override(key: Key, settings: &Settings, reduce: bool) -> Option<Overri
         Key::SmoothScroll if snap => disabled("Line by line while cursor motion is Snap."),
         Key::Erase if reduce => disabled("Off while Reduce motion is on."),
         Key::SmoothScroll if reduce => disabled("Line by line while Reduce motion is on."),
+        Key::ScrollBounce if reduce => disabled("Stops at the ends while Reduce motion is on."),
         Key::Keypress if reduce && settings.keypress != Keypress::Off => Some(Override {
             enabled: true,
             note: "Letters only fade in while Reduce motion is on.",
@@ -908,6 +912,13 @@ fn smooth_on(smooth: SmoothScroll) -> bool {
     match smooth {
         SmoothScroll::On => true,
         SmoothScroll::Off => false,
+    }
+}
+
+fn bounce_on(bounce: ScrollBounce) -> bool {
+    match bounce {
+        ScrollBounce::On => true,
+        ScrollBounce::Off => false,
     }
 }
 
@@ -1252,6 +1263,7 @@ struct Controls {
     unfocused: Retained<NSPopUpButton>,
     cursor_motion: Retained<NSPopUpButton>,
     smooth_scroll: Retained<NSSwitch>,
+    scroll_bounce: Retained<NSSwitch>,
     reduce_motion: Retained<NSPopUpButton>,
     keypress: Retained<NSPopUpButton>,
     erase: Retained<NSPopUpButton>,
@@ -1488,6 +1500,11 @@ define_class!(
                     SmoothScroll::On
                 } else {
                     SmoothScroll::Off
+                })),
+                Some(Key::ScrollBounce) => Some(SettingsEdit::ScrollBounce(if on {
+                    ScrollBounce::On
+                } else {
+                    ScrollBounce::Off
                 })),
                 Some(Key::PreviewReadOnly) => Some(SettingsEdit::PreviewReadOnly(on)),
                 Some(Key::DownloadNotify) => Some(SettingsEdit::DownloadNotify(on)),
@@ -1888,6 +1905,7 @@ impl SettingsWindow {
 
         select_choice(&c.cursor_motion, settings.cursor_motion);
         set_switch(&c.smooth_scroll, smooth_on(settings.smooth_scroll));
+        set_switch(&c.scroll_bounce, bounce_on(settings.scroll_bounce));
         select_choice(&c.reduce_motion, settings.reduce_motion);
         select_choice(&c.keypress, settings.keypress);
         select_choice(&c.erase, settings.erase);
@@ -2788,6 +2806,7 @@ impl SettingsWindow {
         // Motion
         let cursor_motion = self.popup::<CursorMotion>(Key::CursorMotion);
         let smooth_scroll = self.switch(Key::SmoothScroll);
+        let scroll_bounce = self.switch(Key::ScrollBounce);
         let reduce_motion = self.popup::<ReduceMotion>(Key::ReduceMotion);
         let keypress = self.popup::<Keypress>(Key::Keypress);
         let erase = self.popup::<Erase>(Key::Erase);
@@ -2827,6 +2846,13 @@ impl SettingsWindow {
             &smooth_scroll,
             &[&smooth_scroll],
             None,
+        );
+        motion.row(
+            Key::ScrollBounce,
+            "Bounce at the ends:",
+            &scroll_bounce,
+            &[&scroll_bounce],
+            Some("Whether lists in a program's view spring back past their ends."),
         );
         motion.row(
             Key::ReduceMotion,
@@ -3008,6 +3034,7 @@ impl SettingsWindow {
             unfocused,
             cursor_motion,
             smooth_scroll,
+            scroll_bounce,
             reduce_motion,
             keypress,
             erase,
@@ -3493,7 +3520,7 @@ mod tests {
                     focus_frame = []\nsplit_style = []\ntab_details = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_running = []\ntab_position = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
-                    [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
+                    [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
                     [commands]\nlevel = []\n\
@@ -3535,6 +3562,7 @@ mod tests {
                 Key::Unfocused => SettingsEdit::CursorUnfocused(UnfocusedCaret::Solid),
                 Key::CursorMotion => SettingsEdit::CursorMotion(CursorMotion::Snap),
                 Key::SmoothScroll => SettingsEdit::SmoothScroll(SmoothScroll::On),
+                Key::ScrollBounce => SettingsEdit::ScrollBounce(ScrollBounce::On),
                 Key::ReduceMotion => SettingsEdit::ReduceMotion(ReduceMotion::On),
                 Key::Keypress => SettingsEdit::Keypress(Keypress::Off),
                 Key::Erase => SettingsEdit::Erase(Erase::Off),
@@ -3847,7 +3875,7 @@ mod tests {
             // given is `snap`.
             assert_eq!(motion_override(key, &snap, true), Some(forced), "{key:?}");
         }
-        for key in [Key::Erase, Key::SmoothScroll] {
+        for key in [Key::Erase, Key::SmoothScroll, Key::ScrollBounce] {
             let forced = motion_override(key, &plain, true).expect("Reduce Motion overrides");
             assert!(!forced.enabled, "{key:?}");
         }
@@ -3884,6 +3912,9 @@ mod tests {
         }
         for &(_, smooth) in SmoothScroll::NAMES {
             assert_eq!(smooth_on(smooth), smooth == SmoothScroll::On);
+        }
+        for &(_, bounce) in ScrollBounce::NAMES {
+            assert_eq!(bounce_on(bounce), bounce == ScrollBounce::On);
         }
     }
 
