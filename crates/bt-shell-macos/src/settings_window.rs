@@ -3006,6 +3006,15 @@ impl SettingsWindow {
             .get()
             .map_or(2.0, |window| window.backingScaleFactor());
         specimens.show(kind, inputs, scale);
+        // The cursor rows' options are the renderer's caret too, drawn with the page like its
+        // example.
+        if kind == specimen::Kind::Cursor
+            && let Some(controls) = self.ivars().controls.get()
+        {
+            let stills = specimens.caret_stills(inputs, scale);
+            controls.shape.set_stills(&stills);
+            controls.unfocused.set_stills(&stills);
+        }
     }
 
     fn target(&self) -> &AnyObject {

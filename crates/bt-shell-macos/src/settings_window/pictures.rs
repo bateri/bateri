@@ -6,6 +6,11 @@
 //! theme's own cursor colour; the window hands the control a new palette whenever it refreshes.
 //! The control keeps nothing of its own either: it shows the option the file chose, and a click
 //! sends its action like a pop-up's — the window writes the line and comes back from the file.
+//!
+//! A picture of the terminal's own drawing is not drawn here: the cursor's options are bateri's
+//! renderer drawing the caret ([`super::specimen`]), handed in as stills ([`PictureChoice::set_stills`]),
+//! so the shape, the thickness, the corner and the glow are the ones a pane draws. The drawing below
+//! stays for when there is no GPU.
 
 use std::cell::{Cell, RefCell};
 
@@ -14,8 +19,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBezierPath, NSColor, NSControl, NSEvent, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSStringDrawing, NSView,
+    NSBezierPath, NSColor, NSCompositingOperation, NSControl, NSEvent, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSStringDrawing, NSView,
 };
 use objc2_foundation::{
     NSAttributedStringKey, NSDictionary, NSInteger, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -25,8 +30,8 @@ use objc2_foundation::{
 use crate::tab_bar::{Tint, rounded, stroke};
 
 /// The picture's width and height, in points.
-const PICTURE_WIDTH: f64 = 70.0;
-const PICTURE_HEIGHT: f64 = 46.0;
+pub(super) const PICTURE_WIDTH: f64 = 70.0;
+pub(super) const PICTURE_HEIGHT: f64 = 46.0;
 /// The room round a picture for the ring that marks the chosen one.
 const RING: f64 = 4.0;
 /// One option's width (the picture, the ring and the room a name needs), the gap between two
@@ -112,6 +117,9 @@ pub(super) struct ChoiceIvars {
     tag: Cell<NSInteger>,
     /// The font the label is drawn in; made once.
     label: RefCell<Option<Retained<NSFont>>>,
+    /// Each option's still, when it is a drawing of the terminal's own: shown in place of
+    /// [`draw_picture`]'s.
+    stills: RefCell<Vec<Option<Retained<NSImage>>>>,
 }
 
 define_class!(
@@ -211,6 +219,7 @@ impl PictureChoice {
             enabled: Cell::new(true),
             tag: Cell::new(0),
             label: RefCell::new(None),
+            stills: RefCell::new(Vec::new()),
         });
         // SAFETY: `init` is NSControl's designated initializer (zero frame); the size is the
         // intrinsic one.
@@ -237,6 +246,36 @@ impl PictureChoice {
         }
     }
 
+    /// Shows each option whose picture is among `stills` as that still (a picture
+    /// [`PICTURE_WIDTH`] × [`PICTURE_HEIGHT`] points); the others, and all of them when `stills`
+    /// is empty, are drawn.
+    pub(super) fn set_stills(&self, stills: &[(Picture, Retained<NSImage>)]) {
+        let new: Vec<Option<Retained<NSImage>>> = self
+            .ivars()
+            .items
+            .iter()
+            .map(|(_, picture)| {
+                stills
+                    .iter()
+                    .find(|(of, _)| of == picture)
+                    .map(|(_, still)| still.clone())
+            })
+            .collect();
+        let same = {
+            let old = self.ivars().stills.borrow();
+            old.len() == new.len()
+                && old.iter().zip(&new).all(|(a, b)| match (a, b) {
+                    (Some(a), Some(b)) => std::ptr::eq::<NSImage>(&**a, &**b),
+                    (None, None) => true,
+                    _ => false,
+                })
+        };
+        if !same {
+            self.ivars().stills.replace(new);
+            self.redraw();
+        }
+    }
+
     fn paint(&self) {
         let ivars = self.ivars();
         let palette = ivars.palette.get();
@@ -249,7 +288,11 @@ impl PictureChoice {
         for (index, (title, picture)) in ivars.items.iter().enumerate() {
             let left = index as f64 * (CELL_WIDTH + CELL_GAP);
             let origin = NSPoint::new(left + (CELL_WIDTH - PICTURE_WIDTH) / 2.0, RING);
-            draw_picture(*picture, origin, &palette, if enabled { 1.0 } else { 0.4 });
+            let strength = if enabled { 1.0 } else { 0.4 };
+            match ivars.stills.borrow().get(index).and_then(Option::as_ref) {
+                Some(still) => draw_still(still, origin, &palette, strength),
+                None => draw_picture(*picture, origin, &palette, strength),
+            }
             let chosen = ivars.selected.get() == Some(index);
             if chosen {
                 let ring = NSRect::new(
@@ -329,6 +372,45 @@ pub(super) fn attributes(
             &values,
         )
     }
+}
+
+/// Draws `still` as a picture with its top-left corner at `at`, at `strength` of its own: on the
+/// theme's background (the still's own ground), within the picture's corner, and framed as the
+/// drawn pictures are.
+fn draw_still(still: &NSImage, at: NSPoint, palette: &Palette, strength: f64) {
+    let frame = NSRect::new(at, NSSize::new(PICTURE_WIDTH, PICTURE_HEIGHT));
+    rounded(
+        frame,
+        PICTURE_RADIUS,
+        Tint::of(palette.background, strength),
+        None,
+    );
+    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+        frame,
+        PICTURE_RADIUS,
+        PICTURE_RADIUS,
+    );
+    NSGraphicsContext::saveGraphicsState_class();
+    path.addClip();
+    // SAFETY: no hints; drawing happens inside `drawRect:`, and the view is flipped, which
+    // `respectFlipped` honours so the still is not drawn upside down.
+    unsafe {
+        still.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+            frame,
+            NSRect::ZERO,
+            NSCompositingOperation::SourceOver,
+            strength,
+            true,
+            None,
+        );
+    }
+    NSGraphicsContext::restoreGraphicsState_class();
+    rounded(
+        frame,
+        PICTURE_RADIUS,
+        Tint::of(palette.background, 0.0),
+        Some(Tint::of(palette.separator, 0.8 * strength)),
+    );
 }
 
 /// Draws `picture` with its top-left corner at `at`, every colour at `strength` of its own.

@@ -6,7 +6,9 @@
 //! the renderer ([`bt_gpu::Stage`]) with the theme, the font, the floor under a program's text
 //! and the caret the file has, so a stylistic set, a bolder stroke or a corner radius shows as it
 //! will in a pane. The tabs example is a drawing of the bar and the cards in miniature
-//! ([`tabs_specimen`]).
+//! ([`tabs_specimen`]). The cursor rows' options are drawn the same way, one small still each
+//! ([`Specimens::caret_stills`]): a picture of a caret that is not the renderer's would show a
+//! shape, a thickness and a corner no pane draws.
 //!
 //! **Nothing here keeps a setting.** An example is made from the inputs the last refresh
 //! gave ([`Inputs`]) and is drawn only while its page is the open one; the picture of each card
@@ -17,7 +19,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use bt_core::{CaretShape, CaretStyle, FontOptions, Session, SessionOptions, Settings, Theme};
+use bt_core::{
+    CaretShape, CaretStyle, FontOptions, Session, SessionOptions, Settings, Theme, UnfocusedCaret,
+};
 use bt_gpu::{Snapshot, Stage, StageLook};
 use objc2::rc::Retained;
 use objc2::{AnyThread, MainThreadMarker};
@@ -27,7 +31,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSSize, NSString};
 
-use super::pictures::Palette;
+use super::pictures::{PICTURE_HEIGHT, PICTURE_WIDTH, Palette, Picture};
 use super::tabs_specimen::{self, TabsView};
 use super::{Category, DETAIL_WIDTH, PAGE_MARGIN};
 use crate::snapshot;
@@ -397,6 +401,193 @@ fn render(
     )
 }
 
+/// The cursor rows' options, each drawn as the renderer draws its caret.
+const CARET_PICTURES: [Picture; 5] = [
+    Picture::Block,
+    Picture::Underline,
+    Picture::Beam,
+    Picture::Hollow,
+    Picture::Solid,
+];
+
+/// The caret an option shows: its shape, its style and whether its window is key. The shapes are
+/// shown in a key window with the file's corner and glow; the two looks of an inactive window are
+/// shown on the block, the one shape that hollows (a hollow beam is the beam), so the pair is
+/// never two of the same picture.
+fn caret_of(picture: Picture, caret: CaretStyle) -> Option<(CaretShape, CaretStyle, bool)> {
+    let unfocused = |unfocused| CaretStyle { unfocused, ..caret };
+    Some(match picture {
+        Picture::Block => (CaretShape::Block, caret, true),
+        Picture::Underline => (CaretShape::Underline, caret, true),
+        Picture::Beam => (CaretShape::Beam, caret, true),
+        Picture::Hollow => (CaretShape::Block, unfocused(UnfocusedCaret::Hollow), false),
+        Picture::Solid => (CaretShape::Block, unfocused(UnfocusedCaret::Solid), false),
+        _ => return None,
+    })
+}
+
+/// What a caret's still shows: `ls` typed and the caret after it.
+const TYPED: &str = "ls ";
+/// The columns the still is centred on: the typed text and the caret's cell.
+const TYPED_COLS: u16 = 4;
+
+/// Where the typed text starts in a caret's session and how big the session is: as many columns
+/// beside it and rows above it as half a picture needs, so the still can be cut from round it
+/// whatever the font's cell and the glow is drawn, not cut at a row's edge. The text is on the
+/// last row: the renderer sets a screen's rows on its foot, and a blank row under the caret's
+/// would not be drawn there but above.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Middle {
+    /// The typed text's first column and its row.
+    col: u16,
+    row: u16,
+    cols: u16,
+    rows: u16,
+}
+
+impl Middle {
+    fn of(picture: (u32, u32), cell: (u16, u16)) -> Self {
+        let (cell_w, cell_h) = (u32::from(cell.0.max(1)), u32::from(cell.1.max(1)));
+        let side = u16::try_from(picture.0.div_ceil(2).div_ceil(cell_w)).unwrap_or(u16::MAX / 4);
+        let above = u16::try_from(picture.1.div_ceil(2).div_ceil(cell_h)).unwrap_or(u16::MAX / 4);
+        Middle {
+            col: side,
+            row: above,
+            cols: side + TYPED_COLS + side,
+            rows: above + 1,
+        }
+    }
+
+    /// The bytes that write the typed text there; the caret ends after it.
+    fn screen(self) -> Vec<u8> {
+        format!("\x1b[2J\x1b[{};{}H{TYPED}", self.row + 1, self.col + 1).into_bytes()
+    }
+
+    /// The middle of the typed text and its caret, in pixels from the session's top-left corner.
+    fn centre(self, cell: (u16, u16), left: u16) -> (u32, u32) {
+        let (cell_w, cell_h) = (u32::from(cell.0), u32::from(cell.1));
+        (
+            u32::from(left) + u32::from(self.col) * cell_w + u32::from(TYPED_COLS) * cell_w / 2,
+            u32::from(self.row) * cell_h + cell_h / 2,
+        )
+    }
+}
+
+/// `size` pixels of `still` round `centre`; what falls outside it (under the screen's foot, or
+/// beside a font too big for a picture) is the still's ground, its top-left pixel.
+fn cut(still: &Snapshot, centre: (u32, u32), size: (u32, u32)) -> Option<Snapshot> {
+    let ground = still.rgba.get(..4)?;
+    let mut rgba = ground.repeat(size.0 as usize * size.1 as usize);
+    let left = i64::from(centre.0) - i64::from(size.0 / 2);
+    let top = i64::from(centre.1) - i64::from(size.1 / 2);
+    // The columns of the cut that are inside the still, and where they are in it.
+    let from = left.max(0);
+    let to = (left + i64::from(size.0)).min(i64::from(still.width));
+    if from < to {
+        let (width, offset) = ((to - from) as usize * 4, (from - left) as usize * 4);
+        for line in 0..i64::from(size.1) {
+            let y = top + line;
+            if y < 0 || y >= i64::from(still.height) {
+                continue;
+            }
+            let source = (y as usize * still.width as usize + from as usize) * 4;
+            let target = line as usize * size.0 as usize * 4 + offset;
+            rgba.get_mut(target..target + width)?
+                .copy_from_slice(still.rgba.get(source..source + width)?);
+        }
+    }
+    Some(Snapshot {
+        width: size.0,
+        height: size.1,
+        rgba,
+    })
+}
+
+/// The still of `picture`'s caret in `theme`, a picture's size at `scale`; `None` for a picture
+/// that is not a caret's, or when the session or the GPU said no. The session is kept in `kept`.
+fn render_caret(
+    stage: &mut Stage,
+    kept: &mut Option<Kept>,
+    picture: Picture,
+    theme: Theme,
+    settings: &Settings,
+    scale: f64,
+) -> Option<Snapshot> {
+    let (shape, caret_style, focused) = caret_of(picture, settings.caret)?;
+    let metrics = stage.cell_metrics(scale);
+    let cell = metrics.cell_px();
+    let inset = metrics.grid_inset();
+    let size = (
+        (PICTURE_WIDTH * scale).round() as u32,
+        (PICTURE_HEIGHT * scale).round() as u32,
+    );
+    let middle = Middle::of(size, cell);
+    let key = (theme, shape, middle.cols, middle.rows, cell);
+    if kept.as_ref().map(|kept| kept.key) != Some(key) {
+        let session = bt_core::pictured(
+            SessionOptions {
+                command: None,
+                working_directory: None,
+                home: None,
+                env: HashMap::new(),
+                cols: middle.cols,
+                rows: middle.rows,
+                cell_px: cell,
+                terminal: Settings {
+                    cursor: shape,
+                    ..settings.clone()
+                }
+                .terminal(),
+                theme,
+                dock: false,
+                cluster: true,
+                initial_input: None,
+                shell_marks: false,
+                pane_uuid: None,
+                hostname: None,
+                replay: None,
+                views: None,
+            },
+            &middle.screen(),
+        )
+        .ok()?;
+        *kept = Some(Kept { key, session });
+    }
+    let session = &kept.as_ref()?.session;
+    let whole = (
+        u32::from(inset.left) + u32::from(middle.cols) * u32::from(cell.0) + u32::from(inset.right),
+        u32::from(middle.rows) * u32::from(cell.1) + u32::from(inset.foot),
+    );
+    let still = stage.snapshot_with(
+        session,
+        middle.cols,
+        scale,
+        whole,
+        whole,
+        StageLook {
+            caret_style,
+            caret_focused: focused,
+        },
+    )?;
+    cut(&still, middle.centre(cell, inset.left), size)
+}
+
+/// Everything a caret's still depends on.
+#[derive(Clone, Debug, PartialEq)]
+struct CaretDrawn {
+    theme: Theme,
+    font: FontOptions,
+    caret: CaretStyle,
+    scale: f64,
+}
+
+/// One caret option's still and its session, kept between draws.
+struct CaretTile {
+    picture: Picture,
+    kept: RefCell<Option<Kept>>,
+    drawn: RefCell<Option<(CaretDrawn, Retained<NSImage>)>>,
+}
+
 /// One card of a terminal example: the picture, and its name and tag under it.
 struct Card {
     column: Retained<NSStackView>,
@@ -480,6 +671,7 @@ struct Specimen {
 /// The examples of all the pages, and the renderer they share.
 pub(super) struct Specimens {
     all: Vec<Specimen>,
+    carets: Vec<CaretTile>,
     /// Opened with the first example drawn; dropped when the window closes.
     stage: RefCell<Option<Stage>>,
     /// The GPU said no: the terminal examples stay hidden.
@@ -524,6 +716,14 @@ impl Specimens {
             .collect();
         Specimens {
             all,
+            carets: CARET_PICTURES
+                .iter()
+                .map(|picture| CaretTile {
+                    picture: *picture,
+                    kept: RefCell::new(None),
+                    drawn: RefCell::new(None),
+                })
+                .collect(),
             stage: RefCell::new(None),
             no_gpu: Cell::new(false),
         }
@@ -561,17 +761,12 @@ impl Specimens {
             }
             Body::Cards(cards) => {
                 let faces = faces(kind, inputs);
-                let mut stage = self.stage.borrow_mut();
-                if stage.is_none() && !self.no_gpu.get() {
-                    *stage = Stage::new(&inputs.settings.font).ok();
-                    self.no_gpu.set(stage.is_none());
-                }
+                let mut stage = self.stage(inputs);
                 let Some(stage) = stage.as_mut() else {
                     specimen.view.setHidden(true);
                     return;
                 };
                 specimen.view.setHidden(faces.is_empty());
-                stage.set_font(&inputs.settings.font);
                 let width_pt = if faces.len() > 1 {
                     (WIDTH - GAP) / 2.0
                 } else {
@@ -590,11 +785,80 @@ impl Specimens {
         }
     }
 
+    /// The renderer, opened on the first draw and set to the file's font; `None` inside when the
+    /// GPU said no.
+    fn stage(&self, inputs: &Inputs) -> std::cell::RefMut<'_, Option<Stage>> {
+        let mut stage = self.stage.borrow_mut();
+        if stage.is_none() && !self.no_gpu.get() {
+            *stage = Stage::new(&inputs.settings.font).ok();
+            self.no_gpu.set(stage.is_none());
+        }
+        if let Some(stage) = stage.as_mut() {
+            stage.set_font(&inputs.settings.font);
+        }
+        stage
+    }
+
+    /// The cursor rows' options as the renderer draws the caret, in the theme on screen, at
+    /// `scale` pixels to the point; empty with no GPU, and an option whose still could not be made
+    /// is left out (the row draws its own picture for it). A still is made again only when what it
+    /// shows changed.
+    pub(super) fn caret_stills(
+        &self,
+        inputs: &Inputs,
+        scale: f64,
+    ) -> Vec<(Picture, Retained<NSImage>)> {
+        let mut stage = self.stage(inputs);
+        let Some(stage) = stage.as_mut() else {
+            return Vec::new();
+        };
+        let drawn = CaretDrawn {
+            theme: inputs.on_screen,
+            font: inputs.settings.font.clone(),
+            caret: inputs.settings.caret,
+            scale,
+        };
+        let mut stills = Vec::new();
+        for tile in &self.carets {
+            if let Some((was, image)) = tile.drawn.borrow().as_ref()
+                && *was == drawn
+            {
+                stills.push((tile.picture, image.clone()));
+                continue;
+            }
+            let Some(still) = render_caret(
+                stage,
+                &mut tile.kept.borrow_mut(),
+                tile.picture,
+                inputs.on_screen,
+                &inputs.settings,
+                scale,
+            ) else {
+                continue;
+            };
+            let Some(image) = snapshot::image(&still) else {
+                continue;
+            };
+            let image = NSImage::initWithCGImage_size(
+                NSImage::alloc(),
+                &image,
+                NSSize::new(PICTURE_WIDTH, PICTURE_HEIGHT),
+            );
+            tile.drawn.replace(Some((drawn.clone(), image.clone())));
+            stills.push((tile.picture, image));
+        }
+        stills
+    }
+
     /// Gives the renderer's textures and the sessions back (the window closed); the next draw
     /// makes them again, and tries for a renderer again if the last try found none.
     pub(super) fn release(&self) {
         self.stage.replace(None);
         self.no_gpu.set(false);
+        for tile in &self.carets {
+            tile.kept.replace(None);
+            tile.drawn.replace(None);
+        }
         for specimen in &self.all {
             if let Body::Cards(cards) = &specimen.body {
                 for card in cards {
@@ -752,6 +1016,61 @@ mod tests {
         let faint = mix(theme.background, theme.foreground, 0.16);
         assert_ne!(faint, theme.background);
         assert_ne!(faint, theme.foreground);
+    }
+
+    /// Each caret option is the renderer's caret: the three shapes are three pictures, the two
+    /// looks of an inactive window two, and every still stands on the theme's background with
+    /// the caret in its middle.
+    #[test]
+    fn the_caret_options_are_the_renderers_caret() {
+        let mut stage = Stage::new(&FontOptions::default()).expect("a stage");
+        let settings = Settings::default();
+        let theme = Theme::BATERI;
+        let mut seen = Vec::new();
+        for picture in CARET_PICTURES {
+            let mut kept = None;
+            let still = render_caret(&mut stage, &mut kept, picture, theme, &settings, 2.0)
+                .expect("a still");
+            assert_eq!((still.width, still.height), (140, 92));
+            let want = theme.background;
+            let got = corner(&still);
+            for (i, shift) in [16, 8, 0].into_iter().enumerate() {
+                assert!(
+                    got[i].abs_diff((want >> shift) as u8) <= 2,
+                    "{picture:?}: the ground is {got:?}, the theme's background is {want:06x}"
+                );
+            }
+            let cursor = theme.cursor;
+            let near = |px: &[u8]| {
+                [16, 8, 0]
+                    .iter()
+                    .zip(px)
+                    .all(|(shift, c)| c.abs_diff((cursor >> shift) as u8) <= 24)
+            };
+            assert!(
+                still.rgba.chunks(4).any(near),
+                "{picture:?}: no pixel is the caret's colour"
+            );
+            seen.push(still.rgba);
+        }
+        // The three shapes are three pictures; an inactive window's two looks are two (a solid
+        // one is the key window's block, which is what Solid means).
+        let differ = |i: usize, j: usize| {
+            assert!(
+                seen[i] != seen[j],
+                "{:?} and {:?} are the same picture",
+                CARET_PICTURES[i],
+                CARET_PICTURES[j]
+            );
+        };
+        differ(0, 1);
+        differ(0, 2);
+        differ(1, 2);
+        differ(3, 4);
+        assert!(
+            seen[0] == seen[4],
+            "a solid caret is the key window's block"
+        );
     }
 
     fn corner(still: &Snapshot) -> [u8; 3] {
