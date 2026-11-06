@@ -328,10 +328,11 @@ tab_running = "tail"
 tab_position = "top"
 
 [font]
-# A family name as shown in Font Book. Without it bateri uses SF Mono, or
-# Menlo when SF Mono is not installed — SF Mono ships with Xcode, so it is not
-# on every machine. A character the family lacks is drawn from the system font
-# chain when it fits one cell; emoji, CJK and other wide glyphs stay as boxes.
+# A family name as shown in Font Book. Without it bateri uses JetBrains Mono,
+# which comes with the app. A character the family lacks is drawn from the
+# system font chain when it fits one cell, and a symbol of the private use area
+# (a git branch, a folder) from the symbol font that comes with the app; emoji,
+# CJK and other wide glyphs stay as boxes.
 # family = "Menlo"
 # Greater than 0. Size in points.
 size = 13
@@ -733,7 +734,7 @@ error (or the ⚠) stays visible there too.
 | the chosen theme cannot be found | the built-in theme matching the appearance (`bateri` in dark, `bateri-light` in light), warning |
 | the theme file cannot be read, is empty or is invalid TOML | the built-in theme matching the appearance, warning (a built-in theme with the same name is **not** used) |
 | a color in the theme file is not accepted | only that color comes from the file's base (`bateri`, `bateri-light` or the shadowed built-in theme), warning |
-| the font family cannot be found | the default font (SF Mono, otherwise Menlo), warning |
+| the font family cannot be found | the default font (JetBrains Mono), warning |
 | the font family is not monospaced | the family is still used, warning |
 | a `[font.features]` line that cannot be read (a tag that is not four letters or digits, a value that is not `true` or `false`) | only that line is ignored, warning |
 | a `[font.features]` tag the font does not list | the choice does nothing, warning: `font "Obel Mono" has no feature "ss99"` |
@@ -1339,7 +1340,7 @@ letter_spacing = 1.0
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `family` | text | none (SF Mono, otherwise Menlo) | font family |
+| `family` | text | none (JetBrains Mono) | font family |
 | `size` | number, greater than `0` | `13` | size in points |
 | `line_height` | number, `0.5` – `2` | `1.0` | line spacing multiplier |
 | `letter_spacing` | number, `0.5` – `2` | `1.0` | letter spacing multiplier |
@@ -1350,7 +1351,7 @@ letter_spacing = 1.0
   face (`"Menlo-Regular"`) does not count as a family and gives a "not found"
   warning.
 - If the family is not on the machine, the default font is used and the title
-  bar says so: `font "Fira Code" not found; using Menlo`. Fixing the name and
+  bar says so: `font "Hack" not found; using JetBrains Mono`. Fixing the name and
   saving changes the font and clears the warning.
 - **Eight fonts come with bateri:** JetBrains Mono, Fira Code, Cascadia Code,
   Monaspace Neon, Geist Mono, Maple Mono, IBM Plex Mono and Obel Mono. They
@@ -1363,12 +1364,15 @@ letter_spacing = 1.0
   its regular face. Each family's license text lies beside its font files in
   the app, `bateri.app/Contents/Resources/fonts/`. A symbol font ships with
   them too; it is not in the list and is not meant to be chosen.
-- **The default font is a two-link chain:** first SF Mono, otherwise Menlo.
-  SF Mono comes with Xcode and is **not on every machine**; if it is not
-  installed, no warning is given either, because this is not a fault but a
-  designed fallback — both are monospaced. "SF Mono, otherwise Menlo" in the
-  table says exactly this: if you wonder which one is on screen, it is the
-  face you see when you do not write `family` at all.
+- **The default font is JetBrains Mono**, which comes with the app: with no
+  `family` (or `family = ""`) that is what opens, and no warning is given. It
+  is the font whose ligatures, `->` and `!=`, you see without choosing
+  anything. Writing `family = "Menlo"` (or any family) changes it and nothing
+  else; a file that already says so is untouched. Where the app's own fonts are
+  not there — a copy of bateri run from a source tree without them — the
+  default is the system's two-link chain instead: SF Mono, otherwise Menlo
+  (SF Mono comes with Xcode and is not on every machine, so it gives no
+  warning when it is missing).
 - A family that is not monospaced (`"Helvetica"`) is **not rejected**, it
   gives a warning: `font "Helvetica" is not monospaced; text may not line up`.
   The cell width comes from the space character; letters wider than that are
@@ -1381,11 +1385,19 @@ letter_spacing = 1.0
   fits in one cell, it is drawn from macOS's own font chain; you do not need
   to change your font or define a fallback list. The measure is the
   character's **advance**: if it is wider than the cell, it is not drawn and
-  **stays a box**. This is deliberate — emoji, CJK (`漢`), powerline
-  separators (`U+E0B0`) and Braille (the `⠋⠙⠹` of spinners) exceed the cell's
-  width, and a half-drawn glyph would be a silent corruption; a box is a
-  visible gap, that is, it tells you what could not be drawn. Drawing these
-  characters properly is a separate piece of work.
+  **stays a box**. This is deliberate — emoji, CJK (`漢`) and Braille (the
+  `⠋⠙⠹` of spinners) exceed the cell's width, and a half-drawn glyph would be
+  a silent corruption; a box is a visible gap, that is, it tells you what
+  could not be drawn. Drawing these characters properly is a separate piece of
+  work.
+- **Symbols come with the app too.** A character of the private use area that
+  the chosen font lacks — the git branch `U+E0A0`, a folder, the powerline
+  separators, the Material Design icons above `U+F0000` — is drawn from the
+  Symbols Nerd Font Mono that comes with bateri, in one cell, whichever font
+  you chose; it is tried before the system's chain, passes the same fit test
+  and, where it has no glyph, the system's chain goes on as before. A font that
+  carries these symbols itself (a Nerd Font) is never asked to give way: its
+  own are drawn.
 - The measure being the **advance** has a cost: a glyph that advances narrow
   but paints wide passes the gate and its overflow is clipped. No such
   character has been met in today's font chain, but the promise is not "never
@@ -1516,8 +1528,8 @@ calt = false     # no ligatures
 **A tag the font does not list.** A font's engine ignores a feature the font
 does not have without a word, so a misspelled tag or one copied from another
 font would silently do nothing. The title bar says it instead: `font "Obel
-Mono" has no feature "ss99"`, one line for each such tag (`font "System Mono"`
-for the default font), and fixing the line clears it. The check reads the
+Mono" has no feature "ss99"`, one line for each such tag (the default font
+goes by its name: `font "JetBrains Mono"`), and fixing the line clears it. The check reads the
 font's glyph-substitution table, so a font without one (Menlo) lists no
 feature and every tag written for it is reported. It is not given for a
 family that cannot be found (the warning for that comes first).

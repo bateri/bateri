@@ -417,7 +417,13 @@ fn font_families() -> Vec<String> {
 
 fn family_label(token: &str) -> String {
     if token.is_empty() {
-        "System Mono".to_owned()
+        // The default font, named: the app's own default family where its fonts are there,
+        // the system's chain otherwise. Not the bare family name — the list has a row of
+        // that name too, and two rows alike would not say which one is "no choice made".
+        bt_gpu::app_default_family().map_or_else(
+            || "System Mono".to_owned(),
+            |family| format!("Default ({family})"),
+        )
     } else {
         token.to_owned()
     }

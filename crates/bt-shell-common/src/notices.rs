@@ -45,10 +45,11 @@ pub fn font_messages(notices: impl IntoIterator<Item = FontNotice>) -> Vec<Strin
                 format!("font \"{family}\" is not monospaced; text may not line up")
             }
             FontNotice::NoFeature { family, tag } => {
-                // The empty family is the default chain's font, which the
+                // The empty family is the default font: the app's own default family
+                // where its fonts are there, otherwise the system's chain, which the
                 // palette and the settings window call System Mono.
                 let family = if family.is_empty() {
-                    "System Mono"
+                    bt_gpu::app_default_family().unwrap_or("System Mono")
                 } else {
                     &family
                 };

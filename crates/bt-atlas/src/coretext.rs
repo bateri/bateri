@@ -665,10 +665,10 @@ impl FontSystem for CoreText {
                 if returned == *name {
                     font
                 } else {
-                    Self::open_default(size).0
+                    crate::app_fonts::open_default(size).0
                 }
             }
-            Family::Terminal(None) => Self::open_default(size).0,
+            Family::Terminal(None) => crate::app_fonts::open_default(size).0,
         };
         let weighted = with_weight(base, weight);
         Some(if italic { slanted(weighted) } else { weighted })

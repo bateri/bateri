@@ -3486,9 +3486,19 @@ fn fill_contrasts(popup: &NSPopUpButton, items: &[ContrastItem], selected: usize
     fill_popup(popup, titles, selected);
 }
 
+/// The Font popup's first entry: the default font, named. The app's own default family where
+/// its fonts are registered; the system's chain, which is what opens otherwise, in a copy
+/// run without them.
+fn default_font_title() -> String {
+    bt_gpu::app_default_family().map_or_else(
+        || "Default (SF Mono, or Menlo)".to_owned(),
+        |family| format!("Default ({family})"),
+    )
+}
+
 fn fill_fonts(popup: &NSPopUpButton, items: &[FontItem], selected: usize) {
     let titles = items.iter().map(|item| match item {
-        FontItem::Default => Some("Default (SF Mono, or Menlo)".to_owned()),
+        FontItem::Default => Some(default_font_title()),
         FontItem::Separator => None,
         FontItem::Family(name) => Some(name.clone()),
         FontItem::Missing(name) => Some(missing_font_title(name, bt_gpu::family_notice(name))),

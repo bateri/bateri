@@ -118,3 +118,110 @@ fn each_family_gives_plain_bold_italic_and_bold_italic_faces() {
         }
     }
 }
+
+fn atlas(family: Option<&str>) -> Atlas {
+    Atlas::new(
+        family,
+        13.0,
+        2.0,
+        Spacing {
+            line: 1.0,
+            letter: 1.0,
+        },
+    )
+}
+
+/// The bytes of 'e' as the atlas draws it: only the first ask for a slot carries them.
+fn drawn_e(atlas: &mut Atlas) -> Vec<u8> {
+    let (_, upload) = atlas.slot(
+        Sprite::Char('e'),
+        Face::Regular,
+        SizeClass::Normal,
+        Half::Whole,
+    );
+    upload.expect("'e' is drawn").bytes.to_vec()
+}
+
+#[test]
+fn without_a_family_the_default_is_jetbrains_mono_and_says_nothing() {
+    register_app_fonts(&fonts_dir());
+    assert_eq!(bt_atlas::app_default_family(), Some("JetBrains Mono"));
+
+    let mut default = atlas(None);
+    let mut jetbrains = atlas(Some("JetBrains Mono"));
+    let mut menlo = atlas(Some("Menlo"));
+    assert!(default.font_issue().is_none());
+    // The same font, not a lookalike: the cell, and the pixels of a letter.
+    assert_eq!(default.metrics(), jetbrains.metrics());
+    let (default, jetbrains, menlo) = (
+        drawn_e(&mut default),
+        drawn_e(&mut jetbrains),
+        drawn_e(&mut menlo),
+    );
+    assert_eq!(default, jetbrains);
+    assert_ne!(default, menlo);
+}
+
+#[test]
+fn a_family_that_is_not_there_falls_back_to_the_apps_default() {
+    register_app_fonts(&fonts_dir());
+    let missing = atlas(Some("No Such Family"));
+    match missing.font_issue() {
+        Some(bt_atlas::FontIssue::FamilyNotFound { using, .. }) => {
+            assert_eq!(using, "JetBrains Mono");
+        }
+        other => panic!("expected FamilyNotFound, got {other:?}"),
+    }
+}
+
+#[test]
+fn private_use_symbols_come_from_the_symbol_font_in_one_cell() {
+    register_app_fonts(&fonts_dir());
+    // Menlo has none of them. The branch and the folder are in the first
+    // range, the third is Material Design above U+F0000.
+    let mut menlo = atlas(Some("Menlo"));
+    for ch in ['\u{E0A0}', '\u{E0B0}', '\u{F07B}', '\u{F0001}'] {
+        let (placed, upload) = menlo.slot(
+            Sprite::Char(ch),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        assert_ne!(
+            placed.slot,
+            bt_atlas::TOFU,
+            "U+{:04X} is a box",
+            u32::from(ch)
+        );
+        assert_eq!(
+            placed.half,
+            Half::Whole,
+            "U+{:04X} is not one cell",
+            u32::from(ch)
+        );
+        let ink = upload.map_or(0, |u| u.bytes.iter().filter(|&&b| b != 0).count());
+        assert!(ink > 0, "U+{:04X} has no ink", u32::from(ch));
+    }
+}
+
+#[test]
+fn a_missing_character_outside_the_private_use_area_still_comes_from_the_system() {
+    register_app_fonts(&fonts_dir());
+    // Menlo has no ⏵ either; the system's chain supplies it as before, and a
+    // private-use code point nobody has stays a box.
+    let mut menlo = atlas(Some("Menlo"));
+    let (placed, _) = menlo.slot(
+        Sprite::Char('⏵'),
+        Face::Regular,
+        SizeClass::Normal,
+        Half::Whole,
+    );
+    assert_ne!(placed.slot, bt_atlas::TOFU, "⏵ is a box");
+    let (placed, _) = menlo.slot(
+        Sprite::Char('\u{10FFFD}'),
+        Face::Regular,
+        SizeClass::Normal,
+        Half::Whole,
+    );
+    assert_eq!(placed.slot, bt_atlas::TOFU);
+}

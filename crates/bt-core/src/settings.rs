@@ -79,8 +79,10 @@ pub const SYSTEM_THEME: &str = "system";
 /// values, so NaN doesn't enter the comparison.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontOptions {
-    /// Family name; `None` → the chain (SF Mono, else Menlo). Whether it exists
-    /// on the machine is `bt-atlas`'s question — only text here.
+    /// Family name; `None` → the default font (JetBrains Mono, which ships with the
+    /// app; the system's chain, SF Mono else Menlo, where the app's fonts are not
+    /// there). Whether it exists on the machine is `bt-atlas`'s question — only
+    /// text here.
     pub family: Option<String>,
     /// Logical point size. Clamping its scale-multiplied form is in `bt-atlas`
     /// and is **silent**; the rule here is only "finite and greater than zero".
@@ -2288,10 +2290,11 @@ tab_running = "tail"
 tab_position = "top"
 
 [font]
-# A family name as shown in Font Book. Without it bateri uses SF Mono, or
-# Menlo when SF Mono is not installed — SF Mono ships with Xcode, so it is not
-# on every machine. A character the family lacks is drawn from the system font
-# chain when it fits one cell; emoji, CJK and other wide glyphs stay as boxes.
+# A family name as shown in Font Book. Without it bateri uses JetBrains Mono,
+# which comes with the app. A character the family lacks is drawn from the
+# system font chain when it fits one cell, and a symbol of the private use area
+# (a git branch, a folder) from the symbol font that comes with the app; emoji,
+# CJK and other wide glyphs stay as boxes.
 # family = "Menlo"
 # Greater than 0. Size in points.
 size = 13

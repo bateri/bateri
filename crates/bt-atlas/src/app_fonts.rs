@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::rules::same_family;
-use crate::system::{Backend, FontSystem};
+use crate::system::{Backend, Font, FontSystem};
 
 /// The family the app opens when no `family` is written.
 pub(crate) const DEFAULT_FAMILY: &str = "JetBrains Mono";
@@ -101,6 +101,28 @@ pub fn register_app_fonts(dir: &Path) -> &'static AppFonts {
 /// family open by its name (its own file or the user's copy)?
 pub fn app_fonts_registered() -> bool {
     DEFAULT_AVAILABLE.load(Ordering::Acquire)
+}
+
+/// The family the app starts with when no `family` is written, if the app's
+/// fonts are there ([`app_fonts_registered`]): what the Font list calls the
+/// default. `None`: the system's own chain (SF Mono, else Menlo) is.
+pub fn app_default_family() -> Option<&'static str> {
+    app_fonts_registered().then_some(DEFAULT_FAMILY)
+}
+
+/// Opens the font no `family` asks for: the app's default family where the
+/// app's fonts are registered, the system's chain everywhere else (a test
+/// binary, a build without the directory). Every place that opens "the
+/// default" comes through here, so the grid, the font options and the
+/// proportional text agree on which font that is.
+pub(crate) fn open_default(size: f64) -> (Font, String) {
+    if app_fonts_registered() {
+        let (font, returned) = Backend::open(DEFAULT_FAMILY, size);
+        if same_family(&returned, DEFAULT_FAMILY) {
+            return (font, returned);
+        }
+    }
+    Backend::open_default(size)
 }
 
 /// Does `name` open as itself? `Backend::open` never fails; the family the
@@ -232,6 +254,22 @@ mod tests {
         let plan = plan(group(&files, declared), |_| true);
         assert!(plan.register.is_empty());
         assert_eq!(plan.kept, ["One", "Two"]);
+    }
+
+    /// A process that never ran the launch's pass keeps the system's chain for
+    /// the default font, whatever else it registered: the lib tests and
+    /// `raster_digest` rest on the chain staying SF Mono / Menlo. The test
+    /// fonts are registered here on purpose — JetBrains Mono is among them and
+    /// would be the default if registering any font were enough.
+    #[test]
+    fn registering_the_test_fonts_does_not_change_the_default_font() {
+        crate::system::fixture::register_test_fonts();
+        assert!(!app_fonts_registered());
+        assert_eq!(app_default_family(), None);
+        let (_, name) = open_default(12.0);
+        let (_, chain) = Backend::open_default(12.0);
+        assert_eq!(name, chain);
+        assert!(!same_family(&name, DEFAULT_FAMILY));
     }
 
     #[test]

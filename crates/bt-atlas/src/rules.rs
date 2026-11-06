@@ -336,9 +336,10 @@ pub(crate) fn same_family(returned: &str, requested: &str) -> bool {
     returned.to_lowercase() == requested.to_lowercase()
 }
 
-/// Walks the chain: the requested family (if any), otherwise the backend's
-/// default chain ([`FontSystem::open_default`]). Anything to tell the user is
-/// in the second value.
+/// Walks the chain: the requested family (if any), otherwise the default font
+/// ([`crate::app_fonts::open_default`]: the app's own default family where the app's
+/// fonts were registered, the backend's chain, [`FontSystem::open_default`],
+/// everywhere else). Anything to tell the user is in the second value.
 ///
 /// The requested family is checked **by the returned name** like the other
 /// links ([`same_family`]): for a name that does not exist CoreText gives
@@ -347,14 +348,14 @@ pub(crate) fn same_family(returned: &str, requested: &str) -> bool {
 /// warning — one that names a side effect, not the actual error.
 ///
 /// [`FontSystem::open`] gives the font **together** with the family name it
-/// actually opened; the default chain itself belongs to the backend.
+/// actually opened; the system's own default chain belongs to the backend.
 pub(crate) fn open_chain(family: Option<&str>, point_size: f64) -> (Font, Option<FontIssue>) {
     let Some(requested) = family else {
-        return (Backend::open_default(point_size).0, None);
+        return (crate::app_fonts::open_default(point_size).0, None);
     };
     let (font, returned) = Backend::open(requested, point_size);
     if !same_family(&returned, requested) {
-        let (font, using) = Backend::open_default(point_size);
+        let (font, using) = crate::app_fonts::open_default(point_size);
         let issue = FontIssue::FamilyNotFound {
             requested: requested.to_owned(),
             using,
@@ -844,10 +845,49 @@ pub(crate) fn fallback_font(
     natural_advance: f64,
     cols: u8,
 ) -> Option<Accepted> {
+    // The private use area first, from the symbol font that ships with the app:
+    // the system's cascade does not promise to look at a font registered for the
+    // process, and it never answers "none" (the last resort font comes back).
+    // The same glyph and the same gate; a symbol the font lacks, or one the gate
+    // refuses, goes on to the cascade as before.
+    if is_private_use(ch)
+        && let Some(accepted) = symbol_fallback(base, ch, cell, natural_advance, cols)
+    {
+        return Some(accepted);
+    }
     let mut utf8 = [0u8; 4];
     let candidate = Backend::cascade(base, ch.encode_utf8(&mut utf8))?;
     let glyph = Backend::glyph(&candidate, ch)?;
     accept(candidate, glyph, cell, natural_advance, cols)
+}
+
+/// Is `ch` in the private use area, where icon fonts keep their symbols: the
+/// basic plane's (U+E000–U+F8FF) and both supplementary planes' (U+F0000 and
+/// U+100000 up — Nerd Fonts 3 puts its Material Design icons above U+F0000, so
+/// the first range alone would miss half of the symbols).
+pub(crate) fn is_private_use(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD
+    )
+}
+
+/// `ch` from the symbol font, at the size of `base`, through the fallback's
+/// gate. `None` when the symbol font is not there (it opens as another
+/// family), has no glyph for `ch` or the gate refuses the glyph.
+fn symbol_fallback(
+    base: &Font,
+    ch: char,
+    cell: GlyphBox,
+    natural_advance: f64,
+    cols: u8,
+) -> Option<Accepted> {
+    let (symbols, returned) = Backend::open(crate::app_fonts::SYMBOL_FAMILY, Backend::size(base));
+    if !same_family(&returned, crate::app_fonts::SYMBOL_FAMILY) {
+        return None;
+    }
+    let glyph = Backend::glyph(&symbols, ch)?;
+    accept(symbols, glyph, cell, natural_advance, cols)
 }
 
 /// Shapes a grapheme cluster (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) into a **single
@@ -1211,6 +1251,43 @@ pub(crate) fn unpremultiply(target: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The private use area is the three ranges Unicode sets aside, and only
+    /// them: Nerd Fonts 3 keeps its Material Design icons above U+F0000, so
+    /// the basic plane's range alone leaves half the symbols as boxes.
+    #[test]
+    fn the_private_use_area_is_the_three_ranges_and_nothing_next_to_them() {
+        for ch in [
+            '\u{E000}',
+            '\u{E0A0}',
+            '\u{F07B}',
+            '\u{F8FF}',
+            '\u{F0000}',
+            '\u{F0001}',
+            '\u{FFFFD}',
+            '\u{100000}',
+            '\u{10FFFD}',
+        ] {
+            assert!(is_private_use(ch), "U+{:04X} is private use", u32::from(ch));
+        }
+        for ch in [
+            'a',
+            '\u{D7FF}',
+            '\u{F900}',
+            '\u{FB00}',
+            '\u{EFFFF}',
+            '\u{FFFFE}',
+            '\u{FFFFF}',
+            '\u{10FFFE}',
+            '\u{10FFFF}',
+        ] {
+            assert!(
+                !is_private_use(ch),
+                "U+{:04X} is not private use",
+                u32::from(ch)
+            );
+        }
+    }
 
     /// `post.isFixedPitch` is the `u32` at byte 12: a short or damaged table
     /// declares nothing.

@@ -61,7 +61,7 @@ mod text;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-pub use app_fonts::{AppFonts, app_fonts_registered, register_app_fonts};
+pub use app_fonts::{AppFonts, app_default_family, app_fonts_registered, register_app_fonts};
 pub use features::{FontFeature, font_features};
 use raster::DrawResult;
 pub use raster::RuleKind;

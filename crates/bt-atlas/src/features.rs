@@ -41,7 +41,7 @@ const PROBE_SIZE: f64 = 12.0;
 /// without a `GSUB` table (Menlo), and on a backend that cannot read tables.
 pub fn font_features(family: Option<&str>) -> Vec<FontFeature> {
     let font = match family {
-        None => Backend::open_default(PROBE_SIZE).0,
+        None => crate::app_fonts::open_default(PROBE_SIZE).0,
         Some(name) => {
             let (font, returned) = Backend::open(name, PROBE_SIZE);
             if !same_family(&returned, name) {
