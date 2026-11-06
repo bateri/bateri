@@ -15,21 +15,15 @@ of every installed copy. A version without a section is not released.
 ### Added
 
 - **A font's own rules now run: ligatures, alternate letters and hiding secrets.** In a code font such as JetBrains Mono, `->`, `!=` and `===` are one shape, each cell keeping its own colour, and the cursor on one opens it into its characters. Obel Mono Masked can draw API keys and tokens as dots, including a key the terminal wrapped onto a second row. Settings ▸ Appearance has an Options row under Font, and the command palette the same switches, for what the selected font offers (Ligatures, Hide Secrets, its alternate letters, Slashed Zero); the choices are kept per font under `[font.features."Family"]`, and a tag the font does not have is named in the title bar. A font with no rules, Menlo included, looks exactly as before.
-
-### Changed
-
-- **Lists and text in a program's view stop at their ends**, as the terminal's history does, so a file tree or an editor no longer bounces past its end and squeezes its scroll bar. To have them bounce as macOS's own windows do, turn on Bounce at the Ends (`[motion] scroll_bounce = "on"`).
 - **Eight code fonts come with bateri.** JetBrains Mono, Fira Code, Cascadia Code, Monaspace Neon, Geist Mono, Maple Mono, IBM Plex Mono and Obel Mono are in the Font list in Settings and the command palette, and `family = "Fira Code"` works on a Mac that has never had it installed. They are loaded for bateri alone, so they do not appear in Font Book or in any other app, and a copy you installed yourself comes first. They add 9.3 MB to the app. Each font's license is in the app next to its files, and the About window and `THIRD-PARTY-LICENSES.txt` credit them.
-
 - **Icons in your prompt are drawn in any font.** The git branch, a folder and the arrows of a powerline prompt came out as empty boxes unless the font was a Nerd Font. bateri now draws them from a Symbols Nerd Font that comes with it, in one cell, whichever font you use; a font that has the icons itself keeps its own.
-
 - **A switch for heavier text.** With `smoothing = true` under `[font]`, or Bolder text in Settings ▸ Appearance and Bolder Text in the command palette, text is drawn the way macOS thickens it in Terminal.app, where the default is the font's own thinner weight. It is off unless you turn it on, it needs no restart, and it is macOS only.
-
 - **A program's view is set in your font.** The web page a program shows in a pane used SF Mono or Menlo whatever `family` said, and a font that comes with bateri, one you never installed, fell back to SF Mono there while the terminal showed it. The page now gets your family, JetBrains Mono when you chose none, and changes with it when you save. In a page Fira Code's italic is slanted by the web engine, where the terminal draws it upright.
 
 ### Changed
 
 - **bateri starts in JetBrains Mono.** If you never chose a font, text is now drawn in JetBrains Mono, with its ligatures (`->`, `!=`, `===`), where it used to be SF Mono or Menlo. Choose Menlo in Settings or write `family = "Menlo"` to go back; a font you chose stays as it was.
+- **Lists and text in a program's view stop at their ends**, as the terminal's history does, so a file tree or an editor no longer bounces past its end and squeezes its scroll bar. To have them bounce as macOS's own windows do, turn on Bounce at the Ends (`[motion] scroll_bounce = "on"`).
 
 ### Fixed
 
