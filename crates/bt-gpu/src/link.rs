@@ -152,7 +152,7 @@ use crate::{GpuError, Renderer, Surface};
 
 mod page;
 mod still;
-pub use still::{Shot, Snapshot, Stage};
+pub use still::{Shot, Snapshot, Stage, StageLook};
 
 /// The platform's side of the frame loop — **four jobs**.
 ///

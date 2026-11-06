@@ -122,6 +122,15 @@ value and the names of its choices (a query with a `.` or `_` in it, such as
 `font.size`, also looks at the key in the file); a click on a result opens its
 page and lights the row for a moment.
 
+Five pages open with an example above their rows, drawn by the same renderer
+as a pane so that a choice shows as it will look: Appearance (the light and the
+dark theme side by side while the theme follows the system, with "In use now"
+under the one the system is in, and a program's faint line that Minimum
+contrast lifts), Font, Cursor (this window and an inactive one), Shell (the
+plain prompt, when shell integration is off) and Tabs and Panes (a small window
+with the tab bar and two panes). An example is drawn while its page is open and
+is left out where there is no GPU.
+
 On folder rows Change… opens a folder picker (a folder under your home
 directory is written as `~/…`), on the preview folder Show in Finder opens it,
 and the "In use" row shows the total size of the copies in the folder — Clear

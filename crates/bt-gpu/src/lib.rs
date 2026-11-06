@@ -91,7 +91,7 @@ pub use frame::{
     edge_drawn_px, edge_fades, edge_reserve_px,
 };
 pub use link::{
-    DisplayLink, Layout, Origin, Pacer, Shot, Snapshot, Stage, TickTarget, Ticker, Waker,
+    DisplayLink, Layout, Origin, Pacer, Shot, Snapshot, Stage, StageLook, TickTarget, Ticker, Waker,
 };
 pub use metrics::{CellMetrics, FontNotice, GridInset, family_notice};
 pub use renderer::Renderer;

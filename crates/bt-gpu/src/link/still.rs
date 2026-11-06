@@ -200,6 +200,18 @@ impl Core {
     }
 }
 
+/// How a still shows the caret: the settings' own style (radius, glow, what an inactive window
+/// does to it) and whether the window the picture is of is key.
+///
+/// The default is what a card shows of a pane in the background: the default style, in a
+/// window that is not key.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StageLook {
+    pub caret_style: CaretStyle,
+    /// The window is key: the caret is solid. Otherwise it is as `caret_style.unfocused` says.
+    pub caret_focused: bool,
+}
+
 /// What draws a picture of a session no pane shows (a kablo terminal that runs in the
 /// background, [`bt_core::pictured`]): a renderer of its own, the frame buffers a still keeps
 /// ([`Shot`]) and the reduction chain, with no window, no layer and no surface.
@@ -245,6 +257,9 @@ impl Stage {
 
     /// `session`, a `cols`-column screen, drawn at `size` pixels and brought to `tile`; `None`
     /// when either is empty or the GPU said no (the caller keeps the picture it had).
+    ///
+    /// The pane of a window that is not key, with the caret in its default style
+    /// ([`StageLook::default`]).
     pub fn snapshot(
         &mut self,
         session: &Session,
@@ -253,18 +268,34 @@ impl Stage {
         size: (u32, u32),
         tile: (u32, u32),
     ) -> Option<Snapshot> {
+        self.snapshot_with(session, cols, scale, size, tile, StageLook::default())
+    }
+
+    /// [`Stage::snapshot`] with the caret as `look` has it: a picture of how a setting looks, not
+    /// of a terminal nobody shows. Nothing else of the picture changes — the colours are the
+    /// session's theme, the text is the stage's font, the floor under a program's text is the
+    /// session's own ([`Session::set_minimum_contrast`]).
+    pub fn snapshot_with(
+        &mut self,
+        session: &Session,
+        cols: u16,
+        scale: f64,
+        size: (u32, u32),
+        tile: (u32, u32),
+        look: StageLook,
+    ) -> Option<Snapshot> {
         if size.0 == 0 || size.1 == 0 || tile.0 == 0 || tile.1 == 0 {
             return None;
         }
         let view = View {
             cell: self.renderer.cell_metrics(scale),
-            caret_style: CaretStyle::default(),
+            caret_style: look.caret_style,
             edge: ContentEdge::default(),
             dock_rows: 0,
             dock_cols: cols,
             context: ContextStrip::default(),
-            focused: false,
-            caret_focused: false,
+            focused: look.caret_focused,
+            caret_focused: look.caret_focused,
         };
         let clear = compose_still(&mut self.shot, session, &view, size, &|cells, above| {
             self.renderer.shape(cells, above);

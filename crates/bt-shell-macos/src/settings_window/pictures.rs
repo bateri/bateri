@@ -65,6 +65,9 @@ pub(super) struct Palette {
     pub(super) cursor: u32,
     pub(super) accent: u32,
     pub(super) dim: u32,
+    /// The prompt's mark, and the line that frames the focused pane.
+    pub(super) success: u32,
+    pub(super) focus: u32,
     /// What the cards stand on.
     pub(super) ground: u32,
     /// The tab bar and the dock.
@@ -90,6 +93,8 @@ impl Palette {
             cursor: theme.cursor,
             accent: theme.accent,
             dim: theme.dim,
+            success: theme.success,
+            focus: pack(theme.focus_frame_srgb()),
             ground: pack(theme.ground_srgb()),
             band: pack(theme.band_srgb()),
             separator: pack(theme.separator_srgb()),
@@ -311,7 +316,7 @@ fn cell_at(x: f64, count: usize) -> Option<usize> {
     (index < count && x - index as f64 * stride <= CELL_WIDTH).then_some(index)
 }
 
-fn attributes(
+pub(super) fn attributes(
     font: &NSFont,
     color: &NSColor,
 ) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
@@ -472,7 +477,7 @@ fn draw_picture(picture: Picture, at: NSPoint, palette: &Palette, strength: f64)
 }
 
 /// The running line's tail, as it is at one moment: about a third of the ring from its start.
-fn stroke_tail(ring: &NSBezierPath, color: Tint) {
+pub(super) fn stroke_tail(ring: &NSBezierPath, color: Tint) {
     // The ring is 2 * (27 + 23) minus the corners' share long, about 90 points.
     let mut pattern: [f64; 2] = [29.0, 61.0];
     // SAFETY: `pattern` outlives the call (AppKit copies it) and `count` is its length.

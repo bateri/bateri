@@ -54,8 +54,9 @@ use objc2_app_kit::{
     NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch, NSTableColumn,
     NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
     NSTableViewStyle, NSTextField, NSTitlePosition, NSUserInterfaceItemIdentification,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowDelegate,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
@@ -78,6 +79,8 @@ mod pages;
 mod pictures;
 mod recorder;
 mod search;
+mod specimen;
+mod tabs_specimen;
 
 /// Whether the keyboard is in a field of Settings ▸ Keyboard that listens for a shortcut: then
 /// a modifier pressed twice is a shortcut to give, not one to run.
@@ -1696,7 +1699,10 @@ impl Row {
         wash.setBorderWidth(0.0);
         wash.setCornerRadius(0.0);
         wash.setFillColor(&NSColor::controlAccentColor().colorWithAlphaComponent(0.22));
-        add_pinned(&self.view, &wash);
+        // Under the row's own views: a wash on top would take the next click.
+        wash.setTranslatesAutoresizingMaskIntoConstraints(false);
+        self.view
+            .addSubview_positioned_relativeTo(&wash, NSWindowOrderingMode::Below, None);
         activate(&[
             wash.leadingAnchor()
                 .constraintEqualToAnchor(&self.view.leadingAnchor()),
@@ -1763,6 +1769,11 @@ pub(crate) struct ThemeLists<'a> {
     pub(crate) user: &'a [String],
     /// The theme on screen for the file's choice: the pictures are drawn in its colours.
     pub(crate) on_screen: &'a Theme,
+    /// The themes the file names for the light and for the dark appearance, and whether the
+    /// system is in the dark one: Appearance's example shows the pair.
+    pub(crate) light: &'a Theme,
+    pub(crate) dark: &'a Theme,
+    pub(crate) dark_appearance: bool,
 }
 
 pub(crate) struct Ivars {
@@ -1795,6 +1806,10 @@ pub(crate) struct Ivars {
     side_open: OnceCell<Retained<NSButton>>,
     /// One stack per page that has rows; only the selected one is visible.
     panes: OnceCell<Vec<Retained<NSStackView>>>,
+    /// The live examples at the top of five pages, and what the last refresh gave them: an example
+    /// is drawn when its page opens and when a refresh finds its page open.
+    specimens: OnceCell<specimen::Specimens>,
+    specimen_inputs: RefCell<Option<specimen::Inputs>>,
     /// Keyboard: the table of the commands and their shortcuts, shown in the pages' place.
     keyboard: OnceCell<Retained<KeyboardPage>>,
     controls: OnceCell<Controls>,
@@ -1842,6 +1857,17 @@ define_class!(
     }
 
     unsafe impl NSControlTextEditingDelegate for SettingsWindow {}
+
+    unsafe impl NSWindowDelegate for SettingsWindow {
+        /// A closed window gives the examples' renderer and sessions back; opening it draws them
+        /// again from the refresh that reopening makes.
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _note: &NSNotification) {
+            if let Some(specimens) = self.ivars().specimens.get() {
+                specimens.release();
+            }
+        }
+    }
 
     unsafe impl NSTableViewDelegate for SettingsWindow {
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
@@ -2262,6 +2288,8 @@ impl SettingsWindow {
             pane_bottoms: OnceCell::new(),
             side_open: OnceCell::new(),
             panes: OnceCell::new(),
+            specimens: OnceCell::new(),
+            specimen_inputs: RefCell::new(None),
             keyboard: OnceCell::new(),
             controls: OnceCell::new(),
             themes: RefCell::new(Vec::new()),
@@ -2556,6 +2584,16 @@ impl SettingsWindow {
             // The strip carries the button, as the default one, when the file is locked.
             open.setHidden(status.locked);
         }
+        // The open page's example is drawn from the file as it is now.
+        self.ivars().specimen_inputs.replace(Some(specimen::Inputs {
+            settings: settings.clone(),
+            light: *themes.light,
+            dark: *themes.dark,
+            on_screen: *themes.on_screen,
+            dark_appearance: themes.dark_appearance,
+            reduce_motion: resolved.reduce,
+        }));
+        self.show_specimen();
     }
 
     /// A new usage measurement starts: its generation, which
@@ -2887,6 +2925,36 @@ impl SettingsWindow {
             clip.scrollToPoint(NSPoint::new(0.0, 0.0));
             scroll.reflectScrolledClipView(&clip);
         }
+        self.show_specimen();
+    }
+
+    /// Draws the open page's example from what the last refresh gave it; a page that is not open,
+    /// the search results and a page without an example draw nothing.
+    fn show_specimen(&self) {
+        let (Some(sidebar), Some(specimens)) =
+            (self.ivars().sidebar.get(), self.ivars().specimens.get())
+        else {
+            return;
+        };
+        let Some(SideItem::Page(category)) = SideItem::at(sidebar.selectedRow()) else {
+            return;
+        };
+        let Some(kind) = specimen::Kind::of(category) else {
+            return;
+        };
+        if self.searching() {
+            return;
+        }
+        let inputs = self.ivars().specimen_inputs.borrow();
+        let Some(inputs) = inputs.as_ref() else {
+            return;
+        };
+        let scale = self
+            .ivars()
+            .window
+            .get()
+            .map_or(2.0, |window| window.backingScaleFactor());
+        specimens.show(kind, inputs, scale);
     }
 
     fn target(&self) -> &AnyObject {
@@ -3057,6 +3125,7 @@ impl SettingsWindow {
         // Closing hides, reopening returns on the same category.
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(ns_string!("Settings"));
+        window.setDelegate(Some(ProtocolObject::from_ref(self)));
         // The title is in the pane's header; the window title is for the Window menu.
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setTitlebarAppearsTransparent(true);
@@ -3488,6 +3557,7 @@ impl SettingsWindow {
         let mut panes = Vec::new();
         let mut rows = Vec::new();
         let mut groups = Vec::new();
+        let specimens = specimen::Specimens::new(mtm);
         for category in Category::ALL {
             if category.grid().is_none() {
                 continue;
@@ -3499,6 +3569,13 @@ impl SettingsWindow {
                 GROUP_SPACING,
                 NSLayoutAttribute::Leading,
             );
+            // The page's live example, above its groups.
+            if let Some(view) = specimen::Kind::of(category).and_then(|kind| specimens.view(kind)) {
+                page.addArrangedSubview(view);
+                view.widthAnchor()
+                    .constraintEqualToAnchor(&page.widthAnchor())
+                    .setActive(true);
+            }
             for spec in pages::groups(category) {
                 let first = rows.len();
                 let (boxed, inner) = group_box(mtm);
@@ -3552,6 +3629,7 @@ impl SettingsWindow {
         }
         controls.rows = rows;
         controls.groups = groups;
+        let _ = self.ivars().specimens.set(specimens);
         (panes, controls)
     }
 }

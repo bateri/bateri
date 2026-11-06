@@ -6654,10 +6654,19 @@ impl AppDelegate {
         let dark = self.dark_appearance();
         let (theme, _) =
             settings::load_theme(Some(&root), settings.theme_for(dark)).or_embedded(dark);
+        // The pair Appearance's example shows, loaded the same way (a theme the folder no longer
+        // has falls back to the embedded one for the appearance it is for).
+        let (light, _) =
+            settings::load_theme(Some(&root), &settings.light_theme).or_embedded(false);
+        let (dark_theme, _) =
+            settings::load_theme(Some(&root), &settings.dark_theme).or_embedded(true);
         let themes = crate::settings_window::ThemeLists {
             embedded: &embedded,
             user: &user,
             on_screen: &theme,
+            light: &light,
+            dark: &dark_theme,
+            dark_appearance: dark,
         };
         window.refresh(&settings, resolved, &state, &write, &themes);
         // On every refresh, not only on open: a changed `preview_dir` is
