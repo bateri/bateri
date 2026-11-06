@@ -49,9 +49,11 @@ Choices:
   fallback fonts of PDFium (Foxit's, BSD-3-Clause) and the predefined CMaps of Adobe
   (BSD-3-Clause), each with the license file that lies beside the data in its crate, given
   as it is. A binary that ships the data asks for the notice, as for any BSD license.
-- Crates under both of two licenses (`BSD-3-Clause AND MIT`, brotli) give the text of each:
-  the `AND` is not the option the MIT list above is made of. A crate under BSD-3-Clause or
-  Apache-2.0 is given under BSD-3-Clause, the text of the crate's own `LICENSE.md`.
+- A crate under both BSD-3-Clause and MIT (`BSD-3-Clause AND MIT`, brotli) gives the text of
+  each: that `AND` is not the option the MIT list below is made of. Other `AND` expressions
+  (`encoding_rs`, `unicode-ident`) are still listed under MIT alone, as they were before the
+  PDF reader. A crate under BSD-3-Clause or Apache-2.0 is given under BSD-3-Clause, the text of
+  the crate's own `LICENSE.md`.
 - The color schemes bateri adapts (`tools/import_themes.py`, the one list a
   theme is added to): the collection the values are read from and each
   project the schemes come from, with its copyright line and license — MIT
@@ -103,13 +105,19 @@ OWN_PROJECT_LICENSE = "GPL-3.0-or-later"
 OWN_PROJECT_SOURCE = "git+https://github.com/bateri/"
 # pencere's LICENSE is the Apache text as it is published and names no holder (the
 # lines in it that begin with "copyright" are the license's own sentences); its
-# NOTICE does, and this is that line. Four crates of its repository are in the build: the
-# host's rules, the wire they share with the program, the page engine and the sandbox.
+# NOTICE does, and this is that line. Six crates of its repository are in the build: the
+# host's rules, the wire they share with the program, the page engine, the sandbox, the
+# drive that tests a pane and the editor the page engine takes.
 COPYRIGHT = {
     "alacritty_terminal": ["Copyright 2020 The Alacritty Project"],
     **{name: ["Copyright 2026 The pencere Authors"]
-       for name in ("pencere-host", "pencere-wire", "pencere-view", "pencere-sandbox")},
+       for name in ("pencere-host", "pencere-wire", "pencere-view", "pencere-sandbox",
+                    "pencere-drive", "pencere-editor")},
 }
+# Crates whose license file is the Apache text alone, with no copyright line of the holder's (the
+# sentences of the license that begin with "copyright" are not one): the line comes from the
+# authors in the crate's `Cargo.toml`.
+COPYRIGHT_FROM_AUTHORS = {"ab_glyph_rasterizer"}
 MIT_TEXT = """Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
@@ -159,8 +167,9 @@ def copyright_lines(pkg):
     if pkg["name"] in COPYRIGHT:
         return COPYRIGHT[pkg["name"]]
     root = os.path.dirname(pkg["manifest_path"])
-    for name in ("LICENSE-MIT", "LICENSE-MIT.md", "LICENSE-MIT.txt", "LICENSE.MIT",
-                 "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING"):
+    for name in () if pkg["name"] in COPYRIGHT_FROM_AUTHORS else (
+            "LICENSE-MIT", "LICENSE-MIT.md", "LICENSE-MIT.txt", "LICENSE.MIT",
+            "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING"):
         path = os.path.join(root, name)
         if not os.path.isfile(path):
             continue
@@ -271,6 +280,8 @@ def main():
                                          f"LICENSE-{license.upper()}"))
                 if text is None and name in SIBLING_LICENSE:
                     text = sibling_license(pkgs, pkg, SIBLING_LICENSE[name])
+                if text is not None and license == "BSD-3-Clause" and "Redistribution" not in text:
+                    sys.exit(f"{name} {version}: the license file is not the BSD-3-Clause text")
             if text is None:
                 sys.exit(f"{name} {version}: {license} license file not found")
             out += [RULE, name, pkg.get("repository") or "",
@@ -368,13 +379,20 @@ def pdf_data_notices(pkgs):
         with open(path, encoding="utf-8") as f:
             return f.read().rstrip()
 
+    # The notice the fonts were extracted with: PDFium's line is in the license file, Foxit's is
+    # the crate's note beside the fonts.
+    foxit_lines = [line.strip() for line in text_of("hayro-font", "assets/README.md").splitlines()
+                   if "Foxit Software" in line]
+    if not foxit_lines:
+        sys.exit("hayro-font: no Foxit copyright line in assets/README.md")
+
     return [
         RULE, "Foxit fonts (from PDFium), in hayro-font",
         "https://github.com/LaurenzV/hayro",
         "The fonts a PDF is drawn in where it does not carry the standard ones (Helvetica,",
         "Times, Courier, Symbol, ZapfDingbats): BSD-3-Clause; full text below, as the crate",
         "has it.",
-        RULE, "", text_of("hayro-font", "assets/LICENSE_FOXIT"), "",
+        RULE, "", *foxit_lines, "", text_of("hayro-font", "assets/LICENSE_FOXIT"), "",
         RULE, "Predefined CMaps of Adobe, in hayro-cmap",
         "https://github.com/LaurenzV/hayro",
         "The tables that read the text of a PDF set in a CJK or other composite font: BSD-3-Clause;",

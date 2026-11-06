@@ -3,8 +3,7 @@ bateri includes, among others, the following third-party software.
 ================================================================================
 ab_glyph_rasterizer
 https://github.com/alexheretic/ab-glyph
-copyright notice that is included in or attached to the work
-copyright license to reproduce, prepare Derivative Works of,
+Copyright (c) Alex Butler
 Licensed under the Apache License, Version 2.0; full text below.
 ================================================================================
 
@@ -833,9 +832,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 pencere-drive
 https://github.com/bateri/pencere
-copyright notice that is included in or attached to the work
-copyright license to reproduce, prepare Derivative Works of,
-Copyright [yyyy] [name of copyright owner]
+Copyright 2026 The pencere Authors
 Licensed under the Apache License, Version 2.0; full text below.
 ================================================================================
 
@@ -1049,9 +1046,7 @@ Copyright 2026 The pencere Authors
 ================================================================================
 pencere-editor
 https://github.com/bateri/pencere
-copyright notice that is included in or attached to the work
-copyright license to reproduce, prepare Derivative Works of,
-Copyright [yyyy] [name of copyright owner]
+Copyright 2026 The pencere Authors
 Licensed under the Apache License, Version 2.0; full text below.
 ================================================================================
 
@@ -4437,6 +4432,8 @@ The fonts a PDF is drawn in where it does not carry the standard ones (Helvetica
 Times, Courier, Symbol, ZapfDingbats): BSD-3-Clause; full text below, as the crate
 has it.
 ================================================================================
+
+Original code copyright 2014 Foxit Software Inc. http://www.foxitsoftware.com
 
 // Copyright 2014 PDFium Authors. All rights reserved.
 //
