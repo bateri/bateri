@@ -807,10 +807,13 @@ impl Specimens {
             .collect()
     }
 
-    /// Hides every example: the open page shows its own again ([`Specimens::show`]).
-    pub(super) fn hide_all(&self) {
+    /// Hides every example but `kept`'s, which [`Specimens::show`] draws next: hiding it too would
+    /// empty the place above the rows for a moment, and a layout then would move the rows.
+    pub(super) fn hide_except(&self, kept: Option<Kind>) {
         for specimen in &self.all {
-            specimen.view.setHidden(true);
+            if Some(specimen.kind) != kept {
+                specimen.view.setHidden(true);
+            }
         }
     }
 

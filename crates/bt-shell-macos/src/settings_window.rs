@@ -3083,10 +3083,9 @@ impl SettingsWindow {
             return;
         };
         // A blink belongs to the Cursor page as it was drawn: whatever is shown now starts it
-        // again or leaves it stopped. Only the open page's example shows.
+        // again or leaves it stopped.
         self.cancel_blink();
         specimens.stop_blink();
-        specimens.hide_all();
         let settle = || {
             if let Some(sticky) = self.ivars().sticky.get() {
                 sticky.settle(self.pages_scrolled());
@@ -3098,6 +3097,9 @@ impl SettingsWindow {
             }
             _ => None,
         };
+        // Only the open page's example shows; it is not hidden on the way, or the rows under it
+        // would move up and back and lose where they were scrolled.
+        specimens.hide_except(shown.map(|(kind, _)| kind));
         let Some((kind, inputs)) = shown else {
             settle();
             return;
@@ -3107,13 +3109,15 @@ impl SettingsWindow {
             .window
             .get()
             .map_or(2.0, |window| window.backingScaleFactor());
-        // As wide as the page's groups: the window lays out first, so the width is the one shown.
+        // As wide as the page's groups. The place's width is the window's, whatever it holds; a
+        // window not laid out yet is laid out first.
         let width = self.ivars().sticky.get().map_or(0.0, |sticky| {
-            if let Some(content) = self
-                .ivars()
-                .window
-                .get()
-                .and_then(|window| window.contentView())
+            if sticky.stack.frame().size.width < 1.0
+                && let Some(content) = self
+                    .ivars()
+                    .window
+                    .get()
+                    .and_then(|window| window.contentView())
             {
                 content.layoutSubtreeIfNeeded();
             }

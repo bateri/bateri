@@ -226,6 +226,17 @@ impl SettingsWindow {
                 {
                     say("no line under the example with rows scrolled under it".to_owned());
                 }
+                // A setting changed down the page refreshes the window from the file: the page
+                // stays where it was scrolled.
+                let before = clip.bounds().origin.y;
+                self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+                content.layoutSubtreeIfNeeded();
+                let after = clip.bounds().origin.y;
+                if (after - before).abs() > SLACK {
+                    say(format!(
+                        "a refresh scrolled the page from {before:.1} to {after:.1}"
+                    ));
+                }
                 clip.scrollToPoint(objc2_foundation::NSPoint::new(0.0, 0.0));
                 scroll.reflectScrolledClipView(&clip);
             }
