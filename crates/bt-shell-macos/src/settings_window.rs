@@ -48,15 +48,15 @@ use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSBackingStoreType,
     NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlStateValueOff,
     NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType, NSFont, NSFontAttributeName,
-    NSFontDescriptor, NSImage, NSImageScaling, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
-    NSLineBreakMode, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
-    NSScrollView, NSSearchField, NSSegmentSwitchTracking, NSSegmentedControl, NSSlider,
-    NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch, NSTableColumn,
-    NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
-    NSTableViewStyle, NSTextField, NSTitlePosition, NSUserInterfaceItemIdentification,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowDelegate,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
-    NSWorkspace,
+    NSFontDescriptor, NSImage, NSImageScaling, NSImageSymbolConfiguration, NSImageView,
+    NSLayoutAttribute, NSLayoutConstraint, NSLineBreakMode, NSMenuItem, NSModalResponse,
+    NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSScrollView, NSSearchField,
+    NSSegmentSwitchTracking, NSSegmentedControl, NSSlider, NSSplitViewController, NSSplitViewItem,
+    NSStackView, NSStepper, NSSwitch, NSTableColumn, NSTableView, NSTableViewDataSource,
+    NSTableViewDelegate, NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField,
+    NSTitlePosition, NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView,
+    NSViewController, NSWindow, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
@@ -117,6 +117,10 @@ const SIDE_PAD: f64 = 10.0;
 const SIDE_TILE_LEFT: f64 = 8.0;
 const SIDE_ROW_RADIUS: f64 = 14.0;
 const SIDE_TILE_RADIUS: f64 = 6.0;
+/// The point size of the mark in a sidebar tile: drawn at its own size in the tile's middle, with
+/// room round it, not scaled down to the tile's edges (a symbol fitted to the edges stands where its
+/// own bounds put it, off the middle).
+const SIDE_SYMBOL_SIZE: f64 = 11.0;
 const SIDE_ROW_HEIGHT: f64 = 30.0;
 const SIDE_GAP_HEIGHT: f64 = 10.0;
 /// A group's box: its corner, the gap between two groups and between a title and its box.
@@ -3474,7 +3478,9 @@ impl SettingsWindow {
         let dark_theme = self.string_popup(Key::DarkTheme);
         let minimum_contrast = self.string_popup(Key::MinimumContrast);
         let font = self.string_popup(Key::Font);
-        let size = self.number(Key::Size, MIN_SIZE, MAX_SIZE, 1.0, NUMBER_WIDTH);
+        // Half a point a step: the size is a decimal, and a whole point is a large step at the
+        // sizes a terminal is read at.
+        let size = self.number(Key::Size, MIN_SIZE, MAX_SIZE, 0.5, NUMBER_WIDTH);
         let line_height = self.number(
             Key::LineHeight,
             *LINE_HEIGHT_RANGE.start(),
@@ -4397,13 +4403,17 @@ impl SideRow {
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         let label = NSTextField::labelWithString(&NSString::from_str(category.title()), mtm);
         let icon = NSImageView::new(mtm);
+        let config =
+            NSImageSymbolConfiguration::configurationWithPointSize_weight(SIDE_SYMBOL_SIZE, 0.0);
         if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             &NSString::from_str(category.symbol()),
             None,
-        ) {
+        )
+        .and_then(|image| image.imageWithSymbolConfiguration(&config))
+        {
             icon.setImage(Some(&image));
         }
-        icon.setImageScaling(NSImageScaling::ScaleProportionallyDown);
+        icon.setImageScaling(NSImageScaling::ScaleNone);
         add_pinned(&this, &icon);
         add_pinned(&this, &label);
         activate(&[

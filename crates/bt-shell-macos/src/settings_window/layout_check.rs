@@ -26,7 +26,7 @@ const SLACK: f64 = 0.5;
 
 impl SettingsWindow {
     /// Lays out every page and lists what overlaps; with `shots`, writes `{page}.png` (the whole
-    /// page) and `{page}-window.png` (the window) there.
+    /// page), `{page}-window.png` (the window) and `{page}-sidebar.png` (the sidebar) there.
     pub(crate) fn layout_problems(&self, shots: Option<&Path>) -> Vec<String> {
         let ivars = self.ivars();
         let (Some(window), Some(sidebar), Some(controls), Some(scroll), Some(panes)) = (
@@ -168,6 +168,9 @@ impl SettingsWindow {
                 let slug = page.to_lowercase().replace(' ', "-");
                 picture(&document, &dir.join(format!("{slug}.png")));
                 picture(&content, &dir.join(format!("{slug}-window.png")));
+                // The window's picture leaves the sidebar out (its material is the window
+                // server's); its rows draw themselves.
+                picture(sidebar, &dir.join(format!("{slug}-sidebar.png")));
             }
         }
         problems
