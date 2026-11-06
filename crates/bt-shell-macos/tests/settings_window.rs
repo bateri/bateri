@@ -1,0 +1,42 @@
+//! The settings window's pages, laid out and measured (`bt_shell_macos::settings_layout_problems`):
+//! a group's rows inside its box and one under another, a row's text beside its control, a
+//! page's example above its groups. A layout that leaves a height open builds without a word and
+//! draws everything over one another; this is the check that sees it without eyes.
+//!
+//! Its own `main` (`harness = false`): AppKit wants the main thread. Without a window server
+//! session (an ssh login) it says so and passes. `BT_SETTINGS_SHOTS=<dir>` also writes each page
+//! there as a PNG, for a person to look at.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+fn main() {
+    let aqua = Command::new("launchctl")
+        .arg("managername")
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "Aqua");
+    if !aqua {
+        println!("settings_window: SKIPPED (no window server session)");
+        return;
+    }
+    let mtm = MainThreadMarker::new().expect("a harness-less test runs on the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let shots = std::env::var_os("BT_SETTINGS_SHOTS").map(PathBuf::from);
+    if let Some(dir) = &shots {
+        std::fs::create_dir_all(dir).expect("the pictures' folder can be made");
+    }
+    let problems = bt_shell_macos::settings_layout_problems(mtm, shots.as_deref());
+    for problem in &problems {
+        eprintln!("settings_window: {problem}");
+    }
+    assert!(
+        problems.is_empty(),
+        "{} layout problems in the settings window",
+        problems.len()
+    );
+    println!("settings_window: ok");
+}

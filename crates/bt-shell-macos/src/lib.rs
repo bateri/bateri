@@ -115,6 +115,18 @@ pub use bt_gpu::GpuError;
 /// work. Re-exported here so the binary gains no new crate edge.
 pub use bt_shell_common::ssh_route::askpass_main as askpass;
 
+/// Builds the settings window without showing it, lays out every page with the default settings
+/// and lists what overlaps; with `shots`, writes each page there as a PNG. Only for
+/// `tests/settings_window.rs`: a layout that leaves a height open builds without a word and draws
+/// its rows over one another, and only measuring the laid-out frames sees it.
+#[doc(hidden)]
+pub fn settings_layout_problems(
+    mtm: MainThreadMarker,
+    shots: Option<&std::path::Path>,
+) -> Vec<String> {
+    settings_window::SettingsWindow::new(mtm).layout_problems(shots)
+}
+
 /// The profile this copy of the application names in its `Info.plist` (`BateriProfile`): a
 /// development copy's (`make dev`) settings are its own
 /// ([`bt_shell_common::settings::profile_root`]). `None` for the application itself, and for a

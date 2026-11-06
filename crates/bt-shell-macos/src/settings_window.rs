@@ -75,6 +75,7 @@ use pictures::{Palette, Picture, PictureChoice};
 
 mod font_options;
 mod keyboard;
+mod layout_check;
 mod pages;
 mod pictures;
 mod recorder;
@@ -4045,6 +4046,24 @@ fn group_box(mtm: MainThreadMarker) -> (Retained<NSBox>, Retained<NSStackView>) 
     );
     let content: &NSView = &inner;
     boxed.setContentView(Some(content));
+    // The box sizes its content view by its autoresizing mask, which gives the box no height of
+    // its own: left so, the box is laid out at none and the rows draw over one another and over
+    // the next group. Tied to the box's four edges, the stack's rows are the box's height.
+    inner.setTranslatesAutoresizingMaskIntoConstraints(false);
+    activate(&[
+        inner
+            .topAnchor()
+            .constraintEqualToAnchor(&boxed.topAnchor()),
+        inner
+            .bottomAnchor()
+            .constraintEqualToAnchor(&boxed.bottomAnchor()),
+        inner
+            .leadingAnchor()
+            .constraintEqualToAnchor(&boxed.leadingAnchor()),
+        inner
+            .trailingAnchor()
+            .constraintEqualToAnchor(&boxed.trailingAnchor()),
+    ]);
     (boxed, inner)
 }
 
