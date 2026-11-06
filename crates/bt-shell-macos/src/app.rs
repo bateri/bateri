@@ -6486,6 +6486,21 @@ impl AppDelegate {
         }
     }
 
+    /// The settings window's Show in Finder: selects the settings file in a Finder window — the
+    /// strip's answer to a file that cannot be written, where the way to the file is the point.
+    pub(crate) fn reveal_settings(&self) {
+        let Inputs::User {
+            config_root: Some(root),
+        } = self.inputs()
+        else {
+            return;
+        };
+        let path = root.join(settings::FILE_NAME);
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        NSWorkspace::sharedWorkspace()
+            .activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
+    }
+
     /// View ▸ Theme ▸ Open Themes Folder: shows `themes/` under the settings directory in
     /// Finder. The folder is made if it is not there (the menu item is the way a user finds
     /// where theme files go); a folder that cannot be made, or shown, goes to the write slot

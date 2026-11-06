@@ -25,6 +25,8 @@ of every installed copy. A version without a section is not released.
 - **bateri starts in JetBrains Mono.** If you never chose a font, text is now drawn in JetBrains Mono, with its ligatures (`->`, `!=`, `===`), where it used to be SF Mono or Menlo. Choose Menlo in Settings or write `family = "Menlo"` to go back; a font you chose stays as it was.
 - **Lists and text in a program's view stop at their ends**, as the terminal's history does, so a file tree or an editor no longer bounces past its end and squeezes its scroll bar. To have them bounce as macOS's own windows do, turn on Bounce at the Ends (`[motion] scroll_bounce = "on"`).
 
+- **The Settings window is organised by page.** Nine pages in a sidebar (General, Appearance, Font, Tabs and Panes, Cursor, Motion, Shell, Keyboard, Servers) replace the six, and each row has a name, a line saying what the current value does, and its control. A row that depends on another setting stays in place, dimmed, with the reason, and a settings file that cannot be read shows a strip with Open settings.toml.
+
 ### Fixed
 
 - The command palette's font list shows only the monospaced families this Mac has, so choosing one no longer ends in `font "JetBrains Mono" not found`.

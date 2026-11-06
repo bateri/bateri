@@ -74,33 +74,47 @@ according to the keyboard layout; on a Turkish Q keyboard the same key
 carries a different letter, and the menu shows that letter instead. View ▸
 Bigger also shows as `⌘:` on that layout.
 
-bateri ▸ Settings… (Cmd ,) opens the settings window: six categories on the
-left (General, Appearance, Cursor, Motion, Keyboard, Remote Files), the
-settings on the right. Remote Files shows `[remote] integration` at the top ("Set up shell
-integration on servers"; see [Remote shell
-integration](#remote-shell-integration)), then the eight preview/download keys
-of `[remote]` and the two keys of the load indicator (`stats`,
-`stats_interval`; eleven keys in all), and Appearance also carries
-`[terminal] scrollbar` ("Scroll bar"), because it changes how the window
-looks, `[appearance] content_edge` ("Content edge") and
-`[appearance] minimum_contrast` ("Minimum contrast", under the themes) and
-`[appearance] dim_unfocused_splits` ("Dim unfocused splits") and
-`[appearance] focus_frame` ("Focus frame") and
-`[appearance] split_style` ("Split style") and
-`[appearance] tab_details` ("Tab details") and `[appearance]
-resize_in_steps` ("Resize in steps") and `[appearance] tab_position`
-("Tabs") and `[appearance] tab_icons`
-("Tab icons") with `tab_icon_colors` ("Icon colors") and `tab_running`
-("Running tab"); on
-folder rows
-Change… opens a folder
-picker (a folder under your home directory is written as `~/…`), on the
-preview folder Show in Finder opens it, and the "In use" row shows the total
-size of the copies in the folder — Clear Now deletes the previews at once (a
-copy you changed is not deleted, it is moved to the download folder). The
-window only writes to `settings.toml`; what applies it to the screen is the
-same path that runs when you save the file, so a change made from the window
-also takes effect at once.
+bateri ▸ Settings… (Cmd ,) opens the settings window: a sidebar of nine pages on
+the left and the chosen page on the right. A page is a few titled groups of
+rows. A row has the setting's name, a line under it that says what the current
+value does, and the control on the right; a unit (lines, pt, ×, seconds) stands
+beside the control. A row that leans on another setting stays where it is,
+dimmed, with the reason in place of its description ("Blink is Off." under
+Blink speed); a row that means nothing at all is hidden, as Light and Dark are
+while the theme is a theme of its own, and a group whose rows are all hidden
+goes with them.
+
+- **General** — reopening after quitting, keeping programs running, asking
+  before closing, scrollback, and whether programs may copy to the clipboard.
+- **Appearance** — the theme (with Light and Dark when it follows the system),
+  minimum contrast, where text meets the tab bar, the scroll bar, and resizing
+  a whole cell at a time.
+- **Font** — the font, its size, line height, letter spacing and Bolder text,
+  then an Options group with a switch for each option the font offers.
+- **Tabs and Panes** — where the tabs sit, program icons and their colors, the
+  running indicator, details under a tab, the split style, dimming the other
+  panes and the focus frame.
+- **Cursor** — shape, blink and its speed, corner radius, glow, and the cursor
+  in an inactive window.
+- **Motion** — Reduce motion, and the motion of a typed or deleted letter, the
+  cursor, a shell starting and scrolling.
+- **Shell** — shell integration, what the dock shows (Python environment, Node
+  version, listening ports) and what programs on this Mac may do with the
+  `bateri` command.
+- **Keyboard** — the shortcuts table (see [Settings… ▸
+  Keyboard](#settings--keyboard)).
+- **Servers**, after a gap — `[remote] integration` ("Set up shell integration
+  on servers"; see [Remote shell integration](#remote-shell-integration)), the
+  two keys of the load indicator (`stats`, `stats_interval`) and the eight
+  preview and download keys of `[remote]`.
+
+On folder rows Change… opens a folder picker (a folder under your home
+directory is written as `~/…`), on the preview folder Show in Finder opens it,
+and the "In use" row shows the total size of the copies in the folder — Clear
+Now deletes the previews at once (a copy you changed is not deleted, it is
+moved to the download folder). The window only writes to `settings.toml`; what
+applies it to the screen is the same path that runs when you save the file, so
+a change made from the window also takes effect at once.
 
 - **When it writes:** pop-up menus and switches the moment you pick, sliders
   when released, number fields on Enter or when you leave the field (the
@@ -114,15 +128,15 @@ also takes effect at once.
   the file.
 - **When the file changes from outside, the window changes too** — a value you
   saved in the editor, a new theme you put in `themes/`.
-- **Font options.** Under Font, Appearance has an Options row with a switch for
-  each option the selected font offers: Ligatures, Hide Secrets, the font's
+- **Font options.** The Font page has an Options group with a switch for each
+  option the selected font offers: Ligatures, Hide Secrets, the font's
   alternate letters and Slashed Zero (see [Font
   options](#font-options-ligatures-alternate-letters-and-hiding-secrets)). The
   list is the font's own, so it changes with the font and a font that offers
-  none (Menlo) shows no row. A switch writes only its own lines under
+  none (Menlo) shows no group. A switch writes only its own lines under
   `[font.features."Family"]`; the choices of every family stay in the file when
   you change the font.
-- **Bolder text.** Under Options, Appearance has a Bolder text switch: the
+- **Bolder text.** The Font page has a Bolder text switch: the
   `[font] smoothing` key (see [`[font]`](#font)). It turns on the macOS
   thickening of the text, in the window and in the command palette alike.
 - **A value that is not accepted** is shown in orange under its own row; the
@@ -134,8 +148,8 @@ also takes effect at once.
   bar, and Open settings.toml becomes the default button (Enter). The window
   does not write to a broken file — the half-finished work in it is yours; the
   lock lifts once you fix and save it.
-- **A file that cannot be written** (permissions) is reported in the strip and
-  in the title bar, and the control goes back to the value in the file.
+- **A file that cannot be written** (permissions) is reported in the strip,
+  which offers Show in Finder, and in the title bar, and the control goes back to the value in the file.
 - Not shown in the window: the temporary font size (Cmd +/−; Size is the
   file's value) and settings that do not exist yet.
 
@@ -887,7 +901,7 @@ the first line has gone into history.
   up from its text.
 - Reduce Motion makes the bar widen and narrow at once under the pointer;
   its appearing and fading stay, because they are not movement.
-- In Settings it is Appearance ▸ "Scroll bar:" — Follow System Settings, When
+- In Settings it is Appearance ▸ "Scroll bar" — Follow System Settings, When
   scrolling, Always, Never; under Follow System Settings the line below says
   what the system's preference gives right now.
 
@@ -1420,7 +1434,7 @@ smoothing = false
   warning.
 - **`smoothing = true` draws the text heavier**, the way macOS thickens it in
   Terminal.app. It is **off** by default, which is the outline's own weight.
-  The setting is in Settings ▸ Appearance (Bolder text, under Options) and in
+  The setting is in Settings ▸ Font (Bolder text) and in
   the command palette (Bolder Text, a switch). It applies to the terminal's
   text — the grid, the history, the input line — and to the text bateri draws
   for its own views; colour glyphs (emoji) are drawn the same either way. The
@@ -1518,7 +1532,7 @@ it, the input line at the bottom and the effects of typing in it. They work on
 macOS; the Linux build draws every font as before.
 
 **Where the options are.** The selected font's options are in Settings ▸
-Appearance (the Options row under Font), in the command palette (type the
+Font (the Options group), in the command palette (type the
 option's name; each is a switch and Return flips it without closing the list)
 and in the file. The list comes from the font's own file: Menlo offers none,
 JetBrains Mono offers Ligatures, its stylistic sets and Slashed Zero, Obel Mono
@@ -2195,7 +2209,7 @@ path and the branch. The environment's name goes last, and no name or
 version is ever cut. Over ssh the line shows the server (`host`), not your
 Mac's environment. `python_env = false` and `node_version = false` turn each
 part off at once, in every open tab; both are also in the settings window's
-General page.
+Shell page.
 
 ### `[commands]`
 
@@ -2229,7 +2243,7 @@ installed on that machine, and removed from it when it was, so a program that ru
 the window; give it to a host by its exact name (a pattern such as `prod-*` is read as `own` and the file gets a
 warning).
 
-This Mac's level is also the "bateri command:" row in the settings window's General page and takes effect at
+This Mac's level is also the "Programs on this computer may" row in the settings window's Shell page and takes effect at
 once. A server's level is read again at every request the window gets from it, so a change to `full`, `screen` or
 `own` applies to the next command; what a change to or from `off` does to the installed command waits for that
 server's next connection, which is when the command is installed or removed.
@@ -2522,7 +2536,7 @@ the server's rc files.
   integration off** (like `osc52`): a wrong guess would mean writing to the
   server silently.
 - The setting is read on every `ssh` at that moment; open windows do not wait.
-- **From the settings window**: Remote Files ▸ **Set up shell integration on
+- **From the settings window**: Servers ▸ **Set up shell integration on
   servers** writes this key (`[remote] integration`); changing the file by
   hand changes the switch too.
 - **From the menu**: while in an ssh tab, **Shell ▸ Shell Integration on

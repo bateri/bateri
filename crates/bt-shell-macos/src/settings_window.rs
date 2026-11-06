@@ -1,6 +1,7 @@
-//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar with six
-//! categories on the left, a label–control grid on the right (Keyboard, the sixth, is a table
-//! of its own: [`keyboard`]).
+//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar of nine pages on the left, the
+//! chosen page on the right: titled groups of rows, each row a name and a description with its
+//! control beside them (which rows a page holds and in what order is the table in [`pages`];
+//! Keyboard is a table of its own: [`keyboard`]).
 //!
 //! The window **holds no state of its own**: every value it shows comes from
 //! `AppDelegate`'s active settings ([`SettingsWindow::refresh`]) and every
@@ -44,17 +45,17 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl,
     NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType,
-    NSFont, NSGridCell, NSGridCellPlacement, NSGridRow, NSGridRowAlignment, NSGridView, NSImage,
-    NSImageView, NSLayoutAttribute, NSLayoutConstraint, NSLineBreakMode, NSMenuItem,
-    NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSScrollView, NSSlider,
-    NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch, NSTableCellView,
-    NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle,
-    NSTextField, NSTitlePosition, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
-    NSWindow, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
+    NSFont, NSImage, NSImageScaling, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
+    NSLineBreakMode, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
+    NSScrollView, NSSlider, NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper,
+    NSSwitch, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTitlePosition,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
+    NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, NSURL, ns_string,
+    NSArray, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString, NSURL, ns_string,
 };
 
 use crate::app;
@@ -67,6 +68,7 @@ use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
 mod font_options;
 mod keyboard;
+mod pages;
 mod recorder;
 
 /// Whether the keyboard is in a field of Settings ▸ Keyboard that listens for a shortcut: then
@@ -78,38 +80,64 @@ pub(crate) fn is_recording(mtm: MainThreadMarker) -> bool {
 use keyboard::KeyboardPage;
 
 /// The window's opening content size, in points. The width is fixed, the
-/// height is not: the panes sit in a vertical scroll view, so a pane taller
-/// than the window (Remote Files since its integration row) or a screen
-/// shorter than the window scrolls instead of clipping the rows under the
-/// button. A design constant, not a measured number.
-const WINDOW_SIZE: NSSize = NSSize::new(680.0, 780.0);
-/// The shortest the window can be dragged: the header, a few rows and the
-/// button still fit. A design constant.
+/// height is not: the pages sit in a vertical scroll view, so a page taller
+/// than the window (Servers) or a screen shorter than the window scrolls
+/// instead of clipping the rows. A design constant, not a measured number.
+const WINDOW_SIZE: NSSize = NSSize::new(760.0, 700.0);
+/// The shortest the window can be dragged: the head, a few rows and the
+/// sidebar's button still fit. A design constant.
 const MIN_WINDOW_HEIGHT: f64 = 360.0;
-/// The sidebar's width: close to System Settings', roomy for four short
-/// titles. A design constant.
-const SIDEBAR_WIDTH: f64 = 180.0;
-/// The right pane's inner margin. The 20-point margin of macOS forms.
+/// The sidebar's width: a search field and ten short titles beside their tiles. A design
+/// constant.
+const SIDEBAR_WIDTH: f64 = 212.0;
+/// The detail side's width: what the window leaves beside the sidebar.
+const DETAIL_WIDTH: f64 = WINDOW_SIZE.width - SIDEBAR_WIDTH;
+/// The strip's outer margin.
 const MARGIN: f64 = 20.0;
-/// The label column's width: the same in all four panes, otherwise the
-/// controls would shift sideways when the category changes. The width the
-/// longest label ("Confirm before closing:") fits.
-const LABEL_WIDTH: f64 = 170.0;
+/// A page's margin to the window's edges, and the room under its last group.
+const PAGE_MARGIN: f64 = 22.0;
+const PAGE_BOTTOM: f64 = 28.0;
+/// The head row: the page's name, level with the traffic lights.
+const HEAD_HEIGHT: f64 = 52.0;
+/// The sidebar's rows: the room at each side of a row's face, how far in the tile stands, the
+/// face's corner and the tile's (the tab tile's own: `tab_bar`'s `TILE_ROUND`).
+const SIDE_PAD: f64 = 10.0;
+const SIDE_TILE_LEFT: f64 = 8.0;
+const SIDE_ROW_RADIUS: f64 = 14.0;
+const SIDE_TILE_RADIUS: f64 = 6.0;
+const SIDE_ROW_HEIGHT: f64 = 30.0;
+const SIDE_GAP_HEIGHT: f64 = 10.0;
+/// A group's box: its corner, the gap between two groups and between a title and its box.
+const GROUP_RADIUS: f64 = 10.0;
+const GROUP_SPACING: f64 = 20.0;
+const TITLE_SPACING: f64 = 7.0;
+/// A row: its padding, the gap between its text and its control, and its least height.
+const ROW_PAD_X: f64 = 12.0;
+const ROW_PAD_Y: f64 = 9.0;
+const ROW_GAP: f64 = 14.0;
+const ROW_MIN_HEIGHT: f64 = 40.0;
+/// The text of a row — its name and description — stands in what is left of the row's width
+/// beside its control; never narrower than this, whatever the control. Wrapped text is given its
+/// width up front: the window's width is fixed, so it is a number and not a layout pass.
+const ROW_WIDTH: f64 = DETAIL_WIDTH - 2.0 * PAGE_MARGIN - 2.0 * ROW_PAD_X;
+const MIN_TEXT_WIDTH: f64 = 160.0;
 /// The popups' common width: popups of different sizes in the same column
 /// look scattered. The longest item ("Only when a program is running") fits.
 const POPUP_WIDTH: f64 = 230.0;
-/// The sliders' width; the value label sits next to it.
+/// A number field's width, and the least the unit after it takes.
+const NUMBER_WIDTH: f64 = 64.0;
+const UNIT_WIDTH: f64 = 18.0;
+/// The sliders' width; the reading sits next to it.
 const SLIDER_WIDTH: f64 = 170.0;
-/// The banner text's wrap width: the right pane's width minus two margins,
-/// the box's two inner paddings, the symbol and its spacing.
+const SLIDE_READING_WIDTH: f64 = 48.0;
+/// The strip's button, and the text's wrap width beside it: the detail side's width minus two
+/// margins, the box's padding, the symbol and its spacing, the button and its gap.
+const BANNER_BUTTON_WIDTH: f64 = 150.0;
 const BANNER_TEXT_WIDTH: f64 =
-    WINDOW_SIZE.width - SIDEBAR_WIDTH - 2.0 * MARGIN - 2.0 * 10.0 - 16.0 - 8.0;
-/// The note text's wrap width: the popup's width — the note must not exceed
-/// the right edge of the control above it (it did in the first screenshot).
-const NOTE_WIDTH: f64 = POPUP_WIDTH;
-/// A folder row's path label: as wide as the popups' column allows, the
-/// middle truncated beyond it (the end of a path is what tells folders apart).
-const PATH_WIDTH: f64 = 280.0;
+    DETAIL_WIDTH - 2.0 * MARGIN - 2.0 * 12.0 - 16.0 - 8.0 - BANNER_BUTTON_WIDTH - 10.0;
+/// A folder row's path label: the end of a path is what tells folders apart, so the head is
+/// what is cut when it does not fit.
+const PATH_WIDTH: f64 = 230.0;
 /// The size popups' presets, bytes (the keys' starting values among
 /// them). A design constant; a value the file holds that is not here is
 /// still shown ([`size_items`]).
@@ -134,59 +162,71 @@ const PREVIEW_LIMIT_PRESETS: &[u64] = &[
 /// that is not here is still shown ([`contrast_items`]).
 const CONTRAST_PRESETS: &[f64] = &[1.0, 3.0, 4.5, 7.0];
 
-/// The sidebar's rows.
+/// The pages of the window, in the sidebar's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Category {
     General,
     Appearance,
+    Font,
+    Tabs,
     Cursor,
     Motion,
+    Shell,
     Keyboard,
-    RemoteFiles,
+    Servers,
 }
 
 impl Category {
-    const ALL: [Category; 6] = [
+    const ALL: [Category; 9] = [
         Category::General,
         Category::Appearance,
+        Category::Font,
+        Category::Tabs,
         Category::Cursor,
         Category::Motion,
+        Category::Shell,
         Category::Keyboard,
-        Category::RemoteFiles,
+        Category::Servers,
     ];
 
-    /// The grid of the category in `panes`; the Keyboard page is a table of its own.
+    /// The page's stack in `panes`: the pages that have rows, in order; the Keyboard page is a
+    /// table of its own.
     fn grid(self) -> Option<usize> {
-        match self {
-            Category::General => Some(0),
-            Category::Appearance => Some(1),
-            Category::Cursor => Some(2),
-            Category::Motion => Some(3),
-            Category::Keyboard => None,
-            Category::RemoteFiles => Some(4),
+        if self == Category::Keyboard {
+            return None;
         }
+        Self::ALL
+            .iter()
+            .filter(|category| **category != Category::Keyboard)
+            .position(|category| *category == self)
     }
 
     fn title(self) -> &'static str {
         match self {
             Category::General => "General",
             Category::Appearance => "Appearance",
+            Category::Font => "Font",
+            Category::Tabs => "Tabs and Panes",
             Category::Cursor => "Cursor",
             Category::Motion => "Motion",
+            Category::Shell => "Shell",
             Category::Keyboard => "Keyboard",
-            Category::RemoteFiles => "Remote Files",
+            Category::Servers => "Servers",
         }
     }
 
-    /// SF Symbol name; if the symbol is not found the icon stays empty, the row stays.
+    /// SF Symbol name; if the symbol is not found the tile stays empty, the row stays.
     fn symbol(self) -> &'static str {
         match self {
             Category::General => "gearshape",
             Category::Appearance => "paintpalette",
+            Category::Font => "textformat",
+            Category::Tabs => "rectangle.split.2x1",
             Category::Cursor => "character.cursor.ibeam",
             Category::Motion => "wind",
+            Category::Shell => "terminal",
             Category::Keyboard => "keyboard",
-            Category::RemoteFiles => "network",
+            Category::Servers => "network",
         }
     }
 }
@@ -386,21 +426,40 @@ impl Key {
 /// The sentence under the reason in a locked window's banner.
 const LOCK_HINT: &str = "Fix the file and save it; this window follows.";
 
-/// The banner above the right pane; invisible if it has no lines.
+/// The strip above the page; invisible if it has no lines.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Banner {
+    /// What happened, in a word or two, above the lines.
+    title: Option<&'static str>,
     /// The subtitle's texts, verbatim: a write error, the lock's reason, a
     /// diagnostic that lands on no row.
     lines: Vec<String>,
     /// Below it, in the secondary colour: what to do.
     hint: Option<&'static str>,
+    /// The button the strip carries, if any.
+    action: BannerAction,
 }
+
+/// The button of the strip: what the user can do about it right there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BannerAction {
+    #[default]
+    None,
+    /// The file cannot be read: opening it is one click — Enter — away.
+    OpenFile,
+    /// The file cannot be written: show where it is.
+    ShowInFinder,
+}
+
+/// The title of a locked window's strip, and of the one for a refused write.
+const LOCK_TITLE: &str = "settings.toml can\u{2019}t be read";
+const WRITE_TITLE: &str = "Changes can\u{2019}t be saved";
 
 /// What the window sees from the file's state — pure, so the
 /// three states are tested without building a window.
 #[derive(Debug, PartialEq, Eq)]
 struct Status {
-    /// All controls disabled; "Open settings.toml" is the default button.
+    /// All controls disabled; the strip's "Open settings.toml" is the default button.
     locked: bool,
     banner: Banner,
     /// Values that were not accepted: row → the diagnostic's message (in place
@@ -418,7 +477,7 @@ struct Status {
 fn status(state: &FileState, write: &[String]) -> Status {
     let mut banner = Banner {
         lines: write.to_vec(),
-        hint: None,
+        ..Banner::default()
     };
     let mut rows = Vec::new();
     let locked = match state {
@@ -426,6 +485,8 @@ fn status(state: &FileState, write: &[String]) -> Status {
         FileState::Locked(reason) => {
             banner.lines.push(reason.clone());
             banner.hint = Some(LOCK_HINT);
+            banner.title = Some(LOCK_TITLE);
+            banner.action = BannerAction::OpenFile;
             true
         }
         FileState::Usable(diagnostics) => {
@@ -441,6 +502,10 @@ fn status(state: &FileState, write: &[String]) -> Status {
             false
         }
     };
+    if !locked && !write.is_empty() {
+        banner.title = Some(WRITE_TITLE);
+        banner.action = BannerAction::ShowInFinder;
+    }
     Status {
         locked,
         banner,
@@ -495,16 +560,16 @@ impl Choice for KeepRunning {
     }
 }
 
-/// The note under "Keep programs running:" for the file's value: under
+/// The description under "Keep programs running" for the file's value: under
 /// `quit` it says, for as long as the value stands, that quitting leaves the
 /// programs behind and how to get back to them or end them — the reminder
 /// that does not depend on a notification permission. Pure.
 fn keep_running_note(keep: KeepRunning) -> &'static str {
     match keep {
-        KeepRunning::Update | KeepRunning::Crash => "Restarting the Mac ends them.",
+        KeepRunning::Update | KeepRunning::Crash => "Restarting the computer ends them.",
         KeepRunning::Quit => {
             "Programs keep running after you quit; open bateri to return to them, \u{2325}\u{2318}Q \
-             ends them. Restarting the Mac ends them."
+             ends them. Restarting the computer ends them."
         }
     }
 }
@@ -515,27 +580,24 @@ impl Choice for CommandLevel {
     }
     fn title(self) -> &'static str {
         match self {
-            CommandLevel::Off => "Off",
-            CommandLevel::Own => "Own panes",
-            CommandLevel::Screen => "Whole screen",
-            CommandLevel::Full => "Everything",
+            CommandLevel::Off => "Do nothing",
+            CommandLevel::Own => "Use their own panes",
+            CommandLevel::Screen => "Use the whole screen",
+            CommandLevel::Full => "Use everything",
         }
     }
 }
 
-/// The note under "bateri command:" for the file's value: what a program in a terminal of this
-/// Mac may do with the command. A server has its own level in the `[remote]` hosts entry.
+/// The description under "Programs on this computer may" for the file's value: what a program
+/// in a terminal of this computer may do with the bateri command. A server has its own level in
+/// the `[remote]` hosts entry.
 fn command_level_note(level: CommandLevel) -> &'static str {
     match level {
-        CommandLevel::Off => "The bateri command does nothing here.",
-        CommandLevel::Own => {
-            "A program here sees and changes only what is made of this Mac's own panes."
-        }
-        CommandLevel::Screen => {
-            "A program here sees and changes every tab, group and window bateri has open."
-        }
+        CommandLevel::Off => "The bateri command does nothing.",
+        CommandLevel::Own => "They see and change only this computer\u{2019}s panes.",
+        CommandLevel::Screen => "They see and change every tab, group and window bateri has open.",
         CommandLevel::Full => {
-            "Like Whole screen, and it starts terminals on other machines and types into or reads their panes. A server given this is trusted with your other machines too."
+            "They also start terminals on other machines and type into or read their panes. A server given this is trusted with your other machines too."
         }
     }
 }
@@ -629,7 +691,7 @@ impl Choice for ContentEdge {
     }
 }
 
-/// The note under "Scroll bar:": under "Follow System Settings" it says what
+/// The description under "Scroll bar": under "Follow System Settings" it says what
 /// the system's preference gives **right now** (`resolved`, the setting and
 /// the system merged), in the popup's own words — "Automatically based on
 /// mouse or trackpad" resolves by device, so the choice in System Settings
@@ -658,16 +720,153 @@ pub(crate) struct Resolved {
     pub(crate) scrollbar: ScrollbarMode,
 }
 
-/// A row's description that follows the file's value; `None` → the row's
-/// fixed one. The window keeps no state of its own: the text is chosen on
-/// every refresh from the settings it shows (and, for "Scroll bar:", what
-/// the system resolves them to).
+/// A row's description: the one sentence under its name, chosen on every refresh from the
+/// settings the window shows (and, for "Scroll bar" and "Reduce motion", what the system resolves
+/// them to). It tells what the **selected** value does, never the list of them all, and a value
+/// that explains itself has none. The window keeps no state of its own.
 fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<&'static str> {
     match key {
+        Key::RestoreWindows => Some(match settings.restore_windows {
+            RestoreWindows::All => {
+                "Windows, tabs and splits come back with what each pane showed. Scrollback is saved as plain text on disk."
+            }
+            RestoreWindows::Layout => {
+                "Windows, tabs and splits come back. Nothing you saw is written to disk."
+            }
+            RestoreWindows::Off => "bateri opens with a new window and deletes what was saved.",
+        }),
         Key::KeepRunning => Some(keep_running_note(settings.keep_running)),
-        Key::CommandLevel => Some(command_level_note(settings.commands_level)),
+        Key::ConfirmClose => match settings.confirm_close {
+            ConfirmClose::Running => {
+                Some("Asks while a program other than the shell runs, and names it.")
+            }
+            ConfirmClose::Always => Some("Asks even at an empty prompt."),
+            ConfirmClose::Never => None,
+        },
+        Key::Clipboard => Some("Also over ssh (OSC 52)."),
+        Key::MinimumContrast => Some(
+            "Text a program colors too close to its background is drawn darker or lighter until it reads.",
+        ),
+        Key::ContentEdge => Some(match settings.content_edge {
+            ContentEdge::Fade => "The line scrolling up thins out, so no letter is cut in half.",
+            ContentEdge::Line => "Text is cut under a thin line.",
+            ContentEdge::Cut => "Text is cut where the pane ends.",
+        }),
         Key::Scrollbar => scrollbar_note(settings.scrollbar, resolved.scrollbar),
-        _ => None,
+        Key::ResizeInSteps => Some(
+            "While you drag a window\u{2019}s edge, so the text keeps the same margin on both sides.",
+        ),
+        Key::FontSmoothing => Some("Thickens the strokes the way Terminal does."),
+        Key::TabPosition => Some(match settings.tab_position {
+            TabPosition::Side => {
+                "A column down the left edge, tall as the window; the title row goes."
+            }
+            TabPosition::Top => "A bar along the top of the window.",
+        }),
+        Key::TabIcons => Some(if settings.tab_icons {
+            "The program a tab runs, on a tile before its title."
+        } else {
+            "Only a small mark while a tab works, waits or has finished."
+        }),
+        Key::TabIconColors => Some(match settings.tab_icon_colors {
+            IconColors::Brand => "Programs with a colored brand (Claude, Gemini) keep it.",
+            IconColors::Theme => "Icons take the theme\u{2019}s colors.",
+        }),
+        Key::TabRunning => {
+            Some("The line round the tab\u{2019}s icon. Still while Reduce motion is on.")
+        }
+        Key::TabDetails => match settings.tab_details {
+            TabDetails::Off => None,
+            TabDetails::Smart => {
+                Some("Where the program stands and what it asks, in Activity only.")
+            }
+            TabDetails::Always => {
+                Some("Where the program stands and what it asks, under every tab.")
+            }
+        },
+        Key::SplitStyle => Some(match settings.split_style {
+            SplitStyle::Lines => "Panes touch, with one thin line between them.",
+            SplitStyle::Cards => "Each pane stands on the ground with a gap round it.",
+        }),
+        Key::FocusFrame => Some("A line in the theme\u{2019}s accent."),
+        Key::Shape => Some("Programs like vim can change it while they run."),
+        Key::ScrollBounce => Some(match settings.scroll_bounce {
+            ScrollBounce::On => "Lists in a program's view spring back past their ends.",
+            ScrollBounce::Off => "Lists in a program's view stop at their ends.",
+        }),
+        Key::Blink => match settings.cursor_blink {
+            CursorBlink::Auto => Some("Blinks until the running program asks it to stop."),
+            CursorBlink::On => Some("Blinks whatever the program asks."),
+            CursorBlink::Off => None,
+        },
+        Key::CursorMotion => Some(match settings.cursor_motion {
+            CursorMotion::Spring => "Travels to its new place with a little give.",
+            CursorMotion::Ease => "Glides to its new place.",
+            CursorMotion::Snap => "Jumps. Typing and deleting effects are off too.",
+        }),
+        Key::ReduceMotion => match settings.reduce_motion {
+            ReduceMotion::System if resolved.reduce => {
+                Some("On right now, from System Settings \u{203a} Accessibility.")
+            }
+            ReduceMotion::System => {
+                Some("Off right now, from System Settings \u{203a} Accessibility.")
+            }
+            ReduceMotion::On => Some("Animations become fades and instant jumps."),
+            ReduceMotion::Off => None,
+        },
+        Key::ShellIntegration => Some(match settings.shell_integration {
+            ShellIntegration::Auto => {
+                "bateri draws the prompt and the line you type sits in the dock. New tabs only."
+            }
+            ShellIntegration::Blocks => {
+                "Commands become blocks; the prompt and the line stay your shell\u{2019}s. New tabs only."
+            }
+            ShellIntegration::Off => "bateri sets nothing up in your shell. New tabs only.",
+        }),
+        Key::PythonEnv => Some("As activate prints it."),
+        Key::NodeVersion => {
+            Some("In the warning color when the project asks for another (.nvmrc).")
+        }
+        Key::Ports => Some("Click to list them, \u{2318}-click to open one."),
+        Key::CommandLevel => Some(command_level_note(settings.commands_level)),
+        Key::RemoteIntegration => {
+            Some("Not on servers marked Production, unless the Shell menu turns it on.")
+        }
+        Key::RemoteStats => match settings.remote_stats.mode {
+            RemoteStatsMode::Sparkline => {
+                Some("CPU and memory as a line and numbers, in the ssh bar.")
+            }
+            RemoteStatsMode::Numbers => Some("CPU and memory as numbers, in the ssh bar."),
+            RemoteStatsMode::Alerts => Some("Nothing until a value passes its threshold."),
+            RemoteStatsMode::Off => None,
+        },
+        Key::StatsInterval => Some("Pauses in hidden tabs and while idle."),
+        Key::PreviewReadOnly => Some("A preview you change is kept, never cleaned up."),
+        Key::PreviewLimit => Some("Oldest go first, when bateri starts."),
+        Key::DownloadNotify => Some("Only while bateri is in the background."),
+        Key::Scrollback
+        | Key::Theme
+        | Key::LightTheme
+        | Key::DarkTheme
+        | Key::Font
+        | Key::Size
+        | Key::LineHeight
+        | Key::LetterSpacing
+        | Key::FontFeatures
+        | Key::DimSplits
+        | Key::BlinkSpeed
+        | Key::Radius
+        | Key::Glow
+        | Key::Unfocused
+        | Key::Keypress
+        | Key::Erase
+        | Key::DockArrival
+        | Key::SmoothScroll
+        | Key::PreviewMaxSize
+        | Key::PreviewDir
+        | Key::PreviewKeep
+        | Key::DownloadDir
+        | Key::DownloadConflict => None,
     }
 }
 
@@ -872,9 +1071,9 @@ fn motion_override(key: Key, settings: &Settings, reduce: bool) -> Option<Overri
     let snap = settings.cursor_motion == CursorMotion::Snap;
     match key {
         Key::Keypress | Key::Erase | Key::DockArrival if snap => {
-            disabled("Off while cursor motion is Snap.")
+            disabled("Off while Cursor motion is Snap.")
         }
-        Key::SmoothScroll if snap => disabled("Line by line while cursor motion is Snap."),
+        Key::SmoothScroll if snap => disabled("Line by line while Cursor motion is Snap."),
         Key::Erase if reduce => disabled("Off while Reduce motion is on."),
         Key::SmoothScroll if reduce => disabled("Line by line while Reduce motion is on."),
         Key::ScrollBounce if reduce => disabled("Stops at the ends while Reduce motion is on."),
@@ -1283,10 +1482,14 @@ struct Controls {
     preview_max_size: Retained<NSPopUpButton>,
     preview_read_only: Retained<NSSwitch>,
     preview_dir: Folder,
+    /// The preview folder's Show in Finder, beside its path; it writes nothing.
+    show_previews: Retained<NSButton>,
     preview_keep: Retained<NSPopUpButton>,
     preview_limit: Retained<NSPopUpButton>,
     /// The preview folder's usage; not a setting, so no row of its own.
     usage: Retained<NSTextField>,
+    /// Clear Now, beside the usage; it writes nothing.
+    clear: Retained<NSButton>,
     download_dir: Folder,
     download_conflict: Retained<NSPopUpButton>,
     download_notify: Retained<NSSwitch>,
@@ -1299,21 +1502,28 @@ struct Controls {
     dim_splits: Retained<NSSwitch>,
     focus_frame: Retained<NSSwitch>,
     resize_in_steps: Retained<NSSwitch>,
-    /// The panes' rows: the lock, the dependent row and the row's
+    /// The pages' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
+    /// The pages' groups, in the order of `rows` they cut spans from.
+    groups: Vec<GroupView>,
 }
 
-/// A row of the grid: the label, its controls and the note row below it.
+/// A row of a group's box: the name, its controls and the note under the name.
 struct Row {
-    key: Key,
+    /// `None` for the one row that is not a setting ("In use").
+    key: Option<Key>,
+    view: Retained<NSView>,
+    /// The hairline above the row; the group's first shown row has none.
+    separator: Retained<NSBox>,
     label: Retained<NSTextField>,
     controls: Vec<Retained<NSControl>>,
-    /// Description or diagnostic; if there is neither the note row is hidden
+    /// Labels beside the controls (a unit, a slider's reading) that dim with the row.
+    dim: Vec<Retained<NSTextField>>,
+    /// Description or diagnostic; if there is neither the note is hidden
     /// (it leaves no gap).
     note: Retained<NSTextField>,
-    note_row: Retained<NSGridRow>,
-    description: Option<&'static str>,
+    hidden: Cell<bool>,
 }
 
 impl Row {
@@ -1329,14 +1539,28 @@ impl Row {
             NSColor::disabledControlTextColor()
         };
         self.label.setTextColor(Some(&color));
+        let reading = if enabled {
+            NSColor::secondaryLabelColor()
+        } else {
+            NSColor::disabledControlTextColor()
+        };
+        for label in &self.dim {
+            label.setTextColor(Some(&reading));
+        }
     }
 
-    /// Sets the note to the diagnostic, the reason the overriding input gives
-    /// ([`motion_override`]) or the description (`description`: the one that
-    /// follows the value, [`row_description`], else the row's own) — in that
-    /// order; if there is none it hides the row. A disabled row's description
-    /// dims together with its label, the reason does not dim: it is the only
-    /// text that says why the row is disabled.
+    /// Takes the row out of its group (it leaves no gap) or puts it back.
+    fn set_hidden(&self, hidden: bool) {
+        self.hidden.set(hidden);
+        self.view.setHidden(hidden);
+    }
+
+    /// Sets the note to the diagnostic, the reason the row is dimmed
+    /// ([`pages::dependency`], [`motion_override`]) or the description
+    /// ([`row_description`]) — in that order; if there is none it hides
+    /// the note. A disabled row's description dims together with its label,
+    /// the reason does not dim: it is the only text that says why the row is
+    /// disabled.
     fn set_note(
         &self,
         diagnostic: Option<&str>,
@@ -1344,7 +1568,7 @@ impl Row {
         description: Option<&str>,
         enabled: bool,
     ) {
-        let (text, color) = match (diagnostic, reason, description.or(self.description)) {
+        let (text, color) = match (diagnostic, reason, description) {
             (Some(diagnostic), _, _) => (diagnostic, NSColor::systemOrangeColor()),
             (None, Some(reason), _) => (reason, NSColor::secondaryLabelColor()),
             (None, None, Some(description)) if enabled => {
@@ -1352,13 +1576,13 @@ impl Row {
             }
             (None, None, Some(description)) => (description, NSColor::tertiaryLabelColor()),
             (None, None, None) => {
-                self.note_row.setHidden(true);
+                self.note.setHidden(true);
                 return;
             }
         };
         self.note.setStringValue(&NSString::from_str(text));
         self.note.setTextColor(Some(&color));
-        self.note_row.setHidden(false);
+        self.note.setHidden(false);
     }
 }
 
@@ -1377,11 +1601,12 @@ pub(crate) struct Ivars {
     /// bottom; only the selected pane's is active, so each pane scrolls exactly
     /// as far as its own rows.
     pane_bottoms: OnceCell<Vec<Retained<NSLayoutConstraint>>>,
-    /// "Open settings.toml": the default button (Enter) while locked.
-    open: OnceCell<Retained<NSButton>>,
-    /// One grid per category; only the selected one is visible.
-    panes: OnceCell<Vec<Retained<NSGridView>>>,
-    /// Keyboard: the table of the commands and their shortcuts, shown in the grids' place.
+    /// "Open settings.toml" at the foot of the sidebar; hidden while the file is locked, when the
+    /// strip carries it as the default button (Enter).
+    side_open: OnceCell<Retained<NSButton>>,
+    /// One stack per page that has rows; only the selected one is visible.
+    panes: OnceCell<Vec<Retained<NSStackView>>>,
+    /// Keyboard: the table of the commands and their shortcuts, shown in the pages' place.
     keyboard: OnceCell<Retained<KeyboardPage>>,
     controls: OnceCell<Controls>,
     /// The popups' item lists — the meaning of the selected index. Rebuilt on
@@ -1421,7 +1646,7 @@ define_class!(
     unsafe impl NSTableViewDataSource for SettingsWindow {
         #[unsafe(method(numberOfRowsInTableView:))]
         fn number_of_rows(&self, _table: &NSTableView) -> NSInteger {
-            Category::ALL.len() as NSInteger
+            SideItem::ALL.len() as NSInteger
         }
     }
 
@@ -1431,14 +1656,32 @@ define_class!(
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
         fn view_for_row(
             &self,
-            _table: &NSTableView,
+            table: &NSTableView,
             _column: Option<&NSTableColumn>,
             row: NSInteger,
         ) -> Option<Retained<NSView>> {
-            let category = usize::try_from(row)
-                .ok()
-                .and_then(|row| Category::ALL.get(row).copied());
-            category.map(|category| Retained::into_super(sidebar_cell(self.mtm(), category)))
+            match SideItem::at(row) {
+                Some(SideItem::Page(category)) => Some(Retained::into_super(SideRow::new(
+                    self.mtm(),
+                    category,
+                    table.selectedRow() == row,
+                ))),
+                Some(SideItem::Gap) => Some(NSView::new(self.mtm())),
+                None => None,
+            }
+        }
+
+        #[unsafe(method(tableView:heightOfRow:))]
+        fn height_of_row(&self, _table: &NSTableView, row: NSInteger) -> f64 {
+            match SideItem::at(row) {
+                Some(SideItem::Gap) => SIDE_GAP_HEIGHT,
+                _ => SIDE_ROW_HEIGHT,
+            }
+        }
+
+        #[unsafe(method(tableView:shouldSelectRow:))]
+        fn should_select_row(&self, _table: &NSTableView, row: NSInteger) -> bool {
+            matches!(SideItem::at(row), Some(SideItem::Page(_)))
         }
 
         #[unsafe(method(tableViewSelectionDidChange:))]
@@ -1583,8 +1826,8 @@ define_class!(
             if let Some(controls) = self.ivars().controls.get() {
                 let label = match key {
                     Key::BlinkSpeed => Some((&controls.blink_speed.value, seconds_label(value))),
-                    Key::Radius => Some((&controls.radius.value, decimal_label(value))),
-                    Key::Glow => Some((&controls.glow.value, decimal_label(value))),
+                    Key::Radius => Some((&controls.radius.value, radius_label(value))),
+                    Key::Glow => Some((&controls.glow.value, glow_label(value))),
                     _ => None,
                 };
                 if let Some((field, text)) = label {
@@ -1701,6 +1944,14 @@ define_class!(
             }
         }
 
+        /// The strip's Show in Finder, for a settings file that cannot be written.
+        #[unsafe(method(showSettingsFile:))]
+        fn show_settings_file(&self, _sender: Option<&AnyObject>) {
+            if let Some(delegate) = app::delegate(self.mtm()) {
+                delegate.reveal_settings();
+            }
+        }
+
         /// A folder row's Change…: a folder panel as a sheet, started in the
         /// folder the file names; the chosen one is written as one edit.
         #[unsafe(method(chooseFolder:))]
@@ -1762,9 +2013,23 @@ fn font_edit(items: &[FontItem], index: NSInteger) -> Option<String> {
     }
 }
 
-/// The blink-speed label: seconds (`0.5 s`).
+/// The blink-speed reading: seconds, to two places (`0.50 s`).
 fn seconds_label(seconds: f64) -> String {
-    format!("{} s", decimal_label(seconds))
+    format!("{seconds:.2} s")
+}
+
+/// The corner-radius reading: the ratio to two places (`0.10`).
+fn radius_label(ratio: f64) -> String {
+    format!("{ratio:.2}")
+}
+
+/// The glow reading: one place, or "Off" when there is none (`1.0`).
+fn glow_label(glow: f64) -> String {
+    if glow > 0.0 {
+        format!("{glow:.1}")
+    } else {
+        "Off".to_owned()
+    }
 }
 
 impl SettingsWindow {
@@ -1779,7 +2044,7 @@ impl SettingsWindow {
             pane_tops: OnceCell::new(),
             pane_scroll: OnceCell::new(),
             pane_bottoms: OnceCell::new(),
-            open: OnceCell::new(),
+            side_open: OnceCell::new(),
             panes: OnceCell::new(),
             keyboard: OnceCell::new(),
             controls: OnceCell::new(),
@@ -1836,13 +2101,10 @@ impl SettingsWindow {
         else {
             return;
         };
-        if let Some(at) = Category::ALL
-            .iter()
-            .position(|category| *category == Category::Keyboard)
-        {
-            sidebar
-                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(at), false);
-        }
+        sidebar.selectRowIndexes_byExtendingSelection(
+            &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Keyboard)),
+            false,
+        );
         self.show_selected();
         keyboard.show_command(name);
     }
@@ -1886,7 +2148,6 @@ impl SettingsWindow {
         let (items, index) = theme_items(&settings.theme, true, embedded, user);
         fill_themes(&c.theme, &items, index);
         self.ivars().themes.replace(items);
-        let follows = settings.follows_system();
         let (items, index) = theme_items(&settings.light_theme, false, embedded, user);
         fill_themes(&c.light_theme, &items, index);
         self.ivars().light_themes.replace(items);
@@ -1932,16 +2193,15 @@ impl SettingsWindow {
             blink_to_position(settings.blink_interval),
             &seconds_label(settings.blink_interval),
         );
-        let blinks = settings.cursor_blink != CursorBlink::Off;
         set_slide(
             &c.radius,
             settings.caret.radius_ratio,
-            &decimal_label(settings.caret.radius_ratio),
+            &radius_label(settings.caret.radius_ratio),
         );
         set_slide(
             &c.glow,
             settings.caret.glow,
-            &decimal_label(settings.caret.glow),
+            &glow_label(settings.caret.glow),
         );
         select_choice(&c.unfocused, settings.caret.unfocused);
 
@@ -1984,54 +2244,55 @@ impl SettingsWindow {
             f64::from(interval),
             &interval.to_string(),
         );
-        let sampling = settings.remote_stats.mode != RemoteStatsMode::Off;
         self.ivars()
             .folders
             .replace((files.preview_dir.clone(), files.download_dir.clone()));
 
         let status = status(state, write);
+        // The font's options: the selected font's own list, shown as the file chooses.
+        let options = crate::font_options::options(settings.font.family.as_deref());
         for row in &c.rows {
-            let forced = motion_override(row.key, settings, resolved.reduce);
-            let depends = match row.key {
-                Key::LightTheme | Key::DarkTheme => follows,
-                Key::BlinkSpeed => blinks,
-                Key::StatsInterval => sampling,
-                _ => forced.is_none_or(|forced| forced.enabled),
+            let Some(key) = row.key else {
+                // "In use" is measured, not written: neither the lock nor a dependency reaches it.
+                continue;
             };
-            let enabled = !status.locked && depends;
+            let forced = motion_override(key, settings, resolved.reduce);
+            let leans = pages::dependency(key, settings);
+            row.set_hidden(leans.hidden || (key == Key::FontFeatures && options.is_empty()));
+            let enabled =
+                !status.locked && leans.enabled && forced.is_none_or(|forced| forced.enabled);
             row.set_enabled(enabled);
             let diagnostic = status
                 .rows
                 .iter()
-                .find(|(key, _)| *key == row.key)
+                .find(|(row_key, _)| *row_key == key)
                 .map(|(_, message)| message.as_str());
             row.set_note(
                 diagnostic,
-                forced.map(|forced| forced.note),
-                row_description(row.key, settings, resolved),
+                leans.reason.or(forced.map(|forced| forced.note)),
+                row_description(key, settings, resolved),
                 enabled,
             );
         }
-        // The font's options: the selected font's own list, shown as the file chooses.
-        let options = crate::font_options::options(settings.font.family.as_deref());
+        // A group is as visible as its rows: none shown, no title and no empty box. Its first
+        // shown row has no hairline above it, the others do.
+        for group in &c.groups {
+            let rows = &c.rows[group.rows.clone()];
+            let mut first = true;
+            for row in rows.iter().filter(|row| !row.hidden.get()) {
+                row.separator.setHidden(first);
+                first = false;
+            }
+            group.view.setHidden(first);
+            if let Some(aside) = &group.aside {
+                aside.setStringValue(&NSString::from_str(
+                    (group.spec.aside)(settings).unwrap_or_default(),
+                ));
+            }
+        }
         c.font_options
             .show(self, &options, &settings.font, !status.locked);
         self.ivars().font_options.replace(options);
-        // The value label is a label, not a control: dimming it is by hand.
-        let value_color = if !status.locked && blinks {
-            NSColor::secondaryLabelColor()
-        } else {
-            NSColor::disabledControlTextColor()
-        };
-        c.blink_speed.value.setTextColor(Some(&value_color));
-        for slide in [&c.radius, &c.glow] {
-            let color = if status.locked {
-                NSColor::disabledControlTextColor()
-            } else {
-                NSColor::secondaryLabelColor()
-            };
-            slide.value.setTextColor(Some(&color));
-        }
         if let Some(keyboard) = self.ivars().keyboard.get() {
             keyboard.refresh(settings, status.locked);
         }
@@ -2039,13 +2300,9 @@ impl SettingsWindow {
             banner.show(&status.banner);
         }
         self.layout_panes(!status.banner.lines.is_empty());
-        if let Some(open) = self.ivars().open.get() {
-            // On a lock, repairing the file is one click — Enter — away.
-            open.setKeyEquivalent(if status.locked {
-                ns_string!("\r")
-            } else {
-                ns_string!("")
-            });
+        if let Some(open) = self.ivars().side_open.get() {
+            // The strip carries the button, as the default one, when the file is locked.
+            open.setHidden(status.locked);
         }
     }
 
@@ -2165,13 +2422,21 @@ impl SettingsWindow {
         ) else {
             return;
         };
-        let Some(index) = usize::try_from(sidebar.selectedRow())
-            .ok()
-            .filter(|&index| index < Category::ALL.len())
-        else {
+        let selected = sidebar.selectedRow();
+        let Some(SideItem::Page(category)) = SideItem::at(selected) else {
             return;
         };
-        let category = Category::ALL[index];
+        // The rows draw their own selection: tell each whether it is the open page.
+        for row in 0..SideItem::ALL.len() {
+            let at = NSInteger::try_from(row).unwrap_or_default();
+            let view = sidebar.viewAtColumn_row_makeIfNecessary(0, at, false);
+            if let Some(view) = view
+                .as_deref()
+                .and_then(|view| view.downcast_ref::<SideRow>())
+            {
+                view.set_selected(at == selected);
+            }
+        }
         header.setStringValue(&NSString::from_str(category.title()));
         let grid = category.grid();
         for (i, pane) in panes.iter().enumerate() {
@@ -2256,7 +2521,8 @@ impl SettingsWindow {
     fn folder(&self, key: Key) -> Folder {
         let path = NSTextField::labelWithString(ns_string!(""), self.mtm());
         path.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        path.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        path.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
+        path.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(12.0, 0.0)));
         path.widthAnchor()
             .constraintLessThanOrEqualToConstant(PATH_WIDTH)
             .setActive(true);
@@ -2377,9 +2643,13 @@ impl SettingsWindow {
     fn build_sidebar(&self) -> Retained<NSView> {
         let mtm = self.mtm();
         let table = NSTableView::new(mtm);
-        table.setStyle(NSTableViewStyle::SourceList);
+        table.setStyle(NSTableViewStyle::Plain);
+        // The rows draw their own selection: a pale face, and the page's tile in the accent.
+        table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
+        table.setBackgroundColor(&NSColor::clearColor());
         table.setHeaderView(None);
         table.setAllowsEmptySelection(false);
+        table.setIntercellSpacing(NSSize::new(0.0, 1.0));
         let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("c"));
         table.addTableColumn(&column);
         // SAFETY: the source and delegate are weak references; this object
@@ -2392,34 +2662,72 @@ impl SettingsWindow {
         scroll.setDocumentView(Some(&table));
         scroll.setDrawsBackground(false);
         scroll.setHasVerticalScroller(false);
+
+        // "Open settings.toml" sits at the foot of the column; a locked file puts it, as the
+        // default button, in the strip instead.
+        // SAFETY: the target is a weak reference and lives for the whole process; the selector is
+        // this class's `openFile:`.
+        let open = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                ns_string!("Open settings.toml"),
+                Some(self.target()),
+                Some(sel!(openFile:)),
+                mtm,
+            )
+        };
+        let side = NSView::new(mtm);
+        add_pinned(&side, &scroll);
+        add_pinned(&side, &open);
+        let safe = side.safeAreaLayoutGuide();
+        activate(&[
+            scroll
+                .topAnchor()
+                .constraintEqualToAnchor_constant(&safe.topAnchor(), 4.0),
+            scroll
+                .leadingAnchor()
+                .constraintEqualToAnchor(&side.leadingAnchor()),
+            scroll
+                .trailingAnchor()
+                .constraintEqualToAnchor(&side.trailingAnchor()),
+            scroll
+                .bottomAnchor()
+                .constraintEqualToAnchor_constant(&open.topAnchor(), -8.0),
+            open.leadingAnchor()
+                .constraintEqualToAnchor_constant(&side.leadingAnchor(), SIDE_PAD),
+            open.trailingAnchor()
+                .constraintEqualToAnchor_constant(&side.trailingAnchor(), -SIDE_PAD),
+            open.bottomAnchor()
+                .constraintEqualToAnchor_constant(&side.bottomAnchor(), -12.0),
+        ]);
+        let _ = self.ivars().side_open.set(open);
         let _ = self.ivars().sidebar.set(table);
-        Retained::into_super(scroll)
+        side
     }
 
     fn build_detail(&self) -> Retained<NSView> {
         let mtm = self.mtm();
         let detail = NSView::new(mtm);
 
+        // The page's name: the row 52 points high at the top, which the traffic lights share.
         let header = NSTextField::labelWithString(ns_string!(""), mtm);
-        header.setFont(Some(&NSFont::boldSystemFontOfSize(17.0)));
+        header.setFont(Some(&NSFont::boldSystemFontOfSize(15.0)));
         add_pinned(&detail, &header);
-        let safe = detail.safeAreaLayoutGuide();
         activate(&[
             header
-                .topAnchor()
-                .constraintEqualToAnchor_constant(&safe.topAnchor(), 4.0),
+                .centerYAnchor()
+                .constraintEqualToAnchor_constant(&detail.topAnchor(), HEAD_HEIGHT / 2.0),
             header
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN),
+                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), 24.0),
         ]);
 
-        let banner = BannerView::new(mtm);
+        let banner = BannerView::new(mtm, self.target());
         add_pinned(&detail, &banner.frame);
         activate(&[
             banner
                 .frame
                 .topAnchor()
-                .constraintEqualToAnchor_constant(&header.bottomAnchor(), 12.0),
+                .constraintEqualToAnchor_constant(&detail.topAnchor(), HEAD_HEIGHT),
             banner
                 .frame
                 .leadingAnchor()
@@ -2430,11 +2738,10 @@ impl SettingsWindow {
                 .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
         ]);
 
-        // The panes' top is tied to one of two places: to the header when there
-        // is no banner, to the banner when there is ([`SettingsWindow::layout_panes`]).
-        // A hidden banner takes no room, so the panes move back up under the header.
-        // The grids live in a flipped document inside a vertical scroll view
-        // that fills the space between the header (or banner) and the button.
+        // The panes' top is tied to one of two places: to the head row when there is no banner, to
+        // the banner when there is ([`SettingsWindow::layout_panes`]). A hidden banner takes no
+        // room, so the panes move back up. The pages live in a flipped document inside a vertical
+        // scroll view that fills the space below.
         let (panes, controls) = self.build_panes();
         let scroll = NSScrollView::new(mtm);
         scroll.setDrawsBackground(false);
@@ -2453,6 +2760,9 @@ impl SettingsWindow {
             scroll
                 .trailingAnchor()
                 .constraintEqualToAnchor(&detail.trailingAnchor()),
+            scroll
+                .bottomAnchor()
+                .constraintEqualToAnchor(&detail.bottomAnchor()),
             document
                 .topAnchor()
                 .constraintEqualToAnchor(&clip.topAnchor()),
@@ -2468,51 +2778,32 @@ impl SettingsWindow {
             add_pinned(&document, pane);
             activate(&[
                 pane.leadingAnchor()
-                    .constraintEqualToAnchor_constant(&document.leadingAnchor(), MARGIN),
+                    .constraintEqualToAnchor_constant(&document.leadingAnchor(), PAGE_MARGIN),
+                pane.trailingAnchor()
+                    .constraintEqualToAnchor_constant(&document.trailingAnchor(), -PAGE_MARGIN),
                 pane.topAnchor()
-                    .constraintEqualToAnchor(&document.topAnchor()),
+                    .constraintEqualToAnchor_constant(&document.topAnchor(), 6.0),
             ]);
             pane_bottoms.push(
                 document
                     .bottomAnchor()
-                    .constraintEqualToAnchor_constant(&pane.bottomAnchor(), MARGIN),
+                    .constraintEqualToAnchor_constant(&pane.bottomAnchor(), PAGE_BOTTOM),
             );
         }
         let under_header = vec![
             scroll
                 .topAnchor()
-                .constraintEqualToAnchor_constant(&header.bottomAnchor(), 18.0),
+                .constraintEqualToAnchor_constant(&detail.topAnchor(), HEAD_HEIGHT),
         ];
         let under_banner = vec![
             scroll
                 .topAnchor()
-                .constraintEqualToAnchor_constant(&banner.frame.bottomAnchor(), 16.0),
+                .constraintEqualToAnchor_constant(&banner.frame.bottomAnchor(), 8.0),
         ];
         activate(&under_header);
         banner.frame.setHidden(true);
 
-        // SAFETY: the target is a weak reference and lives for the whole
-        // process; the selector is this class's `openFile:`.
-        let open = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                ns_string!("Open settings.toml"),
-                Some(self.target()),
-                Some(sel!(openFile:)),
-                mtm,
-            )
-        };
-        add_pinned(&detail, &open);
-        activate(&[
-            open.trailingAnchor()
-                .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
-            open.bottomAnchor()
-                .constraintEqualToAnchor_constant(&detail.bottomAnchor(), -MARGIN),
-            scroll
-                .bottomAnchor()
-                .constraintEqualToAnchor_constant(&open.topAnchor(), -12.0),
-        ]);
-
-        // Keyboard is a table of its own, in the place the grids' scroll view has.
+        // Keyboard is a table of its own, in the place the pages' scroll view has.
         let keyboard = KeyboardPage::new(mtm);
         detail.addSubview(&keyboard);
         activate(&[
@@ -2521,13 +2812,13 @@ impl SettingsWindow {
                 .constraintEqualToAnchor(&scroll.topAnchor()),
             keyboard
                 .bottomAnchor()
-                .constraintEqualToAnchor(&scroll.bottomAnchor()),
+                .constraintEqualToAnchor_constant(&detail.bottomAnchor(), -16.0),
             keyboard
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN),
+                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), PAGE_MARGIN),
             keyboard
                 .trailingAnchor()
-                .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
+                .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -PAGE_MARGIN),
         ]);
         keyboard.setHidden(true);
         let _ = self.ivars().keyboard.set(keyboard);
@@ -2538,7 +2829,6 @@ impl SettingsWindow {
             under_header,
             under_banner,
         });
-        let _ = self.ivars().open.set(open);
         let _ = self.ivars().pane_scroll.set(scroll);
         let _ = self.ivars().pane_bottoms.set(pane_bottoms);
         let _ = self.ivars().panes.set(panes);
@@ -2546,114 +2836,41 @@ impl SettingsWindow {
         detail
     }
 
-    fn build_panes(&self) -> (Vec<Retained<NSGridView>>, Controls) {
+    /// The page stacks, one per category with a grid (Keyboard is a table of its own), and the
+    /// controls: every control is made here, the rows around them come from [`pages`].
+    fn build_panes(&self) -> (Vec<Retained<NSStackView>>, Controls) {
         let mtm = self.mtm();
 
-        // General
         let confirm_close = self.popup::<ConfirmClose>(Key::ConfirmClose);
         let restore_windows = self.popup::<RestoreWindows>(Key::RestoreWindows);
         let keep_running = self.popup::<KeepRunning>(Key::KeepRunning);
         let clipboard = self.switch(Key::Clipboard);
-        let scrollback = self.number(Key::Scrollback, 0.0, SCROLLBACK_MAX as f64, 1000.0, 80.0);
+        let scrollback = self.number(Key::Scrollback, 0.0, SCROLLBACK_MAX as f64, 1000.0, 76.0);
         let shell_integration = self.popup::<ShellIntegration>(Key::ShellIntegration);
         let ports = self.switch(Key::Ports);
         let python_env = self.switch(Key::PythonEnv);
         let node_version = self.switch(Key::NodeVersion);
         let command_level = self.popup::<CommandLevel>(Key::CommandLevel);
-        let mut general = Form::new(mtm);
-        general.row(
-            Key::ConfirmClose,
-            "Confirm before closing:",
-            &confirm_close,
-            &[&confirm_close],
-            None,
-        );
-        general.row(
-            Key::RestoreWindows,
-            "Reopen after quitting:",
-            &restore_windows,
-            &[&restore_windows],
-            Some("Panes whose programs were not kept start a new shell. Saved scrollback is plain text on disk."),
-        );
-        // The description follows the value ([`row_description`]).
-        general.row(
-            Key::KeepRunning,
-            "Keep programs running:",
-            &keep_running,
-            &[&keep_running],
-            None,
-        );
-        general.row(
-            Key::Clipboard,
-            "Clipboard access:",
-            &clipboard,
-            &[&clipboard],
-            Some("Lets programs copy to the clipboard, even over ssh (OSC 52)."),
-        );
-        general.row(
-            Key::Scrollback,
-            "Scrollback lines:",
-            &number_view(mtm, &scrollback),
-            &number_controls(&scrollback),
-            None,
-        );
-        general.row(
-            Key::ShellIntegration,
-            "Shell integration:",
-            &shell_integration,
-            &[&shell_integration],
-            Some("Takes effect in new tabs and windows."),
-        );
-        general.row(
-            Key::Ports,
-            "Show listening ports:",
-            &ports,
-            &[&ports],
-            Some("The ports your programs listen on, at the right of the dock (↗ :3000). Click to list them, Cmd-click to open one."),
-        );
-        general.row(
-            Key::PythonEnv,
-            "Show Python environment:",
-            &python_env,
-            &[&python_env],
-            Some("The active venv or conda environment at the left of the dock's bottom line, as activate prints it: (.venv) 3.12."),
-        );
-        general.row(
-            Key::NodeVersion,
-            "Show Node version:",
-            &node_version,
-            &[&node_version],
-            Some("In a Node project, after the branch: node 22.11. In the warning color when the project asks for another version (.nvmrc)."),
-        );
-        // The description follows the value ([`row_description`]).
-        general.row(
-            Key::CommandLevel,
-            "bateri command:",
-            &command_level,
-            &[&command_level],
-            None,
-        );
 
-        // Appearance
         let theme = self.string_popup(Key::Theme);
         let light_theme = self.string_popup(Key::LightTheme);
         let dark_theme = self.string_popup(Key::DarkTheme);
         let minimum_contrast = self.string_popup(Key::MinimumContrast);
         let font = self.string_popup(Key::Font);
-        let size = self.number(Key::Size, MIN_SIZE, MAX_SIZE, 1.0, 56.0);
+        let size = self.number(Key::Size, MIN_SIZE, MAX_SIZE, 1.0, NUMBER_WIDTH);
         let line_height = self.number(
             Key::LineHeight,
             *LINE_HEIGHT_RANGE.start(),
             *LINE_HEIGHT_RANGE.end(),
             0.1,
-            56.0,
+            NUMBER_WIDTH,
         );
         let letter_spacing = self.number(
             Key::LetterSpacing,
             *LETTER_SPACING_RANGE.start(),
             *LETTER_SPACING_RANGE.end(),
-            0.1,
-            56.0,
+            0.05,
+            NUMBER_WIDTH,
         );
         let scrollbar = self.popup::<Scrollbar>(Key::Scrollbar);
         let content_edge = self.popup::<ContentEdge>(Key::ContentEdge);
@@ -2667,144 +2884,10 @@ impl SettingsWindow {
         let tab_icon_colors = self.popup::<IconColors>(Key::TabIconColors);
         let tab_running = self.popup::<TabRunning>(Key::TabRunning);
         let tab_position = self.popup::<TabPosition>(Key::TabPosition);
-        let mut appearance = Form::new(mtm);
-        appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
-        appearance.row(
-            Key::LightTheme,
-            "Light theme:",
-            &light_theme,
-            &[&light_theme],
-            None,
-        );
-        appearance.row(
-            Key::DarkTheme,
-            "Dark theme:",
-            &dark_theme,
-            &[&dark_theme],
-            Some("Used when Theme is Match System."),
-        );
-        appearance.row(
-            Key::MinimumContrast,
-            "Minimum contrast:",
-            &minimum_contrast,
-            &[&minimum_contrast],
-            Some("Text a program colors too close to its background, like white on a light theme, is drawn darker or lighter until it reads."),
-        );
-        appearance.row(Key::Font, "Font:", &font, &[&font], None);
-        // The font's own options: its switches are rebuilt on every refresh (a new font is
-        // other options), and the row is hidden when the font offers none.
-        let options_stack = font_options::Options::stack(mtm);
-        let options_row = appearance.row(Key::FontFeatures, "Options:", &options_stack, &[], None);
-        let font_options = font_options::Options::new(options_stack, options_row);
-        appearance.row(
-            Key::FontSmoothing,
-            "Bolder text:",
-            &font_smoothing,
-            &[&font_smoothing],
-            Some("Draw the text the way macOS thickens it, as Terminal.app does. Off: the font's own weight."),
-        );
-        appearance.row(
-            Key::Size,
-            "Size:",
-            &number_view(mtm, &size),
-            &number_controls(&size),
-            None,
-        );
-        appearance.row(
-            Key::LineHeight,
-            "Line height:",
-            &number_view(mtm, &line_height),
-            &number_controls(&line_height),
-            None,
-        );
-        appearance.row(
-            Key::LetterSpacing,
-            "Letter spacing:",
-            &number_view(mtm, &letter_spacing),
-            &number_controls(&letter_spacing),
-            None,
-        );
-        // Under "Follow System Settings" the note says what that gives right
-        // now ([`row_description`]).
-        appearance.row(
-            Key::Scrollbar,
-            "Scroll bar:",
-            &scrollbar,
-            &[&scrollbar],
-            None,
-        );
-        appearance.row(
-            Key::ContentEdge,
-            "Content edge:",
-            &content_edge,
-            &[&content_edge],
-            Some("Where text meets the tab bar."),
-        );
-        appearance.row(
-            Key::DimSplits,
-            "Dim unfocused splits:",
-            &dim_splits,
-            &[&dim_splits],
-            Some("Veil the panes of a split tab that don't have the focus. Off: the focused pane is told by the card standing nearer."),
-        );
-        appearance.row(
-            Key::FocusFrame,
-            "Focus frame:",
-            &focus_frame,
-            &[&focus_frame],
-            Some("Draw a line in the theme's accent round the focused pane of a split tab."),
-        );
-        appearance.row(
-            Key::SplitStyle,
-            "Split style:",
-            &split_style,
-            &[&split_style],
-            Some("Cards stand on a ground with a gap round them; lines let the panes touch with one line between them."),
-        );
-        appearance.row(
-            Key::TabDetails,
-            "Tab details:",
-            &tab_details,
-            &[&tab_details],
-            Some("Under a program's row in the side column, where it stands and what it asks. Smart: in Activity only."),
-        );
-        appearance.row(
-            Key::ResizeInSteps,
-            "Resize in steps:",
-            &resize_in_steps,
-            &[&resize_in_steps],
-            Some("Resize a window a whole cell at a time while you drag its edge, so the text keeps the same margin on both sides. Off: the window follows the pointer."),
-        );
-        appearance.row(
-            Key::TabPosition,
-            "Tabs:",
-            &tab_position,
-            &[&tab_position],
-            Some("Top: a bar along the top of the window. Side: a column down the left edge, tall as the window, where the title row goes."),
-        );
-        appearance.row(
-            Key::TabIcons,
-            "Tab icons:",
-            &tab_icons,
-            &[&tab_icons],
-            Some("Show the program a tab runs as an icon on a tile before its title. Off: only a small indicator while the tab works, waits or has finished."),
-        );
-        appearance.row(
-            Key::TabIconColors,
-            "Icon colors:",
-            &tab_icon_colors,
-            &[&tab_icon_colors],
-            Some("Theme: icons use the theme's colors. Brand: programs with a colored brand keep it."),
-        );
-        appearance.row(
-            Key::TabRunning,
-            "Running tab:",
-            &tab_running,
-            &[&tab_running],
-            Some("How a tab says a command runs. Tail: a line with a fading tail goes round its icon. Tail and ring: the same over a faint line. Breathe: the whole line fades in and out."),
-        );
+        // The font's own options: its switches are rebuilt on every refresh (a new font is other
+        // options), and the group is hidden when the font offers none.
+        let font_options = font_options::Options::new(font_options::Options::stack(mtm));
 
-        // Cursor
         let shape = self.popup::<CaretShape>(Key::Shape);
         let blink = self.popup::<CursorBlink>(Key::Blink);
         let blink_speed = self.slide(Key::BlinkSpeed, 0.0, 1.0);
@@ -2819,51 +2902,7 @@ impl SettingsWindow {
             *CURSOR_GLOW_RANGE.end(),
         );
         let unfocused = self.popup::<UnfocusedCaret>(Key::Unfocused);
-        let mut cursor = Form::new(mtm);
-        cursor.row(
-            Key::Shape,
-            "Shape:",
-            &shape,
-            &[&shape],
-            Some("Programs like vim can change it while they run."),
-        );
-        cursor.row(
-            Key::Blink,
-            "Blink:",
-            &blink,
-            &[&blink],
-            Some("Follow program blinks only when the running program asks."),
-        );
-        cursor.row(
-            Key::BlinkSpeed,
-            "Blink speed:",
-            &slide_view(mtm, &blink_speed),
-            &[&blink_speed.slider],
-            None,
-        );
-        cursor.row(
-            Key::Radius,
-            "Corner radius:",
-            &slide_view(mtm, &radius),
-            &[&radius.slider],
-            None,
-        );
-        cursor.row(
-            Key::Glow,
-            "Glow:",
-            &slide_view(mtm, &glow),
-            &[&glow.slider],
-            None,
-        );
-        cursor.row(
-            Key::Unfocused,
-            "When unfocused:",
-            &unfocused,
-            &[&unfocused],
-            Some("How the cursor looks in a window that is not active."),
-        );
 
-        // Motion
         let cursor_motion = self.popup::<CursorMotion>(Key::CursorMotion);
         let smooth_scroll = self.switch(Key::SmoothScroll);
         let scroll_bounce = self.switch(Key::ScrollBounce);
@@ -2871,59 +2910,7 @@ impl SettingsWindow {
         let keypress = self.popup::<Keypress>(Key::Keypress);
         let erase = self.popup::<Erase>(Key::Erase);
         let dock_arrival = self.popup::<DockArrival>(Key::DockArrival);
-        let mut motion = Form::new(mtm);
-        motion.row(
-            Key::CursorMotion,
-            "Cursor motion:",
-            &cursor_motion,
-            &[&cursor_motion],
-            Some("How the cursor travels to its new place."),
-        );
-        motion.row(
-            Key::Keypress,
-            "Keypress:",
-            &keypress,
-            &[&keypress],
-            Some("How a letter you type at the prompt appears."),
-        );
-        motion.row(
-            Key::Erase,
-            "Erase:",
-            &erase,
-            &[&erase],
-            Some("How a letter you delete at the prompt goes."),
-        );
-        motion.row(
-            Key::DockArrival,
-            "Dock arrival:",
-            &dock_arrival,
-            &[&dock_arrival],
-            Some("How the prompt arrives when a shell starts."),
-        );
-        motion.row(
-            Key::SmoothScroll,
-            "Smooth scrolling:",
-            &smooth_scroll,
-            &[&smooth_scroll],
-            None,
-        );
-        motion.row(
-            Key::ScrollBounce,
-            "Bounce at the ends:",
-            &scroll_bounce,
-            &[&scroll_bounce],
-            Some("Whether lists in a program's view spring back past their ends."),
-        );
-        motion.row(
-            Key::ReduceMotion,
-            "Reduce motion:",
-            &reduce_motion,
-            &[&reduce_motion],
-            Some("On turns animations into fades and instant jumps."),
-        );
 
-        // Remote Files: the shell integration on servers, preview, cleanup,
-        // downloads.
         let remote_integration = self.switch(Key::RemoteIntegration);
         let preview_max_size = self.string_popup(Key::PreviewMaxSize);
         let preview_read_only = self.switch(Key::PreviewReadOnly);
@@ -2936,6 +2923,7 @@ impl SettingsWindow {
             NSFont::systemFontSize(),
             0.0,
         )));
+        usage.setTextColor(Some(&NSColor::secondaryLabelColor()));
         let clear = self.button("Clear Now", None, sel!(clearPreviews:));
         let download_dir = self.folder(Key::DownloadDir);
         let download_conflict = self.popup::<DownloadConflict>(Key::DownloadConflict);
@@ -2946,123 +2934,10 @@ impl SettingsWindow {
             f64::from(*STATS_INTERVAL_RANGE.start()),
             f64::from(*STATS_INTERVAL_RANGE.end()),
             1.0,
-            56.0,
-        );
-        let mut remote = Form::new(mtm);
-        remote.row(
-            Key::RemoteIntegration,
-            "Set up shell integration on servers:",
-            &remote_integration,
-            &[&remote_integration],
-            Some("Off on hosts marked Production unless the Shell menu turns it on."),
-        );
-        remote.row(
-            Key::PreviewMaxSize,
-            "Preview without asking:",
-            &preview_max_size,
-            &[&preview_max_size],
-            Some("Cmd-click a remote file name. Larger files ask first."),
-        );
-        remote.row(
-            Key::PreviewReadOnly,
-            "Open read-only:",
-            &preview_read_only,
-            &[&preview_read_only],
-            Some("A hint: a preview you change is kept, never cleaned up."),
-        );
-        remote.row(
-            Key::PreviewDir,
-            "Preview folder:",
-            &preview_dir.path,
-            &[&preview_dir.change],
-            None,
-        );
-        remote.actions(&hstack(
-            mtm,
-            &[
-                preview_dir.change.as_super().as_super(),
-                show_previews.as_super().as_super(),
-            ],
-            8.0,
-        ));
-        remote.row(
-            Key::PreviewKeep,
-            "Keep previews:",
-            &preview_keep,
-            &[&preview_keep],
-            Some("Checked when bateri starts and once a day."),
-        );
-        remote.row(
-            Key::PreviewLimit,
-            "Size limit:",
-            &preview_limit,
-            &[&preview_limit],
-            Some("Applied when bateri starts, oldest first."),
-        );
-        remote.plain_row(
-            "In use:",
-            &hstack(
-                mtm,
-                &[usage.as_super().as_super(), clear.as_super().as_super()],
-                10.0,
-            ),
-        );
-        remote.row(
-            Key::DownloadDir,
-            "Download folder:",
-            &download_dir.path,
-            &[&download_dir.change],
-            None,
-        );
-        remote.actions(&download_dir.change);
-        remote.row(
-            Key::DownloadConflict,
-            "If the name exists:",
-            &download_conflict,
-            &[&download_conflict],
-            None,
-        );
-        remote.row(
-            Key::DownloadNotify,
-            "Notify when done:",
-            &download_notify,
-            &[&download_notify],
-            Some("Only while bateri is in the background."),
-        );
-        // The load indicator.
-        remote.row(
-            Key::RemoteStats,
-            "Server load:",
-            &remote_stats,
-            &[&remote_stats],
-            Some("The server's CPU and memory, in the ssh status bar."),
-        );
-        remote.row(
-            Key::StatsInterval,
-            "Sample every:",
-            &number_view(mtm, &stats_interval),
-            &number_controls(&stats_interval),
-            Some("Seconds. Pauses in hidden tabs and when idle."),
+            NUMBER_WIDTH,
         );
 
-        let rows = [
-            general.rows,
-            appearance.rows,
-            cursor.rows,
-            motion.rows,
-            remote.rows,
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let panes = vec![
-            general.grid,
-            appearance.grid,
-            cursor.grid,
-            motion.grid,
-            remote.grid,
-        ];
-        let controls = Controls {
+        let mut controls = Controls {
             confirm_close,
             restore_windows,
             keep_running,
@@ -3104,9 +2979,11 @@ impl SettingsWindow {
             preview_max_size,
             preview_read_only,
             preview_dir,
+            show_previews,
             preview_keep,
             preview_limit,
             usage,
+            clear,
             download_dir,
             download_conflict,
             download_notify,
@@ -3119,8 +2996,82 @@ impl SettingsWindow {
             dim_splits,
             focus_frame,
             resize_in_steps,
-            rows,
+            rows: Vec::new(),
+            groups: Vec::new(),
         };
+
+        let mut panes = Vec::new();
+        let mut rows = Vec::new();
+        let mut groups = Vec::new();
+        for category in Category::ALL {
+            if category.grid().is_none() {
+                continue;
+            }
+            let page = stack(
+                mtm,
+                &[],
+                NSUserInterfaceLayoutOrientation::Vertical,
+                GROUP_SPACING,
+                NSLayoutAttribute::Leading,
+            );
+            for spec in pages::groups(category) {
+                let first = rows.len();
+                let (boxed, inner) = group_box(mtm);
+                for item in spec.items {
+                    let row = match *item {
+                        pages::Item::Key(key) => {
+                            let parts = controls.parts(mtm, key);
+                            // A row whose control is a list of switches has the width to itself.
+                            build_row(
+                                mtm,
+                                Some(key),
+                                pages::label(key),
+                                parts,
+                                key == Key::FontFeatures,
+                            )
+                        }
+                        pages::Item::Usage => build_row(
+                            mtm,
+                            None,
+                            "In use",
+                            Parts {
+                                view: hstack(
+                                    mtm,
+                                    &[
+                                        controls.usage.as_super().as_super(),
+                                        controls.clear.as_super().as_super(),
+                                    ],
+                                    10.0,
+                                ),
+                                controls: Vec::new(),
+                                dim: Vec::new(),
+                            },
+                            false,
+                        ),
+                    };
+                    inner.addArrangedSubview(&row.view);
+                    row.view
+                        .widthAnchor()
+                        .constraintEqualToAnchor(&inner.widthAnchor())
+                        .setActive(true);
+                    rows.push(row);
+                }
+                let (view, aside) = group_view(mtm, spec, &boxed);
+                page.addArrangedSubview(&view);
+                view.widthAnchor()
+                    .constraintEqualToAnchor(&page.widthAnchor())
+                    .setActive(true);
+                groups.push(GroupView {
+                    view,
+                    aside,
+                    spec,
+                    rows: first..rows.len(),
+                });
+            }
+            panes.push(page);
+        }
+        controls.rows = rows;
+        controls.groups = groups;
         (panes, controls)
     }
 }
@@ -3159,27 +3110,28 @@ struct PaneTops {
     under_banner: Vec<Retained<NSLayoutConstraint>>,
 }
 
-/// The banner's view: a rounded box with a light orange fill, a warning
-/// symbol on the left, the text on the right and what to do below it in the
-/// secondary colour. The colours are the system's semantic colours — each
-/// correct in the light and dark appearance.
+/// The strip's view: a rounded box with a light fill (orange for a file that cannot be read,
+/// red for a write that was refused), a warning symbol on the left, what happened in bold with
+/// the lines under it and what to do below them in the secondary colour, and the button that does
+/// it at the right. The colours are the system's semantic colours — each correct in the light and
+/// dark appearance.
 struct BannerView {
     frame: Retained<NSBox>,
+    icon: Retained<NSImageView>,
+    title: Retained<NSTextField>,
     lines: Retained<NSTextField>,
     hint: Retained<NSTextField>,
+    action: Retained<NSButton>,
 }
 
 impl BannerView {
-    fn new(mtm: MainThreadMarker) -> Self {
+    fn new(mtm: MainThreadMarker, target: &AnyObject) -> Self {
         let frame = NSBox::new(mtm);
         frame.setBoxType(NSBoxType::Custom);
         frame.setTitlePosition(NSTitlePosition::NoTitle);
-        frame.setCornerRadius(8.0);
+        frame.setCornerRadius(10.0);
         frame.setBorderWidth(1.0);
-        let orange = NSColor::systemOrangeColor();
-        frame.setFillColor(&orange.colorWithAlphaComponent(0.10));
-        frame.setBorderColor(&orange.colorWithAlphaComponent(0.35));
-        frame.setContentViewMargins(NSSize::new(10.0, 8.0));
+        frame.setContentViewMargins(NSSize::new(12.0, 10.0));
 
         let icon = NSImageView::new(mtm);
         if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
@@ -3188,50 +3140,100 @@ impl BannerView {
         ) {
             icon.setImage(Some(&image));
         }
-        icon.setContentTintColor(Some(&orange));
+        let title = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        title.setFont(Some(&NSFont::boldSystemFontOfSize(
+            NSFont::smallSystemFontSize() + 1.5,
+        )));
+        title.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
         let lines = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        lines.setFont(Some(&NSFont::systemFontOfSize(
+            NSFont::smallSystemFontSize() + 1.5,
+        )));
         lines.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
         let hint = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
         hint.setFont(Some(&NSFont::systemFontOfSize(
-            NSFont::smallSystemFontSize(),
+            NSFont::smallSystemFontSize() + 1.5,
         )));
         hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
         hint.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
 
         let text = NSStackView::stackViewWithViews(
-            &NSArray::from_slice(&[lines.as_super().as_super(), hint.as_super().as_super()]),
+            &NSArray::from_slice(&[
+                title.as_super().as_super(),
+                lines.as_super().as_super(),
+                hint.as_super().as_super(),
+            ]),
             mtm,
         );
         text.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
         text.setAlignment(NSLayoutAttribute::Leading);
         text.setSpacing(2.0);
+        // SAFETY: the target is a weak reference and lives for the whole process; the selector
+        // is this class's `openFile:`, and `BannerView::show` picks the action for the strip.
+        let action = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                ns_string!("Open settings.toml"),
+                Some(target),
+                Some(sel!(openFile:)),
+                mtm,
+            )
+        };
         let content = NSView::new(mtm);
         add_pinned(&content, &icon);
         add_pinned(&content, &text);
+        add_pinned(&content, &action);
         activate(&[
             icon.leadingAnchor()
                 .constraintEqualToAnchor(&content.leadingAnchor()),
             icon.firstBaselineAnchor()
-                .constraintEqualToAnchor(&lines.firstBaselineAnchor()),
+                .constraintEqualToAnchor(&title.firstBaselineAnchor()),
             icon.widthAnchor().constraintEqualToConstant(16.0),
             text.leadingAnchor()
                 .constraintEqualToAnchor_constant(&icon.trailingAnchor(), 8.0),
-            text.trailingAnchor()
-                .constraintLessThanOrEqualToAnchor(&content.trailingAnchor()),
             text.topAnchor()
                 .constraintEqualToAnchor(&content.topAnchor()),
             text.bottomAnchor()
                 .constraintEqualToAnchor(&content.bottomAnchor()),
+            action
+                .trailingAnchor()
+                .constraintEqualToAnchor(&content.trailingAnchor()),
+            action
+                .centerYAnchor()
+                .constraintEqualToAnchor(&content.centerYAnchor()),
+            text.trailingAnchor()
+                .constraintLessThanOrEqualToAnchor_constant(&action.leadingAnchor(), -10.0),
         ]);
         frame.setContentView(Some(&content));
-        BannerView { frame, lines, hint }
+        BannerView {
+            frame,
+            icon,
+            title,
+            lines,
+            hint,
+            action,
+        }
     }
 
-    /// Sets the banner; hides it if there are no lines.
+    /// Sets the strip; hides it if there are no lines.
     fn show(&self, banner: &Banner) {
         if banner.lines.is_empty() {
             self.frame.setHidden(true);
             return;
+        }
+        let tint = match banner.action {
+            BannerAction::ShowInFinder => NSColor::systemRedColor(),
+            BannerAction::None | BannerAction::OpenFile => NSColor::systemOrangeColor(),
+        };
+        self.frame.setFillColor(&tint.colorWithAlphaComponent(0.10));
+        self.frame
+            .setBorderColor(&tint.colorWithAlphaComponent(0.35));
+        self.icon.setContentTintColor(Some(&tint));
+        match banner.title {
+            Some(title) => {
+                self.title.setStringValue(&NSString::from_str(title));
+                self.title.setHidden(false);
+            }
+            None => self.title.setHidden(true),
         }
         self.lines
             .setStringValue(&NSString::from_str(&banner.lines.join("\n")));
@@ -3242,130 +3244,374 @@ impl BannerView {
             }
             None => self.hint.setHidden(true),
         }
+        match banner.action {
+            BannerAction::None => self.action.setHidden(true),
+            BannerAction::OpenFile => {
+                self.action.setTitle(ns_string!("Open settings.toml"));
+                // SAFETY: the selector is one of the window's actions; the target was set at birth.
+                unsafe { self.action.setAction(Some(sel!(openFile:))) };
+                // On a lock, repairing the file is one click — Enter — away.
+                self.action.setKeyEquivalent(ns_string!("\r"));
+                self.action.setHidden(false);
+            }
+            BannerAction::ShowInFinder => {
+                self.action.setTitle(ns_string!("Show in Finder"));
+                // SAFETY: as above.
+                unsafe { self.action.setAction(Some(sel!(showSettingsFile:))) };
+                self.action.setKeyEquivalent(ns_string!(""));
+                self.action.setHidden(false);
+            }
+        }
         self.frame.setHidden(false);
     }
 }
 
-/// A pane's grid: the left column a right-aligned label, the right column
-/// the control; the note below the control on its own row, small and in the secondary colour.
-struct Form {
-    mtm: MainThreadMarker,
-    grid: Retained<NSGridView>,
-    rows: Vec<Row>,
+/// A group of rows on a page: its title line, if it has one, and the rounded box that holds the
+/// rows.
+struct GroupView {
+    view: Retained<NSStackView>,
+    /// The text beside the title ([`pages::Group::aside`]).
+    aside: Option<Retained<NSTextField>>,
+    spec: &'static pages::Group,
+    /// The group's rows, as a span of `Controls::rows`.
+    rows: std::ops::Range<usize>,
 }
 
-impl Form {
-    fn new(mtm: MainThreadMarker) -> Self {
-        let grid = NSGridView::new(mtm);
-        grid.setRowSpacing(6.0);
-        grid.setColumnSpacing(10.0);
-        grid.setRowAlignment(NSGridRowAlignment::FirstBaseline);
-        Form {
-            mtm,
-            grid,
-            rows: Vec::new(),
+/// What a row's control side is made of.
+struct Parts {
+    view: Retained<NSView>,
+    /// The controls the lock and a dependent row's dimming reach.
+    controls: Vec<Retained<NSControl>>,
+    /// The labels beside the controls (a unit, a slider's reading) that dim with the row.
+    dim: Vec<Retained<NSTextField>>,
+}
+
+impl Parts {
+    /// A single control that is the whole of the row's control side.
+    fn of(control: &NSControl) -> Parts {
+        let view: &NSView = control;
+        Parts {
+            view: view.retain(),
+            controls: vec![control.retain()],
+            dim: Vec::new(),
         }
     }
+}
 
-    /// Adds the row and the note row below it. The note row exists even in a
-    /// row with no description — hidden; the diagnostic of a value that was
-    /// not accepted appears there.
-    fn row(
-        &mut self,
-        key: Key,
-        label: &str,
-        control: &NSView,
-        controls: &[&NSControl],
-        description: Option<&'static str>,
-    ) -> Retained<NSGridRow> {
-        let mtm = self.mtm;
-        let text = NSTextField::labelWithString(&NSString::from_str(label), mtm);
-        let first = self.grid.numberOfRows() == 0;
-        let grid_row = self
-            .grid
-            .addRowWithViews(&NSArray::from_slice(&[text.as_super().as_super(), control]));
-        if !first {
-            // A gap between row groups wider than the note's padding.
-            grid_row.setTopPadding(10.0);
-        }
-        if self.grid.numberOfRows() == 1 {
-            let labels = self.grid.columnAtIndex(0);
-            labels.setXPlacement(NSGridCellPlacement::Trailing);
-            labels.setWidth(LABEL_WIDTH);
-        }
-        let empty = NSGridCell::emptyContentView(mtm);
-        let note = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
-        note.setFont(Some(&NSFont::systemFontOfSize(
-            NSFont::smallSystemFontSize(),
-        )));
-        note.setPreferredMaxLayoutWidth(NOTE_WIDTH);
-        let note_row = self
-            .grid
-            .addRowWithViews(&NSArray::from_slice(&[&*empty, note.as_super().as_super()]));
-        note_row.setTopPadding(-2.0);
-        let row = Row {
-            key,
-            label: text,
-            controls: controls.iter().map(|control| control.retain()).collect(),
-            note,
-            note_row,
-            description,
+impl Controls {
+    /// The control side of `key`'s row. Each control sits in one row, so this is asked once per key.
+    fn parts(&self, mtm: MainThreadMarker, key: Key) -> Parts {
+        let number = |number: &Number| {
+            let unit = pages::unit(key).map(|unit| {
+                let label = NSTextField::labelWithString(&NSString::from_str(unit), mtm);
+                label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                label
+                    .widthAnchor()
+                    .constraintGreaterThanOrEqualToConstant(UNIT_WIDTH)
+                    .setActive(true);
+                label
+            });
+            let mut views: Vec<&NSView> = vec![&number.field, &number.stepper];
+            if let Some(unit) = &unit {
+                views.push(unit);
+            }
+            Parts {
+                view: hstack(mtm, &views, 6.0),
+                controls: vec![
+                    number.field.as_super().retain(),
+                    number.stepper.as_super().retain(),
+                ],
+                dim: unit.into_iter().collect(),
+            }
         };
-        row.set_note(None, None, None, true);
-        self.rows.push(row);
-        grid_row
-    }
-
-    /// A row below the last one with only a right-hand view: a folder row's
-    /// buttons under its path. Its label column is empty.
-    fn actions(&mut self, view: &NSView) {
-        let empty = NSGridCell::emptyContentView(self.mtm);
-        let row = self
-            .grid
-            .addRowWithViews(&NSArray::from_slice(&[&*empty, view]));
-        row.setTopPadding(2.0);
-    }
-
-    /// A row that is not a settings key (the preview folder's usage): label
-    /// and view, no note and no [`Row`] — the lock and the diagnostics do not
-    /// reach it, because it writes nothing.
-    fn plain_row(&mut self, label: &str, view: &NSView) {
-        let text = NSTextField::labelWithString(&NSString::from_str(label), self.mtm);
-        let row = self
-            .grid
-            .addRowWithViews(&NSArray::from_slice(&[text.as_super().as_super(), view]));
-        row.setTopPadding(10.0);
+        let slide = |slide: &Slide| {
+            slide
+                .value
+                .setAlignment(objc2_app_kit::NSTextAlignment::Right);
+            width_constraint(&slide.value, SLIDE_READING_WIDTH);
+            Parts {
+                view: hstack(mtm, &[&slide.slider, &slide.value], 10.0),
+                controls: vec![slide.slider.as_super().retain()],
+                dim: vec![slide.value.clone()],
+            }
+        };
+        let folder = |folder: &Folder, show: Option<&NSButton>| {
+            let mut views: Vec<&NSView> = vec![&folder.path, &folder.change];
+            if let Some(show) = show {
+                views.push(show);
+            }
+            Parts {
+                view: hstack(mtm, &views, 8.0),
+                controls: vec![folder.change.as_super().retain()],
+                dim: Vec::new(),
+            }
+        };
+        match key {
+            Key::ConfirmClose => Parts::of(&self.confirm_close),
+            Key::RestoreWindows => Parts::of(&self.restore_windows),
+            Key::KeepRunning => Parts::of(&self.keep_running),
+            Key::Clipboard => Parts::of(&self.clipboard),
+            Key::Scrollback => number(&self.scrollback),
+            Key::ShellIntegration => Parts::of(&self.shell_integration),
+            Key::CommandLevel => Parts::of(&self.command_level),
+            Key::Theme => Parts::of(&self.theme),
+            Key::LightTheme => Parts::of(&self.light_theme),
+            Key::DarkTheme => Parts::of(&self.dark_theme),
+            Key::Font => Parts::of(&self.font),
+            Key::FontFeatures => Parts {
+                view: self.font_options.view(),
+                controls: Vec::new(),
+                dim: Vec::new(),
+            },
+            Key::Size => number(&self.size),
+            Key::LineHeight => number(&self.line_height),
+            Key::LetterSpacing => number(&self.letter_spacing),
+            Key::FontSmoothing => Parts::of(&self.font_smoothing),
+            Key::Scrollbar => Parts::of(&self.scrollbar),
+            Key::ContentEdge => Parts::of(&self.content_edge),
+            Key::SplitStyle => Parts::of(&self.split_style),
+            Key::TabDetails => Parts::of(&self.tab_details),
+            Key::TabIcons => Parts::of(&self.tab_icons),
+            Key::TabIconColors => Parts::of(&self.tab_icon_colors),
+            Key::TabRunning => Parts::of(&self.tab_running),
+            Key::TabPosition => Parts::of(&self.tab_position),
+            Key::MinimumContrast => Parts::of(&self.minimum_contrast),
+            Key::Shape => Parts::of(&self.shape),
+            Key::Blink => Parts::of(&self.blink),
+            Key::BlinkSpeed => slide(&self.blink_speed),
+            Key::Radius => slide(&self.radius),
+            Key::Glow => slide(&self.glow),
+            Key::Unfocused => Parts::of(&self.unfocused),
+            Key::CursorMotion => Parts::of(&self.cursor_motion),
+            Key::SmoothScroll => Parts::of(&self.smooth_scroll),
+            Key::ScrollBounce => Parts::of(&self.scroll_bounce),
+            Key::ReduceMotion => Parts::of(&self.reduce_motion),
+            Key::Keypress => Parts::of(&self.keypress),
+            Key::Erase => Parts::of(&self.erase),
+            Key::DockArrival => Parts::of(&self.dock_arrival),
+            Key::PreviewMaxSize => Parts::of(&self.preview_max_size),
+            Key::PreviewReadOnly => Parts::of(&self.preview_read_only),
+            Key::PreviewDir => folder(&self.preview_dir, Some(&self.show_previews)),
+            Key::PreviewKeep => Parts::of(&self.preview_keep),
+            Key::PreviewLimit => Parts::of(&self.preview_limit),
+            Key::DownloadDir => folder(&self.download_dir, None),
+            Key::DownloadConflict => Parts::of(&self.download_conflict),
+            Key::DownloadNotify => Parts::of(&self.download_notify),
+            Key::RemoteStats => Parts::of(&self.remote_stats),
+            Key::StatsInterval => number(&self.stats_interval),
+            Key::RemoteIntegration => Parts::of(&self.remote_integration),
+            Key::Ports => Parts::of(&self.ports),
+            Key::PythonEnv => Parts::of(&self.python_env),
+            Key::NodeVersion => Parts::of(&self.node_version),
+            Key::DimSplits => Parts::of(&self.dim_splits),
+            Key::FocusFrame => Parts::of(&self.focus_frame),
+            Key::ResizeInSteps => Parts::of(&self.resize_in_steps),
+        }
     }
 }
 
-/// Field + stepper side by side.
-fn number_view(mtm: MainThreadMarker, number: &Number) -> Retained<NSView> {
-    hstack(
+/// A box for a group's rows: rounded, a hair of edge, the ground a control stands on. Returns it
+/// and the stack inside it that the rows go into.
+fn group_box(mtm: MainThreadMarker) -> (Retained<NSBox>, Retained<NSStackView>) {
+    let boxed = NSBox::new(mtm);
+    boxed.setBoxType(NSBoxType::Custom);
+    boxed.setTitlePosition(NSTitlePosition::NoTitle);
+    boxed.setCornerRadius(GROUP_RADIUS);
+    boxed.setBorderWidth(0.5);
+    boxed.setBorderColor(&NSColor::separatorColor());
+    boxed.setFillColor(&NSColor::controlBackgroundColor());
+    boxed.setContentViewMargins(NSSize::new(0.0, 0.0));
+    let inner = stack(
         mtm,
-        &[
-            number.field.as_super().as_super(),
-            number.stepper.as_super().as_super(),
-        ],
-        4.0,
-    )
+        &[],
+        NSUserInterfaceLayoutOrientation::Vertical,
+        0.0,
+        NSLayoutAttribute::Leading,
+    );
+    let content: &NSView = &inner;
+    boxed.setContentView(Some(content));
+    (boxed, inner)
 }
 
-/// The field and the stepper are both the row's control (the lock disables
-/// both at once).
-fn number_controls(number: &Number) -> [&NSControl; 2] {
-    [&number.field, &number.stepper]
-}
-
-/// Slider + value label side by side.
-fn slide_view(mtm: MainThreadMarker, slide: &Slide) -> Retained<NSView> {
-    hstack(
+/// A group as the page shows it: the title line (title, then its aside) above the box.
+fn group_view(
+    mtm: MainThreadMarker,
+    spec: &pages::Group,
+    boxed: &NSBox,
+) -> (Retained<NSStackView>, Option<Retained<NSTextField>>) {
+    let group = stack(
         mtm,
-        &[
-            slide.slider.as_super().as_super(),
-            slide.value.as_super().as_super(),
-        ],
-        8.0,
-    )
+        &[],
+        NSUserInterfaceLayoutOrientation::Vertical,
+        TITLE_SPACING,
+        NSLayoutAttribute::Leading,
+    );
+    let mut aside = None;
+    if let Some(title) = spec.title {
+        let title = NSTextField::labelWithString(&NSString::from_str(title), mtm);
+        title.setFont(Some(
+            &NSFont::boldSystemFontOfSize(NSFont::systemFontSize()),
+        ));
+        let note = NSTextField::labelWithString(ns_string!(""), mtm);
+        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        note.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        let line = stack(
+            mtm,
+            &[&title, &note],
+            NSUserInterfaceLayoutOrientation::Horizontal,
+            8.0,
+            NSLayoutAttribute::FirstBaseline,
+        );
+        line.setEdgeInsets(NSEdgeInsets {
+            top: 0.0,
+            left: 4.0,
+            bottom: 0.0,
+            right: 4.0,
+        });
+        group.addArrangedSubview(&line);
+        aside = Some(note);
+    }
+    group.addArrangedSubview(boxed);
+    boxed
+        .widthAnchor()
+        .constraintEqualToAnchor(&group.widthAnchor())
+        .setActive(true);
+    (group, aside)
+}
+
+/// A row of a group's box: the name on the left with its description under it, the control on
+/// the right (or, for `below`, under the text and as wide as the row), a hairline above it.
+fn build_row(
+    mtm: MainThreadMarker,
+    key: Option<Key>,
+    label: &str,
+    parts: Parts,
+    below: bool,
+) -> Row {
+    let view = NSView::new(mtm);
+    let name = NSTextField::labelWithString(&NSString::from_str(label), mtm);
+    name.setHidden(label.is_empty());
+    let note = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+    note.setFont(Some(&NSFont::systemFontOfSize(
+        NSFont::smallSystemFontSize(),
+    )));
+    let side = if below {
+        0.0
+    } else {
+        parts.view.fittingSize().width
+    };
+    note.setPreferredMaxLayoutWidth(if below {
+        ROW_WIDTH
+    } else {
+        (ROW_WIDTH - ROW_GAP - side).max(MIN_TEXT_WIDTH)
+    });
+    let text = stack(
+        mtm,
+        &[&name, &note],
+        NSUserInterfaceLayoutOrientation::Vertical,
+        2.0,
+        NSLayoutAttribute::Leading,
+    );
+    let separator = NSBox::new(mtm);
+    separator.setBoxType(NSBoxType::Separator);
+    add_pinned(&view, &separator);
+    add_pinned(&view, &text);
+    add_pinned(&view, &parts.view);
+    let min_height = view
+        .heightAnchor()
+        .constraintGreaterThanOrEqualToConstant(ROW_MIN_HEIGHT);
+    let mut constraints = vec![
+        min_height,
+        separator
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_PAD_X),
+        separator
+            .trailingAnchor()
+            .constraintEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
+        separator
+            .topAnchor()
+            .constraintEqualToAnchor(&view.topAnchor()),
+        separator.heightAnchor().constraintEqualToConstant(1.0),
+        text.leadingAnchor()
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_PAD_X),
+        text.topAnchor()
+            .constraintGreaterThanOrEqualToAnchor_constant(&view.topAnchor(), ROW_PAD_Y),
+    ];
+    if below {
+        constraints.extend([
+            text.trailingAnchor()
+                .constraintLessThanOrEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
+            parts
+                .view
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_PAD_X),
+            parts
+                .view
+                .trailingAnchor()
+                .constraintLessThanOrEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
+            parts.view.topAnchor().constraintEqualToAnchor_constant(
+                &text.bottomAnchor(),
+                if label.is_empty() { 4.0 } else { 10.0 },
+            ),
+            parts
+                .view
+                .bottomAnchor()
+                .constraintEqualToAnchor_constant(&view.bottomAnchor(), -ROW_PAD_Y),
+        ]);
+    } else {
+        constraints.extend([
+            text.bottomAnchor()
+                .constraintLessThanOrEqualToAnchor_constant(&view.bottomAnchor(), -ROW_PAD_Y),
+            text.centerYAnchor()
+                .constraintEqualToAnchor(&view.centerYAnchor()),
+            parts
+                .view
+                .trailingAnchor()
+                .constraintEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
+            parts
+                .view
+                .centerYAnchor()
+                .constraintEqualToAnchor(&view.centerYAnchor()),
+            parts
+                .view
+                .topAnchor()
+                .constraintGreaterThanOrEqualToAnchor_constant(&view.topAnchor(), 6.0),
+            parts
+                .view
+                .bottomAnchor()
+                .constraintLessThanOrEqualToAnchor_constant(&view.bottomAnchor(), -6.0),
+            text.trailingAnchor()
+                .constraintLessThanOrEqualToAnchor_constant(&parts.view.leadingAnchor(), -ROW_GAP),
+        ]);
+    }
+    activate(&constraints);
+    let row = Row {
+        key,
+        view,
+        separator,
+        label: name,
+        controls: parts.controls,
+        dim: parts.dim,
+        note,
+        hidden: Cell::new(false),
+    };
+    row.set_note(None, None, None, true);
+    row
+}
+
+/// A stack of `views` with the window's usual manners: hidden members take no room.
+fn stack(
+    mtm: MainThreadMarker,
+    views: &[&NSView],
+    orientation: NSUserInterfaceLayoutOrientation,
+    spacing: f64,
+    alignment: NSLayoutAttribute,
+) -> Retained<NSStackView> {
+    let stack = NSStackView::stackViewWithViews(&NSArray::from_slice(views), mtm);
+    stack.setOrientation(orientation);
+    stack.setSpacing(spacing);
+    stack.setAlignment(alignment);
+    stack
 }
 
 fn hstack(mtm: MainThreadMarker, views: &[&NSView], spacing: f64) -> Retained<NSView> {
@@ -3399,40 +3645,170 @@ fn activate(constraints: &[Retained<NSLayoutConstraint>]) {
     }
 }
 
-/// A row of the sidebar: SF Symbol + title.
-fn sidebar_cell(mtm: MainThreadMarker, category: Category) -> Retained<NSTableCellView> {
-    let cell = NSTableCellView::new(mtm);
-    let label = NSTextField::labelWithString(&NSString::from_str(category.title()), mtm);
-    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str(category.symbol()),
-        None,
-    );
-    let icon = NSImageView::new(mtm);
-    if let Some(image) = image {
-        icon.setImage(Some(&image));
+/// What a row of the sidebar is: a page, or the gap that sets Servers apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SideItem {
+    Page(Category),
+    Gap,
+}
+
+impl SideItem {
+    /// The sidebar's rows, top to bottom: the pages in order, a gap before Servers.
+    const ALL: [SideItem; 10] = [
+        SideItem::Page(Category::General),
+        SideItem::Page(Category::Appearance),
+        SideItem::Page(Category::Font),
+        SideItem::Page(Category::Tabs),
+        SideItem::Page(Category::Cursor),
+        SideItem::Page(Category::Motion),
+        SideItem::Page(Category::Shell),
+        SideItem::Page(Category::Keyboard),
+        SideItem::Gap,
+        SideItem::Page(Category::Servers),
+    ];
+
+    /// The table row of `category`.
+    fn row_of(category: Category) -> usize {
+        Self::ALL
+            .iter()
+            .position(|item| *item == SideItem::Page(category))
+            .unwrap_or_default()
     }
-    add_pinned(&cell, &icon);
-    add_pinned(&cell, &label);
-    activate(&[
-        icon.leadingAnchor()
-            .constraintEqualToAnchor_constant(&cell.leadingAnchor(), 4.0),
-        icon.centerYAnchor()
-            .constraintEqualToAnchor(&cell.centerYAnchor()),
-        icon.widthAnchor().constraintEqualToConstant(18.0),
-        label
-            .leadingAnchor()
-            .constraintEqualToAnchor_constant(&icon.trailingAnchor(), 6.0),
-        label
-            .centerYAnchor()
-            .constraintEqualToAnchor(&cell.centerYAnchor()),
-    ]);
-    // SAFETY: both fields are weak; the views live with the cell as the
-    // cell's subviews.
-    unsafe {
-        cell.setImageView(Some(&icon));
-        cell.setTextField(Some(&label));
+
+    fn at(row: NSInteger) -> Option<SideItem> {
+        usize::try_from(row)
+            .ok()
+            .and_then(|row| Self::ALL.get(row).copied())
     }
-    cell
+}
+
+pub(crate) struct SideRowIvars {
+    selected: Cell<bool>,
+    icon: OnceCell<Retained<NSImageView>>,
+    title: OnceCell<Retained<NSTextField>>,
+}
+
+define_class!(
+    /// A row of the sidebar. It draws what the table would: the pale face of the selected row and
+    /// the page's tile — bateri's own tab tile, in the accent when the page is the open one.
+    // SAFETY: NSView has no subclassing requirement; Drop is not implemented.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriSettingsSideRow"]
+    #[ivars = SideRowIvars]
+    struct SideRow;
+
+    unsafe impl NSObjectProtocol for SideRow {}
+
+    impl SideRow {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let bounds = self.bounds();
+            let selected = self.ivars().selected.get();
+            if selected {
+                let face = NSRect::new(
+                    NSPoint::new(SIDE_PAD, 0.0),
+                    NSSize::new(bounds.size.width - 2.0 * SIDE_PAD, bounds.size.height),
+                );
+                NSColor::labelColor()
+                    .colorWithAlphaComponent(0.08)
+                    .setFill();
+                crate::tab_bar::shaped(face, SIDE_ROW_RADIUS).fill();
+            }
+            let tile = NSRect::new(
+                NSPoint::new(
+                    SIDE_PAD + SIDE_TILE_LEFT,
+                    (bounds.size.height - bt_shell_common::tabs::TILE_HEIGHT) / 2.0,
+                ),
+                NSSize::new(
+                    bt_shell_common::tabs::TILE_WIDTH,
+                    bt_shell_common::tabs::TILE_HEIGHT,
+                ),
+            );
+            let fill = if selected {
+                NSColor::controlAccentColor()
+            } else {
+                NSColor::labelColor().colorWithAlphaComponent(0.14)
+            };
+            fill.setFill();
+            crate::tab_bar::shaped(tile, SIDE_TILE_RADIUS).fill();
+        }
+    }
+);
+
+impl SideRow {
+    fn new(mtm: MainThreadMarker, category: Category, selected: bool) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SideRowIvars {
+            selected: Cell::new(selected),
+            icon: OnceCell::new(),
+            title: OnceCell::new(),
+        });
+        // SAFETY: `init` is NSView's designated initializer (zero frame); the size comes from the
+        // table and the constraints below.
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        let label = NSTextField::labelWithString(&NSString::from_str(category.title()), mtm);
+        let icon = NSImageView::new(mtm);
+        if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(category.symbol()),
+            None,
+        ) {
+            icon.setImage(Some(&image));
+        }
+        icon.setImageScaling(NSImageScaling::ScaleProportionallyDown);
+        add_pinned(&this, &icon);
+        add_pinned(&this, &label);
+        activate(&[
+            icon.leadingAnchor()
+                .constraintEqualToAnchor_constant(&this.leadingAnchor(), SIDE_PAD + SIDE_TILE_LEFT),
+            icon.centerYAnchor()
+                .constraintEqualToAnchor(&this.centerYAnchor()),
+            icon.widthAnchor()
+                .constraintEqualToConstant(bt_shell_common::tabs::TILE_WIDTH),
+            icon.heightAnchor()
+                .constraintEqualToConstant(bt_shell_common::tabs::TILE_HEIGHT),
+            label.leadingAnchor().constraintEqualToAnchor_constant(
+                &this.leadingAnchor(),
+                SIDE_PAD + SIDE_TILE_LEFT + bt_shell_common::tabs::TILE_WIDTH + 9.0,
+            ),
+            label
+                .centerYAnchor()
+                .constraintEqualToAnchor(&this.centerYAnchor()),
+        ]);
+        let _ = this.ivars().icon.set(icon);
+        let _ = this.ivars().title.set(label);
+        this.paint();
+        this
+    }
+
+    /// Marks the row as the open page (or not) and redraws it.
+    fn set_selected(&self, selected: bool) {
+        if self.ivars().selected.replace(selected) != selected {
+            self.paint();
+        }
+    }
+
+    /// The parts that are views rather than drawing: the tile's mark and the title.
+    fn paint(&self) {
+        let selected = self.ivars().selected.get();
+        if let Some(icon) = self.ivars().icon.get() {
+            let tint = if selected {
+                NSColor::whiteColor()
+            } else {
+                NSColor::secondaryLabelColor()
+            };
+            icon.setContentTintColor(Some(&tint));
+        }
+        if let Some(title) = self.ivars().title.get() {
+            let size = NSFont::systemFontSize();
+            let font = if selected {
+                NSFont::boldSystemFontOfSize(size)
+            } else {
+                NSFont::systemFontOfSize(size)
+            };
+            title.setFont(Some(&font));
+        }
+        self.setNeedsDisplay(true);
+    }
 }
 
 fn select_choice<T: Choice>(popup: &NSPopUpButton, value: T) {
@@ -3752,16 +4128,13 @@ mod tests {
         check::<RemoteStatsMode>();
     }
 
-    /// "Keep programs running:"'s note follows the value: under `quit` it
-    /// says what quitting leaves behind and how to end it, under the others
-    /// only what ends the programs anyway; no other row's note moves.
+    /// "Keep programs running"'s description follows the value: under `quit` it says what
+    /// quitting leaves behind and how to end it, under the others only what ends the programs
+    /// anyway; no other row's description moves with it.
     #[test]
     fn keep_running_note_follows_the_value() {
-        // A scroll bar value with no note of its own: this test asks about
-        // `keep_running` alone.
         let with = |keep| Settings {
             keep_running: keep,
-            scrollbar: Scrollbar::Auto,
             ..Settings::default()
         };
         let resolved = Resolved {
@@ -3770,11 +4143,11 @@ mod tests {
         };
         assert_eq!(
             row_description(Key::KeepRunning, &with(KeepRunning::Update), resolved),
-            Some("Restarting the Mac ends them.")
+            Some("Restarting the computer ends them.")
         );
         assert_eq!(
             row_description(Key::KeepRunning, &with(KeepRunning::Crash), resolved),
-            Some("Restarting the Mac ends them.")
+            Some("Restarting the computer ends them.")
         );
         let quit = row_description(Key::KeepRunning, &with(KeepRunning::Quit), resolved)
             .expect("the row has a note");
@@ -3783,22 +4156,23 @@ mod tests {
             "{quit}"
         );
         assert!(quit.contains("\u{2325}\u{2318}Q ends them"), "{quit}");
-        assert!(quit.ends_with("Restarting the Mac ends them."), "{quit}");
-        // "bateri command:" has a note of its own, which follows `[commands] level`.
-        let followers = [Key::KeepRunning, Key::CommandLevel];
-        for key in Key::ALL.into_iter().filter(|key| !followers.contains(key)) {
+        assert!(
+            quit.ends_with("Restarting the computer ends them."),
+            "{quit}"
+        );
+        for key in Key::ALL.into_iter().filter(|key| *key != Key::KeepRunning) {
             assert_eq!(
                 row_description(key, &with(KeepRunning::Quit), resolved),
-                None,
+                row_description(key, &with(KeepRunning::Update), resolved),
                 "{key:?}"
             );
         }
     }
 
-    /// "Scroll bar:"'s note says what "Follow System Settings" gives right
+    /// "Scroll bar"'s description says what "Follow System Settings" gives right
     /// now — the system's resolved form, which a mouse plugged in can change —
     /// and nothing under the values that say it themselves; no other row's
-    /// note moves.
+    /// description moves with it.
     #[test]
     fn scrollbar_note_follows_what_the_system_gives() {
         let with = |scrollbar| Settings {
@@ -3831,13 +4205,10 @@ mod tests {
                 "{setting:?}"
             );
         }
-        for key in Key::ALL
-            .into_iter()
-            .filter(|&key| ![Key::Scrollbar, Key::KeepRunning, Key::CommandLevel].contains(&key))
-        {
+        for key in Key::ALL.into_iter().filter(|&key| key != Key::Scrollbar) {
             assert_eq!(
                 row_description(key, &system, resolved(ScrollbarMode::Always)),
-                None,
+                row_description(key, &system, resolved(ScrollbarMode::Auto)),
                 "{key:?}"
             );
         }
@@ -4032,7 +4403,11 @@ mod tests {
         assert_eq!(decimal_label(13.0), "13");
         assert_eq!(decimal_label(1.25), "1.25");
         assert_eq!(decimal_label(1.2000000000000002), "1.2");
-        assert_eq!(seconds_label(0.5), "0.5 s");
+        // The readings beside the sliders: fixed places, and "Off" for no glow.
+        assert_eq!(seconds_label(0.5), "0.50 s");
+        assert_eq!(radius_label(0.1), "0.10");
+        assert_eq!(glow_label(1.0), "1.0");
+        assert_eq!(glow_label(0.0), "Off");
     }
 
     #[test]
@@ -4121,5 +4496,463 @@ mod tests {
             ),
             "Helvetica — not monospaced"
         );
+    }
+
+    /// Every settings key stands once in the page table, and the Keyboard page, a table of its
+    /// own, holds none; the one row that is not a key ("In use") stands once too.
+    #[test]
+    fn every_key_has_exactly_one_place_on_the_pages() {
+        let mut keys = Vec::new();
+        let mut usage = 0;
+        for category in Category::ALL {
+            for group in pages::groups(category) {
+                assert!(!group.items.is_empty(), "{category:?} has an empty group");
+                for item in group.items {
+                    match item {
+                        pages::Item::Key(key) => keys.push(*key),
+                        pages::Item::Usage => usage += 1,
+                    }
+                }
+            }
+        }
+        assert!(pages::groups(Category::Keyboard).is_empty());
+        assert_eq!(usage, 1);
+        keys.sort_by_key(|key| key.tag());
+        assert_eq!(keys, Key::ALL);
+        // Each key sits on the page its topic belongs to.
+        let page_of = |wanted: Key| {
+            Category::ALL
+                .into_iter()
+                .find(|category| {
+                    pages::groups(*category)
+                        .iter()
+                        .any(|group| group.items.contains(&pages::Item::Key(wanted)))
+                })
+                .expect("the key has a page")
+        };
+        assert_eq!(page_of(Key::KeepRunning), Category::General);
+        assert_eq!(page_of(Key::MinimumContrast), Category::Appearance);
+        assert_eq!(page_of(Key::FontSmoothing), Category::Font);
+        assert_eq!(page_of(Key::FontFeatures), Category::Font);
+        assert_eq!(page_of(Key::SplitStyle), Category::Tabs);
+        assert_eq!(page_of(Key::Glow), Category::Cursor);
+        assert_eq!(page_of(Key::SmoothScroll), Category::Motion);
+        assert_eq!(page_of(Key::Ports), Category::Shell);
+        assert_eq!(page_of(Key::CommandLevel), Category::Shell);
+        assert_eq!(page_of(Key::StatsInterval), Category::Servers);
+        assert_eq!(page_of(Key::DownloadNotify), Category::Servers);
+    }
+
+    /// Every row has a name that is a name — none ends in the old colon — except the options' row,
+    /// whose switches carry their own; units stand beside the control.
+    #[test]
+    fn rows_are_named_without_colons_and_units_stand_beside_the_control() {
+        for key in Key::ALL {
+            let label = pages::label(key);
+            assert_eq!(label.is_empty(), key == Key::FontFeatures, "{key:?}");
+            assert!(!label.ends_with(':'), "{label}");
+        }
+        assert_eq!(pages::unit(Key::Scrollback), Some("lines"));
+        assert_eq!(pages::unit(Key::Size), Some("pt"));
+        assert_eq!(pages::unit(Key::LineHeight), Some("\u{d7}"));
+        assert_eq!(pages::unit(Key::LetterSpacing), Some("\u{d7}"));
+        assert_eq!(pages::unit(Key::StatsInterval), Some("seconds"));
+        assert_eq!(
+            Key::ALL
+                .into_iter()
+                .filter(|k| pages::unit(*k).is_some())
+                .count(),
+            5
+        );
+    }
+
+    /// The sidebar lists the nine pages in their order with a gap before Servers, and every
+    /// page that has rows has a stack of its own.
+    #[test]
+    fn the_sidebar_lists_every_page_with_a_gap_before_servers() {
+        let pages: Vec<Category> = SideItem::ALL
+            .iter()
+            .filter_map(|item| match item {
+                SideItem::Page(category) => Some(*category),
+                SideItem::Gap => None,
+            })
+            .collect();
+        assert_eq!(pages, Category::ALL);
+        let gap = SideItem::ALL
+            .iter()
+            .position(|item| *item == SideItem::Gap)
+            .expect("a gap");
+        assert_eq!(SideItem::ALL[gap + 1], SideItem::Page(Category::Servers));
+        for (row, item) in SideItem::ALL.iter().enumerate() {
+            assert_eq!(SideItem::at(row as NSInteger), Some(*item));
+            if let SideItem::Page(category) = item {
+                assert_eq!(SideItem::row_of(*category), row);
+            }
+        }
+        assert_eq!(SideItem::at(-1), None);
+        assert_eq!(SideItem::at(SideItem::ALL.len() as NSInteger), None);
+        let grids: Vec<Option<usize>> = Category::ALL.iter().map(|c| c.grid()).collect();
+        assert_eq!(
+            grids,
+            [
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+                Some(6),
+                None,
+                Some(7)
+            ]
+        );
+    }
+
+    /// The rows that lean on another setting: dimmed with their reason, or gone.
+    #[test]
+    fn a_row_that_leans_on_another_setting_is_dimmed_and_says_why() {
+        let with = |edit: &dyn Fn(&mut Settings)| {
+            let mut settings = Settings::default();
+            edit(&mut settings);
+            settings
+        };
+        let free = pages::Dependency {
+            hidden: false,
+            enabled: true,
+            reason: None,
+        };
+        let dimmed = |reason| pages::Dependency {
+            hidden: false,
+            enabled: false,
+            reason,
+        };
+        // Under the defaults only two rows lean: the cursor does not blink, and the tabs are on top.
+        let plain = with(&|_| {});
+        for key in Key::ALL {
+            let leans = pages::dependency(key, &plain);
+            match key {
+                Key::BlinkSpeed => assert_eq!(leans, dimmed(Some("Blink is Off."))),
+                Key::TabDetails => assert_eq!(leans, dimmed(Some("Only in the side column."))),
+                Key::LightTheme | Key::DarkTheme => {
+                    assert_eq!(leans.hidden, !plain.follows_system(), "{key:?}");
+                }
+                _ => assert_eq!(leans, free, "{key:?}"),
+            }
+        }
+        // Blink Off: the speed has nothing to set.
+        let blink = |mode| with(&|s: &mut Settings| s.cursor_blink = mode);
+        assert_eq!(
+            pages::dependency(Key::BlinkSpeed, &blink(CursorBlink::Off)),
+            dimmed(Some("Blink is Off."))
+        );
+        assert_eq!(
+            pages::dependency(Key::BlinkSpeed, &blink(CursorBlink::On)),
+            free
+        );
+        // A theme of its own: Light and Dark mean nothing and go; Match System brings them back.
+        let named = with(&|s: &mut Settings| s.theme = "bateri".to_owned());
+        for key in [Key::LightTheme, Key::DarkTheme] {
+            assert!(pages::dependency(key, &named).hidden, "{key:?}");
+        }
+        let system = with(&|s: &mut Settings| s.theme = SYSTEM_THEME.to_owned());
+        for key in [Key::LightTheme, Key::DarkTheme] {
+            assert_eq!(pages::dependency(key, &system), free, "{key:?}");
+        }
+        // Server load Off: no interval to sample at.
+        let load = |mode| with(&|s: &mut Settings| s.remote_stats.mode = mode);
+        assert_eq!(
+            pages::dependency(Key::StatsInterval, &load(RemoteStatsMode::Off)),
+            dimmed(Some("Server load is Off."))
+        );
+        assert_eq!(
+            pages::dependency(Key::StatsInterval, &load(RemoteStatsMode::Alerts)),
+            free
+        );
+        // Tabs on top: the details have no column to stand under; on the side they do.
+        let tabs = |position| with(&|s: &mut Settings| s.tab_position = position);
+        assert_eq!(
+            pages::dependency(Key::TabDetails, &tabs(TabPosition::Top)),
+            dimmed(Some("Only in the side column."))
+        );
+        assert_eq!(
+            pages::dependency(Key::TabDetails, &tabs(TabPosition::Side)),
+            free
+        );
+        // No program icons: the colors have nothing to color.
+        let icons = |on| with(&|s: &mut Settings| s.tab_icons = on);
+        assert_eq!(
+            pages::dependency(Key::TabIconColors, &icons(false)),
+            dimmed(Some("Program icons are off."))
+        );
+        assert_eq!(pages::dependency(Key::TabIconColors, &icons(true)), free);
+        // The dock's three rows need Shell integration to be Auto; the group says so, not the rows.
+        let shell = |mode| with(&|s: &mut Settings| s.shell_integration = mode);
+        for key in [Key::PythonEnv, Key::NodeVersion, Key::Ports] {
+            for mode in [ShellIntegration::Blocks, ShellIntegration::Off] {
+                assert_eq!(
+                    pages::dependency(key, &shell(mode)),
+                    dimmed(None),
+                    "{key:?}"
+                );
+            }
+            assert_eq!(
+                pages::dependency(key, &shell(ShellIntegration::Auto)),
+                free,
+                "{key:?}"
+            );
+        }
+        let dock = pages::groups(Category::Shell)
+            .iter()
+            .find(|group| group.title == Some("In the dock"))
+            .expect("the dock's group");
+        assert_eq!(
+            (dock.aside)(&shell(ShellIntegration::Off)),
+            Some("needs Shell integration: Auto")
+        );
+        assert_eq!((dock.aside)(&shell(ShellIntegration::Auto)), None);
+    }
+
+    /// Each row's description for each value is its own sentence — the window says what the
+    /// selected value does, not the list of them all.
+    #[test]
+    fn every_value_has_its_own_description() {
+        let resolved = |reduce| Resolved {
+            reduce,
+            scrollbar: ScrollbarMode::Auto,
+        };
+        let say = |edit: &dyn Fn(&mut Settings)| {
+            let mut settings = Settings::default();
+            edit(&mut settings);
+            settings
+        };
+        let of = |key, settings: &Settings| row_description(key, settings, resolved(false));
+        let restore = |v| say(&|s: &mut Settings| s.restore_windows = v);
+        assert_eq!(
+            of(Key::RestoreWindows, &restore(RestoreWindows::All)),
+            Some(
+                "Windows, tabs and splits come back with what each pane showed. Scrollback is saved as plain text on disk."
+            )
+        );
+        assert_eq!(
+            of(Key::RestoreWindows, &restore(RestoreWindows::Layout)),
+            Some("Windows, tabs and splits come back. Nothing you saw is written to disk.")
+        );
+        assert_eq!(
+            of(Key::RestoreWindows, &restore(RestoreWindows::Off)),
+            Some("bateri opens with a new window and deletes what was saved.")
+        );
+        let confirm = |v| say(&|s: &mut Settings| s.confirm_close = v);
+        assert_eq!(
+            of(Key::ConfirmClose, &confirm(ConfirmClose::Running)),
+            Some("Asks while a program other than the shell runs, and names it.")
+        );
+        assert_eq!(
+            of(Key::ConfirmClose, &confirm(ConfirmClose::Always)),
+            Some("Asks even at an empty prompt.")
+        );
+        assert_eq!(of(Key::ConfirmClose, &confirm(ConfirmClose::Never)), None);
+        let edge = |v| say(&|s: &mut Settings| s.content_edge = v);
+        assert_eq!(
+            of(Key::ContentEdge, &edge(ContentEdge::Fade)),
+            Some("The line scrolling up thins out, so no letter is cut in half.")
+        );
+        assert_eq!(
+            of(Key::ContentEdge, &edge(ContentEdge::Line)),
+            Some("Text is cut under a thin line.")
+        );
+        assert_eq!(
+            of(Key::ContentEdge, &edge(ContentEdge::Cut)),
+            Some("Text is cut where the pane ends.")
+        );
+        let position = |v| say(&|s: &mut Settings| s.tab_position = v);
+        assert_eq!(
+            of(Key::TabPosition, &position(TabPosition::Side)),
+            Some("A column down the left edge, tall as the window; the title row goes.")
+        );
+        assert_eq!(
+            of(Key::TabPosition, &position(TabPosition::Top)),
+            Some("A bar along the top of the window.")
+        );
+        let icons = |v| say(&|s: &mut Settings| s.tab_icons = v);
+        assert_eq!(
+            of(Key::TabIcons, &icons(true)),
+            Some("The program a tab runs, on a tile before its title.")
+        );
+        assert_eq!(
+            of(Key::TabIcons, &icons(false)),
+            Some("Only a small mark while a tab works, waits or has finished.")
+        );
+        let colors = |v| say(&|s: &mut Settings| s.tab_icon_colors = v);
+        assert_eq!(
+            of(Key::TabIconColors, &colors(IconColors::Brand)),
+            Some("Programs with a colored brand (Claude, Gemini) keep it.")
+        );
+        assert_eq!(
+            of(Key::TabIconColors, &colors(IconColors::Theme)),
+            Some("Icons take the theme\u{2019}s colors.")
+        );
+        let details = |v| say(&|s: &mut Settings| s.tab_details = v);
+        assert_eq!(of(Key::TabDetails, &details(TabDetails::Off)), None);
+        assert_eq!(
+            of(Key::TabDetails, &details(TabDetails::Smart)),
+            Some("Where the program stands and what it asks, in Activity only.")
+        );
+        assert_eq!(
+            of(Key::TabDetails, &details(TabDetails::Always)),
+            Some("Where the program stands and what it asks, under every tab.")
+        );
+        let split = |v| say(&|s: &mut Settings| s.split_style = v);
+        assert_eq!(
+            of(Key::SplitStyle, &split(SplitStyle::Lines)),
+            Some("Panes touch, with one thin line between them.")
+        );
+        assert_eq!(
+            of(Key::SplitStyle, &split(SplitStyle::Cards)),
+            Some("Each pane stands on the ground with a gap round it.")
+        );
+        let blink = |v| say(&|s: &mut Settings| s.cursor_blink = v);
+        assert_eq!(
+            of(Key::Blink, &blink(CursorBlink::Auto)),
+            Some("Blinks until the running program asks it to stop.")
+        );
+        assert_eq!(
+            of(Key::Blink, &blink(CursorBlink::On)),
+            Some("Blinks whatever the program asks.")
+        );
+        assert_eq!(of(Key::Blink, &blink(CursorBlink::Off)), None);
+        let cursor = |v| say(&|s: &mut Settings| s.cursor_motion = v);
+        assert_eq!(
+            of(Key::CursorMotion, &cursor(CursorMotion::Spring)),
+            Some("Travels to its new place with a little give.")
+        );
+        assert_eq!(
+            of(Key::CursorMotion, &cursor(CursorMotion::Ease)),
+            Some("Glides to its new place.")
+        );
+        assert_eq!(
+            of(Key::CursorMotion, &cursor(CursorMotion::Snap)),
+            Some("Jumps. Typing and deleting effects are off too.")
+        );
+        let reduce = |v| say(&|s: &mut Settings| s.reduce_motion = v);
+        assert_eq!(
+            row_description(
+                Key::ReduceMotion,
+                &reduce(ReduceMotion::System),
+                resolved(true)
+            ),
+            Some("On right now, from System Settings \u{203a} Accessibility.")
+        );
+        assert_eq!(
+            row_description(
+                Key::ReduceMotion,
+                &reduce(ReduceMotion::System),
+                resolved(false)
+            ),
+            Some("Off right now, from System Settings \u{203a} Accessibility.")
+        );
+        assert_eq!(
+            of(Key::ReduceMotion, &reduce(ReduceMotion::On)),
+            Some("Animations become fades and instant jumps.")
+        );
+        assert_eq!(of(Key::ReduceMotion, &reduce(ReduceMotion::Off)), None);
+        let shell = |v| say(&|s: &mut Settings| s.shell_integration = v);
+        assert_eq!(
+            of(Key::ShellIntegration, &shell(ShellIntegration::Auto)),
+            Some("bateri draws the prompt and the line you type sits in the dock. New tabs only.")
+        );
+        assert_eq!(
+            of(Key::ShellIntegration, &shell(ShellIntegration::Blocks)),
+            Some(
+                "Commands become blocks; the prompt and the line stay your shell\u{2019}s. New tabs only."
+            )
+        );
+        assert_eq!(
+            of(Key::ShellIntegration, &shell(ShellIntegration::Off)),
+            Some("bateri sets nothing up in your shell. New tabs only.")
+        );
+        let level = |v| say(&|s: &mut Settings| s.commands_level = v);
+        assert_eq!(
+            of(Key::CommandLevel, &level(CommandLevel::Off)),
+            Some("The bateri command does nothing.")
+        );
+        assert_eq!(
+            of(Key::CommandLevel, &level(CommandLevel::Own)),
+            Some("They see and change only this computer\u{2019}s panes.")
+        );
+        assert_eq!(
+            of(Key::CommandLevel, &level(CommandLevel::Screen)),
+            Some("They see and change every tab, group and window bateri has open.")
+        );
+        assert_eq!(
+            of(Key::CommandLevel, &level(CommandLevel::Full)),
+            Some(
+                "They also start terminals on other machines and type into or read their panes. A server given this is trusted with your other machines too."
+            )
+        );
+        let stats = |v| say(&|s: &mut Settings| s.remote_stats.mode = v);
+        assert_eq!(
+            of(Key::RemoteStats, &stats(RemoteStatsMode::Sparkline)),
+            Some("CPU and memory as a line and numbers, in the ssh bar.")
+        );
+        assert_eq!(
+            of(Key::RemoteStats, &stats(RemoteStatsMode::Numbers)),
+            Some("CPU and memory as numbers, in the ssh bar.")
+        );
+        assert_eq!(
+            of(Key::RemoteStats, &stats(RemoteStatsMode::Alerts)),
+            Some("Nothing until a value passes its threshold.")
+        );
+        assert_eq!(of(Key::RemoteStats, &stats(RemoteStatsMode::Off)), None);
+        // Fixed sentences.
+        let plain = Settings::default();
+        assert_eq!(of(Key::Clipboard, &plain), Some("Also over ssh (OSC 52)."));
+        assert_eq!(
+            of(Key::FontSmoothing, &plain),
+            Some("Thickens the strokes the way Terminal does.")
+        );
+        assert_eq!(
+            of(Key::Ports, &plain),
+            Some("Click to list them, \u{2318}-click to open one.")
+        );
+        assert_eq!(
+            of(Key::StatsInterval, &plain),
+            Some("Pauses in hidden tabs and while idle.")
+        );
+        assert_eq!(of(Key::Theme, &plain), None);
+        // No text anywhere still speaks of "this Mac" or lists the values.
+        for key in Key::ALL {
+            if let Some(text) = of(key, &plain) {
+                assert!(!text.contains("Mac"), "{text}");
+            }
+        }
+    }
+
+    /// The strip says what happened and offers what can be done about it right there: Enter opens
+    /// a file that cannot be read, a refused write shows where the file is.
+    #[test]
+    fn the_strip_says_what_happened_and_offers_what_to_do() {
+        let locked = status(
+            &FileState::Locked("line 12: expected \"=\"".to_owned()),
+            &[],
+        );
+        assert_eq!(locked.banner.title, Some(LOCK_TITLE));
+        assert_eq!(locked.banner.action, BannerAction::OpenFile);
+        let write = ["settings.toml could not be written: denied".to_owned()];
+        let refused = status(&FileState::Usable(Vec::new()), &write);
+        assert_eq!(refused.banner.title, Some(WRITE_TITLE));
+        assert_eq!(refused.banner.action, BannerAction::ShowInFinder);
+        // A write error under a lock: the lock is the news, the file the way out.
+        let both = status(&FileState::Locked("bad".to_owned()), &write);
+        assert_eq!(both.banner.action, BannerAction::OpenFile);
+        // A diagnostic that lands on no row is a note: no title, no button.
+        let retired = Diagnostic {
+            key: None,
+            line: Some(4),
+            message: "`shell.prompt` is no longer read".to_owned(),
+        };
+        let note = status(&FileState::Usable(vec![retired]), &[]);
+        assert_eq!(note.banner.title, None);
+        assert_eq!(note.banner.action, BannerAction::None);
+        assert_eq!(status(&FileState::Missing, &[]).banner, Banner::default());
     }
 }

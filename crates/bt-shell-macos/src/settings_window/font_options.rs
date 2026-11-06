@@ -1,10 +1,10 @@
-//! The font options of the Appearance pane: a switch for each option the selected font offers.
+//! The font options of the Font page: a switch for each option the selected font offers.
 //!
 //! The list is the font's own ([`bt_shell_common::font_options`], the palette reads the same
 //! one): Ligatures and Hide Secrets first, then the font's stylistic sets and variants under the
-//! names it gives them, and Slashed Zero. A font that offers none (Menlo) hides the row, and
-//! changing the font rebuilds the switches, so the options on screen are always the selected
-//! font's.
+//! names it gives them, and Slashed Zero. A font that offers none (Menlo) hides the group — the
+//! window does, from the options it asks for — and changing the font rebuilds the switches, so the
+//! options on screen are always the selected font's.
 //!
 //! A switch keeps nothing of its own: it shows the file's choice, and flipping it writes the
 //! option's edits and comes back from the file like every other control of the window. A refresh
@@ -17,10 +17,9 @@ use std::cell::RefCell;
 use bt_core::FontOptions;
 use bt_shell_common::font_options::FontOption;
 use objc2::rc::Retained;
-use objc2::{ClassType, MainThreadMarker, MainThreadOnly, sel};
+use objc2::{ClassType, MainThreadMarker, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
-    NSGridRow, NSLayoutAttribute, NSStackView, NSSwitch, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView,
+    NSLayoutAttribute, NSStackView, NSSwitch, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{NSArray, NSInteger, NSString};
 
@@ -29,11 +28,9 @@ use super::{SettingsWindow, set_switch};
 /// The vertical space between two options, in points.
 const SPACING: f64 = 6.0;
 
-/// The Options row: the stack its switches are in and the grid row that goes away when there are
-/// none.
+/// The Options row's control: the stack its switches are in.
 pub(super) struct Options {
     stack: Retained<NSStackView>,
-    row: Retained<NSGridRow>,
     /// The options on screen, by id, and the switch of each, in the stack's order.
     shown: RefCell<Vec<(String, Retained<NSSwitch>)>>,
 }
@@ -48,17 +45,22 @@ impl Options {
         stack
     }
 
-    pub(super) fn new(stack: Retained<NSStackView>, row: Retained<NSGridRow>) -> Self {
+    pub(super) fn new(stack: Retained<NSStackView>) -> Self {
         Self {
             stack,
-            row,
             shown: RefCell::new(Vec::new()),
         }
     }
 
+    /// The stack, as the row's control view.
+    pub(super) fn view(&self) -> Retained<NSView> {
+        let view: &NSView = &self.stack;
+        view.retain()
+    }
+
     /// Shows a switch for each of `options`, on as `font`'s choices say; each switch's tag is
-    /// the option's place in `options`, which the window keeps for the action. No options hides
-    /// the row. The same options as last time only update the switches in place.
+    /// the option's place in `options`, which the window keeps for the action. The same options as
+    /// last time only update the switches in place.
     pub(super) fn show(
         &self,
         window: &SettingsWindow,
@@ -66,7 +68,6 @@ impl Options {
         font: &FontOptions,
         enabled: bool,
     ) {
-        self.row.setHidden(options.is_empty());
         let mut shown = self.shown.borrow_mut();
         let same = shown.len() == options.len()
             && shown
