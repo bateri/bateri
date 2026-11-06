@@ -1223,9 +1223,11 @@ tab_position = "top"
   fewer than with the other two values.
 - `content_edge = "line"` cuts the text at the top as `"cut"` does, under a
   one-pixel line in the color of the split panes' frames, along the top of the
-  window's panes (a split pane's own frame is that line). With the tabs at the
-  side there is no bar for the line to stand under, so it draws nothing and
-  `"line"` cuts the text as `"cut"` does.
+  window's panes (a split pane's own frame is that line). The line is drawn only
+  where the panes meet the tab bar's edge: with `split_style = "lines"` and the
+  tabs at the top. With panes as cards (`split_style = "cards"`, the default)
+  or the tabs at the side it draws nothing, and `"line"` cuts the text as
+  `"cut"` does; the settings window says so under the choice.
 - `content_edge = "cut"` cuts the text where the pane ends, through a letter
   if it falls so — every line the height allows.
 - Changing the value applies at once; between `"fade"` and the other two the

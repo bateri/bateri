@@ -831,7 +831,16 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         ),
         Key::ContentEdge => Some(match settings.content_edge {
             ContentEdge::Fade => "The line scrolling up thins out, so no letter is cut in half.",
-            ContentEdge::Line => "Text is cut under a thin line.",
+            // The line stands only where the panes meet the tab bar's edge: under a bar at the
+            // top, with panes as lines (`split_view`'s hairline). Elsewhere Line is Cut, and the
+            // row says so rather than promising a line nobody sees.
+            ContentEdge::Line if settings.split_style == SplitStyle::Cards => {
+                "Same as Cut while panes are cards: the thin line is drawn only with panes as lines."
+            }
+            ContentEdge::Line if settings.tab_position == TabPosition::Side => {
+                "Same as Cut while tabs are at the side: there is no tab bar above the text for the line."
+            }
+            ContentEdge::Line => "Text is cut under a thin line along the tab bar.",
             ContentEdge::Cut => "Text is cut where the pane ends.",
         }),
         Key::Scrollbar => scrollbar_note(settings.scrollbar, resolved.scrollbar),
@@ -5920,9 +5929,36 @@ mod tests {
             of(Key::ContentEdge, &edge(ContentEdge::Fade)),
             Some("The line scrolling up thins out, so no letter is cut in half.")
         );
+        // Line draws its line only with panes as lines and the tabs at the top; elsewhere the row
+        // says it is Cut. The default panes are cards.
         assert_eq!(
             of(Key::ContentEdge, &edge(ContentEdge::Line)),
-            Some("Text is cut under a thin line.")
+            Some(
+                "Same as Cut while panes are cards: the thin line is drawn only with panes as lines."
+            )
+        );
+        let line_with = |split_style, tab_position| {
+            say(&|s: &mut Settings| {
+                s.content_edge = ContentEdge::Line;
+                s.split_style = split_style;
+                s.tab_position = tab_position;
+            })
+        };
+        assert_eq!(
+            of(
+                Key::ContentEdge,
+                &line_with(SplitStyle::Lines, TabPosition::Top)
+            ),
+            Some("Text is cut under a thin line along the tab bar.")
+        );
+        assert_eq!(
+            of(
+                Key::ContentEdge,
+                &line_with(SplitStyle::Lines, TabPosition::Side)
+            ),
+            Some(
+                "Same as Cut while tabs are at the side: there is no tab bar above the text for the line."
+            )
         );
         assert_eq!(
             of(Key::ContentEdge, &edge(ContentEdge::Cut)),
