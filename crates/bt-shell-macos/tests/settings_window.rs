@@ -29,6 +29,16 @@ fn main() {
     if let Some(dir) = &shots {
         std::fs::create_dir_all(dir).expect("the pictures' folder can be made");
     }
+    // First: the window's palette is not set yet, as when the application opens the window.
+    let titles = bt_shell_macos::settings_title_problems(mtm);
+    for problem in &titles {
+        eprintln!("settings_window: {problem}");
+    }
+    assert!(
+        titles.is_empty(),
+        "{} buttons titled in a colour that is not the theme's",
+        titles.len()
+    );
     let problems = bt_shell_macos::settings_layout_problems(mtm, shots.as_deref());
     for problem in &problems {
         eprintln!("settings_window: {problem}");

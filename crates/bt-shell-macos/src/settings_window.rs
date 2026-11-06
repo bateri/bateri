@@ -38,7 +38,7 @@ use bt_core::{
     SplitStyle, TabDetails, TabPosition, TabRunning, Theme, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{
     AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
@@ -2586,10 +2586,12 @@ impl SettingsWindow {
             // given the theme's ground itself, not the dynamic colour, which is one object for
             // every theme (one light theme for another changed nothing it could see).
             window.setBackgroundColor(Some(&crate::tab_bar::Tint::of(palette.ground, 1.0).color()));
-            if look::set(palette)
-                && let Some(content) = window.contentView()
-            {
-                look::redraw(&content);
+            if look::set(palette) {
+                // A button keeps the title colour it was first drawn in: each is titled again.
+                reink_buttons();
+                if let Some(content) = window.contentView() {
+                    look::redraw(&content);
+                }
             }
         }
         for choice in [
@@ -4791,7 +4793,12 @@ pub(super) fn inked(title: &str, font: &NSFont, enabled: bool) -> Retained<NSAtt
     } else {
         look::faded(Ink::Dim, 0.55)
     };
-    let attributes = pictures::attributes(font, &color);
+    in_color(title, font, &color)
+}
+
+/// `title` in `font` and `color`.
+fn in_color(title: &str, font: &NSFont, color: &NSColor) -> Retained<NSAttributedString> {
+    let attributes = pictures::attributes(font, color);
     // SAFETY: `attributes` is a dictionary of attribute keys and values AppKit reads.
     unsafe {
         NSAttributedString::initWithString_attributes(
@@ -4802,13 +4809,54 @@ pub(super) fn inked(title: &str, font: &NSFont, enabled: bool) -> Retained<NSAtt
     }
 }
 
+thread_local! {
+    /// Every button [`ink_button`] titled, and whether it was titled as on: each is titled again
+    /// when the palette changes ([`reink_buttons`]).
+    static INKED: RefCell<Vec<(Weak<NSButton>, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
 /// A button's title in the theme's text colour: the system's is black or white whatever the
-/// theme. Again after its title changes ([`retitle`]) or it is turned off or on.
+/// theme. Again after its title changes ([`retitle`]) or it is turned off or on, and when the
+/// palette changes ([`reink_buttons`]): a button keeps the colour its title had when it was first
+/// drawn on the screen, so the colour is the palette's as it is now ([`look::fixed`]), not the
+/// dynamic one a label reads when it is drawn.
 pub(super) fn ink_button(button: &NSButton, enabled: bool) {
     let font = button
         .font()
         .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
-    button.setAttributedTitle(&inked(&button.title().to_string(), &font, enabled));
+    let color = if enabled {
+        look::fixed(Ink::Text, 1.0)
+    } else {
+        look::fixed(Ink::Dim, 0.55)
+    };
+    button.setAttributedTitle(&in_color(&button.title().to_string(), &font, &color));
+    INKED.with(|inked| {
+        let mut inked = inked.borrow_mut();
+        let known = inked.iter_mut().find(|(weak, _)| {
+            weak.load()
+                .is_some_and(|known| std::ptr::eq(&*known, button))
+        });
+        match known {
+            Some((_, on)) => *on = enabled,
+            None => inked.push((Weak::new(button), enabled)),
+        }
+    });
+}
+
+/// Titles every button [`ink_button`] titled again, in the palette set now, as on or off as it
+/// was; forgets the buttons that are gone.
+fn reink_buttons() {
+    let live: Vec<(Retained<NSButton>, bool)> = INKED.with(|inked| {
+        let mut inked = inked.borrow_mut();
+        inked.retain(|(weak, _)| weak.load().is_some());
+        inked
+            .iter()
+            .filter_map(|(weak, on)| weak.load().map(|button| (button, *on)))
+            .collect()
+    });
+    for (button, on) in live {
+        ink_button(&button, on);
+    }
 }
 
 /// Gives `button` another title, in the theme's text colour.

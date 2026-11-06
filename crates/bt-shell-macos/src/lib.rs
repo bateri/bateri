@@ -127,6 +127,16 @@ pub fn settings_layout_problems(
     settings_window::SettingsWindow::new(mtm).layout_problems(shots)
 }
 
+/// Builds the settings window, shows it off the screen before it has a theme, refreshes it in two
+/// light themes and lists each time the sidebar's "Open settings.toml" is not titled in the
+/// theme's text colour. Only for `tests/settings_window.rs`, before anything else there: a button
+/// keeps the colour its title had when it was first drawn, and a light grey left from before the
+/// theme reads as a button that is off.
+#[doc(hidden)]
+pub fn settings_title_problems(mtm: MainThreadMarker) -> Vec<String> {
+    settings_window::SettingsWindow::new(mtm).title_problems()
+}
+
 /// The profile this copy of the application names in its `Info.plist` (`BateriProfile`): a
 /// development copy's (`make dev`) settings are its own
 /// ([`bt_shell_common::settings::profile_root`]). `None` for the application itself, and for a

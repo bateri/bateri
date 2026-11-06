@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- Open settings.toml in the Settings window no longer looks disabled the first time the window opens in a light theme, and the text of the window's buttons follows a change from one light theme to another.
+
 ## [0.25.0] - 2026-11-06
 
 ### Added
