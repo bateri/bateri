@@ -1498,10 +1498,9 @@ smoothing = false
   own, gets `family`, and JetBrains Mono when there is none, as the grid does.
   The fonts that come with bateri reach the page too, on a Mac that never
   installed them; a family you installed yourself is the one the page uses, as
-  in the grid. A page's font follows `family` the moment you save. Three things
-  differ from the grid. A `family` this Mac does not have: the grid opens
-  JetBrains Mono and the title bar warns, the page falls to the system's
-  monospace (SF Mono, else Menlo). Fira Code's italic: a page slants its regular
+  in the grid. A page's font follows `family` the moment you save, and a `family`
+  this Mac does not have falls to JetBrains Mono in the page as it does in the
+  grid. Two things differ from the grid. Fira Code's italic: a page slants its regular
   face, where the grid draws it upright. The symbol font: the page does not get
   it, so an icon of the private use area is drawn from the system's fonts there,
   or not at all. `smoothing` and the font options do not reach a page: they

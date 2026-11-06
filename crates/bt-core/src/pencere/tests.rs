@@ -1546,10 +1546,21 @@ fn no_family_shows_the_apps_default_where_the_apps_fonts_are() {
     assert_eq!(font_stack(Some("  "), default), font_stack(None, default));
     // Without the app's fonts: the system's list, whatever the family said.
     assert_eq!(font_stack(None, None), DEFAULT_FONT_MONO);
-    // A family the person set wins, and the default is not in the list behind it.
+    // A family the person set wins; the default stands behind it, because the grid opens
+    // the default when that family is not on this Mac.
     assert_eq!(
         font_stack(Some("Menlo"), default),
-        format!("\"Menlo\", {DEFAULT_FONT_MONO}")
+        format!("\"Menlo\", \"Some Default\", {DEFAULT_FONT_MONO}")
+    );
+    // The default is not named twice, whatever the case the family was written in.
+    assert_eq!(
+        font_stack(Some("some default"), default),
+        format!("\"some default\", {DEFAULT_FONT_MONO}")
+    );
+    // A default that is all quotes is left out like a blank family.
+    assert_eq!(
+        font_stack(Some("Menlo"), Some("\"\"")),
+        font_stack(Some("Menlo"), None)
     );
     assert_eq!(active_family(Some("Menlo"), default), Some("Menlo"));
     assert_eq!(active_family(None, default), default);
@@ -1567,7 +1578,7 @@ fn a_reset_family_leaves_the_desk_with_the_apps_default_stack() {
     let desk = pane.rig.desk.as_ref().expect("a desk");
     let stack = || lock(&desk.inner).font_mono.clone();
     desk.set_font(Some("Menlo"), Some("Some Default"), |_| {});
-    assert_eq!(stack(), font_stack(Some("Menlo"), None));
+    assert_eq!(stack(), font_stack(Some("Menlo"), Some("Some Default")));
     desk.set_font(None, Some("Some Default"), |_| {});
     let reset = stack();
     assert_eq!(reset, font_stack(None, Some("Some Default")));

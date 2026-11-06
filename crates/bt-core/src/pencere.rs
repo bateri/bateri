@@ -167,21 +167,33 @@ pub fn active_family<'a>(family: Option<&'a str>, app_default: Option<&'a str>) 
         .or(app_default)
 }
 
-/// The font list a view gets for the family the person set and the app's default
-/// ([`active_family`]): the family first (without the characters that would end its
-/// quotes), then the system's. No family, or one with nothing left, is just the system's.
+/// The font list a view gets for the family the person set and the app's default, in the
+/// order the grid tries them: the family the person set, then the app's default (the grid
+/// opens it when that family is not on this Mac, so the page falls to the same font), then
+/// the system's. Each name loses the characters that would end its quotes; a name with
+/// nothing left, or the default when it is the family again, is left out. No family and no
+/// default is just the system's.
 pub fn font_stack(family: Option<&str>, app_default: Option<&str>) -> String {
-    let family: String = active_family(family, app_default)
-        .unwrap_or_default()
-        .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '"' | '\'' | '\\' | ','))
-        .collect();
-    let family = family.trim();
-    if family.is_empty() {
-        DEFAULT_FONT_MONO.to_owned()
-    } else {
-        format!("\"{family}\", {DEFAULT_FONT_MONO}")
+    let mut names: Vec<String> = Vec::new();
+    for name in [family, app_default].into_iter().flatten() {
+        let name: String = name
+            .chars()
+            .filter(|c| !c.is_control() && !matches!(c, '"' | '\'' | '\\' | ','))
+            .collect();
+        let name = name.trim();
+        if !name.is_empty() && !names.iter().any(|kept| same_name(kept, name)) {
+            names.push(name.to_owned());
+        }
     }
+    let mut stack: String = names.iter().map(|name| format!("\"{name}\", ")).collect();
+    stack.push_str(DEFAULT_FONT_MONO);
+    stack
+}
+
+/// Whether two family names are the same family: the font system matches them without
+/// regard to case, so the page's list does too.
+fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
 }
 
 /// The time as the desk of a pane reads it: only for the moment the person asked the program to
