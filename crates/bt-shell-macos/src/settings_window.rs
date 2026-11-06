@@ -2494,8 +2494,11 @@ impl SettingsWindow {
         let palette = Palette::of(themes.on_screen);
         if let Some(window) = self.ivars().window.get() {
             window.setAppearance(look::appearance(themes.on_screen).as_deref());
-            // The title strip is the window's own drawing, out of the content's reach.
-            window.setBackgroundColor(Some(&look::ink(Ink::Ground)));
+            // The title strip and the room round the sidebar are the window's own drawing, out of
+            // the content's reach, and the window draws them again only for another colour: it is
+            // given the theme's ground itself, not the dynamic colour, which is one object for
+            // every theme (one light theme for another changed nothing it could see).
+            window.setBackgroundColor(Some(&crate::tab_bar::Tint::of(palette.ground, 1.0).color()));
             if look::set(palette)
                 && let Some(content) = window.contentView()
             {

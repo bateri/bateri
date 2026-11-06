@@ -17,7 +17,7 @@ use bt_core::{CursorBlink, Settings, Theme};
 use bt_gpu::ScrollbarMode;
 use objc2::{DefinedClass, Message};
 use objc2_app_kit::{NSBitmapImageFileType, NSView};
-use objc2_foundation::{NSDate, NSDictionary, NSIndexSet, NSRect, NSRunLoop};
+use objc2_foundation::{NSDate, NSDictionary, NSIndexSet, NSObjectProtocol, NSRect, NSRunLoop};
 
 use super::{Category, Key, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
 use crate::settings::{self, FileState};
@@ -288,6 +288,7 @@ impl SettingsWindow {
             }
         }
         self.theme_change_problems(&themes, resolved, &dark, shots, &mut problems);
+        self.window_ground_problems(&themes, resolved, &mut problems);
         problems
     }
 
@@ -348,6 +349,44 @@ impl SettingsWindow {
         if seen.iter().any(Option::is_none) || seen[0] == seen[1] {
             problems.push(
                 "General: another dark theme left the window in the colours of the one before"
+                    .to_owned(),
+            );
+        }
+    }
+
+    /// One light theme for another keeps the appearance, and the window's own ground (the strip
+    /// round the sidebar, the title row) is drawn again only when its colour is another: the
+    /// window must be given the new theme's ground, not the same colour as before.
+    fn window_ground_problems(
+        &self,
+        themes: &ThemeLists<'_>,
+        resolved: Resolved,
+        problems: &mut Vec<String>,
+    ) {
+        let Some(window) = self.ivars().window.get() else {
+            return;
+        };
+        let mut grounds = Vec::new();
+        for (name, theme) in [
+            ("bateri-light", Theme::BATERI_LIGHT),
+            ("linen", Theme::LINEN),
+        ] {
+            let settings = Settings {
+                theme: name.to_owned(),
+                ..Settings::default()
+            };
+            let themes = ThemeLists {
+                on_screen: &theme,
+                dark_appearance: false,
+                ..*themes
+            };
+            self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+            grounds.push(window.backgroundColor());
+        }
+        if grounds[0].isEqual(Some(&grounds[1])) {
+            problems.push(
+                "the window's ground is the same colour after one light theme for another, so \
+                 the strip round the sidebar keeps the old one"
                     .to_owned(),
             );
         }
