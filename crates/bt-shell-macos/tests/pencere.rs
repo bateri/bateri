@@ -1271,6 +1271,11 @@ fn run(dir: &Path) {
             connection_goes_and_comes_back(mtm, &window, frame_rect, dir);
         },
     );
+    // Last: it registers the app's fonts for this process, and with them the default font of
+    // every pane opened after it.
+    section("the app's fonts in the page", &mut failures, || {
+        app_fonts_in_the_page(mtm, &window, frame_rect, dir);
+    });
 
     pane.close();
     assert!(failures.is_empty(), "failed: {failures:?}");
@@ -1550,6 +1555,82 @@ fn engine_channels(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect,
         "the engine opened a channel beside the policy: {}",
         reached()
     );
+    pane.close();
+}
+
+/// A script that, once told its `context`, asks the page's font set to load each family it was
+/// given as the page would ask for it (regular, italic and bold) and tells the program how the
+/// set stands: how many faces it holds, how many loads came back with every face loaded, and which
+/// did not. One short string (the host's frame is read as it arrives, and a long one is read in
+/// pieces), so that how the host writes the call back does not matter either.
+const FONTS_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var started=false;\
+window.addEventListener('message',function(e){\
+if(e.source!==window.parent)return;var m=e.data;\
+if(!m.context||started)return;started=true;\
+var families=__FAMILIES__;var styles=['16px','italic 16px','bold 16px'];\
+var ok=0;var bad=[];var jobs=[];\
+families.forEach(function(f){styles.forEach(function(s){\
+jobs.push(document.fonts.load(s+' \"'+f+'\"').then(function(l){\
+if(l.length&&l.every(function(x){return x.status==='loaded'}))ok++;\
+else bad.push(f+'|'+s+'='+l.map(function(x){return x.status}).join('/'))},\
+function(x){bad.push(f+'|'+s+'=error')}))})});\
+Promise.all(jobs).then(function(){\
+send({call:{id:1,method:'hello',params:{r:'size='+document.fonts.size+';ok='+ok+';bad='+bad.join(',')}}})})});";
+
+/// The page of a program's view is given the app's own fonts (the web engine is another process and
+/// never sees the ones this process registered): a family the machine does not have loads in the
+/// page, from the view's own origin, in each style a page asks for, and the page's font set holds
+/// exactly the faces of the files that were registered — none for a family the machine had.
+/// Nothing is asked of the grid: every family the pass registered is, by definition, one this Mac
+/// does not have, so a face that loads here came through the route and nowhere else.
+fn app_fonts_in_the_page(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect, dir: &Path) {
+    // What a launch does, in this process: the pane's page is given what it registered.
+    bt_shell_common::font_options::register_app_fonts();
+    let app = bt_gpu::app_fonts().expect("the pass ran");
+    let mut families: Vec<&str> = app.faces.iter().map(|face| face.family.as_str()).collect();
+    families.dedup();
+    if families.is_empty() {
+        println!(
+            "pencere: app fonts SKIPPED (this Mac has every family the app ships: kept {:?})",
+            app.kept
+        );
+        return;
+    }
+    let list = format!(
+        "[{}]",
+        families
+            .iter()
+            .map(|family| format!("\"{family}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let script = FONTS_SCRIPT.replace("__FAMILIES__", &list);
+    let files = [
+        ("index.html", "text/html", PAGE.as_bytes()),
+        ("app.js", "text/javascript", script.as_bytes()),
+    ];
+    let (pane, mut program) = open_pane(mtm, window, frame_rect, &dir.join("fonts"), PANE + 5);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello();
+    program.open(&token, &files, None);
+    program.supply(&files);
+    let said = watch_it_start(&pane, &mut program);
+    let report = said
+        .split("\"r\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("the page's report: {said}"));
+    eprintln!("pencere: app fonts: {report} ({} families)", families.len());
+    // One face for each file that was registered and no other (none for a family the machine
+    // had), and every family loaded in each of the three styles a page asks for.
+    assert_eq!(
+        report,
+        format!("size={};ok={};bad=", app.faces.len(), families.len() * 3),
+        "{said}"
+    );
+    program.bye(&token);
+    until("the view to go", || !covered(&pane));
     pane.close();
 }
 

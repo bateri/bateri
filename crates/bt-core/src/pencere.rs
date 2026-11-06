@@ -136,8 +136,8 @@ impl fmt::Debug for DropShown {
     }
 }
 
-/// The monospaced font list a view is given when the person named no family
-/// (`[font] family`): the system's, as a CSS `font-family`.
+/// The system's monospaced font list, as a CSS `font-family`: what a view is
+/// given when nothing else is, and what every stack ends with ([`font_stack`]).
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 
 /// The version of the Lua API a `lua` view is written against, the only one the application
@@ -155,11 +155,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The font list a view gets for the family the person set: the family first
-/// (without the characters that would end its quotes), then the system's.
-/// `None`, or a family with nothing left, is just the system's.
-pub fn font_stack(family: Option<&str>) -> String {
-    let family: String = family
+/// The family a view shows: the one the person set (`[font] family`), or, when they set
+/// none (or reset it to nothing), `app_default` — the family the app opens for its own grid
+/// in that case, which is there only where the app's fonts are (`bt_gpu::app_default_family`;
+/// `None` anywhere else). The grid and the view ask the same source, so a program's page is
+/// not set in another font than the terminal around it. The value comes from the shell so
+/// that this crate stays platformless and holds no family name of its own.
+pub fn active_family<'a>(family: Option<&'a str>, app_default: Option<&'a str>) -> Option<&'a str> {
+    family
+        .filter(|name| !name.trim().is_empty())
+        .or(app_default)
+}
+
+/// The font list a view gets for the family the person set and the app's default
+/// ([`active_family`]): the family first (without the characters that would end its
+/// quotes), then the system's. No family, or one with nothing left, is just the system's.
+pub fn font_stack(family: Option<&str>, app_default: Option<&str>) -> String {
+    let family: String = active_family(family, app_default)
         .unwrap_or_default()
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '"' | '\'' | '\\' | ','))
@@ -255,7 +267,7 @@ impl ViewOptions {
                 version: version.into(),
             },
             store: Shelf::in_memory(),
-            font_mono: font_stack(None),
+            font_mono: font_stack(None, None),
             locale: None,
             time_zone: None,
             reduce_motion: false,
@@ -1244,8 +1256,14 @@ impl Desk {
     }
 
     /// The font list changed (`[font] family`): the view is told if it runs.
-    pub(crate) fn set_font(&self, family: Option<&str>, write: impl Fn(Vec<u8>)) {
-        let font_mono = font_stack(family);
+    /// `app_default` is the family the app opens when none is set ([`active_family`]).
+    pub(crate) fn set_font(
+        &self,
+        family: Option<&str>,
+        app_default: Option<&str>,
+        write: impl Fn(Vec<u8>),
+    ) {
+        let font_mono = font_stack(family, app_default);
         let (writes, notify) = {
             let mut inner = lock(&self.inner);
             if inner.font_mono == font_mono {

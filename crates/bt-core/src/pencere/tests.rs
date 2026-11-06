@@ -605,7 +605,7 @@ fn a_burst_for_the_shell_is_one_event() {
         },
         |_| {},
     );
-    desk.set_font(Some("Fira Code"), |_| {});
+    desk.set_font(Some("Fira Code"), None, |_| {});
     assert_eq!(
         wake_count(&wake),
         2,
@@ -1513,13 +1513,13 @@ fn the_view_is_given_the_themes_own_values_and_the_same_dark_or_light() {
 
 #[test]
 fn a_font_family_is_first_and_cannot_end_its_quotes() {
-    assert_eq!(font_stack(None), DEFAULT_FONT_MONO);
-    assert_eq!(font_stack(Some("   ")), DEFAULT_FONT_MONO);
+    assert_eq!(font_stack(None, None), DEFAULT_FONT_MONO);
+    assert_eq!(font_stack(Some("   "), None), DEFAULT_FONT_MONO);
     assert_eq!(
-        font_stack(Some("JetBrains Mono")),
+        font_stack(Some("JetBrains Mono"), None),
         format!("\"JetBrains Mono\", {DEFAULT_FONT_MONO}")
     );
-    let hostile = font_stack(Some("Evil\"; } body { display: none; /*"));
+    let hostile = font_stack(Some("Evil\"; } body { display: none; /*"), None);
     assert_eq!(
         hostile.matches('"').count(),
         2 + 2,
@@ -1530,6 +1530,54 @@ fn a_font_family_is_first_and_cannot_end_its_quotes() {
         hostile.starts_with("\"Evil; } body { display: none; /*\""),
         "{hostile}"
     );
+}
+
+/// The page shows the font the grid opens: where the app's fonts are, no family means the
+/// app's default; where they are not, the system's list stays, as it was.
+#[test]
+fn no_family_shows_the_apps_default_where_the_apps_fonts_are() {
+    let default = Some("Some Default");
+    assert_eq!(
+        font_stack(None, default),
+        format!("\"Some Default\", {DEFAULT_FONT_MONO}")
+    );
+    // Reset writes the empty string; a blank is no family either.
+    assert_eq!(font_stack(Some(""), default), font_stack(None, default));
+    assert_eq!(font_stack(Some("  "), default), font_stack(None, default));
+    // Without the app's fonts: the system's list, whatever the family said.
+    assert_eq!(font_stack(None, None), DEFAULT_FONT_MONO);
+    // A family the person set wins, and the default is not in the list behind it.
+    assert_eq!(
+        font_stack(Some("Menlo"), default),
+        format!("\"Menlo\", {DEFAULT_FONT_MONO}")
+    );
+    assert_eq!(active_family(Some("Menlo"), default), Some("Menlo"));
+    assert_eq!(active_family(None, default), default);
+    assert_eq!(active_family(Some(""), default), default);
+    assert_eq!(active_family(None, None), None);
+}
+
+/// The desk keeps the stack the app's default makes when the family is reset, so a view that
+/// starts afterwards and the one that runs are set in the same font.
+#[test]
+fn a_reset_family_leaves_the_desk_with_the_apps_default_stack() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    let stack = || lock(&desk.inner).font_mono.clone();
+    desk.set_font(Some("Menlo"), Some("Some Default"), |_| {});
+    assert_eq!(stack(), font_stack(Some("Menlo"), None));
+    desk.set_font(None, Some("Some Default"), |_| {});
+    let reset = stack();
+    assert_eq!(reset, font_stack(None, Some("Some Default")));
+    assert_ne!(reset, DEFAULT_FONT_MONO);
+    // Reset's empty string is the same answer.
+    desk.set_font(Some(""), Some("Some Default"), |_| {});
+    assert_eq!(stack(), reset);
+    // Where the app has no fonts of its own, resetting is the system's list.
+    desk.set_font(None, None, |_| {});
+    assert_eq!(stack(), DEFAULT_FONT_MONO);
 }
 
 // ---- the stores -----------------------------------------------------------

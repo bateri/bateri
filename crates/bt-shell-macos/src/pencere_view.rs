@@ -68,6 +68,7 @@ pub(crate) mod ask;
 mod engine;
 pub(crate) mod face;
 mod files;
+mod fonts;
 mod serve;
 mod still;
 mod wait;
@@ -109,8 +110,8 @@ use objc2_foundation::{
 use objc2_web_kit::{
     WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
     WKOpenPanelParameters, WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKUIDelegate,
-    WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKWebView,
-    WKWebViewConfiguration, WKWebsiteDataStore,
+    WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKUserScript,
+    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use objc2_web_kit::{WKMediaCaptureType, WKPermissionDecision};
 
@@ -650,7 +651,7 @@ impl Bridge {
             return;
         };
         let ivars = self.ivars();
-        if ivars.page.file_of(&text).is_none() {
+        if !ivars.page.reads_disk(&text) {
             Self::respond(task, &ivars.page.reply(&text, &|_| None));
             return;
         }
@@ -832,7 +833,12 @@ impl ViewHost {
             start.policy.clone(),
             &start.allow,
             &serve::css_color(ground),
+            fonts::Fonts::registered(),
         );
+        // The script that gives the view's page the app's own fonts, if there are any: it is a
+        // string the page never sees and has to be told, so it is made here, before the page
+        // goes to the bridge.
+        let font_script = page.font_script();
         let shot = still::Shared::default();
         let bridge = Bridge::new(mtm, Arc::clone(session), page, Rc::clone(&shot));
 
@@ -871,6 +877,18 @@ impl ViewHost {
                     ProtocolObject::from_ref(&*bridge),
                     &NSString::from_str(serve::LOADED_HANDLER),
                 );
+            // The app's own fonts, for the page: declared at the start of every document of the
+            // web view, in every frame — the script itself does nothing outside the view's own
+            // document ([`fonts::script`]).
+            if let Some(source) = &font_script {
+                let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                    WKUserScript::alloc(mtm),
+                    &NSString::from_str(source),
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    false,
+                );
+                configuration.userContentController().addUserScript(&script);
+            }
             configuration
         };
 

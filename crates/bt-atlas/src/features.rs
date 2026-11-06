@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use crate::rules::same_family;
+use crate::sfnt::u16_at;
 use crate::system::{Backend, Font, FontSystem};
 
 /// One OpenType feature a font lists.
@@ -221,12 +222,6 @@ impl<'a> Names<'a> {
         }
         best.map(|(_, text)| text)
     }
-}
-
-/// A big-endian `u16` at `at`, `None` when it lies outside `bytes`.
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    let pair = bytes.get(at..at.checked_add(2)?)?;
-    Some(u16::from_be_bytes([pair[0], pair[1]]))
 }
 
 #[cfg(test)]

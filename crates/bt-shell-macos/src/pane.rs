@@ -4105,9 +4105,10 @@ impl TerminalPane {
     /// stored and applied.
     pub(crate) fn set_font(&self, font: &FontOptions) {
         self.ivars().font.replace(font.clone());
-        // The view is given the family too (its colours follow `set_theme`).
+        // The view is given the family too (its colours follow `set_theme`), and with it the
+        // family the grid opens when none is set.
         if let Some(session) = self.session() {
-            session.set_view_font(font.family.as_deref());
+            session.set_view_font(font.family.as_deref(), bt_gpu::app_default_family());
         }
         self.apply_font();
     }
@@ -5742,7 +5743,10 @@ impl TerminalPane {
             bt_core::TERM_PROGRAM_VERSION,
         );
         options.store = pencere_view::shelf();
-        options.font_mono = font_stack(ivars.font.borrow().family.as_deref());
+        options.font_mono = font_stack(
+            ivars.font.borrow().family.as_deref(),
+            bt_gpu::app_default_family(),
+        );
         options.locale = pencere_view::locale_tag();
         options.time_zone = pencere_view::time_zone_name();
         options.reduce_motion = ivars.reduce_motion.get();

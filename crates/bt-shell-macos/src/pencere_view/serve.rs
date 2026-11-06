@@ -28,6 +28,8 @@
 
 use std::sync::Arc;
 
+use super::fonts::{self, Fonts};
+
 /// The URL scheme of the two documents, served by this application's
 /// `WKURLSchemeHandler` for the web view of one view and for no other.
 pub(super) const SCHEME: &str = "bateri-view";
@@ -57,6 +59,9 @@ pub(super) enum Route {
     Shell,
     /// A file of the view, by the path the manifest names it with.
     View(String),
+    /// One of the app's own fonts, by the name of its file ([`fonts::ROUTE`]): not a path of
+    /// the bundle, which cannot hold a colon.
+    AppFont(String),
     /// Anything else: another scheme, another host, another instance's origin,
     /// a path that is not one.
     Refused,
@@ -107,7 +112,7 @@ fn percent_decode(text: &str) -> Option<String> {
 
 /// A path escaped for a URL: what is not an unreserved character or a `/` is
 /// `%XX`, so a file name with a space or a `?` in it is still one path.
-fn percent_encode_path(path: &str) -> String {
+pub(super) fn percent_encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
@@ -143,6 +148,16 @@ pub(super) fn route(instance: &str, url: &str) -> Route {
     let Some(path) = path.strip_prefix('/').and_then(percent_decode) else {
         return Route::Refused;
     };
+    // The app's fonts have a name no path of a bundle can have (a colon, which the manifest's
+    // paths never hold), so the name is told before the path is: it is looked up by that exact
+    // name in the list of registered files and never read as a path.
+    if let Some(name) = path.strip_prefix(fonts::ROUTE) {
+        return if fonts::is_name(name) {
+            Route::AppFont(name.to_owned())
+        } else {
+            Route::Refused
+        };
+    }
     let bare = !path.is_empty()
         && !path.contains(['\0', '\\'])
         && path
@@ -352,6 +367,8 @@ pub(super) struct Page {
     policy: String,
     /// The shell page, built once.
     shell: Arc<[u8]>,
+    /// The app's own fonts the view's page is given ([`fonts`]).
+    fonts: Fonts,
 }
 
 impl Page {
@@ -359,13 +376,15 @@ impl Page {
     /// random bytes, new for every view ([`instance`]).
     ///
     /// `policy` and `allow` are the crate's, as it gave them with the view;
-    /// `ground` is the pane's background as a CSS colour.
+    /// `ground` is the pane's background as a CSS colour; `fonts` are the app's own fonts the
+    /// page is given.
     pub(super) fn new(
         instance: String,
         entry: String,
         policy: String,
         allow: &str,
         ground: &str,
+        fonts: Fonts,
     ) -> Self {
         let view_url = format!("{SCHEME}://{instance}/{}", percent_encode_path(&entry));
         let shell = shell_html(&view_url, allow, ground).into_bytes().into();
@@ -374,7 +393,14 @@ impl Page {
             entry,
             policy,
             shell,
+            fonts,
         }
+    }
+
+    /// The user script that gives the page the app's fonts, for the view's frame; `None` when
+    /// the app has none to give.
+    pub(super) fn font_script(&self) -> Option<String> {
+        self.fonts.script(&self.instance)
     }
 
     /// The URL the web view loads: the shell.
@@ -392,21 +418,21 @@ impl Page {
         )
     }
 
-    /// The path of the bundle file a request for `url` is for, or `None` when the answer
-    /// is not a file of the bundle's — the shell page, anything refused — which
-    /// [`Page::reply`] gives from memory. Asking for a file is what takes time (the file
-    /// service waits for the conversation and reads and checks up to 8 MiB), so only these
-    /// are served off the main thread.
-    pub(super) fn file_of(&self, url: &str) -> Option<String> {
-        match route(&self.instance, url) {
-            Route::View(path) => Some(path),
-            _ => None,
-        }
+    /// Whether the answer to a request for `url` is read from the disk: a file of the bundle
+    /// (the file service waits for the conversation and reads and checks up to 8 MiB) or one of
+    /// the app's fonts (up to a megabyte or so). The shell page and anything refused come from
+    /// memory, at once ([`Page::reply`]); only these are served off the main thread.
+    pub(super) fn reads_disk(&self, url: &str) -> bool {
+        matches!(
+            route(&self.instance, url),
+            Route::View(_) | Route::AppFont(_)
+        )
     }
 
     /// The answer to a request for `url`. `files` is the crate's file service
     /// (`Session::serve_view_file`): the bytes and media type of a file of the
-    /// bundle, or nothing for a path the manifest does not name.
+    /// bundle, or nothing for a path the manifest does not name. One of the app's fonts is the
+    /// page's own list's and never the bundle's: `files` is not asked for it.
     pub(super) fn reply(&self, url: &str, files: &dyn Fn(&str) -> Option<Served>) -> Reply {
         match route(&self.instance, url) {
             Route::Shell => Reply {
@@ -419,6 +445,14 @@ impl Page {
                 body: Arc::clone(&self.shell),
             },
             Route::View(path) => match files(&path) {
+                Some((media, bytes)) => Reply {
+                    status: 200,
+                    headers: headers(&media, &self.policy, bytes.len()),
+                    body: bytes,
+                },
+                None => not_found(),
+            },
+            Route::AppFont(name) => match self.fonts.serve(&name) {
                 Some((media, bytes)) => Reply {
                     status: 200,
                     headers: headers(&media, &self.policy, bytes.len()),

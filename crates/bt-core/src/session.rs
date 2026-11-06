@@ -12304,12 +12304,13 @@ impl Session {
             .view(|conversation| conversation.set_reduce_motion(reduce));
     }
 
-    /// The font family changed (`[font] family`; `None` is the system's): the
-    /// view is told if it runs. The terminal's colours reach it through
+    /// The font family changed (`[font] family`; `None` is the app's default where
+    /// `app_default` names one, else the system's — [`crate::pencere::active_family`]):
+    /// the view is told if it runs. The terminal's colours reach it through
     /// [`Session::set_theme`].
-    pub fn set_view_font(&self, family: Option<&str>) {
+    pub fn set_view_font(&self, family: Option<&str>, app_default: Option<&str>) {
         if let Some(desk) = &self.adapter.0.desk {
-            desk.set_font(family, |bytes| self.adapter.input(bytes));
+            desk.set_font(family, app_default, |bytes| self.adapter.input(bytes));
         }
     }
 

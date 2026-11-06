@@ -25,6 +25,8 @@ of every installed copy. A version without a section is not released.
 
 - **A switch for heavier text.** With `smoothing = true` under `[font]`, or Bolder text in Settings ▸ Appearance and Bolder Text in the command palette, text is drawn the way macOS thickens it in Terminal.app, where the default is the font's own thinner weight. It is off unless you turn it on, it needs no restart, and it is macOS only.
 
+- **A program's view is set in your font.** The web page a program shows in a pane used SF Mono or Menlo whatever `family` said, and a font that comes with bateri, one you never installed, fell back to SF Mono there while the terminal showed it. The page now gets your family, JetBrains Mono when you chose none, and changes with it when you save. In a page Fira Code's italic is slanted by the web engine, where the terminal draws it upright.
+
 ### Changed
 
 - **bateri starts in JetBrains Mono.** If you never chose a font, text is now drawn in JetBrains Mono, with its ligatures (`->`, `!=`, `===`), where it used to be SF Mono or Menlo. Choose Menlo in Settings or write `family = "Menlo"` to go back; a font you chose stays as it was.

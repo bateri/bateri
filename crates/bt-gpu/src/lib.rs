@@ -110,7 +110,7 @@ pub use bt_atlas::monospaced_families;
 
 /// The fonts that ship with the app: registered for the process at launch,
 /// before the first atlas and the Font list. Re-exported for the same reason.
-pub use bt_atlas::{AppFonts, app_default_family, register_app_fonts};
+pub use bt_atlas::{AppFace, AppFonts, app_default_family, app_fonts, register_app_fonts};
 
 /// What the selected font offers in OpenType features — the settings window's
 /// and the palette's rows. Re-exported for the same reason.

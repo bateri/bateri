@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::rules::same_family;
+use crate::sfnt::{self, Style};
 use crate::system::{Backend, Font, FontSystem};
 
 /// The family the app opens when no `family` is written.
@@ -53,6 +54,26 @@ pub struct AppFonts {
     pub kept: Vec<String>,
     /// The files the font system refused.
     pub refused: Vec<PathBuf>,
+    /// The faces of the files that **were** registered (the symbol font's excepted: no page is
+    /// set in it), for the web page of a program's view:
+    /// its web engine runs in another process, which never sees what this one registered, so
+    /// it is given these files and told which face each is. A family the machine already had
+    /// is not here (its files were never registered), so the page keeps the user's copy too.
+    pub faces: Vec<AppFace>,
+}
+
+/// One registered font file, as a web page declares it (`@font-face`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppFace {
+    /// The family the file declares about itself.
+    pub family: String,
+    /// The file.
+    pub file: PathBuf,
+    /// Italic or oblique.
+    pub italic: bool,
+    /// The weights it covers on the CSS scale, lowest and highest: the same value twice for a
+    /// static face, the span of the `wght` axis for a variable one.
+    pub weight: (u16, u16),
 }
 
 /// What the pass will do with the families it found.
@@ -71,23 +92,11 @@ pub(crate) struct Plan {
 pub fn register_app_fonts(dir: &Path) -> &'static AppFonts {
     OUTCOME.get_or_init(|| {
         let groups = group(&font_files(dir), Backend::file_family);
-        let Plan { register, kept } = plan(groups, family_resolves);
-        let mut outcome = AppFonts {
-            kept,
-            ..AppFonts::default()
-        };
-        for (family, files) in register {
-            let mut all = true;
-            for file in files {
-                if !Backend::register_file(&file) {
-                    all = false;
-                    outcome.refused.push(file);
-                }
-            }
-            if all {
-                outcome.registered.push(family);
-            }
-        }
+        let outcome = carry_out(
+            plan(groups, family_resolves),
+            Backend::register_file,
+            sfnt::style_of,
+        );
         // Not "the pass registered the default": the user's own copy of it
         // counts, the pass left it alone on purpose.
         if family_resolves(DEFAULT_FAMILY) {
@@ -95,6 +104,53 @@ pub fn register_app_fonts(dir: &Path) -> &'static AppFonts {
         }
         outcome
     })
+}
+
+/// What [`register_app_fonts`] did, if it ran: the same answer it gave. `None` in a
+/// process that never ran it.
+pub fn app_fonts() -> Option<&'static AppFonts> {
+    OUTCOME.get()
+}
+
+/// Registers the files of `plan` with `register` and says what happened: a family whose
+/// files all registered is `registered`, a file that did not is `refused`, and every
+/// registered file whose style `style_of` can read is a face, except the symbol font's. The
+/// families the plan left alone have no faces by construction.
+pub(crate) fn carry_out(
+    plan: Plan,
+    register: impl Fn(&Path) -> bool,
+    style_of: impl Fn(&Path) -> Option<Style>,
+) -> AppFonts {
+    let mut outcome = AppFonts {
+        kept: plan.kept,
+        ..AppFonts::default()
+    };
+    for (family, files) in plan.register {
+        let mut all = true;
+        for file in files {
+            if !register(&file) {
+                all = false;
+                outcome.refused.push(file);
+                continue;
+            }
+            // The symbol font is no family to set a page in, and the Font list leaves it out too.
+            if family == SYMBOL_FAMILY {
+                continue;
+            }
+            if let Some(Style { italic, weight }) = style_of(&file) {
+                outcome.faces.push(AppFace {
+                    family: family.clone(),
+                    file,
+                    italic,
+                    weight,
+                });
+            }
+        }
+        if all {
+            outcome.registered.push(family);
+        }
+    }
+    outcome
 }
 
 /// Did [`register_app_fonts`] run in this process, and does the app's default
@@ -256,6 +312,74 @@ mod tests {
         assert_eq!(plan.kept, ["One", "Two"]);
     }
 
+    /// Every made-up file is regular, except the ones named `Italic`; a name with `Var` covers
+    /// 100 to 800.
+    fn styled(path: &Path) -> Option<Style> {
+        let name = path.file_stem()?.to_str()?;
+        Some(Style {
+            italic: name.contains("Italic"),
+            weight: if name.contains("Var") {
+                (100, 800)
+            } else {
+                (400, 400)
+            },
+        })
+    }
+
+    #[test]
+    fn only_the_files_that_were_registered_become_faces_of_the_page() {
+        let files = paths(&[
+            "a/Mine-Regular.ttf",
+            "a/Mine-Italic.ttf",
+            "b/Ours-Var.ttf",
+            "b/Ours-VarItalic.ttf",
+            "c/Torn-Regular.ttf",
+            "c/Torn-Bold.ttf",
+        ]);
+        // The user has Mine; the system refuses one file of Torn.
+        let plan = plan(group(&files, declared), |name| name == "Mine");
+        let outcome = carry_out(plan, |file| !file.ends_with("Torn-Bold.ttf"), styled);
+        assert_eq!(outcome.kept, ["Mine"]);
+        assert_eq!(outcome.registered, ["Ours"]);
+        assert_eq!(outcome.refused, paths(&["c/Torn-Bold.ttf"]));
+        let faces: Vec<(&str, &str, bool, (u16, u16))> = outcome
+            .faces
+            .iter()
+            .map(|face| {
+                let name = face.file.to_str().unwrap();
+                (face.family.as_str(), name, face.italic, face.weight)
+            })
+            .collect();
+        assert_eq!(
+            faces,
+            [
+                ("Ours", "b/Ours-Var.ttf", false, (100, 800)),
+                ("Ours", "b/Ours-VarItalic.ttf", true, (100, 800)),
+                // The family that lost a file keeps the face of the one that registered: it is
+                // what the grid has of it.
+                ("Torn", "c/Torn-Regular.ttf", false, (400, 400)),
+            ],
+            "nothing of the user's family, nothing of the refused file"
+        );
+    }
+
+    #[test]
+    fn the_symbol_font_registers_and_is_no_face_of_a_page() {
+        let files = paths(&["a/Symbols Nerd Font Mono.ttf", "a/Ours.ttf"]);
+        let outcome = carry_out(plan(group(&files, declared), |_| false), |_| true, styled);
+        assert!(outcome.registered.contains(&SYMBOL_FAMILY.to_owned()));
+        let families: Vec<&str> = outcome.faces.iter().map(|f| f.family.as_str()).collect();
+        assert_eq!(families, ["Ours"]);
+    }
+
+    #[test]
+    fn a_file_whose_style_cannot_be_read_registers_and_has_no_face() {
+        let plan = plan(group(&paths(&["a/Ours.ttf"]), declared), |_| false);
+        let outcome = carry_out(plan, |_| true, |_| None);
+        assert_eq!(outcome.registered, ["Ours"]);
+        assert!(outcome.faces.is_empty());
+    }
+
     /// A process that never ran the launch's pass keeps the system's chain for
     /// the default font, whatever else it registered: the lib tests and
     /// `raster_digest` rest on the chain staying SF Mono / Menlo. The test
@@ -294,6 +418,22 @@ mod tests {
             .collect();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(found, ["Mono.OTF", "Mono.ttf"]);
+    }
+
+    /// A program's page asks for a font by its file's name, so two shipped files of one name
+    /// would be one font to it.
+    #[test]
+    fn the_shipped_files_have_names_of_their_own() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+        let names: Vec<String> = font_files(&dir)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.len() >= 20, "{names:?}");
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "{names:?}");
     }
 
     #[test]

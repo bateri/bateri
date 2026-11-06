@@ -1493,6 +1493,19 @@ smoothing = false
   had been resized; long lines are rewrapped.
 - In a family without bold and italic faces, that text is drawn with the
   regular face; this gives no warning (a line goes to standard error).
+- **A program's view is set in the same font.** A program can show a web page in
+  a pane; a page that uses the font the terminal gives it, rather than naming its
+  own, gets `family`, and JetBrains Mono when there is none, as the grid does.
+  The fonts that come with bateri reach the page too, on a Mac that never
+  installed them; a family you installed yourself is the one the page uses, as
+  in the grid. A page's font follows `family` the moment you save. Three things
+  differ from the grid. A `family` this Mac does not have: the grid opens
+  JetBrains Mono and the title bar warns, the page falls to the system's
+  monospace (SF Mono, else Menlo). Fira Code's italic: a page slants its regular
+  face, where the grid draws it upright. The symbol font: the page does not get
+  it, so an icon of the private use area is drawn from the system's fonts there,
+  or not at all. `smoothing` and the font options do not reach a page: they
+  belong to the terminal's own text.
 
 #### Font options: ligatures, alternate letters and hiding secrets
 

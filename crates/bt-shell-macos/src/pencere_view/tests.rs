@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bt_core::pencere::State;
+use bt_gpu::AppFace;
 use bt_shell_common::view_strip;
 use objc2_app_kit::NSEventModifierFlags;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::files::Pending;
+use super::fonts::{self, Fonts};
 use super::serve::{
     self, Frame, HANDLER, LOADED_HANDLER, Loads, Page, Route, SANDBOX, Served, css_color,
     deliver_script, ground_script, js_string, route,
@@ -27,6 +29,15 @@ fn url(path: &str) -> String {
     format!("bateri-view://{INSTANCE}/{path}")
 }
 
+/// The address of one of the app's fonts on the view's origin, as the page's script asks it.
+fn font_url(name: &str) -> String {
+    format!(
+        "bateri-view://{INSTANCE}/{}{}",
+        fonts::ROUTE,
+        serve::percent_encode_path(name)
+    )
+}
+
 fn bundle_page() -> Page {
     Page::new(
         INSTANCE.to_owned(),
@@ -34,6 +45,7 @@ fn bundle_page() -> Page {
         POLICY.to_owned(),
         "camera; microphone",
         "#101010",
+        Fonts::default(),
     )
 }
 
@@ -297,6 +309,7 @@ fn what_the_frame_is_given_cannot_end_its_attribute() {
         POLICY.to_owned(),
         "camera\" onload=\"x()",
         "#000000\"><script>",
+        Fonts::default(),
     );
     let text = shell_text(&page);
     assert!(
@@ -553,6 +566,7 @@ fn a_change_of_the_fragment_of_the_page_itself_is_let_through_and_loads_nothing(
         POLICY.to_owned(),
         "",
         "#101010",
+        Fonts::default(),
     );
     let mut loads = Loads::default();
     assert!(nested.allows(&Page::shell_url(), Frame::Top, &mut loads));
@@ -1119,27 +1133,21 @@ fn a_picture_that_comes_after_the_card_let_go_is_not_kept() {
 // ---- the files that are read off the main thread ------------------------------
 
 #[test]
-fn only_the_files_of_a_bundle_are_read_off_the_main_thread() {
+fn only_what_is_read_from_the_disk_is_read_off_the_main_thread() {
     let page = bundle_page();
-    assert_eq!(
-        page.file_of(&url("index.html")).as_deref(),
-        Some("index.html")
-    );
-    assert_eq!(
-        page.file_of(&url("app/main.js")).as_deref(),
-        Some("app/main.js")
-    );
+    // A file of the bundle and one of the app's fonts wait for the disk (the file queue's).
+    assert!(page.reads_disk(&url("index.html")));
+    assert!(page.reads_disk(&url("app/main.js")));
+    assert!(page.reads_disk(&font_url("Mono.ttf")));
     // The shell page, a path the page refuses and another view's origin are answered from
     // memory: nothing waits for a file.
-    assert_eq!(page.file_of(&Page::shell_url()), None);
-    assert_eq!(page.file_of(&url("../etc/passwd")), None);
-    assert_eq!(
-        page.file_of("bateri-view://v-ffffffffffffffffffffffffffffffff/index.html"),
-        None
-    );
+    assert!(!page.reads_disk(&Page::shell_url()));
+    assert!(!page.reads_disk(&url("../etc/passwd")));
+    assert!(!page.reads_disk(&font_url("../Mono.ttf")));
+    assert!(!page.reads_disk("bateri-view://v-ffffffffffffffffffffffffffffffff/index.html"));
     // A reply that is not a file's never asks the file service.
     let asked = std::cell::Cell::new(false);
-    for text in [Page::shell_url(), url("../x")] {
+    for text in [Page::shell_url(), url("../x"), font_url("a/b.ttf")] {
         page.reply(&text, &|_| {
             asked.set(true);
             None
@@ -1190,7 +1198,10 @@ fn the_scheme_handler_reads_a_file_off_the_main_thread_and_answers_on_it() {
         answer.matches(".reply(").count() == 1 && answer.contains("&|_| None"),
         "the one reply the handler's body makes is the one that asks for no file"
     );
-    assert!(answer.contains("file_of("));
+    assert!(
+        answer.contains("reads_disk("),
+        "what is read from the disk goes to the queue, and only that"
+    );
     let queued = &answer[answer.find("files_queue()").expect("the file queue")..];
     let (on_queue, back) = queued
         .split_once("DispatchQueue::main()")
@@ -1218,4 +1229,420 @@ fn the_view_asks_the_systems_random_bytes_of_the_core_and_not_of_libc() {
     let source = include_str!("../pencere_view.rs");
     assert!(!source.contains("getentropy"));
     assert!(source.contains("system_random()"));
+}
+
+// ---- the app's own fonts, for the page ----------------------------------------
+
+/// A folder with the font files of a test, removed with it. Named by the process and the test,
+/// so two tests of one run do not share one.
+struct Folder(std::path::PathBuf);
+
+impl Folder {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("bt-view-fonts-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the test's folder");
+        Self(dir)
+    }
+
+    /// Writes `bytes` as the file `name` and says how the page's table lists it.
+    fn face(&self, family: &str, name: &str, bytes: &[u8], italic: bool, w: (u16, u16)) -> AppFace {
+        self.face_in("", family, name, bytes, italic, w)
+    }
+
+    /// [`Folder::face`], in the folder `sub` of this one (a family's folder of the app's fonts).
+    fn face_in(
+        &self,
+        sub: &str,
+        family: &str,
+        name: &str,
+        bytes: &[u8],
+        italic: bool,
+        w: (u16, u16),
+    ) -> AppFace {
+        let dir = self.0.join(sub);
+        std::fs::create_dir_all(&dir).expect("a family's folder");
+        let file = dir.join(name);
+        std::fs::write(&file, bytes).expect("a font file");
+        AppFace {
+            family: family.to_owned(),
+            file,
+            italic,
+            weight: w,
+        }
+    }
+}
+
+impl Drop for Folder {
+    fn drop(&mut self) {
+        // Only the folder this test made.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn font_page(faces: &[AppFace]) -> Page {
+    Page::new(
+        INSTANCE.to_owned(),
+        "index.html".to_owned(),
+        POLICY.to_owned(),
+        "",
+        "#101010",
+        Fonts::of(faces),
+    )
+}
+
+#[test]
+fn a_font_is_named_by_the_prefix_no_path_of_a_bundle_can_have() {
+    assert_eq!(
+        route(INSTANCE, &font_url("Mono[wght].ttf")),
+        Route::AppFont("Mono[wght].ttf".to_owned())
+    );
+    assert_eq!(
+        route(
+            INSTANCE,
+            &format!("bateri-view://{INSTANCE}/bateri-font:Mono%5Bwght%5D.ttf?x=1#y")
+        ),
+        Route::AppFont("Mono[wght].ttf".to_owned()),
+        "the query and the fragment are not part of the name"
+    );
+    // Nothing that is not one name: empty, a path, an escape that is a slash or a NUL.
+    for refused in [
+        format!("bateri-view://{INSTANCE}/bateri-font:"),
+        format!("bateri-view://{INSTANCE}/bateri-font:a/b.ttf"),
+        format!("bateri-view://{INSTANCE}/bateri-font:..%2Fa.ttf"),
+        format!("bateri-view://{INSTANCE}/bateri-font:a%00.ttf"),
+        format!("bateri-view://{INSTANCE}/bateri-font:a%5Cb.ttf"),
+        // Another view's origin, and the shell's own host, are not this view's fonts.
+        "bateri-view://v-ffffffffffffffffffffffffffffffff/bateri-font:Mono.ttf".to_owned(),
+        "bateri-view://shell/bateri-font:Mono.ttf".to_owned(),
+    ] {
+        assert_eq!(route(INSTANCE, &refused), Route::Refused, "{refused}");
+    }
+    // A path of a bundle, an attached file's name included, is still a path of the view.
+    assert_eq!(
+        route(INSTANCE, &url("sha256:0123abcd")),
+        Route::View("sha256:0123abcd".to_owned())
+    );
+    assert_eq!(
+        route(INSTANCE, &url("bateri-font")),
+        Route::View("bateri-font".to_owned()),
+        "without the colon it is a file name like any"
+    );
+}
+
+#[test]
+fn a_font_is_served_with_its_type_and_the_views_policy() {
+    let folder = Folder::new("served");
+    let page = font_page(&[
+        folder.face("Mono", "Mono[wght].ttf", b"roman-bytes", false, (100, 800)),
+        folder.face("Plex", "Plex-Bold.otf", b"bold-bytes", false, (700, 700)),
+    ]);
+    for (name, media, body) in [
+        ("Mono[wght].ttf", "font/ttf", &b"roman-bytes"[..]),
+        ("Plex-Bold.otf", "font/otf", &b"bold-bytes"[..]),
+    ] {
+        // The files service of the bundle is not asked: a font is the page's own list's.
+        let reply = page.reply(&font_url(name), &|path| {
+            panic!("the bundle was asked for {path}")
+        });
+        assert_eq!(reply.status, 200, "{name}");
+        assert_eq!(&*reply.body, body, "{name}");
+        assert_eq!(reply.header("Content-Type"), Some(media), "{name}");
+        assert_eq!(
+            reply.header("Content-Security-Policy"),
+            Some(POLICY),
+            "the view's policy, to the byte, on {name}"
+        );
+        assert_eq!(
+            reply.header("Content-Length"),
+            Some(body.len().to_string().as_str())
+        );
+        assert_eq!(reply.header("X-Content-Type-Options"), Some("nosniff"));
+        assert_eq!(reply.header("Cache-Control"), Some("no-store"));
+        assert_eq!(reply.header("X-DNS-Prefetch-Control"), Some("off"));
+    }
+}
+
+#[test]
+fn a_name_that_is_not_in_the_list_is_not_found_and_nothing_else_is_read() {
+    let folder = Folder::new("refused");
+    let listed = folder.face_in("listed", "Mono", "Mono.ttf", b"font", false, (400, 400));
+    let page = font_page(&[listed]);
+    // A file that lies beside the listed one, and one above it, are not in the list, and a name
+    // is never joined to a directory: nothing it holds takes it out of the list.
+    std::fs::write(folder.0.join("listed/secret.ttf"), b"not for the page").unwrap();
+    std::fs::write(folder.0.join("outside.ttf"), b"out").unwrap();
+    for refused in [
+        font_url("secret.ttf"),
+        font_url("unknown.ttf"),
+        font_url("../outside.ttf"),
+        format!("bateri-view://{INSTANCE}/bateri-font:..%2Foutside.ttf"),
+        font_url(&folder.0.join("listed/Mono.ttf").display().to_string()),
+        font_url("mono.ttf"),
+        font_url(""),
+        format!("bateri-view://{INSTANCE}/BATERI-FONT:Mono.ttf"),
+        "bateri-view://v-ffffffffffffffffffffffffffffffff/bateri-font:Mono.ttf".to_owned(),
+        "bateri-view://shell/bateri-font:Mono.ttf".to_owned(),
+        "https://example.com/bateri-font:Mono.ttf".to_owned(),
+    ] {
+        let reply = page.reply(&refused, &|_| None);
+        assert_eq!(reply.status, 404, "{refused}");
+        assert!(reply.body.is_empty(), "{refused}");
+    }
+    // The listed one is there, so the 404s above are the list's doing and not a broken fixture.
+    assert_eq!(page.reply(&font_url("Mono.ttf"), &|_| None).status, 200);
+}
+
+#[test]
+fn a_font_name_asked_as_a_path_of_the_bundle_is_the_bundles_to_answer() {
+    let folder = Folder::new("bundle");
+    let page = font_page(&[folder.face("Mono", "Mono.ttf", b"the-font", false, (400, 400))]);
+    // The same name, as a path of the bundle: the crate's file service answers, and it has no
+    // such file. No font is given for it.
+    let asked = std::cell::RefCell::new(Vec::new());
+    let reply = page.reply(&url("Mono.ttf"), &|path| {
+        asked.borrow_mut().push(path.to_owned());
+        None
+    });
+    assert_eq!(reply.status, 404);
+    assert!(reply.body.is_empty());
+    assert_eq!(*asked.borrow(), ["Mono.ttf"]);
+    // And a page that asks for the colon name gets the font and the bundle is not asked.
+    let reply = page.reply(&font_url("Mono.ttf"), &|path| {
+        asked.borrow_mut().push(path.to_owned());
+        None
+    });
+    assert_eq!(&*reply.body, b"the-font");
+    assert_eq!(
+        asked.borrow().len(),
+        1,
+        "the bundle was not asked for the font"
+    );
+}
+
+#[test]
+fn a_page_cannot_navigate_to_a_font() {
+    let folder = Folder::new("navigate");
+    let page = font_page(&[folder.face("Mono", "Mono.ttf", b"font", false, (400, 400))]);
+    let mut loads = Loads::default();
+    assert!(page.allows(&Page::shell_url(), Frame::Top, &mut loads));
+    for frame in [Frame::Top, Frame::Below { holds: None }] {
+        assert!(
+            !page.allows(&font_url("Mono.ttf"), frame, &mut loads),
+            "a font is a resource of a page, not a document of a frame"
+        );
+    }
+}
+
+/// The faces of a made-up set of the app's families: a variable family with an italic file, a
+/// static one in four, and one with no italic at all.
+fn the_families(folder: &Folder) -> Vec<AppFace> {
+    vec![
+        folder.face("JetBrains Mono", "JB[wght].ttf", b"a", false, (100, 800)),
+        folder.face(
+            "JetBrains Mono",
+            "JB-Italic[wght].ttf",
+            b"b",
+            true,
+            (100, 800),
+        ),
+        folder.face("IBM Plex Mono", "Plex-Regular.ttf", b"c", false, (400, 400)),
+        folder.face("IBM Plex Mono", "Plex-Italic.ttf", b"d", true, (400, 400)),
+        folder.face("IBM Plex Mono", "Plex-Bold.ttf", b"e", false, (700, 700)),
+        folder.face(
+            "IBM Plex Mono",
+            "Plex-BoldItalic.ttf",
+            b"f",
+            true,
+            (700, 700),
+        ),
+        folder.face("Fira Code", "Fira-VF.ttf", b"g", false, (300, 700)),
+    ]
+}
+
+#[test]
+fn the_table_has_a_face_for_every_file_with_the_style_and_weights_the_file_declares() {
+    let folder = Folder::new("table");
+    let fonts = Fonts::of(&the_families(&folder));
+    let table: Vec<(&str, &str, bool, (u16, u16))> = fonts
+        .faces()
+        .iter()
+        .map(|face| {
+            (
+                face.family.as_str(),
+                face.name.as_str(),
+                face.italic,
+                face.weight,
+            )
+        })
+        .collect();
+    assert_eq!(
+        table,
+        [
+            ("JetBrains Mono", "JB[wght].ttf", false, (100, 800)),
+            ("JetBrains Mono", "JB-Italic[wght].ttf", true, (100, 800)),
+            ("IBM Plex Mono", "Plex-Regular.ttf", false, (400, 400)),
+            ("IBM Plex Mono", "Plex-Italic.ttf", true, (400, 400)),
+            ("IBM Plex Mono", "Plex-Bold.ttf", false, (700, 700)),
+            ("IBM Plex Mono", "Plex-BoldItalic.ttf", true, (700, 700)),
+            // No italic file, no italic face: the engine slants it, the grid does not.
+            ("Fira Code", "Fira-VF.ttf", false, (300, 700)),
+        ]
+    );
+    let script = fonts
+        .script(INSTANCE)
+        .expect("a script for a table with faces");
+    for declared in [
+        r#"["JetBrains Mono", "/bateri-font:JB%5Bwght%5D.ttf", "100 800", "normal"]"#,
+        r#"["JetBrains Mono", "/bateri-font:JB-Italic%5Bwght%5D.ttf", "100 800", "italic"]"#,
+        r#"["IBM Plex Mono", "/bateri-font:Plex-BoldItalic.ttf", "700", "italic"]"#,
+        r#"["Fira Code", "/bateri-font:Fira-VF.ttf", "300 700", "normal"]"#,
+    ] {
+        assert!(script.contains(declared), "{declared}\n{script}");
+    }
+    assert_eq!(script.matches("/bateri-font:").count(), 7);
+    assert_eq!(
+        script.matches("\"italic\"").count(),
+        3,
+        "Fira Code has no italic face"
+    );
+}
+
+#[test]
+fn a_family_the_user_has_is_not_declared_to_the_page() {
+    // The table is made of the files that were registered: the pass left the family the user
+    // had alone, so none of its files is listed, and a `FontFace` of the same name would have
+    // covered their copy.
+    let folder = Folder::new("kept");
+    let registered: Vec<AppFace> = the_families(&folder)
+        .into_iter()
+        .filter(|face| face.family != "IBM Plex Mono")
+        .collect();
+    let script = Fonts::of(&registered).script(INSTANCE).unwrap();
+    assert!(!script.contains("IBM Plex Mono"), "{script}");
+    assert!(!script.contains("Plex-"), "{script}");
+    assert!(script.contains("JetBrains Mono") && script.contains("Fira Code"));
+    // The pass kept every family: nothing to declare, no script, and no user script at all.
+    assert_eq!(Fonts::of(&[]).script(INSTANCE), None);
+    assert!(Fonts::default().is_empty());
+    assert_eq!(
+        font_page(&[]).font_script(),
+        None,
+        "a page with no fonts has no script"
+    );
+}
+
+#[test]
+fn a_file_the_page_cannot_be_given_is_left_out_of_the_table() {
+    let folder = Folder::new("left-out");
+    let fonts = Fonts::of(&[
+        folder.face("One", "One.ttf", b"1", false, (400, 400)),
+        // The name an earlier file has: the earlier one is what the name serves.
+        folder.face_in("two", "Two", "One.ttf", b"2", false, (400, 400)),
+        // Not a format a page is given.
+        folder.face("Three", "Three.ttc", b"3", false, (400, 400)),
+        folder.face("Four", "Four.woff2", b"4", false, (400, 400)),
+        // A family that cannot be written inside quotes.
+        folder.face("Five\" ; evil", "Five.ttf", b"5", false, (400, 400)),
+        folder.face("", "Six.ttf", b"6", false, (400, 400)),
+        folder.face("Seven", "Seven.OTF", b"7", false, (400, 400)),
+    ]);
+    let names: Vec<&str> = fonts
+        .faces()
+        .iter()
+        .map(|face| face.name.as_str())
+        .collect();
+    assert_eq!(names, ["One.ttf", "Seven.OTF"]);
+    let page = Page::new(
+        INSTANCE.to_owned(),
+        "index.html".to_owned(),
+        POLICY.to_owned(),
+        "",
+        "#101010",
+        fonts,
+    );
+    assert_eq!(&*page.reply(&font_url("One.ttf"), &|_| None).body, b"1");
+    assert_eq!(
+        page.reply(&font_url("Seven.OTF"), &|_| None)
+            .header("Content-Type"),
+        Some("font/otf")
+    );
+}
+
+/// Runs `script` in JavaScriptCore (`osascript -l JavaScript`, which every Mac has), once for each
+/// of `documents` — the protocol and host name of the document it runs in, and whether the engine
+/// has a `FontFace` there —, with a font set that only records what it is given. Says what each
+/// run added, as one JSON text: a list with a list of faces for every document. One process for
+/// all of them: it is a script host, started once, and not a program the test would wait for.
+fn run_font_script(script: &str, documents: &[(&str, &str, bool)]) -> String {
+    let cases: Vec<String> = documents
+        .iter()
+        .map(|(protocol, host, face)| {
+            format!("[{}, {}, {face}]", js_string(protocol), js_string(host))
+        })
+        .collect();
+    let program = r#"
+var script = SCRIPT;
+var cases = [CASES];
+JSON.stringify(cases.map(function (one) {
+  var added = [];
+  function FontFace(family, source, descriptors) {
+    this.family = family; this.source = source; this.descriptors = descriptors;
+  }
+  var document = { fonts: { add: function (face) {
+    added.push([face.family, face.source, face.descriptors.weight, face.descriptors.style]);
+  } } };
+  var location = { protocol: one[0], hostname: one[1] };
+  new Function("location", "document", "FontFace", script)(
+    location, document, one[2] ? FontFace : undefined);
+  return added;
+}))
+"#
+    .replace("SCRIPT", &js_string(script))
+    .replace("CASES", &cases.join(", "));
+    let output = std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &program])
+        .output()
+        .expect("osascript runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn the_script_declares_the_faces_in_the_views_own_document_and_in_no_other() {
+    let folder = Folder::new("script");
+    let fonts = Fonts::of(&[
+        folder.face("Mono", "Mono[wght].ttf", b"a", false, (100, 800)),
+        folder.face("Mono", "Mono-Italic[wght].ttf", b"b", true, (100, 800)),
+    ]);
+    let script = fonts.script(INSTANCE).unwrap();
+    let declared = r#"[["Mono","url(/bateri-font:Mono%5Bwght%5D.ttf)","100 800","normal"],["Mono","url(/bateri-font:Mono-Italic%5Bwght%5D.ttf)","100 800","italic"]]"#;
+    let upper = INSTANCE.to_ascii_uppercase();
+    // The documents the web view runs the script in: the view's own (the scheme and the
+    // instance's host, a host not told by its case) and everything else — the shell page (the
+    // application's own host), another view's instance, a frame the page nested from the network,
+    // a blank frame, and an engine with no `FontFace`. Only the first two are given the faces.
+    let documents = [
+        ("bateri-view:", INSTANCE, true),
+        ("bateri-view:", upper.as_str(), true),
+        ("bateri-view:", "shell", true),
+        ("bateri-view:", "v-ffffffffffffffffffffffffffffffff", true),
+        ("bateri-view:", "", true),
+        ("https:", INSTANCE, true),
+        ("https:", "example.com", true),
+        ("about:", "", true),
+        ("data:", "", true),
+        ("bateri-view:", INSTANCE, false),
+    ];
+    let expected = format!(
+        "[{}]",
+        [
+            declared, declared, "[]", "[]", "[]", "[]", "[]", "[]", "[]", "[]"
+        ]
+        .join(",")
+    );
+    assert_eq!(run_font_script(&script, &documents), expected);
 }
