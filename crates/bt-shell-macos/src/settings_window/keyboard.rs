@@ -29,12 +29,12 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSBezelStyle, NSButton, NSColor, NSControlSize,
-    NSControlTextEditingDelegate, NSEvent, NSFont, NSFontAttributeName,
+    NSAlert, NSAlertFirstButtonReturn, NSBezelStyle, NSBezierPath, NSButton, NSColor,
+    NSControlSize, NSControlTextEditingDelegate, NSEvent, NSFont, NSFontAttributeName,
     NSForegroundColorAttributeName, NSLayoutAttribute, NSLayoutConstraintOrientation,
     NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponse, NSScrollView, NSSearchField,
     NSSegmentSwitchTracking, NSSegmentedControl, NSStackView, NSStackViewGravity,
-    NSStrikethroughStyleAttributeName, NSTableCellView, NSTableColumn, NSTableView,
+    NSStrikethroughStyleAttributeName, NSTableCellView, NSTableColumn, NSTableRowView, NSTableView,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewGridLineStyle,
     NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
@@ -245,6 +245,14 @@ define_class!(
                 Ok(index) => self.cell(index),
                 Err(_) => None,
             }
+        }
+
+        #[unsafe(method_id(tableView:rowViewForRow:))]
+        fn row_view(&self, _table: &NSTableView, row: NSInteger) -> Option<Retained<NSTableRowView>> {
+            usize::try_from(row).ok().map(|row| {
+                let place = place_of(&self.ivars().state.borrow().entries, row);
+                Retained::into_super(CardRow::new(self.mtm(), place))
+            })
         }
 
         #[unsafe(method(tableView:isGroupRow:))]
@@ -727,10 +735,12 @@ impl KeyboardPage {
         table.setHeaderView(None);
         table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
         table.setUsesAutomaticRowHeights(true);
-        table.setGridStyleMask(NSTableViewGridLineStyle::SolidHorizontalGridLineMask);
-        // The list is a card on the page's ground, its rules the theme's separator.
-        table.setBackgroundColor(&look::ink(Ink::Card));
-        table.setGridColor(&look::ink(Ink::Line));
+        // Each section is a card on the page's ground, as a group is on the other pages: the rows
+        // draw it ([`CardRow`]), the table draws nothing of its own.
+        table.setGridStyleMask(NSTableViewGridLineStyle::GridNone);
+        table.setBackgroundColor(&NSColor::clearColor());
+        table.setFloatsGroupRows(false);
+        table.setIntercellSpacing(objc2_foundation::NSSize::new(0.0, 0.0));
         table.setAllowsEmptySelection(true);
         let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("k"));
         table.addTableColumn(&column);
@@ -936,7 +946,7 @@ impl KeyboardPage {
             let st = self.ivars().state.borrow();
             let entry = st.entries.get(index)?.clone();
             let built = match &entry {
-                Entry::Heading(title) => (heading_cell(mtm, title), None),
+                Entry::Heading(title) => (heading_cell(mtm, title, index == 0), None),
                 Entry::Empty => (empty_cell(mtm), None),
                 Entry::BuiltIn(at) => (built_in_cell(mtm, st.page.built_in().get(*at)?), None),
                 Entry::Command(name) => self.command_cell(mtm, &st, index, name)?,
@@ -1061,16 +1071,16 @@ impl KeyboardPage {
         for constraint in [
             whole
                 .topAnchor()
-                .constraintEqualToAnchor_constant(&cell.topAnchor(), 6.0),
+                .constraintEqualToAnchor_constant(&cell.topAnchor(), ROW_PAD_Y),
             whole
                 .bottomAnchor()
-                .constraintEqualToAnchor_constant(&cell.bottomAnchor(), -6.0),
+                .constraintEqualToAnchor_constant(&cell.bottomAnchor(), -ROW_PAD_Y),
             whole
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&cell.leadingAnchor(), 4.0),
+                .constraintEqualToAnchor_constant(&cell.leadingAnchor(), super::ROW_PAD_X),
             whole
                 .trailingAnchor()
-                .constraintEqualToAnchor_constant(&cell.trailingAnchor(), -4.0),
+                .constraintEqualToAnchor_constant(&cell.trailingAnchor(), -super::ROW_PAD_X),
             top.widthAnchor()
                 .constraintEqualToAnchor(&whole.widthAnchor()),
         ] {
@@ -1368,16 +1378,20 @@ impl KeyboardPage {
 }
 
 /// A section's heading.
-fn heading_cell(mtm: MainThreadMarker, title: &str) -> Retained<NSView> {
-    let label = text(mtm, title, 11.0, &look::ink(Ink::Dim));
-    label.setFont(Some(&NSFont::boldSystemFontOfSize(11.0)));
-    fill(mtm, &label, 2.0)
+fn heading_cell(mtm: MainThreadMarker, title: &str, first: bool) -> Retained<NSView> {
+    // A group's title on the other pages: bold, in the text colour, a gap above it.
+    let label = text(mtm, title, NSFont::systemFontSize(), &look::ink(Ink::Text));
+    label.setFont(Some(
+        &NSFont::boldSystemFontOfSize(NSFont::systemFontSize()),
+    ));
+    let above = if first { 2.0 } else { super::GROUP_SPACING };
+    fill_with(mtm, &label, above, super::TITLE_SPACING, 4.0)
 }
 
 /// The page when nothing matches.
 fn empty_cell(mtm: MainThreadMarker) -> Retained<NSView> {
     let label = text(mtm, "No command matches.", 13.0, &look::ink(Ink::Dim));
-    fill(mtm, &label, 12.0)
+    fill_with(mtm, &label, 12.0, 12.0, super::ROW_PAD_X)
 }
 
 /// `text` crossed out, in the secondary colour.
@@ -1398,6 +1412,106 @@ fn struck(text: &str, size: f64) -> Retained<NSAttributedString> {
             &values,
         );
         NSAttributedString::new_with_attributes(&NSString::from_str(text), &attributes)
+    }
+}
+
+/// The room above and below a row's words, as on the other pages' rows.
+const ROW_PAD_Y: f64 = 9.0;
+
+/// Where a line stands in its section: a heading, or a row at the top, in the middle or at the
+/// bottom of the section's card (or all three, alone).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    Heading,
+    Row { first: bool, last: bool },
+}
+
+/// The place of the line at `index`: a section runs from a heading to the next.
+fn place_of(entries: &[Entry], index: usize) -> Place {
+    let heading = |at: Option<usize>| {
+        at.and_then(|at| entries.get(at))
+            .is_none_or(|entry| matches!(entry, Entry::Heading(_)))
+    };
+    match entries.get(index) {
+        Some(Entry::Heading(_)) => Place::Heading,
+        _ => Place::Row {
+            first: heading(index.checked_sub(1)),
+            last: heading(index.checked_add(1)),
+        },
+    }
+}
+
+pub(super) struct CardRowIvars {
+    place: Place,
+}
+
+define_class!(
+    /// A line's row, drawn as its part of the section's card: the card's background framed by
+    /// the theme's line, round at the section's first and last row, and the rule between two
+    /// rows inset as on the other pages; a heading stands on the ground.
+    // SAFETY: NSTableRowView is designed for subclassing; Drop is not implemented.
+    #[unsafe(super(NSTableRowView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriKeyboardCardRow"]
+    #[ivars = CardRowIvars]
+    struct CardRow;
+
+    unsafe impl NSObjectProtocol for CardRow {}
+
+    impl CardRow {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let Place::Row { first, last } = self.ivars().place else {
+                return;
+            };
+            let bounds = self.bounds();
+            let radius = super::GROUP_RADIUS;
+            // The card runs on past a row that is not its end, so the corners show only at the
+            // ends and the frame has no seam between two rows.
+            let reach = radius + 2.0;
+            let mut card = NSRect::new(
+                objc2_foundation::NSPoint::new(bounds.origin.x + 0.25, bounds.origin.y),
+                objc2_foundation::NSSize::new(bounds.size.width - 0.5, bounds.size.height),
+            );
+            if first {
+                card.origin.y += 0.25;
+                card.size.height -= 0.25;
+            } else {
+                card.origin.y -= reach;
+                card.size.height += reach;
+            }
+            if last {
+                card.size.height -= 0.25;
+            } else {
+                card.size.height += reach;
+            }
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(card, radius, radius);
+            look::ink(Ink::Card).setFill();
+            path.fill();
+            path.setLineWidth(0.5);
+            look::ink(Ink::Line).setStroke();
+            path.stroke();
+            if !first {
+                look::ink(Ink::Line).setFill();
+                NSBezierPath::fillRect(NSRect::new(
+                    objc2_foundation::NSPoint::new(super::ROW_PAD_X, 0.0),
+                    objc2_foundation::NSSize::new(bounds.size.width - 2.0 * super::ROW_PAD_X, 1.0),
+                ));
+            }
+        }
+    }
+);
+
+impl CardRow {
+    fn new(mtm: MainThreadMarker, place: Place) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(CardRowIvars { place });
+        // SAFETY: `init` is NSTableRowView's designated initializer; the table sizes the row.
+        unsafe { msg_send![super(this), init] }
     }
 }
 
@@ -1434,23 +1548,29 @@ fn built_in_cell(mtm: MainThreadMarker, line: &shortcuts::BuiltIn) -> Retained<N
         8.0,
     );
     let top = row_line(mtm, &words, &keys);
-    fill(mtm, &top, 6.0)
+    fill_with(mtm, &top, ROW_PAD_Y, ROW_PAD_Y, super::ROW_PAD_X)
 }
 
-/// `view` in a table cell, inset.
-fn fill(mtm: MainThreadMarker, view: &NSView, inset: f64) -> Retained<NSView> {
+/// `view` in a table cell, `top` and `bottom` in from its ends and `side` from its sides.
+fn fill_with(
+    mtm: MainThreadMarker,
+    view: &NSView,
+    top: f64,
+    bottom: f64,
+    side: f64,
+) -> Retained<NSView> {
     let cell = NSTableCellView::new(mtm);
     view.setTranslatesAutoresizingMaskIntoConstraints(false);
     cell.addSubview(view);
     for constraint in [
         view.topAnchor()
-            .constraintEqualToAnchor_constant(&cell.topAnchor(), inset),
+            .constraintEqualToAnchor_constant(&cell.topAnchor(), top),
         view.bottomAnchor()
-            .constraintEqualToAnchor_constant(&cell.bottomAnchor(), -inset),
+            .constraintEqualToAnchor_constant(&cell.bottomAnchor(), -bottom),
         view.leadingAnchor()
-            .constraintEqualToAnchor_constant(&cell.leadingAnchor(), 4.0),
+            .constraintEqualToAnchor_constant(&cell.leadingAnchor(), side),
         view.trailingAnchor()
-            .constraintEqualToAnchor_constant(&cell.trailingAnchor(), -4.0),
+            .constraintEqualToAnchor_constant(&cell.trailingAnchor(), -side),
     ] {
         constraint.setActive(true);
     }
@@ -1463,6 +1583,37 @@ mod tests {
     use bt_shell_common::shortcuts::Outcome;
 
     use super::*;
+
+    /// A section runs from a heading to the next: its first row takes the card's top, its last
+    /// the bottom, a lone row both.
+    #[test]
+    fn a_row_knows_its_place_in_its_section() {
+        let entries = [
+            Entry::Heading("bateri".to_owned()),
+            Entry::Command("about"),
+            Entry::Command("settings"),
+            Entry::Command("quit"),
+            Entry::Heading("Shell".to_owned()),
+            Entry::Command("new-window"),
+        ];
+        let row = |first, last| Place::Row { first, last };
+        let places: Vec<Place> = (0..entries.len())
+            .map(|at| place_of(&entries, at))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                Place::Heading,
+                row(true, false),
+                row(false, false),
+                row(false, true),
+                Place::Heading,
+                row(true, true),
+            ]
+        );
+        // With no heading (a search's lone line) the row is a card of its own.
+        assert_eq!(place_of(&[Entry::Empty], 0), row(true, true));
+    }
 
     /// A page over a small menu: Shell has Split Right and Split Down, Edit has Copy Last Output.
     fn state() -> State {

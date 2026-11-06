@@ -175,6 +175,8 @@ objc2-foundation = { workspace = true, features = [
 # The settings window draws in the theme's roles with colours that read the theme when drawn
 # (`NSColor::colorWithName_dynamicProvider`), whose name parameter is `NSColorList`'s type. Only a
 # header flag; `Cargo.lock` did not move.
+# The Keyboard page draws each section's rows as one card, a row's part of it in its row view
+# (`NSTableRowView`). Only a header flag; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSSegmentedControl", "NSSegmentedCell", "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -193,6 +195,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
     "NSGraphicsContext", "NSAffineTransform", "objc2-core-graphics", "NSGraphics", "NSImageRep",
     "NSBitmapImageRep", "NSAccessibilityElement", "NSTextInputContext", "NSColorList",
+    "NSTableRowView",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

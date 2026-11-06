@@ -254,6 +254,16 @@ impl SettingsWindow {
         self.blink_problems(&themes, resolved, shots, &mut problems);
         self.drag_problems(shots, &mut problems);
         if let Some(dir) = shots {
+            // The Keyboard page is a list of its own, not a grid: its picture only.
+            sidebar.selectRowIndexes_byExtendingSelection(
+                &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Keyboard)),
+                false,
+            );
+            self.show_selected();
+            if let Some(content) = window.contentView() {
+                content.layoutSubtreeIfNeeded();
+                picture(&content, &dir.join("keyboard-window.png"));
+            }
             // The same pages in a dark theme of the terminal's: the window is drawn in it.
             let settings = Settings {
                 theme: "bateri".to_owned(),
@@ -265,9 +275,8 @@ impl SettingsWindow {
                 ..themes
             };
             self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
-            // The Keyboard page is left out here as above: drawn off screen, its window comes back
-            // empty (before this palette as after it).
-            for category in Category::ALL.into_iter().filter(|c| c.grid().is_some()) {
+            // The Keyboard page too: a list of its own, with no grid to check, but a picture.
+            for category in Category::ALL {
                 sidebar.selectRowIndexes_byExtendingSelection(
                     &NSIndexSet::indexSetWithIndex(SideItem::row_of(category)),
                     false,
@@ -278,7 +287,9 @@ impl SettingsWindow {
                 };
                 content.layoutSubtreeIfNeeded();
                 let slug = category.title().to_lowercase().replace(' ', "-");
-                if let Some(document) = scroll.documentView() {
+                if category.grid().is_some()
+                    && let Some(document) = scroll.documentView()
+                {
                     picture(&document, &dir.join(format!("{slug}-dark.png")));
                 }
                 picture(&content, &dir.join(format!("{slug}-dark-window.png")));
