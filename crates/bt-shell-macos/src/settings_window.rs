@@ -2095,12 +2095,12 @@ define_class!(
             self.save(edit);
         }
 
-        /// While a slider is dragged only the value label changes; it is
-        /// written to the file **on release**. `continuous` is on,
-        /// otherwise the label would freeze during the drag: the decision to
-        /// write or not is from the event's type — if the mouse is down and
-        /// dragging it is an intermediate value. The event of a slider changed
-        /// with the keyboard (arrow key) is a key event and it writes.
+        /// While a slider is dragged the value label and the page's example follow the hand
+        /// ([`SettingsWindow::preview_specimen`]); the value is written to the file **on
+        /// release**. `continuous` is on, otherwise both would freeze during the drag: the
+        /// decision to write or not is from the event's type — if the mouse is down and dragging
+        /// it is an intermediate value. The event of a slider changed with the keyboard (arrow
+        /// key) is a key event and it writes.
         #[unsafe(method(sliderChanged:))]
         fn slider_changed(&self, sender: Option<&AnyObject>) {
             let Some(slider) = sender.and_then(|s| s.downcast_ref::<NSSlider>()) else {
@@ -2139,6 +2139,7 @@ define_class!(
                     )
                 });
             if dragging {
+                self.preview_specimen(key, value);
                 return;
             }
             let edit = match key {
@@ -3001,6 +3002,29 @@ impl SettingsWindow {
     /// Draws the open page's example from what the last refresh gave it; a page that is not open,
     /// the search results and a page without an example draw nothing.
     fn show_specimen(&self) {
+        let inputs = self.ivars().specimen_inputs.borrow().clone();
+        self.show_specimen_with(inputs.as_ref());
+    }
+
+    /// The open page's example drawn while a slider is dragged: with the value under the hand for
+    /// `key`, the file's for the rest. The file is written on release, and the refresh that
+    /// follows draws the example from it again.
+    fn preview_specimen(&self, key: Key, value: f64) {
+        let Some(mut inputs) = self.ivars().specimen_inputs.borrow().clone() else {
+            return;
+        };
+        let settings = &mut inputs.settings;
+        match key {
+            Key::BlinkSpeed => settings.blink_interval = value,
+            Key::Radius => settings.caret.radius_ratio = value,
+            Key::Glow => settings.caret.glow = value,
+            _ => return,
+        }
+        self.show_specimen_with(Some(&inputs));
+    }
+
+    /// [`SettingsWindow::show_specimen`] from `inputs`.
+    fn show_specimen_with(&self, inputs: Option<&specimen::Inputs>) {
         let (Some(sidebar), Some(specimens)) =
             (self.ivars().sidebar.get(), self.ivars().specimens.get())
         else {
@@ -3019,8 +3043,7 @@ impl SettingsWindow {
         if self.searching() {
             return;
         }
-        let inputs = self.ivars().specimen_inputs.borrow();
-        let Some(inputs) = inputs.as_ref() else {
+        let Some(inputs) = inputs else {
             return;
         };
         let scale = self

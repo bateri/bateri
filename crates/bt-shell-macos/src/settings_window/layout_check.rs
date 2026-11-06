@@ -17,7 +17,7 @@ use objc2::DefinedClass;
 use objc2_app_kit::{NSBitmapImageFileType, NSView};
 use objc2_foundation::{NSDate, NSDictionary, NSIndexSet, NSRect, NSRunLoop};
 
-use super::{Category, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
+use super::{Category, Key, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
 use crate::settings::{self, FileState};
 
 /// How far two frames may run into each other before it is an overlap: the hairline rounding of
@@ -174,7 +174,54 @@ impl SettingsWindow {
             }
         }
         self.blink_problems(&themes, resolved, shots, &mut problems);
+        self.drag_problems(shots, &mut problems);
         problems
+    }
+
+    /// While a slider is dragged the Cursor example follows the value under the hand, and what the
+    /// window holds as the file's stays the file's. Runs on the Cursor page [`Self::blink_problems`]
+    /// left open; a machine with no GPU has no example to follow.
+    fn drag_problems(&self, shots: Option<&Path>, problems: &mut Vec<String>) {
+        let ivars = self.ivars();
+        let (Some(specimens), Some(scroll)) = (ivars.specimens.get(), ivars.pane_scroll.get())
+        else {
+            return;
+        };
+        let Some(document) = scroll.documentView() else {
+            return;
+        };
+        if specimens
+            .view(specimen::Kind::Cursor)
+            .is_none_or(NSView::isHidden)
+        {
+            return;
+        }
+        let file = |read: fn(&Settings) -> f64| {
+            ivars
+                .specimen_inputs
+                .borrow()
+                .as_ref()
+                .map(|inputs| read(&inputs.settings))
+        };
+        let radius = file(|settings| settings.caret.radius_ratio);
+        let before = png_of(&document);
+        self.preview_specimen(Key::Radius, 0.5);
+        self.preview_specimen(Key::Glow, 3.0);
+        let after = png_of(&document);
+        if before.is_none() || before == after {
+            problems.push(
+                "Cursor: dragging Corner radius and Glow left the example as it was".to_owned(),
+            );
+        }
+        if file(|settings| settings.caret.radius_ratio) != radius {
+            problems.push("Cursor: a dragged value was kept as the file's".to_owned());
+        }
+        if let (Some(dir), Some(png)) = (shots, after) {
+            let _ = std::fs::write(dir.join("cursor-drag.png"), png);
+        }
+        self.show_specimen();
+        self.cancel_blink();
+        specimens.stop_blink();
     }
 
     /// With the file's blink on, the Cursor example's caret is turned by the window's clock: half
@@ -260,16 +307,19 @@ fn overlap(a: NSRect, b: NSRect) -> bool {
 
 /// Writes what `view` draws as a PNG at `path`; a view that cannot be drawn writes nothing.
 fn picture(view: &NSView, path: &Path) {
+    if let Some(png) = png_of(view) {
+        let _ = std::fs::write(path, png);
+    }
+}
+
+/// What `view` draws, as a PNG; `None` for a view that cannot be drawn.
+fn png_of(view: &NSView) -> Option<Vec<u8>> {
     let bounds = view.bounds();
-    let Some(rep) = view.bitmapImageRepForCachingDisplayInRect(bounds) else {
-        return;
-    };
+    let rep = view.bitmapImageRepForCachingDisplayInRect(bounds)?;
     view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
     // SAFETY: the properties are an empty dictionary, which the type takes for no property.
     let png = unsafe {
         rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
     };
-    if let Some(png) = png {
-        let _ = std::fs::write(path, png.to_vec());
-    }
+    png.map(|png| png.to_vec())
 }
