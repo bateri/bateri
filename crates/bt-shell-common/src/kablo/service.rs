@@ -3081,12 +3081,20 @@ impl Core {
         let holds: Vec<HoldId> = self.conns.keys().copied().collect();
         for hold in holds {
             let bytes = self.hub.take_outgoing(hold);
-            let queued = self
-                .hub
-                .terminal_of(hold)
-                .and_then(|(account, _)| self.accounts.get(account))
-                .map(|entry| Arc::clone(&entry.queued))
-                .unwrap_or_default();
+            // A pane that waits for its stream does not read it yet: what its terminal sends in
+            // the meantime (the past of one found again, which can be many times what the bridge
+            // lets wait) waits for it apart from the account's count. Counted there, it would stop
+            // the bridge before the server's list came — the word the pane waits for — and the
+            // pane would give up, and every pane of the account after it with it.
+            let queued = if self.awaiting.contains_key(&hold) {
+                Arc::default()
+            } else {
+                self.hub
+                    .terminal_of(hold)
+                    .and_then(|(account, _)| self.accounts.get(account))
+                    .map(|entry| Arc::clone(&entry.queued))
+                    .unwrap_or_default()
+            };
             if let Some(conn) = self.conns.get(&hold) {
                 if !bytes.is_empty() {
                     queued.fetch_add(bytes.len(), Ordering::SeqCst);

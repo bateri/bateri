@@ -1195,14 +1195,17 @@ impl Bridge {
                 ));
             }
         }
-        if !data.is_empty() {
+        // In pieces, as a relay sends a journal: a packet has a size it cannot go over.
+        let mut offset = start;
+        for piece in data.chunks(OUTPUT_PIECE) {
             self.send(&Packet::about(
                 id.clone(),
                 Message::Output {
-                    offset: start,
-                    data,
+                    offset,
+                    data: piece.to_vec(),
                 },
             ));
+            offset += piece.len() as u64;
         }
         if self.sessions.get(&id).is_some_and(|s| s.exit.is_some()) {
             self.tell_ended(&id);
@@ -1226,3 +1229,6 @@ impl Bridge {
         }
     }
 }
+
+/// The most of a terminal's journal one packet of the fake carries when a client attaches.
+const OUTPUT_PIECE: usize = 64 * 1024;

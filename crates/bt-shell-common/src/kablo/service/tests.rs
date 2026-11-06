@@ -4006,6 +4006,42 @@ impl Comeback {
     }
 }
 
+/// A terminal that comes back with a past larger than what the bridge lets wait for slow panes
+/// ([`HIGH_WATER`]): the pane does not read it before it is given its stream, and it is given its
+/// stream only once the server's list says the terminal is still there. Counted with what the
+/// account's panes have not taken, that past stopped the bridge before the list could come, the
+/// pane gave up and was an ordinary shell — and so was every pane after it, the bridge never
+/// moving again. The pane is given its terminal and reads the whole of its past.
+#[test]
+fn a_terminal_with_a_past_larger_than_the_bridge_holds_back_is_shown_again() {
+    let back = Comeback::leaves("local-large-past", b"one\r\n");
+    let id = back.terminal.clone();
+    let line = [b'x'; 1023];
+    for _ in 0..(3 * HIGH_WATER / 1024) {
+        back.world.bridge().write(&id, &line);
+        back.world.bridge().write(&id, b"\n");
+    }
+    back.world.bridge().write(&id, b"last\r\n");
+
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(10))
+        .expect("its terminal, past and all");
+    assert_eq!(stream.pid, crate::kablo::fake::FAKE_PID);
+    let mut mac = Pane::of(stream);
+    // Read to the end of the past, looking only at what came last.
+    let mut read = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    while !read.ends_with(b"last\r\n") {
+        let n = mac.master.read(&mut chunk).expect("the terminal's bytes");
+        assert_ne!(n, 0, "the stream ended after {} bytes", read.len());
+        read.extend_from_slice(&chunk[..n]);
+    }
+    assert!(read.starts_with(b"one\r\n"));
+    assert!(read.len() > 3 * HIGH_WATER, "{}", read.len());
+    second.stop();
+}
+
 #[test]
 fn a_pane_that_comes_back_is_shown_its_terminal_from_the_first_byte_and_told_how_far_that_is_the_past()
  {
