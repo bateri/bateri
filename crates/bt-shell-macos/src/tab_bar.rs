@@ -4370,7 +4370,7 @@ impl Seen {
                 .as_ref()
                 .map(|_| self.theme.mark_rgb(label.mark)),
             server: label.server.as_deref(),
-            emblem: Some(label.emblem).filter(|_| !naming),
+            emblem: (!naming).then_some(label.emblem),
             indicator: label.indicator.filter(|_| !naming),
             turn: label
                 .running
@@ -8188,7 +8188,7 @@ impl TabBar {
         if let (Some(tab), Some(PaneTarget::Tab(chip))) = (carried.lone(), over) {
             return Aim {
                 lit: Some(chip).filter(|chip| *chip != tab),
-                landed: Some(Landed::Merge(chip)).filter(|_| chip != tab),
+                landed: (chip != tab).then_some(Landed::Merge(chip)),
                 ..Aim::default()
             };
         }

@@ -94,7 +94,9 @@ fn ink(still: &Snapshot, ground: Theme) -> u64 {
     ];
     still
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|px| {
             (0..3)
                 .map(|c| u64::from(px[c].abs_diff(bg[c])))

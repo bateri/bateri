@@ -924,9 +924,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
         message.push(0);
     }
     message.extend_from_slice(&((data.len() as u64).wrapping_mul(8)).to_be_bytes());
-    for block in message.chunks_exact(64) {
+    for block in message.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in block.chunks_exact(4).enumerate() {
+        for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for i in 16..64 {

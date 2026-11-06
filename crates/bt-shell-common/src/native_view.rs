@@ -327,6 +327,22 @@ impl Assets for BundleAssets {
 struct Shaped {
     fonts: HashMap<Font, Option<TextFontId>>,
     lines: HashMap<(Font, String), Option<ShapedText>>,
+    /// The renderer's [`Renderer::ui_fonts_generation`] the two were filled under: when the person
+    /// changes the terminal font's rules (Hide Secrets, Ligatures, an alternate letter) the fonts
+    /// are opened and the lines shaped again, or the page would keep drawing the old glyphs.
+    generation: u64,
+}
+
+impl Shaped {
+    /// Forgets the fonts and the lines when the renderer opens its fonts with other rules now.
+    fn follow(&mut self, renderer: &Renderer) {
+        let generation = renderer.ui_fonts_generation();
+        if self.generation != generation {
+            self.fonts.clear();
+            self.lines.clear();
+            self.generation = generation;
+        }
+    }
 }
 
 /// More lines than a page of this kind has words: the cache starts again past it, so a page
@@ -344,9 +360,11 @@ struct Typeset<'a> {
 }
 
 impl Typeset<'_> {
-    /// The renderer's font for `font`, opened the first time it is asked for.
+    /// The renderer's font for `font`, opened the first time it is asked for (and again once the
+    /// renderer's rules for the terminal's face changed, [`Shaped::follow`]).
     fn font(&mut self, font: &Font) -> Option<TextFontId> {
         let (renderer, terminal) = (self.renderer, self.terminal);
+        self.shaped.follow(renderer);
         *self.shaped.fonts.entry(*font).or_insert_with(|| {
             renderer.ui_font(&TextStyle {
                 family: match font.family {
@@ -1032,6 +1050,52 @@ mod tests {
         assert!(
             through.y > 6.0 && through.y < 24.0,
             "across the letters: {through:?}"
+        );
+    }
+
+    /// When the person changes the terminal font's rules (Hide Secrets, Ligatures), a page drops
+    /// the fonts it opened and the lines it shaped and asks the renderer again, or it would keep
+    /// drawing the glyphs of the old rules; a page that did not change keeps both.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_change_of_the_fonts_rules_shapes_the_pages_lines_again() {
+        let renderer = Renderer::system_default().expect("a GPU");
+        let terminal = None;
+        let mut shaped = Shaped::default();
+        let font = Font {
+            family: Family::Terminal,
+            size: 13.0,
+            weight: 400,
+            italic: false,
+        };
+        let typeset = |shaped: &mut Shaped, text: &str| {
+            let mut typeset = Typeset {
+                renderer: &renderer,
+                terminal: &terminal,
+                shaped,
+            };
+            typeset.shaped(&font, text).is_some()
+        };
+        assert!(typeset(&mut shaped, "sk-ant-abc123"), "the line is shaped");
+        assert!(typeset(&mut shaped, "-> !="));
+        assert!(typeset(&mut shaped, "sk-ant-abc123"));
+        assert_eq!(
+            shaped.lines.len(),
+            2,
+            "nothing changed: both lines are kept"
+        );
+
+        let calt_off = bt_core::FontOptions {
+            features: [(String::new(), [("calt".to_owned(), false)].into())].into(),
+            ..bt_core::FontOptions::default()
+        };
+        assert!(renderer.set_font(&calt_off));
+        assert!(typeset(&mut shaped, "sk-ant-abc123"));
+        assert_eq!(shaped.generation, renderer.ui_fonts_generation());
+        assert_eq!(
+            shaped.lines.len(),
+            1,
+            "the lines of the old rules are gone, the one asked for is shaped again"
         );
     }
 }

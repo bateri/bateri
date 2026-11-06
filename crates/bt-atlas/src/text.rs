@@ -263,6 +263,38 @@ pub struct TextAtlas {
     /// Whether glyphs are drawn with the platform's font smoothing
     /// ([`TextAtlas::set_smoothing`]).
     smoothing: bool,
+    /// The rules the terminal's family is opened with ([`TextAtlas::set_features`]).
+    terminal: TerminalFeatures,
+    /// How many times [`TextAtlas::terminal`] changed: [`TextAtlas::generation`].
+    generation: u64,
+}
+
+/// The OpenType features the person chose for the terminal's family (the grid's
+/// `[font.features."Family"]`), and the family they were chosen for. A line set in that
+/// family is shaped with them, as the grid's text is; the system face and another family
+/// are not, because `ss01` is a different rule in every font.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TerminalFeatures {
+    /// `None`: the default chain's.
+    family: Option<String>,
+    features: Vec<(String, bool)>,
+}
+
+impl TerminalFeatures {
+    /// The features a font opened as `family` is given: these, when it is the family they were
+    /// chosen for (the name matched without regard to case, as the grid matches it); none for
+    /// the system face or another family.
+    fn for_family(&self, family: &Family) -> &[(String, bool)] {
+        let chosen_for = match family {
+            Family::System => false,
+            Family::Terminal(None) => self.family.is_none(),
+            Family::Terminal(Some(name)) => self
+                .family
+                .as_deref()
+                .is_some_and(|ours| crate::rules::same_family(ours, name)),
+        };
+        if chosen_for { &self.features } else { &[] }
+    }
 }
 
 impl TextAtlas {
@@ -277,6 +309,8 @@ impl TextAtlas {
             flushed: false,
             edge,
             smoothing: false,
+            terminal: TerminalFeatures::default(),
+            generation: 0,
         }
     }
 
@@ -303,6 +337,47 @@ impl TextAtlas {
         true
     }
 
+    /// An atlas that opens the terminal's family with `features`, the choices made for `family`
+    /// (`None`: the default chain), from the start. Nothing is opened yet, so nothing is
+    /// forgotten ([`TextAtlas::set_features`] is for a change).
+    #[must_use]
+    pub fn with_features(mut self, family: Option<&str>, features: &[(String, bool)]) -> Self {
+        self.terminal = TerminalFeatures {
+            family: family.map(str::to_owned),
+            features: features.to_vec(),
+        };
+        self
+    }
+
+    /// Changes the rules the terminal's family is opened with: `features`, the choices the person
+    /// made for `family`, the family the grid is set in. A change forgets the fonts opened in the
+    /// terminal's family, so the next [`TextAtlas::open`] opens them with the new rules, and
+    /// empties the cache the way [`TextAtlas::set_smoothing`] does. It also moves
+    /// [`TextAtlas::generation`] on: a font id or a shaped line kept from before is of the old
+    /// rules, and whoever kept one opens and shapes again. Returns whether it changed.
+    pub fn set_features(&mut self, family: Option<&str>, features: &[(String, bool)]) -> bool {
+        let wanted = TerminalFeatures {
+            family: family.map(str::to_owned),
+            features: features.to_vec(),
+        };
+        if self.terminal == wanted {
+            return false;
+        }
+        self.terminal = wanted;
+        self.opened
+            .retain(|(family, ..), _| !matches!(family, Family::Terminal(_)));
+        self.generation = self.generation.wrapping_add(1);
+        self.flush();
+        true
+    }
+
+    /// Which rules the fonts are opened with, as a number that changes with them
+    /// ([`TextAtlas::set_features`]): a font id taken or a line shaped under another number was
+    /// shaped by other rules.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Starts the texture over: every cached entry and every pending upload
     /// belongs to its old contents, and the holders of lists are told.
     fn flush(&mut self) {
@@ -323,7 +398,8 @@ impl TextAtlas {
     }
 
     /// Opens `style`; `None` when the platform has no proportional text.
-    /// The same style opens the same [`FontId`].
+    /// The same style opens the same [`FontId`]. The terminal's family is opened with the
+    /// person's choices for it ([`TextAtlas::set_features`]), as the grid draws it.
     pub fn open(&mut self, style: &TextStyle) -> Option<FontId> {
         let key = (
             style.family.clone(),
@@ -334,7 +410,10 @@ impl TextAtlas {
         if let Some(known) = self.opened.get(&key) {
             return *known;
         }
+        // The rules go on last: deriving a weight or the italic from a font drops them.
+        let features = self.terminal.for_family(&style.family);
         let id = Backend::open_text(&style.family, style.size_px, style.weight, style.italic)
+            .map(|font| Backend::with_features(&font, features))
             .map(|font| self.intern(font));
         self.opened.insert(key, id);
         id
@@ -745,5 +824,122 @@ mod tests {
         }
         assert!(atlas.take_flushed(), "the texture filled and was cleared");
         assert!(!atlas.take_flushed(), "the flag is taken");
+    }
+}
+
+/// The terminal font's rules in a page's text: the fonts are the repository's test fonts
+/// (`fixture`), because no installed font carries a rule every Mac has.
+#[cfg(all(test, target_os = "macos"))]
+mod font_tests {
+    use super::*;
+    use crate::system::fixture;
+
+    /// A secret the test font masks under `ss01`: some of its characters change.
+    const KEY: &str = "sk-ant-abc123";
+
+    fn features(list: &[(&str, bool)]) -> Vec<(String, bool)> {
+        list.iter().map(|&(tag, on)| (tag.to_owned(), on)).collect()
+    }
+
+    /// An atlas with `ss01` chosen for Obel Mono, as `[font.features."Obel Mono"]` says it.
+    fn masking() -> TextAtlas {
+        fixture::register_test_fonts();
+        TextAtlas::new(256).with_features(Some(fixture::OBEL_MONO), &features(&[("ss01", true)]))
+    }
+
+    fn style(family: Family, italic: bool) -> TextStyle {
+        TextStyle {
+            family,
+            size_px: 26.0,
+            weight: 400,
+            italic,
+        }
+    }
+
+    fn obel(italic: bool) -> TextStyle {
+        style(
+            Family::Terminal(Some(fixture::OBEL_MONO.to_owned())),
+            italic,
+        )
+    }
+
+    /// The glyph numbers of `text` shaped as one line of `style` in `atlas`.
+    fn glyphs(atlas: &mut TextAtlas, style: &TextStyle, text: &str) -> Vec<u32> {
+        let font = atlas.open(style).expect("opens");
+        let line = atlas.shape(font, text).expect("shapes");
+        line.glyphs.iter().map(|glyph| glyph.glyph).collect()
+    }
+
+    #[test]
+    fn a_line_in_the_terminal_family_is_masked_when_the_person_chose_it() {
+        let mut plain = TextAtlas::new(256);
+        fixture::register_test_fonts();
+        for italic in [false, true] {
+            let masked = glyphs(&mut masking(), &obel(italic), KEY);
+            let shown = glyphs(&mut plain, &obel(italic), KEY);
+            assert_ne!(
+                masked, shown,
+                "the key is drawn as the grid draws it (italic: {italic})"
+            );
+        }
+        // A family name matches without regard to case, as the grid's does.
+        let mut lower = TextAtlas::new(256).with_features(
+            Some(&fixture::OBEL_MONO.to_lowercase()),
+            &features(&[("ss01", true)]),
+        );
+        assert_ne!(
+            glyphs(&mut lower, &obel(false), KEY),
+            glyphs(&mut plain, &obel(false), KEY)
+        );
+    }
+
+    #[test]
+    fn the_choices_reach_only_the_family_they_were_made_for() {
+        fixture::register_test_fonts();
+        let mut plain = TextAtlas::new(256);
+        for family in [
+            Family::System,
+            Family::Terminal(Some(fixture::JETBRAINS_MONO.to_owned())),
+        ] {
+            assert_eq!(
+                glyphs(&mut masking(), &style(family.clone(), false), KEY),
+                glyphs(&mut plain, &style(family.clone(), false), KEY),
+                "{family:?} is not the family ss01 was chosen for"
+            );
+        }
+    }
+
+    #[test]
+    fn a_change_opens_the_terminal_family_again_and_says_so() {
+        fixture::register_test_fonts();
+        let mut atlas = TextAtlas::new(256);
+        let before = atlas.open(&obel(false)).expect("opens");
+        let system = atlas.open(&style(Family::System, false)).expect("opens");
+        let shown = glyphs(&mut atlas, &obel(false), KEY);
+        let _ = atlas.take_flushed();
+        let generation = atlas.generation();
+
+        let ss01 = features(&[("ss01", true)]);
+        assert!(atlas.set_features(Some(fixture::OBEL_MONO), &ss01));
+        assert_ne!(atlas.generation(), generation, "a kept font id is stale");
+        assert!(atlas.take_flushed(), "a list built before holds old glyphs");
+        let after = atlas.open(&obel(false)).expect("opens");
+        assert_ne!(before, after, "the family is opened with the new rules");
+        assert_ne!(glyphs(&mut atlas, &obel(false), KEY), shown);
+        assert_eq!(
+            atlas.open(&style(Family::System, false)),
+            Some(system),
+            "the system face has no rules of the terminal's and is kept"
+        );
+
+        let generation = atlas.generation();
+        assert!(!atlas.set_features(Some(fixture::OBEL_MONO), &ss01));
+        assert_eq!(
+            atlas.generation(),
+            generation,
+            "the same choices change nothing"
+        );
+        assert!(!atlas.take_flushed());
+        assert_eq!(atlas.open(&obel(false)), Some(after));
     }
 }

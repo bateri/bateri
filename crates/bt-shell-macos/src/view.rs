@@ -1529,11 +1529,10 @@ define_class!(
             // beeps, and ⏎ — plain, numpad Enter too — is the wait's one key:
             // try now, or log in. Before the stack and the dock's keys: an
             // accent composed into the wait is a line nobody will read.
-            if let Some(pane) = self.pane() {
-                if pane.hold_input(is_plain_enter(flags, chars.as_deref())) {
+            if let Some(pane) = self.pane()
+                && pane.hold_input(is_plain_enter(flags, chars.as_deref())) {
                     return;
                 }
-            }
             // The key with no modifier applied: `c` for ⌃⇧C, `[` for ⌃[ whose
             // `characters` is Esc's. A program that asked for the kitty
             // protocol is told the key by it (`KeyPress::bare`).

@@ -2639,8 +2639,7 @@ mod tests {
                 .chars()
                 .chain(buffer.chars())
                 .chain(postdisplay.chars())
-                .filter(|ch| !ch.is_whitespace())
-                .next_back(),
+                .rfind(|ch| !ch.is_whitespace()),
             // This module does not read it (its consumer is
             // `Session::can_be_typed`); a live row's usual state is the insert keymap.
             insert_keymap: true,

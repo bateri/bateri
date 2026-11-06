@@ -1152,14 +1152,13 @@ impl Hub {
         // a pane that outlived the application it was asked of, is ended.
         if let Some(older) = self.bound.insert(key, hold)
             && older != hold
+            && let Some(entry) = self.holds.get_mut(&older)
         {
-            if let Some(entry) = self.holds.get_mut(&older) {
-                entry.bound = None;
-                entry.finish(&ToHold::End {
-                    code: 1,
-                    note: Some("bateri: this terminal is shown somewhere else".to_owned()),
-                });
-            }
+            entry.bound = None;
+            entry.finish(&ToHold::End {
+                code: 1,
+                note: Some("bateri: this terminal is shown somewhere else".to_owned()),
+            });
         }
         if let Some(entry) = self.holds.get_mut(&hold) {
             entry.bound = Some(Binding {

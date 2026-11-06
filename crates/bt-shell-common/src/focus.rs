@@ -665,7 +665,7 @@ mod tests {
         let started = Instant::now();
         let mut out = Vec::new();
         assert_eq!(
-            focus_main(&[pane(ID).url()], &[root.clone()], &mut out),
+            focus_main(&[pane(ID).url()], std::slice::from_ref(&root), &mut out),
             EXIT_UNKNOWN
         );
         assert_eq!(out, b"pane=unknown\n");
@@ -730,7 +730,7 @@ mod tests {
         let mut idle = UnixStream::connect(dir.join(FOCUS_SOCKET)).unwrap();
         idle.write_all(b"focus 1 ").unwrap();
         let started = Instant::now();
-        let reply = ask(&[root.clone()], None, &pane(ID));
+        let reply = ask(std::slice::from_ref(&root), None, &pane(ID));
         assert_eq!(reply.line, "pane=live focused=1 idle=4");
         assert!(
             started.elapsed() < SERVER_READ_LIMIT,
@@ -747,7 +747,7 @@ mod tests {
         let dir = instance(&root, "aaaaaaaa", None);
         serve(&dir, Arc::new(|_: &PaneUuid| None)).unwrap();
         assert_eq!(
-            ask(&[root.clone()], None, &pane(ID)).answer,
+            ask(std::slice::from_ref(&root), None, &pane(ID)).answer,
             Answer::Unknown
         );
         let mut stream = UnixStream::connect(dir.join(FOCUS_SOCKET)).unwrap();
@@ -770,7 +770,7 @@ mod tests {
         std::fs::write(dir.join(FOCUS_SOCKET), "").unwrap();
         serve(&dir, knows_id(true)).unwrap();
         assert!(matches!(
-            ask(&[root.clone()], None, &pane(ID)).answer,
+            ask(std::slice::from_ref(&root), None, &pane(ID)).answer,
             Answer::Live { .. }
         ));
         std::fs::remove_dir_all(&root).unwrap();

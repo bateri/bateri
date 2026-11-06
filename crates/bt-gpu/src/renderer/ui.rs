@@ -710,11 +710,16 @@ impl Renderer {
     /// Opens `style` (sizes in pixels); `None` where there is no proportional
     /// text or the font could not be opened.
     pub fn ui_font(&self, style: &TextStyle) -> Option<FontId> {
-        let smoothing = self.font.borrow().smoothing;
+        let font = self.font.borrow();
+        let features = self.font_features.borrow();
         self.ui
             .borrow_mut()
             .text
-            .get_or_insert_with(|| TextAtlas::new(TEXT_EDGE).with_smoothing(smoothing))
+            .get_or_insert_with(|| {
+                TextAtlas::new(TEXT_EDGE)
+                    .with_smoothing(font.smoothing)
+                    .with_features(font.family.as_deref(), &features)
+            })
             .open(style)
     }
 
@@ -726,6 +731,29 @@ impl Renderer {
         if let Some(text) = self.ui.borrow_mut().text.as_mut() {
             text.set_smoothing(on);
         }
+    }
+
+    /// Hands the terminal family's feature choices to the text atlas once it exists
+    /// ([`TextAtlas::set_features`]; one opened later is given them when it opens), so a page's
+    /// text set in the terminal's face follows the same rules as the grid. A change empties the
+    /// atlas, which [`Renderer::ui_flushed`] reports, and moves
+    /// [`Renderer::ui_fonts_generation`] on.
+    pub(super) fn ui_set_features(&self, family: Option<&str>, features: &[(String, bool)]) {
+        if let Some(text) = self.ui.borrow_mut().text.as_mut() {
+            text.set_features(family, features);
+        }
+    }
+
+    /// Which rules the page's fonts are opened with, as a number that changes with them
+    /// ([`TextAtlas::generation`]): whoever keeps a [`FontId`] or a shaped line across frames
+    /// drops them when it moves, because they were shaped by the old rules. `0` before the
+    /// atlas exists, which is also what it starts at.
+    pub fn ui_fonts_generation(&self) -> u64 {
+        self.ui
+            .borrow()
+            .text
+            .as_ref()
+            .map_or(0, TextAtlas::generation)
     }
 
     /// Shapes `text` as one line in `font` and measures it: width, ascent,

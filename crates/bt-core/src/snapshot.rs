@@ -1048,7 +1048,7 @@ pub(crate) fn encode_live<T: EventListener>(
     let default_tabs: Vec<usize> = (8..last).step_by(8).collect();
     // A fresh grid's stops are every eighth column, the last one included
     // when it falls there.
-    let default_last = last % 8 == 0;
+    let default_last = last.is_multiple_of(8);
     if probed.tabs != default_tabs || probed.last_tab != default_last {
         out.extend_from_slice(b"\x1b[3g");
         let last_stop = probed.last_tab.then_some(last);

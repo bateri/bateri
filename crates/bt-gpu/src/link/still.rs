@@ -680,7 +680,7 @@ mod tests {
             .snapshot(&mut shot.chain, clear, &shot.frame, (128, 128), (128, 128))
             .expect("the still");
         assert_eq!(still.len(), 128 * 128 * 4);
-        for (index, rgba) in still.chunks_exact(4).enumerate() {
+        for (index, rgba) in still.as_chunks::<4>().0.iter().enumerate() {
             let at = index * 4;
             // Bgra in the direct picture, rgba in the still.
             let want = [direct[at + 2], direct[at + 1], direct[at], direct[at + 3]];
@@ -787,7 +787,7 @@ mod tests {
             .snapshot(&renderer, &mut chain, (128, 128))
             .expect("the page's still");
         assert_eq!((still.width, still.height), (128, 128));
-        for (index, rgba) in still.rgba.chunks_exact(4).enumerate() {
+        for (index, rgba) in still.rgba.as_chunks::<4>().0.iter().enumerate() {
             let at = index * 4;
             // Bgra in the frame, rgba in the still.
             let want = [drawn[at + 2], drawn[at + 1], drawn[at], drawn[at + 3]];

@@ -6,7 +6,7 @@
 # are two different gates (Homebrew's rustc is not pinned; after `brew
 # upgrade` this line is updated too). The Makefile reads the tag from here;
 # the version lives only on this line.
-FROM rust:1.88-bookworm
+FROM rust:1.99-bookworm
 
 # zsh: bt-core's mirror tests and bt-shell-common's `child`/`jobs` tests run a
 # real zsh. LANG: the image defaults to the C locale, where zsh does not

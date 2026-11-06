@@ -334,7 +334,7 @@ impl Chain {
             .chunks_exact(self.pitch as usize)
             .take(self.tile.1 as usize)
         {
-            for pixel in line[..row].chunks_exact(4) {
+            for pixel in line[..row].as_chunks::<4>().0 {
                 rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
             }
         }
@@ -553,7 +553,7 @@ mod tests {
         let chain = chain_over(gpu, (4, 4), (2, 2), &pixels);
         let tile = chain.reduce(gpu).expect("the reduction");
         assert_eq!(tile.len(), 2 * 2 * 4);
-        for pixel in tile.chunks_exact(4) {
+        for pixel in tile.as_chunks::<4>().0 {
             for channel in &pixel[..3] {
                 assert!(
                     (187..=189).contains(channel),
@@ -589,7 +589,7 @@ mod tests {
             .collect();
         let chain = chain_over(gpu, (4, 4), (4, 4), &pixels);
         let tile = chain.reduce(gpu).expect("the reduction");
-        for (got, want) in tile.chunks_exact(4).zip(&pixels) {
+        for (got, want) in tile.as_chunks::<4>().0.iter().zip(&pixels) {
             // RGBA out of BGRA in.
             for (g, w) in got.iter().zip([want[2], want[1], want[0], want[3]]) {
                 assert!(g.abs_diff(w) <= 1, "{got:?} is not {want:?}");
@@ -632,7 +632,10 @@ mod tests {
         let chain = chain_over(gpu, (8, 4), (4, 4), &pixels);
         let tile = chain.reduce(gpu).expect("the reduction");
         assert!(
-            tile.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]),
+            tile.as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [255, 0, 0, 255]),
             "the right half came into the tile: {tile:?}"
         );
     }

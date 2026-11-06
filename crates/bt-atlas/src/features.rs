@@ -261,7 +261,9 @@ impl<'a> Names<'a> {
                 bytes.iter().map(|b| char::from(*b)).collect::<String>()
             } else {
                 let units = bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
                 char::decode_utf16(units)
                     .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))

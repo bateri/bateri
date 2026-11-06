@@ -1231,7 +1231,7 @@ pub(crate) fn round_up(v: f64) -> u16 {
 /// **same** as the mask path's: RGB source factor `SourceAlpha`. That is why
 /// the earlier "blend is not a parameter" decision was not reverted.
 pub(crate) fn unpremultiply(target: &mut [u8]) {
-    for px in target.chunks_exact_mut(4) {
+    for px in target.as_chunks_mut::<4>().0 {
         let a = u32::from(px[3]);
         if a == 0 {
             // A fully transparent pixel has **no** colour; the division is

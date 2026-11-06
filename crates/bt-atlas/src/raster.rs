@@ -431,7 +431,9 @@ fn distance_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
 /// oversight.
 pub(crate) fn dividing_period(wanted: usize, w: usize) -> usize {
     let wanted = wanted.clamp(1, w.max(1));
-    (wanted..=w).find(|p| w % p == 0).unwrap_or(w.max(1))
+    (wanted..=w)
+        .find(|p| w.is_multiple_of(*p))
+        .unwrap_or(w.max(1))
 }
 
 /// Horizontal band: paints rows `[top, top + thickness)` in the columns the

@@ -1515,7 +1515,7 @@ pub fn tally<K: Copy>(tabs: &[Waiting<K>]) -> Vec<Count<K>> {
                 })
                 .collect();
             // Longest waiting first; equals keep the column's order (a stable sort).
-            those.sort_by(|a, b| b.waited.cmp(&a.waited));
+            those.sort_by_key(|a| std::cmp::Reverse(a.waited));
             let n = match wait {
                 Wait::Asking => those.iter().map(|tab| tab.asking).sum(),
                 Wait::Failed | Wait::Finished => those.len(),

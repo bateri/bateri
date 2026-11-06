@@ -831,10 +831,8 @@ impl<K: Copy + Eq> Groups<K> {
         self.members.retain(|(tab, _)| !closing.contains(tab));
         self.forget(&closing);
         self.drop_empty();
-        if selected_goes {
-            if let Some(next) = next {
-                tabs.select(next);
-            }
+        if selected_goes && let Some(next) = next {
+            tabs.select(next);
         }
         self.settle(tabs);
         closing.len()
@@ -1201,10 +1199,10 @@ impl<K: Copy + Eq> Groups<K> {
             last = rank;
         }
         for of in self.clusters() {
-            if let Some(tab) = self.resident(of) {
-                if tabs.index_of(tab).is_none() || self.group_of(tab) != of {
-                    return Err("a cluster remembers a tab that is not in it".to_owned());
-                }
+            if let Some(tab) = self.resident(of)
+                && (tabs.index_of(tab).is_none() || self.group_of(tab) != of)
+            {
+                return Err("a cluster remembers a tab that is not in it".to_owned());
             }
         }
         Ok(())
@@ -1360,10 +1358,10 @@ impl<K: Copy + Eq> Groups<K> {
     fn forget_in(&mut self, of: Option<GroupId>, tab: K) {
         match of {
             Some(id) => {
-                if let Some(group) = self.groups.iter_mut().find(|group| group.id == id) {
-                    if group.resident == Some(tab) {
-                        group.resident = None;
-                    }
+                if let Some(group) = self.groups.iter_mut().find(|group| group.id == id)
+                    && group.resident == Some(tab)
+                {
+                    group.resident = None;
                 }
             }
             None => {

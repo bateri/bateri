@@ -403,10 +403,8 @@ impl Ledger {
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         self.load(&mut rows);
         let (changed, out) = change(&mut rows);
-        if changed {
-            if let Some(path) = &self.path {
-                let _ = save(path, &rows);
-            }
+        if changed && let Some(path) = &self.path {
+            let _ = save(path, &rows);
         }
         out
     }

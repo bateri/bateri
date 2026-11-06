@@ -31,7 +31,7 @@ pub(crate) fn until(bytes: &[u8], stop: impl Fn(u8) -> bool) -> usize {
         return at;
     }
     let mut at = 0;
-    for block in far.chunks_exact(BLOCK) {
+    for block in far.as_chunks::<BLOCK>().0 {
         if block.iter().fold(false, |any, &byte| any | stop(byte)) {
             break;
         }
