@@ -60,8 +60,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
-    NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
-    NSURL, ns_string,
+    NSInteger, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
+    NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
 };
 
 use crate::app;
@@ -1868,6 +1868,7 @@ define_class!(
         /// again from the refresh that reopening makes.
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _note: &NSNotification) {
+            self.cancel_blink();
             if let Some(specimens) = self.ivars().specimens.get() {
                 specimens.release();
             }
@@ -2203,6 +2204,20 @@ define_class!(
                     let shown = number.shown.borrow().1.clone();
                     field.setStringValue(&NSString::from_str(&shown));
                 }
+            }
+        }
+
+        /// The example's blinking caret turns to its other half, and the next turn is asked for
+        /// unless the blink has stopped.
+        #[unsafe(method(blinkSpecimen:))]
+        fn blink_specimen(&self, _sender: Option<&AnyObject>) {
+            if let Some(delay) = self
+                .ivars()
+                .specimens
+                .get()
+                .and_then(specimen::Specimens::blink_step)
+            {
+                self.blink_after(delay);
             }
         }
 
@@ -2991,6 +3006,10 @@ impl SettingsWindow {
         else {
             return;
         };
+        // A blink belongs to the Cursor page as it was drawn: whatever is shown now starts it
+        // again or leaves it stopped.
+        self.cancel_blink();
+        specimens.stop_blink();
         let Some(SideItem::Page(category)) = SideItem::at(sidebar.selectedRow()) else {
             return;
         };
@@ -3018,6 +3037,42 @@ impl SettingsWindow {
             let stills = specimens.caret_stills(inputs, scale);
             controls.shape.set_stills(&stills);
             controls.unfocused.set_stills(&stills);
+        }
+        if let Some(half) = specimens.blink_half() {
+            self.blink_after(half);
+        }
+    }
+
+    /// Turns the example's blinking caret after `delay` seconds, in every run-loop mode: a
+    /// slider being dragged keeps the blink going.
+    fn blink_after(&self, delay: f64) {
+        let modes = NSArray::from_slice(&[
+            // SAFETY: Foundation's constant mode name, alive for the process.
+            unsafe { NSRunLoopCommonModes },
+        ]);
+        let this: &NSObject = self.as_super();
+        // SAFETY: `blinkSpecimen:` is this object's own method and takes an object argument,
+        // nil here; the request retains the target until it runs or is cancelled.
+        unsafe {
+            this.performSelector_withObject_afterDelay_inModes(
+                sel!(blinkSpecimen:),
+                None,
+                delay,
+                &modes,
+            );
+        }
+    }
+
+    /// Drops the example's waiting blink turn, if any.
+    fn cancel_blink(&self) {
+        // SAFETY: the target is this object and the selector its own; the argument is the nil
+        // the request was made with.
+        unsafe {
+            NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(
+                self.as_ref(),
+                sel!(blinkSpecimen:),
+                None,
+            );
         }
     }
 

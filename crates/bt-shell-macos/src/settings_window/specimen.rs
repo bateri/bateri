@@ -10,6 +10,11 @@
 //! ([`Specimens::caret_stills`]): a picture of a caret that is not the renderer's would show a
 //! shape, a thickness and a corner no pane draws.
 //!
+//! The caret of the Cursor example's key window blinks as a pane's does, by the same rule: the
+//! file's blink and its half period, never with Reduce motion, never in the inactive window's
+//! card, and lit again for good [`bt_gpu::BLINK_IDLE_STOP`] after the last change. It is two
+//! stills taken in turn ([`Specimens::blink_step`], on the window's clock), not frames.
+//!
 //! **Nothing here keeps a setting.** An example is made from the inputs the last refresh
 //! gave ([`Inputs`]) and is drawn only while its page is the open one; the picture of each card
 //! is kept with what it was drawn from and drawn again only when that changes, so a toggle on
@@ -18,9 +23,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::Instant;
 
 use bt_core::{
-    CaretShape, CaretStyle, FontOptions, Session, SessionOptions, Settings, Theme, UnfocusedCaret,
+    CaretShape, CaretStyle, CursorBlink, FontOptions, Session, SessionOptions, Settings, Theme,
+    UnfocusedCaret,
 };
 use bt_gpu::{Snapshot, Stage, StageLook};
 use objc2::rc::Retained;
@@ -292,11 +299,12 @@ fn rows_of(lines: &[Line], cols: u16) -> u16 {
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
-/// The bytes that build the screen in a freshly reset terminal.
-fn screen(kind: Kind, lines: &[Line]) -> Vec<u8> {
+/// The bytes that build the screen in a freshly reset terminal; with `caret` false the caret is
+/// hidden, the dark half of a blink.
+fn screen(kind: Kind, lines: &[Line], caret: bool) -> Vec<u8> {
     // Home on the second row: the first stays blank, the room above the text.
     let mut out = String::from("\x1b[2J\x1b[2;1H");
-    if matches!(kind, Kind::Appearance | Kind::Font) {
+    if matches!(kind, Kind::Appearance | Kind::Font) || !caret {
         // These show text, not the caret.
         out.push_str("\x1b[?25l");
     }
@@ -346,6 +354,22 @@ fn render(
     width_pt: f64,
     scale: f64,
 ) -> Option<Snapshot> {
+    render_with(stage, kept, kind, face, settings, width_pt, scale, true)
+}
+
+/// [`render`], with the caret hidden when `caret` is false. A session is made for one of the two:
+/// the lit and the dark half of a blink keep one each.
+#[allow(clippy::too_many_arguments)]
+fn render_with(
+    stage: &mut Stage,
+    kept: &mut Option<Kept>,
+    kind: Kind,
+    face: &Face,
+    settings: &Settings,
+    width_pt: f64,
+    scale: f64,
+    caret: bool,
+) -> Option<Snapshot> {
     let metrics = stage.cell_metrics(scale);
     let (cell_w, cell_h) = metrics.cell_px();
     let inset = metrics.grid_inset();
@@ -376,7 +400,7 @@ fn render(
                 replay: None,
                 views: None,
             },
-            &screen(kind, &lines),
+            &screen(kind, &lines, caret),
         )
         .ok()?;
         *kept = Some(Kept { key, session });
@@ -597,6 +621,11 @@ struct Card {
     tag: Retained<NSTextField>,
     kept: RefCell<Option<Kept>>,
     drawn: RefCell<Option<Drawn>>,
+    /// The picture on the card, kept to put back after a blink's dark half.
+    lit: RefCell<Option<Retained<NSImage>>>,
+    /// The dark half of a blink: the picture with no caret, its session and what it shows.
+    dark_kept: RefCell<Option<Kept>>,
+    dark: RefCell<Option<(Drawn, Retained<NSImage>)>>,
 }
 
 impl Card {
@@ -643,6 +672,9 @@ impl Card {
             tag,
             kept: RefCell::new(None),
             drawn: RefCell::new(None),
+            lit: RefCell::new(None),
+            dark_kept: RefCell::new(None),
+            dark: RefCell::new(None),
         }
     }
 
@@ -672,6 +704,8 @@ struct Specimen {
 pub(super) struct Specimens {
     all: Vec<Specimen>,
     carets: Vec<CaretTile>,
+    /// The Cursor example's caret while it blinks.
+    blinking: RefCell<Option<Blinking>>,
     /// Opened with the first example drawn; dropped when the window closes.
     stage: RefCell<Option<Stage>>,
     /// The GPU said no: the terminal examples stay hidden.
@@ -724,6 +758,7 @@ impl Specimens {
                     drawn: RefCell::new(None),
                 })
                 .collect(),
+            blinking: RefCell::new(None),
             stage: RefCell::new(None),
             no_gpu: Cell::new(false),
         }
@@ -739,6 +774,8 @@ impl Specimens {
 
     /// Draws `kind`'s example from `inputs` at `scale` pixels to the point.
     pub(super) fn show(&self, kind: Kind, inputs: &Inputs, scale: f64) {
+        // One page shows at a time, and a change starts a blink lit, as typing does in a pane.
+        self.stop_blink();
         let Some(specimen) = self.all.iter().find(|specimen| specimen.kind == kind) else {
             return;
         };
@@ -780,6 +817,20 @@ impl Specimens {
                     card.column.setHidden(false);
                     card.name(face);
                     paint(stage, card, kind, face, &inputs.settings, width_pt, scale);
+                    if blinks(kind, face, inputs)
+                        && let Some(dark) =
+                            paint_dark(stage, card, kind, face, &inputs.settings, width_pt, scale)
+                        && let Some(lit) = card.lit.borrow().clone()
+                    {
+                        self.blinking.replace(Some(Blinking {
+                            view: card.image.clone(),
+                            lit,
+                            dark,
+                            half: inputs.settings.blink_interval,
+                            since: Instant::now(),
+                            shown: true,
+                        }));
+                    }
                 }
             }
         }
@@ -850,9 +901,53 @@ impl Specimens {
         stills
     }
 
+    /// How long the blinking caret stays as it is before [`Specimens::blink_step`]; `None` when
+    /// the example does not blink.
+    pub(super) fn blink_half(&self) -> Option<f64> {
+        self.blinking
+            .borrow()
+            .as_ref()
+            .map(|blinking| blinking.half)
+    }
+
+    /// Turns the blinking caret to its other half and says how long until the next turn; `None`
+    /// once it has stopped: lit, [`bt_gpu::BLINK_IDLE_STOP`] after it started, as a pane's stops.
+    pub(super) fn blink_step(&self) -> Option<f64> {
+        let mut slot = self.blinking.borrow_mut();
+        let blinking = slot.as_mut()?;
+        if blinking.shown && blinking.since.elapsed().as_secs_f64() >= bt_gpu::BLINK_IDLE_STOP {
+            *slot = None;
+            return None;
+        }
+        blinking.shown = !blinking.shown;
+        let image = if blinking.shown {
+            &blinking.lit
+        } else {
+            &blinking.dark
+        };
+        blinking.view.setImage(Some(image));
+        Some(blinking.half)
+    }
+
+    /// Which half the blinking caret shows (`true` lit); `None` when it does not blink.
+    pub(super) fn blink_shown(&self) -> Option<bool> {
+        self.blinking
+            .borrow()
+            .as_ref()
+            .map(|blinking| blinking.shown)
+    }
+
+    /// Stops the blink with the caret lit.
+    pub(super) fn stop_blink(&self) {
+        if let Some(blinking) = self.blinking.take() {
+            blinking.view.setImage(Some(&blinking.lit));
+        }
+    }
+
     /// Gives the renderer's textures and the sessions back (the window closed); the next draw
     /// makes them again, and tries for a renderer again if the last try found none.
     pub(super) fn release(&self) {
+        self.stop_blink();
         self.stage.replace(None);
         self.no_gpu.set(false);
         for tile in &self.carets {
@@ -864,6 +959,9 @@ impl Specimens {
                 for card in cards {
                     card.kept.replace(None);
                     card.drawn.replace(None);
+                    card.lit.replace(None);
+                    card.dark_kept.replace(None);
+                    card.dark.replace(None);
                 }
             }
         }
@@ -913,7 +1011,75 @@ fn paint(
     );
     let image = NSImage::initWithCGImage_size(NSImage::alloc(), &image, size);
     card.image.setImage(Some(&image));
+    card.lit.replace(Some(image));
     card.drawn.replace(Some(drawn));
+}
+
+/// The Cursor example's caret blinks on `face`'s card: the file says blink (a program at the
+/// prompt has asked nothing, so "follow the program" blinks too), the window is key, and motion
+/// is not reduced, which never adds a blink.
+fn blinks(kind: Kind, face: &Face, inputs: &Inputs) -> bool {
+    kind == Kind::Cursor
+        && face.focused
+        && inputs.settings.cursor_blink != CursorBlink::Off
+        && !inputs.reduce_motion
+}
+
+/// The caret's dark half on `card`: its picture with no caret, made again only when what it shows
+/// changed.
+fn paint_dark(
+    stage: &mut Stage,
+    card: &Card,
+    kind: Kind,
+    face: &Face,
+    settings: &Settings,
+    width_pt: f64,
+    scale: f64,
+) -> Option<Retained<NSImage>> {
+    let drawn = Drawn {
+        kind,
+        face: face.clone(),
+        font: settings.font.clone(),
+        shape: settings.cursor,
+        caret: settings.caret,
+        contrast: settings.minimum_contrast,
+        scale,
+        width: (width_pt * scale).round() as u32,
+    };
+    if let Some((was, image)) = card.dark.borrow().as_ref()
+        && *was == drawn
+    {
+        return Some(image.clone());
+    }
+    let still = render_with(
+        stage,
+        &mut card.dark_kept.borrow_mut(),
+        kind,
+        face,
+        settings,
+        width_pt,
+        scale,
+        false,
+    )?;
+    let image = snapshot::image(&still)?;
+    let size = NSSize::new(
+        f64::from(still.width) / scale,
+        f64::from(still.height) / scale,
+    );
+    let image = NSImage::initWithCGImage_size(NSImage::alloc(), &image, size);
+    card.dark.replace(Some((drawn, image.clone())));
+    Some(image)
+}
+
+/// The Cursor example's caret while it blinks: the card's view, its two halves, the half period,
+/// when it started and which half shows.
+struct Blinking {
+    view: Retained<NSImageView>,
+    lit: Retained<NSImage>,
+    dark: Retained<NSImage>,
+    half: f64,
+    since: Instant,
+    shown: bool,
 }
 
 #[cfg(test)]
@@ -960,6 +1126,34 @@ mod tests {
         assert_eq!(faces(Kind::Font, &inputs(Settings::default())).len(), 1);
     }
 
+    /// The example blinks as a pane does: in the key window's card, when the file says blink
+    /// (following the program blinks at a prompt), never with Reduce motion.
+    #[test]
+    fn the_cursor_example_blinks_as_a_pane_does() {
+        let with = |cursor_blink, reduce_motion| {
+            let mut inputs = inputs(Settings {
+                cursor_blink,
+                ..Settings::default()
+            });
+            inputs.reduce_motion = reduce_motion;
+            faces(Kind::Cursor, &inputs)
+                .iter()
+                .map(|face| blinks(Kind::Cursor, face, &inputs))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(with(CursorBlink::On, false), [true, false]);
+        assert_eq!(with(CursorBlink::Auto, false), [true, false]);
+        assert_eq!(with(CursorBlink::Off, false), [false, false]);
+        assert_eq!(with(CursorBlink::On, true), [false, false]);
+        let inputs = inputs(Settings {
+            cursor_blink: CursorBlink::On,
+            ..Settings::default()
+        });
+        for face in faces(Kind::Font, &inputs) {
+            assert!(!blinks(Kind::Font, &face, &inputs));
+        }
+    }
+
     /// The plain prompt is the Shell example, and only without integration: with it the prompt is
     /// the dock, which is not drawn here.
     #[test]
@@ -983,14 +1177,14 @@ mod tests {
     fn a_screen_wraps_and_keeps_its_first_row_blank() {
         let theme = Theme::BATERI;
         let font = lines(Kind::Font, &theme);
-        let bytes = String::from_utf8(screen(Kind::Font, &font)).expect("text");
+        let bytes = String::from_utf8(screen(Kind::Font, &font, true)).expect("text");
         assert!(bytes.starts_with("\x1b[2J\x1b[2;1H\x1b[?25l"));
         let wide = rows_of(&font, 200);
         let narrow = rows_of(&font, 40);
         assert_eq!(usize::from(wide), 1 + font.len());
         assert!(narrow > wide, "a narrower terminal wraps the long line");
-        let cursor =
-            String::from_utf8(screen(Kind::Cursor, &lines(Kind::Cursor, &theme))).expect("text");
+        let cursor = String::from_utf8(screen(Kind::Cursor, &lines(Kind::Cursor, &theme), true))
+            .expect("text");
         // The caret goes back to the end of the typed command: "❯ cargo test" is 12 columns.
         assert!(cursor.ends_with("\x1b[2;13H"), "{cursor:?}");
         assert!(!cursor.contains("?25l"));
@@ -1132,5 +1326,20 @@ mod tests {
             seen[0].rgba, seen[1].rgba,
             "the caret is the same in the window that is key and the one that is not"
         );
+        // The dark half of a blink is the same screen with no caret.
+        let mut kept = None;
+        let dark = render_with(
+            &mut stage,
+            &mut kept,
+            Kind::Cursor,
+            &cursor[0],
+            &settings,
+            240.0,
+            1.0,
+            false,
+        )
+        .expect("a picture");
+        assert!(dark.rgba != seen[0].rgba, "the dark half shows the caret");
+        assert_eq!((dark.width, dark.height), (seen[0].width, seen[0].height));
     }
 }

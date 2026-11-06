@@ -11,13 +11,13 @@
 
 use std::path::Path;
 
-use bt_core::{Settings, Theme};
+use bt_core::{CursorBlink, Settings, Theme};
 use bt_gpu::ScrollbarMode;
 use objc2::DefinedClass;
 use objc2_app_kit::{NSBitmapImageFileType, NSView};
-use objc2_foundation::{NSDictionary, NSIndexSet, NSRect};
+use objc2_foundation::{NSDate, NSDictionary, NSIndexSet, NSRect, NSRunLoop};
 
-use super::{Category, Resolved, SettingsWindow, SideItem, ThemeLists, pages};
+use super::{Category, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
 use crate::settings::{self, FileState};
 
 /// How far two frames may run into each other before it is an overlap: the hairline rounding of
@@ -173,7 +173,60 @@ impl SettingsWindow {
                 picture(sidebar, &dir.join(format!("{slug}-sidebar.png")));
             }
         }
+        self.blink_problems(&themes, resolved, shots, &mut problems);
         problems
+    }
+
+    /// With the file's blink on, the Cursor example's caret is turned by the window's clock: half
+    /// a period after the page opens it is dark. A machine with no GPU has no example to blink.
+    fn blink_problems(
+        &self,
+        themes: &ThemeLists<'_>,
+        resolved: Resolved,
+        shots: Option<&Path>,
+        problems: &mut Vec<String>,
+    ) {
+        let ivars = self.ivars();
+        let (Some(sidebar), Some(specimens), Some(scroll)) = (
+            ivars.sidebar.get(),
+            ivars.specimens.get(),
+            ivars.pane_scroll.get(),
+        ) else {
+            return;
+        };
+        let settings = Settings {
+            cursor_blink: CursorBlink::On,
+            ..Settings::default()
+        };
+        self.refresh(&settings, resolved, &FileState::Missing, &[], themes);
+        sidebar.selectRowIndexes_byExtendingSelection(
+            &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Cursor)),
+            false,
+        );
+        self.show_selected();
+        if specimens
+            .view(specimen::Kind::Cursor)
+            .is_none_or(NSView::isHidden)
+        {
+            return;
+        }
+        if specimens.blink_shown() != Some(true) {
+            problems.push("Cursor: the example does not blink".to_owned());
+            return;
+        }
+        let half = settings.blink_interval;
+        NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(half * 1.5));
+        if specimens.blink_shown() != Some(false) {
+            problems.push(format!(
+                "Cursor: {:.2} s on, the blinking caret has not gone dark",
+                half * 1.5
+            ));
+        }
+        if let (Some(dir), Some(document)) = (shots, scroll.documentView()) {
+            picture(&document, &dir.join("cursor-blink-dark.png"));
+        }
+        self.cancel_blink();
+        specimens.stop_blink();
     }
 }
 

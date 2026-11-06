@@ -84,6 +84,7 @@ mod slots;
 mod stats;
 mod surface;
 
+pub use blink::IDLE_STOP as BLINK_IDLE_STOP;
 pub use error::GpuError;
 pub use frame::{
     ContextStrip, ContextTrailing, DOCK_ROWS, SELECTION_RADIUS, caret_thickness_px,

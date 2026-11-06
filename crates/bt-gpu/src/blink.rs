@@ -47,7 +47,10 @@ const HALF_PERIOD: f64 = bt_core::CURSOR_BLINK_INTERVAL;
 /// Its base is the **last content frame**, not the last drawn frame: blink
 /// frames are drawn too, and a counter watching them would never fill up
 /// (`link.rs`'s `last_frame_at` is written on the motion arm as well).
-const IDLE_STOP: f64 = 15.0;
+///
+/// Public for the one other surface that blinks a caret, the settings window's example, which
+/// stops when a pane would.
+pub const IDLE_STOP: f64 = 15.0;
 
 /// State of the cursor blink.
 ///
