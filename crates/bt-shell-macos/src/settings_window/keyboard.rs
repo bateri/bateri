@@ -727,6 +727,9 @@ impl KeyboardPage {
         table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
         table.setUsesAutomaticRowHeights(true);
         table.setGridStyleMask(NSTableViewGridLineStyle::SolidHorizontalGridLineMask);
+        // The list is a card on the page's ground, its rules the theme's separator.
+        table.setBackgroundColor(&look::ink(Ink::Card));
+        table.setGridColor(&look::ink(Ink::Line));
         table.setAllowsEmptySelection(true);
         let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("k"));
         table.addTableColumn(&column);

@@ -213,7 +213,70 @@ impl SettingsWindow {
                 );
             }
         }
+        self.theme_change_problems(&themes, resolved, &dark, shots, &mut problems);
         problems
+    }
+
+    /// A theme that changes and keeps the appearance (one dark theme for another) draws the
+    /// window in the new one: its colours are read when drawn, not kept. The General page's first
+    /// group is pictured in each and must differ.
+    fn theme_change_problems(
+        &self,
+        themes: &ThemeLists<'_>,
+        resolved: Resolved,
+        dark: &Theme,
+        shots: Option<&Path>,
+        problems: &mut Vec<String>,
+    ) {
+        let ivars = self.ivars();
+        let (Some(window), Some(sidebar), Some(controls)) = (
+            ivars.window.get(),
+            ivars.sidebar.get(),
+            ivars.controls.get(),
+        ) else {
+            return;
+        };
+        let other = Theme::ULTRAVIOLET;
+        if crate::window::is_dark_background(&other) != crate::window::is_dark_background(dark) {
+            problems.push("the theme change check needs two dark themes".to_owned());
+            return;
+        }
+        let mut seen = Vec::new();
+        for (name, theme) in [("bateri", dark), ("ultraviolet", &other)] {
+            let settings = Settings {
+                theme: name.to_owned(),
+                ..Settings::default()
+            };
+            let themes = ThemeLists {
+                on_screen: theme,
+                dark_appearance: true,
+                ..*themes
+            };
+            self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+            sidebar.selectRowIndexes_byExtendingSelection(
+                &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::General)),
+                false,
+            );
+            self.show_selected();
+            if let Some(content) = window.contentView() {
+                content.layoutSubtreeIfNeeded();
+                if let Some(dir) = shots {
+                    picture(&content, &dir.join(format!("general-{name}-window.png")));
+                }
+            }
+            let group = controls
+                .groups
+                .iter()
+                .find(|group| !group.view.isHidden())
+                .and_then(|group| group.view.arrangedSubviews().lastObject());
+            seen.push(group.and_then(|group| png_of(&group)));
+        }
+        if seen.iter().any(Option::is_none) || seen[0] == seen[1] {
+            problems.push(
+                "General: another dark theme left the window in the colours of the one before"
+                    .to_owned(),
+            );
+        }
     }
 
     /// While a slider is dragged the Cursor example follows the value under the hand, and what the
