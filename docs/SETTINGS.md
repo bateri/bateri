@@ -90,7 +90,12 @@ goes with them.
   minimum contrast, where text meets the tab bar, the scroll bar, and resizing
   a whole cell at a time.
 - **Font** — the font, its size, line height, letter spacing and Bolder text,
-  then an Options group with a switch for each option the font offers.
+  then an Options group for what the font offers: switches for Ligatures, Hide
+  Secrets and Slashed Zero, each with a line of text drawn without and with the
+  option, and the font's alternate letters as tiles of the letters they change
+  (the first eight, the rest under Show All) that a click turns on or off. A
+  tag in the file that the font does not have is named in orange under the
+  tiles. A font with no options hides the group.
 - **Tabs and Panes** — where the tabs sit, program icons and their colors, the
   running indicator, details under a tab, the split style, dimming the other
   panes and the focus frame.

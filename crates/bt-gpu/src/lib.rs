@@ -114,7 +114,7 @@ pub use bt_atlas::{AppFace, AppFonts, app_default_family, app_fonts, register_ap
 
 /// What the selected font offers in OpenType features — the settings window's
 /// and the palette's rows. Re-exported for the same reason.
-pub use bt_atlas::{FontFeature, font_features};
+pub use bt_atlas::{FontFeature, font_features, lacking_features};
 
 /// The UI kit's text types, re-exported for the same reason: a page names a
 /// font ([`TextStyle`]) and gets a measured line ([`ShapedText`]) back

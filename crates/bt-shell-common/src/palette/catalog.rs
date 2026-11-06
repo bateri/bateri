@@ -1203,6 +1203,7 @@ mod tests {
         let feature = |tag: &str, name: Option<&str>| bt_gpu::FontFeature {
             tag: tag.to_owned(),
             name: name.map(str::to_owned),
+            chars: Vec::new(),
         };
         font_options::options_of(&[
             feature("calt", None),

@@ -50,6 +50,8 @@ pub struct FontOption {
     title: String,
     tags: Vec<String>,
     kind: Kind,
+    /// The characters the option draws differently (a set's or a variant's), by code point.
+    chars: Vec<char>,
 }
 
 impl FontOption {
@@ -67,6 +69,62 @@ impl FontOption {
     /// The font tags the option writes, which a search can also match.
     pub fn tags(&self) -> &[String] {
         &self.tags
+    }
+
+    /// The characters the option draws differently, in code point order; empty when the font's
+    /// file does not say (a rule on sequences, Ligatures, Hide Secrets).
+    pub fn chars(&self) -> &[char] {
+        &self.chars
+    }
+
+    /// Whether the option is a row of its own on the Font page — the three that people look for
+    /// by what they do: Ligatures, Hide Secrets and Slashed Zero. The font's other sets and
+    /// variants are tiles of letters.
+    pub fn is_row(&self) -> bool {
+        self.id == LIGATURES || self.id == SECRETS || self.id == "zero"
+    }
+
+    /// What a row says under its name and the text its example shows before and after the option;
+    /// `None` for an option that is not a row.
+    pub fn about(&self) -> Option<(&'static str, &'static str)> {
+        match self.id.as_str() {
+            LIGATURES => Some((
+                "Joins characters like != and -> into one symbol.",
+                "!= -> => <= === ::",
+            )),
+            SECRETS => Some((
+                "Masks what looks like a key or a token.",
+                "API_KEY=sk-proj-4f9a2c71e0b3",
+            )),
+            "zero" => Some(("Draws the zero with a slash through it.", "0O 100 1l")),
+            _ => None,
+        }
+    }
+
+    /// The tags with the value the option gives them: what a text drawn "with the option" and
+    /// "without it" is shaped with.
+    pub fn features(&self, on: bool) -> Vec<(String, bool)> {
+        self.tags.iter().map(|tag| (tag.clone(), on)).collect()
+    }
+
+    /// The letters a tile shows for the option: the first three that are ASCII and visible, or
+    /// failing those the first character that has a picture of its own (not whitespace, not a
+    /// private-use code point); `None` when the font does not say which characters it changes,
+    /// which a tile calls "in context".
+    pub fn letters(&self) -> Option<String> {
+        let ascii: String = self
+            .chars
+            .iter()
+            .filter(|c| c.is_ascii_graphic())
+            .take(3)
+            .collect();
+        if !ascii.is_empty() {
+            return Some(ascii);
+        }
+        self.chars
+            .iter()
+            .find(|c| !c.is_whitespace() && !c.is_control() && !is_private_use(**c))
+            .map(char::to_string)
     }
 
     /// Whether the option is on in `font`'s choices (the family in effect's table).
@@ -111,6 +169,7 @@ pub fn options_of(features: &[FontFeature]) -> Vec<FontOption> {
             title: "Ligatures".to_owned(),
             tags: ligatures,
             kind: Kind::Ligatures,
+            chars: Vec::new(),
         });
     }
     let secrets = features.iter().find(|feature| {
@@ -126,6 +185,7 @@ pub fn options_of(features: &[FontFeature]) -> Vec<FontOption> {
             title: "Hide Secrets".to_owned(),
             tags: vec![feature.tag.clone()],
             kind: Kind::Switch,
+            chars: Vec::new(),
         });
     }
     for feature in features {
@@ -134,7 +194,7 @@ pub fn options_of(features: &[FontFeature]) -> Vec<FontOption> {
             continue;
         }
         let title = match (&feature.name, feature.tag.as_str()) {
-            (Some(name), _) => name.clone(),
+            (Some(name), tag) => plain_name(tag, name),
             (None, "zero") => "Slashed Zero".to_owned(),
             (None, tag) => tag.to_owned(),
         };
@@ -143,9 +203,35 @@ pub fn options_of(features: &[FontFeature]) -> Vec<FontOption> {
             title,
             tags: vec![feature.tag.clone()],
             kind: Kind::Switch,
+            chars: feature.chars.clone(),
         });
     }
     options
+}
+
+/// A font's name for a set without the tag some fonts repeat in it ("SS01: Equal Symbols" is
+/// "Equal Symbols" under its tag).
+fn plain_name(tag: &str, name: &str) -> String {
+    let prefix = format!("{}: ", tag.to_uppercase());
+    name.strip_prefix(&prefix)
+        .or_else(|| name.strip_prefix(&prefix.to_lowercase()))
+        .unwrap_or(name)
+        .trim()
+        .to_owned()
+}
+
+/// A code point of the private-use areas, which a font draws as it likes and another does not
+/// draw at all.
+fn is_private_use(c: char) -> bool {
+    matches!(u32::from(c), 0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd)
+}
+
+/// How many tiles the Font page shows before "Show All", and what it shows after the choice.
+pub const TILES_SHOWN: usize = 8;
+
+/// The number of tiles shown of `total`, all of them when `all`.
+pub fn tiles_shown(total: usize, all: bool) -> usize {
+    if all { total } else { total.min(TILES_SHOWN) }
 }
 
 /// A stylistic set (`ss01`–`ss20`) or a character variant (`cv01`–`cv99`).
@@ -175,6 +261,17 @@ pub fn options(family: Option<&str>) -> Vec<FontOption> {
         .entry(key)
         .or_insert_with(|| options_of(&bt_gpu::font_features(family)))
         .clone()
+}
+
+/// The tags the file chose for `font`'s family that the font does not list: lines the font
+/// ignores without a word, which the page says. Empty for a family that is not installed.
+pub fn lacking(font: &FontOptions) -> Vec<String> {
+    let family = font
+        .family
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    bt_gpu::lacking_features(family, &font.active_features())
 }
 
 /// Registers the fonts that ship with the app for this process, before the first pane opens its
@@ -288,6 +385,7 @@ mod tests {
         FontFeature {
             tag: tag.to_owned(),
             name: name.map(str::to_owned),
+            chars: Vec::new(),
         }
     }
 
@@ -446,5 +544,114 @@ mod tests {
     fn a_default_chain_without_a_name_and_one_named_blank_are_the_same_list() {
         assert_eq!(options(None), options(Some("  ")));
         assert_eq!(options(Some("No Such Family 1234")), Vec::new());
+    }
+
+    fn with_chars(tag: &str, name: Option<&str>, chars: &str) -> FontFeature {
+        FontFeature {
+            chars: chars.chars().collect(),
+            ..feature(tag, name)
+        }
+    }
+
+    /// The three options people look for by what they do are rows; everything else the font
+    /// offers is a tile.
+    #[test]
+    fn three_options_are_rows_and_the_rest_are_tiles() {
+        let options = options_of(&[
+            feature("calt", None),
+            feature("liga", None),
+            with_chars("cv02", Some("Single-story a"), "a"),
+            with_chars("ss01", Some("Mask secrets"), "abc"),
+            with_chars("zero", None, "0"),
+        ]);
+        let rows: Vec<&str> = options
+            .iter()
+            .filter(|option| option.is_row())
+            .map(FontOption::id)
+            .collect();
+        let tiles: Vec<&str> = options
+            .iter()
+            .filter(|option| !option.is_row())
+            .map(FontOption::id)
+            .collect();
+        assert_eq!(rows, ["ligatures", "secrets", "zero"]);
+        assert_eq!(tiles, ["cv02"]);
+        for option in options.iter().filter(|option| option.is_row()) {
+            assert!(option.about().is_some(), "{} has no example", option.id());
+        }
+        assert!(
+            options
+                .iter()
+                .find(|o| o.id() == "cv02")
+                .unwrap()
+                .about()
+                .is_none()
+        );
+    }
+
+    /// A tile shows up to three of the letters the option changes: ASCII first, then the first
+    /// character with a picture of its own, and nothing ("in context") when the font says none.
+    #[test]
+    fn a_tile_shows_the_letters_the_option_changes() {
+        let letters = |chars: &str| {
+            options_of(&[with_chars("cv07", None, chars)])
+                .remove(0)
+                .letters()
+        };
+        assert_eq!(letters("Wwx\u{174}"), Some("Wwx".to_owned()));
+        // Spaces and controls are not letters; the fourth ASCII one is not shown.
+        assert_eq!(letters(" Ww1 a"), Some("Ww1".to_owned()));
+        // No ASCII: the first character that can be drawn, skipping a private-use one.
+        assert_eq!(
+            letters("\u{e000}\u{a0}\u{3b3}\u{3bb}"),
+            Some("\u{3b3}".to_owned())
+        );
+        assert_eq!(letters("\u{e000}\u{f8ff}"), None);
+        assert_eq!(letters(""), None);
+    }
+
+    /// Fonts that repeat the tag in a set's name ("SS01: …") are shown without it; the full
+    /// name stays what the file says.
+    #[test]
+    fn the_tag_a_font_repeats_in_a_name_is_dropped() {
+        let options = options_of(&[
+            with_chars("ss03", Some("SS03: Arrows"), "-"),
+            with_chars("cv04", Some("CV04: Alternative l"), "l"),
+            with_chars("ss05", Some("Arrows, not SS05: a name"), "-"),
+            with_chars("ss06", Some("ss06: lower"), "a"),
+        ]);
+        assert_eq!(
+            titles(&options),
+            [
+                "Arrows",
+                "Alternative l",
+                "Arrows, not SS05: a name",
+                "lower"
+            ]
+        );
+    }
+
+    /// "With" and "without" an option are its tags set on and off.
+    #[test]
+    fn an_options_example_is_its_tags_on_and_off() {
+        let ligatures = options_of(&jetbrains()).remove(0);
+        assert_eq!(
+            ligatures.features(true),
+            [("calt".to_owned(), true), ("liga".to_owned(), true)]
+        );
+        assert_eq!(
+            ligatures.features(false),
+            [("calt".to_owned(), false), ("liga".to_owned(), false)]
+        );
+    }
+
+    /// Eight tiles are shown, and all of them after "Show All".
+    #[test]
+    fn eight_tiles_are_shown_until_all_are_asked_for() {
+        assert_eq!(tiles_shown(3, false), 3);
+        assert_eq!(tiles_shown(8, false), 8);
+        assert_eq!(tiles_shown(40, false), TILES_SHOWN);
+        assert_eq!(tiles_shown(40, true), 40);
+        assert_eq!(tiles_shown(0, true), 0);
     }
 }

@@ -26,6 +26,13 @@ pub struct FontFeature {
     /// variants (`cv01`–`cv99`) carry a name, and a font may leave even those
     /// out.
     pub name: Option<String>,
+    /// The characters the feature draws differently, by code point: what the glyphs under its
+    /// substitution lookups (`GSUB` types 1, 3, 6 and 7) are, read back through the font's `cmap`.
+    /// Filled for the stylistic sets, the character variants and `zero`, the features the
+    /// settings window shows letters for; empty for the rest, and for a feature whose changes
+    /// no character stands for (a rule that works on a sequence of glyphs the `cmap` does not
+    /// reach). A font's feature may change a hundred characters: the list is bounded.
+    pub chars: Vec<char>,
 }
 
 /// The features a shaper switches on without being asked. A font with
@@ -55,7 +62,26 @@ pub fn font_features(family: Option<&str>) -> Vec<FontFeature> {
         return Vec::new();
     };
     let names = Backend::table(&font, *b"name").unwrap_or_default();
-    parse(&gsub, &names)
+    let cmap = Backend::table(&font, *b"cmap").unwrap_or_default();
+    parse(&gsub, &names, &cmap)
+}
+
+/// The tags among `chosen` (tag, on) that the named family's font does not list — what a
+/// choice in the settings file asks for that the font ignores without a word. `None` is the
+/// default chain's font. Empty for a family that is not installed, and on a backend that cannot
+/// read tables.
+pub fn lacking_features(family: Option<&str>, chosen: &[(String, bool)]) -> Vec<String> {
+    let font = match family {
+        None => crate::app_fonts::open_default(PROBE_SIZE).0,
+        Some(name) => {
+            let (font, returned) = Backend::open(name, PROBE_SIZE);
+            if !same_family(&returned, name) {
+                return Vec::new();
+            }
+            font
+        }
+    };
+    lacking(&font, chosen)
 }
 
 /// Does the font have a rule that runs without the user asking for it
@@ -90,36 +116,64 @@ pub(crate) fn lacking(font: &Font, chosen: &[(String, bool)]) -> Vec<String> {
         .collect()
 }
 
-/// The features of a `GSUB` table, named from a `name` table, sorted by tag
-/// and deduplicated (a tag listed under several scripts is one feature; its
-/// first name wins).
-pub(crate) fn parse(gsub: &[u8], names: &[u8]) -> Vec<FontFeature> {
+/// The features of a `GSUB` table, named from a `name` table and given their characters from a
+/// `cmap` table, sorted by tag and deduplicated (a tag listed under several scripts is one
+/// feature; its first name wins and its characters are the union).
+pub(crate) fn parse(gsub: &[u8], names: &[u8], cmap: &[u8]) -> Vec<FontFeature> {
     let names = Names::new(names);
-    let mut found: BTreeMap<[u8; 4], Option<String>> = BTreeMap::new();
+    let mut inverse = None;
+    let mut found: BTreeMap<[u8; 4], (Option<String>, Vec<u16>)> = BTreeMap::new();
     for entry in tags(gsub) {
-        let slot = found.entry(entry.tag).or_default();
-        if slot.is_none()
+        let (name, glyphs) = found.entry(entry.tag).or_default();
+        if name.is_none()
             && let Some(id) = entry.name_id
         {
-            *slot = names.get(id);
+            *name = names.get(id);
+        }
+        if shows_letters(&entry.tag) && glyphs.len() < MAX_GLYPHS {
+            glyphs.extend(glyphs_of(gsub, entry.feature));
         }
     }
     found
         .into_iter()
-        .filter_map(|(tag, name)| {
+        .filter_map(|(tag, (name, mut glyphs))| {
             // A tag is four ASCII bytes by the specification; anything else
             // is a broken record and not a feature.
             let tag = std::str::from_utf8(&tag).ok()?.to_owned();
-            tag.bytes()
-                .all(|b| b.is_ascii_alphanumeric())
-                .then_some(FontFeature { tag, name })
+            if !tag.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return None;
+            }
+            let mut chars = Vec::new();
+            if !glyphs.is_empty() {
+                glyphs.sort_unstable();
+                glyphs.dedup();
+                let inverse = inverse.get_or_insert_with(|| characters(cmap));
+                chars = glyphs
+                    .iter()
+                    .filter_map(|glyph| inverse.get(glyph))
+                    .copied()
+                    .collect();
+                chars.sort_unstable();
+                chars.dedup();
+                chars.truncate(MAX_CHARS);
+            }
+            Some(FontFeature { tag, name, chars })
         })
         .collect()
+}
+
+/// The features whose characters are read: the stylistic sets, the character variants and the
+/// slashed zero.
+fn shows_letters(tag: &[u8; 4]) -> bool {
+    tag == b"zero"
+        || (matches!(&tag[..2], b"ss" | b"cv") && tag[2..].iter().all(u8::is_ascii_digit))
 }
 
 /// One record of the `GSUB` feature list.
 struct Entry {
     tag: [u8; 4],
+    /// Where its feature table starts in the `GSUB` table.
+    feature: usize,
     /// The `name` table id of its label, when the feature has parameters.
     name_id: Option<u16>,
 }
@@ -136,6 +190,7 @@ fn tags(gsub: &[u8]) -> impl Iterator<Item = Entry> + '_ {
         let feature = list.checked_add(usize::from(u16_at(gsub, record + 4)?))?;
         Some(Entry {
             tag,
+            feature,
             name_id: label_id(gsub, feature, tag),
         })
     })
@@ -224,6 +279,250 @@ impl<'a> Names<'a> {
     }
 }
 
+/// The most glyphs read for one feature, the most characters kept for it, how many lookups and
+/// subtables of a feature are followed, and how many characters of a `cmap` are walked. The
+/// bytes are a font's, i.e. untrusted: each bound is far above what a real font needs and keeps
+/// a table that lies about its counts from costing more than a blink.
+const MAX_GLYPHS: usize = 4096;
+const MAX_CHARS: usize = 256;
+const MAX_LOOKUPS: usize = 256;
+const MAX_SUBTABLES: usize = 64;
+const MAX_CMAP: usize = 0x30000;
+
+/// The glyphs the substitution lookups of the feature table at `feature` act on: the coverage of
+/// each single (1) and alternate (3) substitution, of the input of each chained context (6), and
+/// of what an extension (7) wraps. Not sorted, not deduplicated; at most [`MAX_GLYPHS`] and
+/// empty on any read outside the table.
+fn glyphs_of(gsub: &[u8], feature: usize) -> Vec<u16> {
+    let mut out = Vec::new();
+    let _ = collect_lookups(gsub, feature, &mut out);
+    out
+}
+
+fn collect_lookups(gsub: &[u8], feature: usize, out: &mut Vec<u16>) -> Option<()> {
+    let list = usize::from(u16_at(gsub, 8)?);
+    if list == 0 {
+        return None;
+    }
+    let lookups = usize::from(u16_at(gsub, list)?);
+    let count = usize::from(u16_at(gsub, feature.checked_add(2)?)?);
+    for i in 0..count.min(MAX_LOOKUPS) {
+        let index = usize::from(u16_at(gsub, feature.checked_add(4)?.checked_add(i * 2)?)?);
+        if index >= lookups {
+            continue;
+        }
+        let lookup = list.checked_add(usize::from(u16_at(
+            gsub,
+            list.checked_add(2)?.checked_add(index * 2)?,
+        )?))?;
+        let kind = u16_at(gsub, lookup)?;
+        let subtables = usize::from(u16_at(gsub, lookup.checked_add(4)?)?);
+        for s in 0..subtables.min(MAX_SUBTABLES) {
+            let offset = u16_at(gsub, lookup.checked_add(6)?.checked_add(s * 2)?)?;
+            let _ = subtable_glyphs(gsub, kind, lookup.checked_add(usize::from(offset))?, out);
+            if out.len() >= MAX_GLYPHS {
+                return Some(());
+            }
+        }
+    }
+    Some(())
+}
+
+/// The glyphs of one substitution subtable of type `kind`, at `at`.
+fn subtable_glyphs(gsub: &[u8], kind: u16, at: usize, out: &mut Vec<u16>) -> Option<()> {
+    match kind {
+        // Single and alternate substitution: the coverage is the word after the format in both
+        // of the first's formats and in the second's only one.
+        1 | 3 => coverage(
+            gsub,
+            at.checked_add(usize::from(u16_at(gsub, at.checked_add(2)?)?))?,
+            out,
+        ),
+        6 => match u16_at(gsub, at)? {
+            // Formats 1 and 2 name the coverage of the first input glyph.
+            1 | 2 => coverage(
+                gsub,
+                at.checked_add(usize::from(u16_at(gsub, at.checked_add(2)?)?))?,
+                out,
+            ),
+            // Format 3 lists a coverage for the backtrack, the input and the lookahead; the
+            // input's is the one whose glyphs the rule can substitute.
+            3 => {
+                let backtrack = usize::from(u16_at(gsub, at.checked_add(2)?)?);
+                let input_at = at.checked_add(4)?.checked_add(backtrack * 2)?;
+                let input = usize::from(u16_at(gsub, input_at)?);
+                for i in 0..input.min(MAX_SUBTABLES) {
+                    let offset = u16_at(gsub, input_at.checked_add(2)?.checked_add(i * 2)?)?;
+                    let _ = coverage(gsub, at.checked_add(usize::from(offset))?, out);
+                }
+                Some(())
+            }
+            _ => Some(()),
+        },
+        // An extension names the real subtable by a 32-bit offset from itself; one that wraps
+        // another extension is a loop and is left alone.
+        7 if u16_at(gsub, at)? == 1 => {
+            let inner = u16_at(gsub, at.checked_add(2)?)?;
+            let offset = u32::from_be_bytes(
+                gsub.get(at.checked_add(4)?..at.checked_add(8)?)?
+                    .try_into()
+                    .ok()?,
+            );
+            if inner == 7 {
+                return Some(());
+            }
+            subtable_glyphs(
+                gsub,
+                inner,
+                at.checked_add(usize::try_from(offset).ok()?)?,
+                out,
+            )
+        }
+        _ => Some(()),
+    }
+}
+
+/// The glyphs of the coverage table at `at`: a list (format 1) or ranges (format 2).
+fn coverage(gsub: &[u8], at: usize, out: &mut Vec<u16>) -> Option<()> {
+    let count = usize::from(u16_at(gsub, at.checked_add(2)?)?);
+    match u16_at(gsub, at)? {
+        1 => {
+            for i in 0..count {
+                if out.len() >= MAX_GLYPHS {
+                    break;
+                }
+                out.push(u16_at(gsub, at.checked_add(4)?.checked_add(i * 2)?)?);
+            }
+        }
+        2 => {
+            for i in 0..count {
+                let record = at.checked_add(4)?.checked_add(i * 6)?;
+                let (start, end) = (u16_at(gsub, record)?, u16_at(gsub, record.checked_add(2)?)?);
+                for glyph in start..=end.max(start) {
+                    if out.len() >= MAX_GLYPHS || glyph > end {
+                        break;
+                    }
+                    out.push(glyph);
+                }
+            }
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// The glyph → character inverse of a `cmap` table: for each glyph the lowest printable code
+/// point that maps to it. The Unicode subtable of format 12 or 4 is read; any other, or a table
+/// that does not hold together, gives an empty inverse.
+fn characters(cmap: &[u8]) -> BTreeMap<u16, char> {
+    let mut inverse = BTreeMap::new();
+    let _ = read_cmap(cmap, &mut inverse);
+    inverse
+}
+
+fn read_cmap(cmap: &[u8], inverse: &mut BTreeMap<u16, char>) -> Option<()> {
+    let tables = usize::from(u16_at(cmap, 2)?);
+    // The best subtable: Windows full repertoire, Unicode full, then the basic planes.
+    let mut best: Option<(u8, usize)> = None;
+    for i in 0..tables.min(64) {
+        let record = 4usize.checked_add(i * 8)?;
+        let (platform, encoding) = (u16_at(cmap, record)?, u16_at(cmap, record.checked_add(2)?)?);
+        let offset = u32::from_be_bytes(
+            cmap.get(record.checked_add(4)?..record.checked_add(8)?)?
+                .try_into()
+                .ok()?,
+        );
+        let rank = match (platform, encoding) {
+            (3, 10) => 0,
+            (0, 4 | 6) => 1,
+            (3, 1) => 2,
+            (0, _) => 3,
+            _ => continue,
+        };
+        if best.is_none_or(|(held, _)| rank < held) {
+            best = Some((rank, usize::try_from(offset).ok()?));
+        }
+    }
+    let at = best?.1;
+    let mut budget = MAX_CMAP;
+    let mut note = |glyph: u16, code: u32| {
+        if glyph == 0 {
+            return;
+        }
+        if let Some(c) = char::from_u32(code).filter(|c| !c.is_control()) {
+            let held = inverse.entry(glyph).or_insert(c);
+            *held = (*held).min(c);
+        }
+    };
+    match u16_at(cmap, at)? {
+        12 => {
+            let groups = usize::try_from(u32::from_be_bytes(
+                cmap.get(at.checked_add(12)?..at.checked_add(16)?)?
+                    .try_into()
+                    .ok()?,
+            ))
+            .ok()?;
+            for i in 0..groups {
+                let group = at.checked_add(16)?.checked_add(i.checked_mul(12)?)?;
+                let word = |n: usize| -> Option<u32> {
+                    Some(u32::from_be_bytes(
+                        cmap.get(group.checked_add(n)?..group.checked_add(n + 4)?)?
+                            .try_into()
+                            .ok()?,
+                    ))
+                };
+                let (start, end, glyph) = (word(0)?, word(4)?, word(8)?);
+                for code in start..=end.max(start) {
+                    if budget == 0 || code > end {
+                        return Some(());
+                    }
+                    budget -= 1;
+                    if let Ok(glyph) = u16::try_from(glyph.checked_add(code - start)?) {
+                        note(glyph, code);
+                    }
+                }
+            }
+        }
+        4 => {
+            let segments = usize::from(u16_at(cmap, at.checked_add(6)?)? / 2);
+            let ends = at.checked_add(14)?;
+            let starts = ends.checked_add(segments * 2)?.checked_add(2)?;
+            let deltas = starts.checked_add(segments * 2)?;
+            let ranges = deltas.checked_add(segments * 2)?;
+            for i in 0..segments {
+                let end = u16_at(cmap, ends.checked_add(i * 2)?)?;
+                let start = u16_at(cmap, starts.checked_add(i * 2)?)?;
+                let delta = u16_at(cmap, deltas.checked_add(i * 2)?)?;
+                let range_at = ranges.checked_add(i * 2)?;
+                let range = usize::from(u16_at(cmap, range_at)?);
+                for code in start..=end.max(start) {
+                    if budget == 0 || code > end {
+                        return Some(());
+                    }
+                    budget -= 1;
+                    if code == 0xffff {
+                        break;
+                    }
+                    let glyph = if range == 0 {
+                        code.wrapping_add(delta)
+                    } else {
+                        let slot = range_at
+                            .checked_add(range)?
+                            .checked_add(usize::from(code - start) * 2)?;
+                        match u16_at(cmap, slot) {
+                            Some(0) | None => continue,
+                            Some(glyph) => glyph.wrapping_add(delta),
+                        }
+                    };
+                    note(glyph, u32::from(code));
+                }
+            }
+        }
+        _ => {}
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +553,12 @@ mod tests {
         let font = file(file_name);
         let gsub = table_of(&font, b"GSUB").to_vec();
         let names = table_of(&font, b"name").to_vec();
-        (parse(&gsub, &names), gsub, names)
+        let cmap = table_of(&font, b"cmap").to_vec();
+        (parse(&gsub, &names, &cmap), gsub, names)
+    }
+
+    fn cmap_of(file_name: &str) -> Vec<u8> {
+        table_of(&file(file_name), b"cmap").to_vec()
     }
 
     fn named<'a>(features: &'a [FontFeature], tag: &str) -> Option<&'a FontFeature> {
@@ -300,15 +604,79 @@ mod tests {
         assert!(has_default_rules(&gsub));
     }
 
+    fn chars_of(features: &[FontFeature], tag: &str) -> String {
+        named(features, tag)
+            .map(|f| f.chars.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// A set or a variant lists the characters it draws, read back through the `cmap`: the
+    /// letters the settings window shows on its tile.
+    #[test]
+    fn a_stylistic_set_knows_the_characters_it_draws() {
+        let (jetbrains, _, _) = features_of("JetBrainsMono/JetBrainsMono[wght].ttf");
+        let w = chars_of(&jetbrains, "cv07");
+        assert!(w.contains('W') && w.contains('w'), "cv07 changes {w:?}");
+        assert_eq!(chars_of(&jetbrains, "zero"), "0");
+        let (obel, _, _) = features_of("ObelMono/ObelMono[wght].ttf");
+        assert!(chars_of(&obel, "cv02").contains('a'));
+        assert_eq!(chars_of(&obel, "cv01"), "0");
+        // The mask covers the whole alphabet: it is not a letter to show.
+        assert!(chars_of(&obel, "ss01").len() > 100);
+        let (fira, _, _) = features_of("FiraCode/FiraCode-VF.ttf");
+        assert!(chars_of(&fira, "ss01").contains('r'));
+        let (geist, _, _) = features_of("GeistMono/GeistMono[wght].ttf");
+        assert!(chars_of(&geist, "ss11").contains('='));
+        // A feature that is not a set, a variant or the zero is listed without characters, and
+        // so is one that only works on sequences the `cmap` does not reach.
+        assert_eq!(chars_of(&jetbrains, "calt"), "");
+        for features in [&jetbrains, &obel, &fira, &geist] {
+            for feature in features {
+                assert!(feature.chars.len() <= MAX_CHARS);
+                assert!(feature.chars.windows(2).all(|pair| pair[0] < pair[1]));
+            }
+        }
+    }
+
+    /// A `cmap` that claims four billion groups of four billion characters is read for a
+    /// bounded number of them, not to its end.
+    #[test]
+    fn a_cmap_that_lies_about_its_size_is_read_within_a_bound() {
+        let mut cmap = Vec::new();
+        cmap.extend([0, 0, 0, 1]);
+        // One record: Windows, full repertoire, the subtable at byte 12.
+        cmap.extend([0, 3, 0, 10, 0, 0, 0, 12]);
+        // Format 12, claiming 2^32 - 1 groups, the first of them every code point.
+        cmap.extend([0, 12, 0, 0]);
+        cmap.extend(u32::MAX.to_be_bytes());
+        cmap.extend(0u32.to_be_bytes());
+        cmap.extend(u32::MAX.to_be_bytes());
+        cmap.extend(0u32.to_be_bytes());
+        cmap.extend(u32::MAX.to_be_bytes());
+        cmap.extend(1u32.to_be_bytes());
+        let inverse = characters(&cmap);
+        assert!(inverse.len() <= MAX_CMAP);
+        assert!(!characters(&[]).contains_key(&1));
+    }
+
     #[test]
     fn a_truncated_or_damaged_table_answers_without_panicking() {
         let (_, gsub, names) = features_of("ObelMono/ObelMono[wght].ttf");
-        for len in 0..=gsub.len() {
-            let _ = parse(&gsub[..len], &names);
+        let cmap = cmap_of("ObelMono/ObelMono[wght].ttf");
+        // The `GSUB` and `name` walks run without a `cmap` (there is nothing to read back
+        // through): a byte-by-byte truncation would otherwise read the real one tens of
+        // thousands of times.
+        // Every length near the header, then a stride: a parse now walks the lookups too.
+        let lengths = |total: usize| (0..=total).filter(move |len| *len < 512 || len % 29 == 0);
+        for len in lengths(gsub.len()) {
+            let _ = parse(&gsub[..len], &names, &[]);
             let _ = has_default_rules(&gsub[..len]);
         }
-        for len in 0..=names.len() {
-            let _ = parse(&gsub, &names[..len]);
+        for len in lengths(names.len()) {
+            let _ = parse(&gsub, &names[..len], &[]);
+        }
+        for len in (0..=cmap.len()).step_by(7) {
+            let _ = characters(&cmap[..len]);
         }
         // Damage: every word of the header and of the first records set to
         // all ones, then a deterministic scatter.
@@ -317,12 +685,14 @@ mod tests {
             for byte in damaged.iter_mut().skip(at).take(2) {
                 *byte = 0xff;
             }
-            let _ = parse(&damaged, &names);
+            let _ = parse(&damaged, &names, &[]);
+            let _ = parse(&damaged, &names, &cmap);
         }
         let mut state = 0x2545_f491_4f6c_dd1du64;
-        for _ in 0..2000 {
+        for round in 0..400 {
             let mut damaged = gsub.clone();
             let mut damaged_names = names.clone();
+            let mut damaged_cmap = cmap.clone();
             for _ in 0..8 {
                 state = state
                     .wrapping_mul(6364136223846793005)
@@ -332,17 +702,24 @@ mod tests {
                 damaged[at % len] = (state >> 8) as u8;
                 let len = damaged_names.len();
                 damaged_names[(at >> 3) % len] = (state >> 16) as u8;
+                let len = damaged_cmap.len();
+                damaged_cmap[(at >> 5) % len] = (state >> 24) as u8;
             }
-            let _ = parse(&damaged, &damaged_names);
+            let _ = parse(&damaged, &damaged_names, &[]);
+            let _ = characters(&damaged_cmap);
+            if round % 50 == 0 {
+                // Both damaged at once, through the whole of `parse`.
+                let _ = parse(&damaged, &damaged_names, &damaged_cmap);
+            }
         }
-        assert!(parse(&[], &[]).is_empty());
+        assert!(parse(&[], &[], &[]).is_empty());
         assert!(!has_default_rules(&[]));
     }
 
     #[test]
     fn a_table_that_is_not_a_table_lists_nothing() {
-        assert!(parse(&[0xff; 64], &[0xff; 64]).is_empty());
-        assert!(parse(&[0; 64], &[0; 64]).is_empty());
+        assert!(parse(&[0xff; 64], &[0xff; 64], &[0xff; 64]).is_empty());
+        assert!(parse(&[0; 64], &[0; 64], &[0; 64]).is_empty());
     }
 
     #[cfg(target_os = "macos")]

@@ -65,7 +65,7 @@ use std::collections::{HashMap, HashSet};
 pub use app_fonts::{
     AppFace, AppFonts, app_default_family, app_fonts, app_fonts_registered, register_app_fonts,
 };
-pub use features::{FontFeature, font_features};
+pub use features::{FontFeature, font_features, lacking_features};
 use raster::DrawResult;
 pub use raster::RuleKind;
 use rules::Faces;

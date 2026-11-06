@@ -2003,6 +2003,39 @@ define_class!(
             let _ = delegate.save_edits(&option.edits(&font, on));
         }
 
+        /// A tile of alternate letters was clicked: the option it is flips, from the file's
+        /// choice, so a click is a toggle whatever a preview shows.
+        #[unsafe(method(fontTileClicked:))]
+        fn font_tile_clicked(&self, sender: Option<&AnyObject>) {
+            let Some(tiles) = sender.and_then(|s| s.downcast_ref::<font_options::LetterTiles>())
+            else {
+                return;
+            };
+            let option = tiles
+                .clicked()
+                .and_then(|at| self.ivars().font_options.borrow().get(at).cloned());
+            let Some(option) = option else {
+                return;
+            };
+            let Some(delegate) = app::delegate(self.mtm()) else {
+                return;
+            };
+            let font = delegate.file_settings().font;
+            let _ = delegate.save_edits(&option.edits(&font, !option.is_on(&font)));
+        }
+
+        /// "Show All" and "Show Fewer" under the tiles.
+        #[unsafe(method(showAllTiles:))]
+        fn show_all_tiles(&self, _sender: Option<&AnyObject>) {
+            let Some(controls) = self.ivars().controls.get() else {
+                return;
+            };
+            controls.font_options.toggle_all();
+            if let Some(delegate) = app::delegate(self.mtm()) {
+                delegate.refresh_settings_window();
+            }
+        }
+
         #[unsafe(method(switchChanged:))]
         fn switch_changed(&self, sender: Option<&AnyObject>) {
             let Some(switch) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) else {
@@ -2557,6 +2590,11 @@ impl SettingsWindow {
                 first = false;
             }
             group.view.setHidden(first);
+            if let Some(title) = &group.title
+                && rows.iter().any(|row| row.key == Some(Key::FontFeatures))
+            {
+                title.setStringValue(&NSString::from_str(&font_options::heading(&settings.font)));
+            }
             if let Some(aside) = &group.aside {
                 aside.setStringValue(&NSString::from_str(
                     (group.spec.aside)(settings).unwrap_or_default(),
@@ -3613,7 +3651,7 @@ impl SettingsWindow {
                         .setActive(true);
                     rows.push(row);
                 }
-                let (view, aside) = group_view(mtm, spec, &boxed);
+                let (view, aside, title) = group_view(mtm, spec, &boxed);
                 page.addArrangedSubview(&view);
                 view.widthAnchor()
                     .constraintEqualToAnchor(&page.widthAnchor())
@@ -3621,6 +3659,7 @@ impl SettingsWindow {
                 groups.push(GroupView {
                     view,
                     aside,
+                    title,
                     spec,
                     rows: first..rows.len(),
                 });
@@ -3830,6 +3869,9 @@ struct GroupView {
     view: Retained<NSStackView>,
     /// The text beside the title ([`pages::Group::aside`]).
     aside: Option<Retained<NSTextField>>,
+    /// The title itself, for the group whose title follows the settings (the font's options
+    /// are named for the font).
+    title: Option<Retained<NSTextField>>,
     spec: &'static pages::Group,
     /// The group's rows, as a span of `Controls::rows`.
     rows: std::ops::Range<usize>,
@@ -3996,7 +4038,11 @@ fn group_view(
     mtm: MainThreadMarker,
     spec: &pages::Group,
     boxed: &NSBox,
-) -> (Retained<NSStackView>, Option<Retained<NSTextField>>) {
+) -> (
+    Retained<NSStackView>,
+    Option<Retained<NSTextField>>,
+    Option<Retained<NSTextField>>,
+) {
     let group = stack(
         mtm,
         &[],
@@ -4005,11 +4051,13 @@ fn group_view(
         NSLayoutAttribute::Leading,
     );
     let mut aside = None;
+    let mut heading = None;
     if let Some(title) = spec.title {
         let title = NSTextField::labelWithString(&NSString::from_str(title), mtm);
         title.setFont(Some(
             &NSFont::boldSystemFontOfSize(NSFont::systemFontSize()),
         ));
+        heading = Some(title.clone());
         let note = NSTextField::labelWithString(ns_string!(""), mtm);
         note.setTextColor(Some(&NSColor::secondaryLabelColor()));
         note.setFont(Some(&NSFont::systemFontOfSize(12.0)));
@@ -4034,7 +4082,7 @@ fn group_view(
         .widthAnchor()
         .constraintEqualToAnchor(&group.widthAnchor())
         .setActive(true);
-    (group, aside)
+    (group, aside, heading)
 }
 
 /// A row of a group's box: the name on the left with its description under it, the control on
