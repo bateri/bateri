@@ -889,3 +889,50 @@ fn a_chosen_tag_the_font_lacks_is_a_notice_until_it_is_fixed() {
     assert!(plain_renderer().font_notices().is_empty());
     assert!(Renderer::new().font_notices().is_empty());
 }
+
+/// The glyph numbers of `text` in a page's line set in the terminal's face (`Obel Mono`).
+fn page_glyphs(r: &Renderer, text: &str) -> Vec<u32> {
+    let font = r
+        .ui_font(&bt_atlas::TextStyle {
+            family: bt_atlas::Family::Terminal(Some(OBEL_MONO.to_owned())),
+            size_px: 26.0,
+            weight: 400,
+            italic: false,
+        })
+        .expect("the terminal's face opens");
+    let line = r.ui_shape(font, text).expect("shapes");
+    line.glyphs.iter().map(|glyph| glyph.glyph).collect()
+}
+
+/// A program's page set in the terminal's face is drawn by the person's choices for that face,
+/// as the grid is: Hide Secrets masks a key there too, whether the page opened before the choice
+/// was made or after, and the change tells whoever keeps lines or font ids to build them again.
+#[test]
+fn a_pages_text_in_the_terminals_face_follows_its_rules() {
+    let r = renderer_with(OBEL_MONO, &[]);
+    let shown = page_glyphs(&r, KEY);
+    let _ = r.ui_flushed();
+    let generation = r.ui_fonts_generation();
+
+    let masking = |r: &Renderer| {
+        let options = FontOptions {
+            family: Some(OBEL_MONO.to_owned()),
+            features: [(OBEL_MONO.to_lowercase(), [("ss01".to_owned(), true)].into())].into(),
+            ..FontOptions::default()
+        };
+        assert!(r.set_font(&options));
+    };
+    masking(&r);
+    assert!(r.ui_flushed(), "a list built before holds the plain key");
+    assert_ne!(
+        r.ui_fonts_generation(),
+        generation,
+        "a kept font id is stale"
+    );
+    let masked = page_glyphs(&r, KEY);
+    assert_ne!(masked, shown, "the key in the page is masked");
+
+    // A renderer that opens its page's text only after the choice gets it as well.
+    let late = renderer_with(OBEL_MONO, &[("ss01", true)]);
+    assert_eq!(page_glyphs(&late, KEY), masked);
+}

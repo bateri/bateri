@@ -16,6 +16,10 @@ of every installed copy. A version without a section is not released.
 
 - Building from source now needs Rust 1.99 or later.
 
+### Fixed
+
+- **A program's native page follows your font's options.** Text a page sets in the terminal's font, such as an editor's lines, was drawn with the font's defaults, so Hide Secrets showed an API key in full there and Ligatures off or an alternate letter did not apply. It is now drawn as the terminal draws it, and switching an option changes the open page at once.
+
 ## [0.25.0] - 2026-11-06
 
 ### Added

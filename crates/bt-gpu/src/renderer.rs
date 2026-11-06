@@ -1967,17 +1967,20 @@ impl Renderer {
     /// Changes the requested font; `true` when it differs. The atlas opens
     /// with it on the next [`Renderer::cell_metrics`].
     ///
-    /// The font smoothing (`[font] smoothing`) reaches the grid's atlas that
-    /// way — it is part of the atlas's key — and the page's text atlas here,
-    /// at once: that one has no key to rebuild on, it empties itself.
+    /// The font smoothing (`[font] smoothing`) and the feature choices
+    /// (`[font.features."Family"]`) reach the grid's atlas that way — they are
+    /// part of the atlas's key — and the page's text atlas here, at once: that
+    /// one has no key to rebuild on, it empties itself.
     pub fn set_font(&self, font: &FontOptions) -> bool {
         let mut current = self.font.borrow_mut();
         if *current == *font {
             return false;
         }
         current.clone_from(font);
-        *self.font_features.borrow_mut() = font.active_features();
+        let features = font.active_features();
         self.ui_set_smoothing(font.smoothing);
+        self.ui_set_features(font.family.as_deref(), &features);
+        *self.font_features.borrow_mut() = features;
         true
     }
 
