@@ -12,7 +12,12 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). **Every version the writer still writes is read**: version 8 gave a pane what it runs
+//! {index}`). **Every version the writer still writes is read**: version 9 gave a tab its floating
+//! cards ([`crate::floating`]: an `F {x} {y} {width} {height} {0|1} {shape}` line each, right after the
+//! tab's `T` line and before its panes, back to front; the four numbers are shares of the tab's
+//! content area, the bit says the card is a capsule, the shape is a tree over the tab's pane
+//! indices like the `T` line's — the `P` lines hold **all** of the tab's panes, flat and floating,
+//! and the `T` line's focus may name a floating one), version 8 gave a pane what it runs
 //! ([`crate::child::PaneRuns`], the field after the remote line) and a window, a group and a tab the
 //! number it is known by from outside ([`crate::ids`]: the last field of a `W` and a `G` line, a
 //! `T` line's field after the group, `-` for none), version 7 gave a window whether
@@ -30,8 +35,9 @@
 //! column was resized and no group exists, 2 while only names are, 3 once a width is, 4 once a
 //! window has a group, 5 once a pane shows a terminal a server keeps, 6 once such a pane was
 //! asked for by a program on the server (it closes with its terminal, or says who asked), 7 once
-//! a window hides its side column or shows Activity, 8 once anything has a number — so a
-//! session that uses
+//! a window hides its side column or shows Activity, 8 once anything has a number, 9 once a tab
+//! has a floating card (no tab has one in most sessions, so the app writes 9 only then and 8
+//! otherwise) — so a session that uses
 //! nothing new stays readable by the bateri before
 //! it, whose reader drops any other number and, with it, the saved layout. Every window the app
 //! saves has its number, so the app writes 8 always and a bateri from before numbers does not
@@ -94,15 +100,20 @@ use crate::tabs::Tabs;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-session";
 
-/// The format's current version: a window, a group and a tab each carry the number it is known
-/// by (`w1`, `g1`, `t3`, [`crate::ids`]). The ones before it ([`FLAGGED`], [`ASKED`], [`KEPT`],
-/// [`GROUPED`], [`SIDED`], [`NAMED`], [`UNNAMED`]) are read too; any other number is not read (a
+/// The format's current version: a tab holds floating cards beside its flat tree (an `F` line
+/// each). The writer says it only for a session where a tab has one, the one before
+/// ([`NUMBERED`]) otherwise. The ones before it are read too; any other number is not read (a
 /// newer bateri's file after a downgrade is dropped, not misread).
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
+
+/// The version before floating cards: a window, a group and a tab each carry the number it is
+/// known by (`w1`, `g1`, `t3`, [`crate::ids`]). Every session of the app without a floating card
+/// is written in it.
+const NUMBERED: u32 = 8;
 
 /// The version before numbers, which a window may say hides its side column and shows Activity.
 /// The writer still writes it for a session with no number in it (only a test makes one): every
-/// window the app saves has a number, so the app's sessions are all in [`VERSION`].
+/// window the app saves has a number, so the app's sessions are all in [`NUMBERED`] or later.
 const FLAGGED: u32 = 7;
 
 /// The version before a window's column and Activity flags, which a session whose windows all
@@ -206,15 +217,19 @@ pub struct SavedGroup {
     pub resident: Option<usize>,
 }
 
-/// A tab: the split tree's shape over `panes`.
+/// A tab: the flat area's split tree's shape and the floating cards, over `panes`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedTab {
     /// The number the tab is known by (`t3`); `None` as for a window.
     pub id: Option<u64>,
+    /// The flat area's tree.
     pub shape: Shape,
-    /// The tab's panes; [`Shape`]'s leaves index this list.
+    /// The tab's panes, flat and floating; the leaves of [`Self::shape`] and of every card's
+    /// shape index this list, each pane in exactly one of them.
     pub panes: Vec<SavedPane>,
-    /// The focused pane's index.
+    /// The floating cards, back to front (empty before version 9).
+    pub cards: Vec<SavedCard>,
+    /// The focused pane's index (a floating pane's too).
     pub focused: usize,
     /// The zoomed pane's index (⇧⌘↩), if any.
     pub zoomed: Option<usize>,
@@ -222,6 +237,50 @@ pub struct SavedTab {
     pub name: Option<String>,
     /// The group the tab is in: its index in [`SavedWindow::groups`]; `None` for an ungrouped tab.
     pub group: Option<usize>,
+}
+
+/// A floating card: its share of the tab's content area, whether it is a capsule and its tree's
+/// shape over the tab's pane indices.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedCard {
+    /// Left, top, width and height, as shares of the content area: each in `[0, 1]`, the size
+    /// above nothing ([`crate::floating::Area`]).
+    pub area: [f64; 4],
+    pub minimized: bool,
+    pub shape: Shape,
+}
+
+impl SavedCard {
+    /// The card of `card`, its panes named by their position in `order`. `None` if a pane is not
+    /// in `order`. An area the reader would refuse is written as the opening place rather than
+    /// dropping the tab (as a ratio is).
+    fn of(card: &crate::floating::Card, order: &[u64]) -> Option<SavedCard> {
+        let area = [card.area.x, card.area.y, card.area.width, card.area.height];
+        let opening = crate::floating::Area::opening();
+        Some(SavedCard {
+            area: if valid_area(area) {
+                area
+            } else {
+                [opening.x, opening.y, opening.width, opening.height]
+            },
+            minimized: card.minimized,
+            shape: Shape::from_tree_inner(&card.tree, order)?,
+        })
+    }
+
+    fn to_card(&self, ids: &[u64]) -> Option<crate::floating::Card> {
+        let [x, y, width, height] = self.area;
+        Some(crate::floating::Card {
+            tree: self.shape.to_tree(ids)?,
+            area: crate::floating::Area::new(x, y, width, height),
+            minimized: self.minimized,
+        })
+    }
+}
+
+/// Whether `area` is a card's share: every number in `[0, 1]` and a size above nothing.
+fn valid_area(area: [f64; 4]) -> bool {
+    area.iter().all(|value| (0.0..=1.0).contains(value)) && area[2] > 0.0 && area[3] > 0.0
 }
 
 /// A pane.
@@ -443,7 +502,28 @@ impl SavedTab {
     /// again, the focus moves to the first pane left if its own went and the zoom goes with its
     /// pane. `None` if no pane is left — a pane that cannot come back takes nothing else with it.
     pub fn retain(&self, keep: &[bool]) -> Option<SavedTab> {
-        let shape = self.shape.retain(keep)?;
+        let mut cards: Vec<SavedCard> = self
+            .cards
+            .iter()
+            .filter_map(|card| {
+                Some(SavedCard {
+                    shape: card.shape.retain(keep)?,
+                    ..card.clone()
+                })
+            })
+            .collect();
+        let shape = match self.shape.retain(keep) {
+            Some(shape) => shape,
+            // The flat area is empty: it always holds a pane, so the front card that is shown —
+            // else the one minimized last — comes down whole ([`crate::floating::Layers::remove`]).
+            None => {
+                let front = cards
+                    .iter()
+                    .rposition(|card| !card.minimized)
+                    .or_else(|| cards.len().checked_sub(1))?;
+                cards.remove(front).shape
+            }
+        };
         let kept = |index: usize| keep.get(index).copied().unwrap_or(false);
         let moved = |index: usize| keep[..index].iter().filter(|kept| **kept).count();
         let panes: Vec<SavedPane> = self
@@ -456,6 +536,7 @@ impl SavedTab {
         Some(SavedTab {
             id: self.id,
             shape,
+            cards,
             focused: if kept(self.focused) {
                 moved(self.focused)
             } else {
@@ -465,6 +546,43 @@ impl SavedTab {
             panes,
             name: self.name.clone(),
             group: self.group,
+        })
+    }
+}
+
+impl SavedTab {
+    /// The shapes a tab's layers are saved as: the flat tree's and each card's, back to front,
+    /// over `order` (the tab's pane list, flat and floating). `None` if a pane is not in `order`,
+    /// is in two trees, or `order` lists one no tree has.
+    pub fn shapes(
+        layers: &crate::floating::Layers,
+        order: &[u64],
+    ) -> Option<(Shape, Vec<SavedCard>)> {
+        let shape = Shape::from_tree_inner(&layers.flat, order)?;
+        let cards = layers
+            .cards
+            .iter()
+            .map(|card| SavedCard::of(card, order))
+            .collect::<Option<Vec<_>>>()?;
+        let mut leaves = shape.leaves();
+        for card in &cards {
+            leaves.extend(card.shape.leaves());
+        }
+        leaves.sort_unstable();
+        let whole = leaves.len() == order.len() && leaves.iter().enumerate().all(|(i, l)| i == *l);
+        whole.then_some((shape, cards))
+    }
+
+    /// The tab's layers with each pane index replaced by `ids[index]` — the restored panes' new
+    /// identities. `None` if an index is out of range.
+    pub fn layers(&self, ids: &[u64]) -> Option<crate::floating::Layers> {
+        Some(crate::floating::Layers {
+            flat: self.shape.to_tree(ids)?,
+            cards: self
+                .cards
+                .iter()
+                .map(|card| card.to_card(ids))
+                .collect::<Option<Vec<_>>>()?,
         })
     }
 }
@@ -715,8 +833,15 @@ impl Saved {
                             .any(|pane| pane.runs != PaneRuns::UserShell)
                 })
         });
-        let version = if current {
+        let floating = self
+            .windows
+            .iter()
+            .flat_map(|window| &window.tabs)
+            .any(|tab| !tab.cards.is_empty());
+        let version = if floating {
             VERSION
+        } else if current {
+            NUMBERED
         } else if flagged {
             FLAGGED
         } else if asked_for {
@@ -758,7 +883,7 @@ impl Saved {
                     u8::from(window.activity)
                 ));
             }
-            if version >= VERSION {
+            if version >= NUMBERED {
                 out.push(' ');
                 out.push_str(&render_id(window.id));
             }
@@ -771,7 +896,7 @@ impl Saved {
                         u8::from(group.collapsed),
                         group.resident.map_or("-".to_owned(), |tab| tab.to_string()),
                     ));
-                    if version >= VERSION {
+                    if version >= NUMBERED {
                         out.push(' ');
                         out.push_str(&render_id(group.id));
                     }
@@ -793,12 +918,24 @@ impl Saved {
                     out.push_str(&tab.group.map_or("-".to_owned(), |group| group.to_string()));
                 }
                 // The number sits after the group, before the shape, as they do.
-                if version >= VERSION {
+                if version >= NUMBERED {
                     out.push(' ');
                     out.push_str(&render_id(tab.id));
                 }
                 tab.shape.render(&mut out);
                 out.push('\n');
+                // The cards stand between the tab's line and its panes, back to front.
+                if version >= VERSION {
+                    for card in &tab.cards {
+                        let [x, y, width, height] = card.area;
+                        out.push_str(&format!(
+                            "F {x} {y} {width} {height} {}",
+                            u8::from(card.minimized)
+                        ));
+                        card.shape.render(&mut out);
+                        out.push('\n');
+                    }
+                }
                 for pane in &tab.panes {
                     let dir = pane.dir.as_deref().and_then(Path::to_str);
                     out.push_str(&format!(
@@ -809,7 +946,7 @@ impl Saved {
                         render_optional(dir),
                         render_optional(pane.remote_line.as_deref()),
                     ));
-                    if version >= VERSION {
+                    if version >= NUMBERED {
                         out.push(' ');
                         out.push_str(&render_runs(&pane.runs));
                     }
@@ -855,7 +992,7 @@ impl Saved {
         }
         let version = header.next()?.parse::<u32>().ok()?;
         if ![
-            UNNAMED, NAMED, SIDED, GROUPED, KEPT, ASKED, FLAGGED, VERSION,
+            UNNAMED, NAMED, SIDED, GROUPED, KEPT, ASKED, FLAGGED, NUMBERED, VERSION,
         ]
         .contains(&version)
             || header.next().is_some()
@@ -888,6 +1025,14 @@ impl Saved {
                     .last_mut()?
                     .tabs
                     .push(parse_tab(&mut tokens, version)?),
+                // The cards come right after the tab's line, before its first pane.
+                "F" => {
+                    let tab = windows.last_mut()?.tabs.last_mut()?;
+                    if version < VERSION || !tab.panes.is_empty() {
+                        return None;
+                    }
+                    tab.cards.push(parse_card(&mut tokens)?);
+                }
                 "P" => windows
                     .last_mut()?
                     .tabs
@@ -921,7 +1066,14 @@ impl SavedWindow {
 impl SavedTab {
     fn is_consistent(&self) -> bool {
         let count = self.panes.len();
-        self.shape.covers(count)
+        // Every pane is in exactly one tree: the flat area's or a card's.
+        let mut leaves = self.shape.leaves();
+        for card in &self.cards {
+            leaves.extend(card.shape.leaves());
+        }
+        leaves.sort_unstable();
+        leaves.len() == count
+            && leaves.iter().enumerate().all(|(i, leaf)| i == *leaf)
             && self.focused < count
             && self.zoomed.is_none_or(|zoomed| zoomed < count)
     }
@@ -968,7 +1120,7 @@ fn parse_window<'a>(
         (false, false)
     };
     // Versions before 8 have no numbers: the window is given one when it is opened.
-    let id = if version >= VERSION {
+    let id = if version >= NUMBERED {
         parse_id(tokens.next()?)?
     } else {
         None
@@ -998,7 +1150,7 @@ fn parse_group<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> 
         "-" => None,
         index => Some(index.parse().ok()?),
     };
-    let id = if version >= VERSION {
+    let id = if version >= NUMBERED {
         parse_id(tokens.next()?)?
     } else {
         None
@@ -1032,7 +1184,7 @@ fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Op
     } else {
         None
     };
-    let id = if version >= VERSION {
+    let id = if version >= NUMBERED {
         parse_id(tokens.next()?)?
     } else {
         None
@@ -1042,10 +1194,32 @@ fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Op
         id,
         shape,
         panes: Vec::new(),
+        cards: Vec::new(),
         focused,
         zoomed,
         name,
         group,
+    })
+}
+
+/// One `F` line after its letter: four shares, the capsule bit and the tree.
+fn parse_card<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedCard> {
+    let mut area = [0.0; 4];
+    for slot in &mut area {
+        *slot = tokens.next()?.parse().ok()?;
+    }
+    if !valid_area(area) {
+        return None;
+    }
+    let minimized = match tokens.next()? {
+        "0" => false,
+        "1" => true,
+        _ => return None,
+    };
+    Some(SavedCard {
+        area,
+        minimized,
+        shape: Shape::parse(tokens, 0)?,
     })
 }
 
@@ -1055,7 +1229,7 @@ fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> O
     let history = parse_bit(tokens.next()?)?;
     let dir = parse_optional(tokens.next()?)?.map(PathBuf::from);
     let remote_line = parse_optional(tokens.next()?)?;
-    let runs = if version >= VERSION {
+    let runs = if version >= NUMBERED {
         parse_runs(tokens.next()?)?
     } else {
         PaneRuns::UserShell
@@ -1455,6 +1629,7 @@ mod tests {
             id: None,
             shape: Shape::Leaf(0),
             panes: vec![pane(tab)],
+            cards: Vec::new(),
             focused: 0,
             zoomed: None,
             name: None,
@@ -1525,6 +1700,7 @@ mod tests {
                     runs: PaneRuns::UserShell,
                 },
             ],
+            cards: Vec::new(),
             focused: 1,
             zoomed: Some(2),
             name: None,
@@ -1857,6 +2033,238 @@ mod tests {
         r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
         "\n",
     );
+
+    /// [`V8_FIXTURE`]'s session with one more tab in the last window: a flat pane and two
+    /// floating cards — the second a capsule holding two panes. The version says 9.
+    const V9_FIXTURE: &str = concat!(
+        "bateri-session 9\n",
+        "W 120.5 -30 800 600.25 1 1 260.5 1 0 1\n",
+        "G api\\sserver 0 2 1\n",
+        "G ünï 1 - 2\n",
+        "T 0 - - - 1 L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
+        "T 1 2 - 0 2 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - - -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod - +ada@prod:2222 b-0123456789abcdef0123456789abcdef 1 +Claude\s(t4) -p 2222 ada@prod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + - -\n",
+        "T 0 - - 0 3 L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\n",
+        // A tab with no number: the field is there and says so.
+        "T 0 - - 1 - L 0\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - - -\n",
+        "W 120.5 -30 800 600.25 0 0 - 0 1 2\n",
+        "T 0 - - - 7 L 0\n",
+        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
+        "\n",
+        // The cards come right after the tab's line, back to front, before its panes.
+        "T 3 - - - 8 L 0\n",
+        "F 0.225 0.2 0.55 0.6 0 L 1\n",
+        "F 0.1 0.15 0.3 0.4 1 S v 0.5 L 2 L 3\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - - -\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
+    );
+
+    /// [`rich_numbered`] with the tab of [`V9_FIXTURE`] added to its last window.
+    fn rich_floating() -> Saved {
+        let mut saved = rich_numbered();
+        saved.windows[1].tabs.push(SavedTab {
+            id: Some(8),
+            shape: Shape::Leaf(0),
+            panes: vec![
+                pane("11111111-2222-3333-4444-555555555555"),
+                pane("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0"),
+                pane("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"),
+                pane("11111111-2222-3333-4444-555555555555"),
+            ],
+            focused: 3,
+            zoomed: None,
+            name: None,
+            group: None,
+            cards: vec![
+                SavedCard {
+                    area: [0.225, 0.2, 0.55, 0.6],
+                    minimized: false,
+                    shape: Shape::Leaf(1),
+                },
+                SavedCard {
+                    area: [0.1, 0.15, 0.3, 0.4],
+                    minimized: true,
+                    shape: Shape::Split {
+                        axis: Axis::Vertical,
+                        ratio: 0.5,
+                        first: Box::new(Shape::Leaf(2)),
+                        second: Box::new(Shape::Leaf(3)),
+                    },
+                },
+            ],
+        });
+        saved
+    }
+
+    #[test]
+    fn the_floating_version_is_read_byte_for_byte() {
+        assert_eq!(Saved::parse(V9_FIXTURE), Some(rich_floating()));
+        // The panes of every card are the tab's panes: the focus may be in one.
+        let tab = &rich_floating().windows[1].tabs[1];
+        assert_eq!(tab.focused, 3);
+        assert!(tab.is_consistent());
+    }
+
+    #[test]
+    fn a_session_with_a_card_is_written_as_version_nine_and_one_without_is_not() {
+        assert_eq!(rich_floating().render(), V9_FIXTURE);
+        // Nothing floats in the numbered session: version 8, byte for byte as before.
+        assert_eq!(rich_numbered().render(), V8_FIXTURE);
+        // One card anywhere makes the file 9, a session with no numbers in it included.
+        let mut plain = rich();
+        plain.windows[0].tabs[0] = {
+            let mut tab = single("11111111-2222-3333-4444-555555555555");
+            tab.panes.push(pane("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0"));
+            tab.cards = vec![SavedCard {
+                area: [0.0, 0.0, 1.0, 1.0],
+                minimized: false,
+                shape: Shape::Leaf(1),
+            }];
+            tab
+        };
+        assert!(plain.render().starts_with("bateri-session 9\n"));
+        assert_eq!(Saved::parse(&plain.render()), Some(plain));
+    }
+
+    #[test]
+    fn a_card_that_is_not_exactly_understood_makes_the_file_none() {
+        let first = "F 0.225 0.2 0.55 0.6 0 L 1\n";
+        let second = "F 0.1 0.15 0.3 0.4 1 S v 0.5 L 2 L 3\n";
+        let bad = |card: &str| V9_FIXTURE.replacen(first, &format!("{card}\n"), 1);
+        assert!(Saved::parse(&bad("F 0.225 0.2 0.55 0.6 0 L 1")).is_some());
+        for card in [
+            // Not a bit, an area outside the tab, one with no size, one that is not a number.
+            "F 0.225 0.2 0.55 0.6 2 L 1",
+            "F -0.1 0.2 0.55 0.6 0 L 1",
+            "F 0.225 1.5 0.55 0.6 0 L 1",
+            "F 0.225 0.2 0 0.6 0 L 1",
+            "F 0.225 0.2 0.55 1.1 0 L 1",
+            "F 0.225 0.2 0.55 NaN 0 L 1",
+            "F 0.225 0.2 0.55 inf 0 L 1",
+            "F x 0.2 0.55 0.6 0 L 1",
+            // A field short, a shape missing, a leaf twice, one the tab has no pane for.
+            "F 0.225 0.2 0.55 0.6 L 1",
+            "F 0.225 0.2 0.55 0.6 0",
+            "F 0.225 0.2 0.55 0.6 0 L 1 L 1",
+            "F 0.225 0.2 0.55 0.6 0 L 2",
+            "F 0.225 0.2 0.55 0.6 0 L 9",
+            "F 0.225 0.2 0.55 0.6 0 L 0",
+            "F 0.225 0.2 0.55 0.6 0 S v 1 L 1 L 2",
+        ] {
+            assert_eq!(Saved::parse(&bad(card)), None, "{card}");
+        }
+        // A pane that is nobody's: the second card gives up one.
+        let lonely = V9_FIXTURE.replacen(second, "", 1);
+        assert_eq!(Saved::parse(&lonely), None);
+        // A card in a file that is not version 9, one with no tab's line before it, one after a
+        // pane.
+        assert_eq!(
+            Saved::parse(&V9_FIXTURE.replacen("bateri-session 9", "bateri-session 8", 1)),
+            None
+        );
+        let stray = V9_FIXTURE.replacen("T 3 - - - 8 L 0\n", "", 1);
+        assert_eq!(Saved::parse(&stray), None, "a card with no tab");
+        let late = V9_FIXTURE.replacen(second, "", 1).replacen(
+            "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\nP 11111111",
+            "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\nF 0.1 0.15 0.3 0.4 1 S v 0.5 L 2 L 3\nP 11111111",
+            1,
+        );
+        assert_eq!(Saved::parse(&late), None, "a card after a pane");
+    }
+
+    #[test]
+    fn the_cards_come_back_as_layers_with_their_new_identities() {
+        use crate::floating::{Area, Card, Layers};
+        let mut inner = Tree::Leaf(12);
+        assert!(inner.split(12, Axis::Vertical, 13));
+        let layers = Layers {
+            flat: Tree::Leaf(10),
+            cards: vec![
+                Card::of(11, Area::new(0.225, 0.2, 0.55, 0.6)),
+                Card {
+                    tree: inner,
+                    area: Area::new(0.1, 0.15, 0.3, 0.4),
+                    minimized: true,
+                },
+            ],
+        };
+        let order = layers.panes();
+        let (shape, cards) = SavedTab::shapes(&layers, &order).expect("every pane is known");
+        let tab = SavedTab {
+            id: Some(8),
+            shape,
+            panes: order
+                .iter()
+                .map(|_| pane("11111111-2222-3333-4444-555555555555"))
+                .collect(),
+            focused: 3,
+            zoomed: None,
+            name: None,
+            group: None,
+            cards,
+        };
+        assert!(tab.is_consistent());
+        let ids = [20, 21, 22, 23];
+        let back = tab.layers(&ids).expect("the indices are in range");
+        assert_eq!(back.flat, Tree::Leaf(20));
+        assert_eq!(back.cards[0].tree, Tree::Leaf(21));
+        assert_eq!(back.cards[0].area, layers.cards[0].area);
+        assert!(!back.cards[0].minimized && back.cards[1].minimized);
+        assert_eq!(back.cards[1].tree.leaves(), vec![22, 23]);
+        // A pane in no tree, or in two, is not a picture of the tab.
+        assert!(SavedTab::shapes(&layers, &[10, 11, 12]).is_none());
+        let twice = Layers {
+            flat: Tree::Leaf(10),
+            cards: vec![Card::of(10, Area::opening())],
+        };
+        assert!(SavedTab::shapes(&twice, &[10]).is_none());
+    }
+
+    #[test]
+    fn dropping_panes_from_a_tab_with_cards_keeps_the_rest_and_lands_a_card_when_the_flat_area_is_empty()
+     {
+        let tab = rich_floating().windows[1].tabs[1].clone();
+        // Pane 2 (in the second card) goes: the card keeps its other pane, indices count again.
+        let kept = tab
+            .retain(&[true, true, false, true])
+            .expect("panes are left");
+        assert_eq!(kept.panes.len(), 3);
+        assert_eq!(kept.shape, Shape::Leaf(0));
+        assert_eq!(kept.cards[1].shape, Shape::Leaf(2));
+        assert!(kept.cards[1].minimized);
+        assert!(kept.is_consistent());
+        // Pane 1 (the first card's only pane) goes: the card goes with it.
+        let kept = tab
+            .retain(&[true, false, true, true])
+            .expect("panes are left");
+        assert_eq!(kept.cards.len(), 1);
+        assert!(kept.is_consistent());
+        // The flat area's only pane goes: the front card that is shown comes down whole.
+        let kept = tab
+            .retain(&[false, true, true, true])
+            .expect("panes are left");
+        assert_eq!(kept.shape, Shape::Leaf(0));
+        assert_eq!(kept.cards.len(), 1);
+        assert!(kept.cards[0].minimized);
+        assert!(kept.is_consistent());
+        // Only capsules left: the one minimized last comes down.
+        let kept = tab
+            .retain(&[false, false, true, true])
+            .expect("panes are left");
+        assert_eq!(kept.panes.len(), 2);
+        assert!(kept.cards.is_empty());
+        assert!(matches!(kept.shape, Shape::Split { .. }));
+        assert!(tab.retain(&[false; 4]).is_none());
+    }
 
     /// [`rich_flagged`] with the numbers of [`V8_FIXTURE`]: the numbers of a window, a group and a
     /// tab are separate counts, and the fourth tab has none.
@@ -2497,6 +2905,7 @@ mod tests {
                 id: None,
                 shape: Shape::from_tree(tree, &order).expect("every leaf is known"),
                 panes: order.iter().map(|&n| pane(ids[n as usize - 1])).collect(),
+                cards: Vec::new(),
                 focused: 0,
                 zoomed: None,
                 name: None,

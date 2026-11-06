@@ -1938,6 +1938,8 @@ impl TerminalTab {
         let tab = SavedTab {
             shape,
             panes: saved,
+            // No floating pane is saved yet: the view has no card to ask.
+            cards: Vec::new(),
             focused: position(self.focused_pane().id()).unwrap_or(0),
             zoomed: self.ivars().container.zoomed().and_then(position),
             name: self.name(),

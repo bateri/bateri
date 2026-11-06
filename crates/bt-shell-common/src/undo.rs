@@ -22,6 +22,7 @@
 //! Panes and tabs are named by the in-process identities, which mean nothing in another
 //! process; a record never reaches the disk.
 
+use crate::floating::{Card, Layers};
 use crate::groups::{GroupId, Groups};
 use crate::split::Tree;
 use crate::tabs::Tabs;
@@ -32,10 +33,29 @@ pub struct Shape {
     pub tab: u64,
     /// The name the user gave it, if any (a tab that was merged away takes it with it).
     pub name: Option<String>,
-    /// The split tree, ratios and all.
+    /// The flat area's split tree, ratios and all.
     pub tree: Tree,
-    /// The pane the keyboard was in.
+    /// The floating cards, back to front, each with its own tree, share and whether it was a
+    /// capsule: Undo Move of a float or a dock puts them back with the tree.
+    pub cards: Vec<Card>,
+    /// The pane the keyboard was in (a floating pane too).
     pub focus: u64,
+}
+
+impl Shape {
+    /// Every pane of the tab: the flat area's, then the cards' ([`Layers::panes`]). What the
+    /// tab holds, where `tree` is only what the flat area holds.
+    pub fn panes(&self) -> Vec<u64> {
+        self.layers().panes()
+    }
+
+    /// The tab's two layers.
+    pub fn layers(&self) -> Layers {
+        Layers {
+            flat: self.tree.clone(),
+            cards: self.cards.clone(),
+        }
+    }
 }
 
 /// One window's part of a move: its strip and the tabs the move touched.
@@ -114,7 +134,7 @@ impl Record {
             .scenes
             .iter()
             .flat_map(|scene| scene.shapes.iter())
-            .flat_map(|shape| shape.tree.leaves())
+            .flat_map(|shape| shape.panes())
             .collect();
         let mut now: Vec<u64> = Vec::new();
         for scene in &self.scenes {
@@ -132,7 +152,7 @@ impl Record {
             }
             for (tab, panes) in &held.tabs {
                 if let Some(shape) = scene.shape(*tab) {
-                    let own = shape.tree.leaves();
+                    let own = shape.panes();
                     if !panes.iter().any(|pane| own.contains(pane)) {
                         return false;
                     }
@@ -187,6 +207,7 @@ mod tests {
             tab,
             name: None,
             tree,
+            cards: Vec::new(),
             focus,
         }
     }

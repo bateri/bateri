@@ -3706,6 +3706,8 @@ impl AppDelegate {
                 tab,
                 tree,
                 name,
+                // The view has no floating card yet to lay out.
+                cards: _,
             } => {
                 if let Some(window) = self.window(window) {
                     window.reshape_tab(tab, tree, name, &mut hands.panes);

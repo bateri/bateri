@@ -31,6 +31,15 @@
 //! every step is done ([`Plan::undo`]); a move that closes a window leaves none, since a window
 //! is not a picture Undo Move can paint again.
 //!
+//! **Floating panes are the tab's, not the flat area's.** A [`Shape`] carries a tab's floating
+//! cards beside its tree, and "the panes a tab holds" is both ([`Shape::panes`]): a pane that
+//! floats is found, released and counted like any other. Floating and docking are moves
+//! ([`Move::Float`], [`Move::Dock`]) whose picture Undo Move keeps like the rest; the layers
+//! they come to are worked out by the one who asks, from [`crate::floating`] and the geometry
+//! only the shell has (the [`Joins::Planned`] precedent), and checked here to be exactly the
+//! tab's panes. A tab with floating panes is not merged into another tab ([`Move::TabToTab`]):
+//! its cards would have nowhere to be, and a floating pane does not float in another tab.
+//!
 //! **Groups go with the strip.** A window's tabs may be gathered in named groups
 //! ([`crate::groups`]): the picture carries them beside the strip ([`Window::groups`]), a plan
 //! that moves a tab lets them follow the rules there (a group left empty is gone, a tab joining a
@@ -39,6 +48,7 @@
 //! ([`Move::RegroupTabs`], [`Move::MoveGroup`], [`Move::GroupToWindow`],
 //! [`Move::GroupToNewWindow`], [`Move::TabsToNewWindow`]) are planned here like any other.
 
+use crate::floating::{Card, Layers};
 use crate::groups::{GroupId, Groups, Target};
 use crate::split::{Direction, Tree};
 use crate::tabs::{NewTab, Tabs, gap_to_index};
@@ -236,6 +246,12 @@ pub enum Move {
         tabs: Vec<u64>,
         at: Option<(f64, f64)>,
     },
+    /// Flat pane `pane` of its tab floats: the tab's layers become `layers` — the pane in a card
+    /// of its own, in front, the flat area without it. The flat area's only pane does not float.
+    Float { pane: u64, layers: Layers },
+    /// Floating pane `pane` docks: the tab's layers become `layers` — the pane in the flat
+    /// area, its card (if it was the card's last pane) gone.
+    Dock { pane: u64, layers: Layers },
     /// Undo Move: the picture `record` keeps goes back, as one step — what the move made comes
     /// apart (a window it made closes, no program with it), then each tab and strip is put as
     /// it was, the selection and the focus with them. There is no redo.
@@ -285,14 +301,16 @@ pub enum Step {
     /// is thrown away. Its place in the strip stays until a [`Step::PutStrip`] puts the strip
     /// back.
     Dissolve { window: u64, tab: u64 },
-    /// Tab `tab` of window `window` holds exactly the panes of `tree`, laid out as it says, and
-    /// is named `name` again: the panes it lacks come from those the steps before took, and a
+    /// Tab `tab` of window `window` holds exactly the panes of `tree` and of `cards`, laid out as
+    /// they say, and is named `name` again: the panes it lacks come from those the steps before took, and a
     /// tab that is gone is born again under its own id (not in the strip until
     /// [`Step::PutStrip`]). A question a pane brought opens again once its tab is on screen.
     Reshape {
         window: u64,
         tab: u64,
         tree: Tree,
+        /// The floating cards, back to front: the tab's floating panes, laid out as they say.
+        cards: Vec<Card>,
         name: Option<String>,
     },
     /// Window `window`'s strip is `order` again, its selection and its `groups` with it; what was
@@ -413,6 +431,8 @@ pub fn plan(world: &[Window], wanted: Move, host: &dyn Host) -> Result<Plan, Ref
             into,
             target,
         } => tabs_to_window(world, window, &tabs, into, target),
+        Move::Float { pane, layers } => relayer(world, pane, layers, true),
+        Move::Dock { pane, layers } => relayer(world, pane, layers, false),
         Move::Undo { record } => undo(world, &record),
     }
 }
@@ -423,7 +443,7 @@ fn holding_pane(world: &[Window], pane: u64) -> Option<(&Window, &Shape)> {
         window
             .tabs
             .iter()
-            .find(|shape| shape.tree.leaves().contains(&pane))
+            .find(|shape| shape.panes().contains(&pane))
             .map(|shape| (window, shape))
     })
 }
@@ -447,7 +467,7 @@ fn pane_to_tab(
     if source.tab == into {
         return Err(Refusal::Quiet);
     }
-    if source.tree.leaves().len() == 1 {
+    if source.panes().len() == 1 {
         return tab_to_tab(world, source.tab, into, place, host);
     }
     if from.asking || onto.asking {
@@ -508,6 +528,40 @@ fn pane_to_tab(
     })
 }
 
+/// Pane `pane`'s tab takes the layers `layers` — floating (`floats`) or docking: the pane must
+/// be flat before and in a card after, or the other way round, and the panes of `layers` must be
+/// exactly the tab's. One step re-lays the tab; Undo Move puts the picture back.
+fn relayer(world: &[Window], pane: u64, layers: Layers, floats: bool) -> Result<Plan, Refusal> {
+    let (from, source) = holding_pane(world, pane).ok_or(Refusal::Quiet)?;
+    let before = source.layers();
+    if before.floating(pane) == floats || layers.floating(pane) != floats {
+        return Err(Refusal::Quiet);
+    }
+    if from.asking {
+        return Err(Refusal::Beep);
+    }
+    let (mut wanted, mut have) = (layers.panes(), before.panes());
+    wanted.sort_unstable();
+    have.sort_unstable();
+    if wanted != have {
+        return Err(Refusal::Beep);
+    }
+    Ok(Plan {
+        steps: vec![Step::Reshape {
+            window: from.id,
+            tab: source.tab,
+            tree: layers.flat,
+            cards: layers.cards,
+            name: source.name.clone(),
+        }],
+        after: Vec::new(),
+        undo: Some(Record {
+            scenes: vec![from.scene(&[source.tab])],
+            born: Vec::new(),
+        }),
+    })
+}
+
 fn tab_to_tab(
     world: &[Window],
     tab: u64,
@@ -521,6 +575,10 @@ fn tab_to_tab(
     let (from, carried) = holding_tab(world, tab).ok_or(Refusal::Quiet)?;
     let (onto, target) = holding_tab(world, into).ok_or(Refusal::Quiet)?;
     if from.asking || onto.asking {
+        return Err(Refusal::Beep);
+    }
+    // Floating panes do not float in another tab, and the flat area has no room for a card.
+    if !carried.cards.is_empty() {
         return Err(Refusal::Beep);
     }
     let tree = place
@@ -616,7 +674,7 @@ fn pane_to_new_tab(
         .iter()
         .find(|onto| onto.id == window)
         .ok_or(Refusal::Quiet)?;
-    let panes = source.tree.leaves().len();
+    let panes = source.panes().len();
     if from.id == onto.id {
         if panes == 1 {
             // A tab's only pane is the tab: it takes that place in its strip, the way a tab
@@ -790,7 +848,7 @@ fn pane_to_new_window(
     host: &dyn Host,
 ) -> Result<Plan, Refusal> {
     let (from, source) = holding_pane(world, pane).ok_or(Refusal::Quiet)?;
-    if source.tree.leaves().len() == 1 {
+    if source.panes().len() == 1 {
         return tab_to_new_window(world, source.tab, at, host);
     }
     if from.asking {
@@ -1268,7 +1326,7 @@ fn now(window: &Window) -> Now {
         tabs: window
             .tabs
             .iter()
-            .map(|shape| (shape.tab, shape.tree.leaves()))
+            .map(|shape| (shape.tab, shape.panes()))
             .collect(),
     }
 }
@@ -1304,8 +1362,8 @@ fn undo(world: &[Window], record: &Record) -> Result<Plan, Refusal> {
         };
         for now in &window.tabs {
             if let Some(shape) = scene.shape(now.tab) {
-                let own = shape.tree.leaves();
-                for pane in now.tree.leaves() {
+                let own = shape.panes();
+                for pane in now.panes() {
                     if !own.contains(&pane) {
                         steps.push(Step::ReleasePane {
                             window: window.id,
@@ -1341,6 +1399,7 @@ fn undo(world: &[Window], record: &Record) -> Result<Plan, Refusal> {
                 window,
                 tab: shape.tab,
                 tree: shape.tree.clone(),
+                cards: shape.cards.clone(),
                 name: shape.name.clone(),
             });
         }
@@ -1438,6 +1497,7 @@ mod tests {
             tab,
             name: None,
             tree,
+            cards: Vec::new(),
             focus,
         }
     }
@@ -2419,6 +2479,7 @@ mod tests {
                     window: window.id,
                     tab,
                     tree: shape.tree.clone(),
+                    cards: Vec::new(),
                     name: None,
                 },
                 Step::PutStrip {
@@ -3819,5 +3880,294 @@ mod tests {
                 .iter()
                 .any(|step| matches!(step, Step::Regroup { .. }))
         );
+    }
+
+    // ---- floating panes -------------------------------------------------------------------
+
+    use crate::floating::{Area, Card};
+
+    /// Tab 10 of [`world`] with pane 102 floating in a card of its own.
+    fn floated() -> Vec<Window> {
+        let mut world = world();
+        world[0].tabs[0].cards = vec![Card::of(102, Area::new(0.2, 0.2, 0.4, 0.4))];
+        world
+    }
+
+    fn layers_of(world: &[Window], tab: u64) -> Layers {
+        holding_tab(world, tab).unwrap().1.layers()
+    }
+
+    #[test]
+    fn a_pane_in_a_card_is_a_pane_of_its_tab() {
+        let world = floated();
+        let (window, shape) = holding_pane(&world, 102).unwrap();
+        assert_eq!((window.id, shape.tab), (1, 10));
+        assert_eq!(shape.panes(), vec![100, 101, 102]);
+        // The tab's panes are what Undo Move's question counts.
+        assert_eq!(now(&world[0]).tabs[0], (10, vec![100, 101, 102]));
+    }
+
+    #[test]
+    fn a_flat_pane_floats_in_one_step_and_undo_move_puts_the_tab_back() {
+        let world = world();
+        let mut layers = layers_of(&world, 10);
+        assert!(layers.float(100, Area::opening()));
+        let planned = plan(
+            &world,
+            Move::Float {
+                pane: 100,
+                layers: layers.clone(),
+            },
+            &Cramped,
+        )
+        .unwrap();
+        assert_eq!(
+            planned.steps,
+            vec![Step::Reshape {
+                window: 1,
+                tab: 10,
+                tree: Tree::Leaf(101),
+                cards: vec![Card::of(100, Area::opening())],
+                name: None,
+            }]
+        );
+        assert!(planned.after.is_empty());
+        let record = planned.undo.unwrap();
+        assert_eq!(record.scenes[0].shape(10).unwrap().cards, Vec::new());
+        assert_eq!(
+            record.scenes[0].shape(10).unwrap().tree,
+            split(Tree::Leaf(100), Tree::Leaf(101))
+        );
+        // What the shell made of it, and Undo Move's way back: the tab as it was, cards and all.
+        let mut after = world.clone();
+        after[0].tabs[0].tree = layers.flat.clone();
+        after[0].tabs[0].cards = layers.cards.clone();
+        assert!(standing(&after, &record));
+        let back = undoing(&after, record).unwrap();
+        assert!(back.steps.contains(&Step::Reshape {
+            window: 1,
+            tab: 10,
+            tree: split(Tree::Leaf(100), Tree::Leaf(101)),
+            cards: Vec::new(),
+            name: None,
+        }));
+        // Nothing leaves the tab: the panes are where they were.
+        assert!(
+            !back
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::ReleasePane { .. }))
+        );
+    }
+
+    #[test]
+    fn a_dock_is_one_step_and_undo_move_floats_the_pane_again() {
+        let world = floated();
+        let mut layers = layers_of(&world, 10);
+        layers.cards.clear();
+        layers.flat = split(split(Tree::Leaf(100), Tree::Leaf(101)), Tree::Leaf(102));
+        let planned = plan(
+            &world,
+            Move::Dock {
+                pane: 102,
+                layers: layers.clone(),
+            },
+            &Cramped,
+        )
+        .unwrap();
+        assert_eq!(
+            planned.steps,
+            vec![Step::Reshape {
+                window: 1,
+                tab: 10,
+                tree: layers.flat.clone(),
+                cards: Vec::new(),
+                name: None,
+            }]
+        );
+        let record = planned.undo.unwrap();
+        let mut after = world.clone();
+        after[0].tabs[0].tree = layers.flat;
+        after[0].tabs[0].cards = Vec::new();
+        let back = undoing(&after, record).unwrap();
+        assert!(back.steps.contains(&Step::Reshape {
+            window: 1,
+            tab: 10,
+            tree: split(Tree::Leaf(100), Tree::Leaf(101)),
+            cards: vec![Card::of(102, Area::new(0.2, 0.2, 0.4, 0.4))],
+            name: None,
+        }));
+    }
+
+    #[test]
+    fn a_float_or_a_dock_that_is_not_one_is_refused() {
+        let flat = world();
+        let carded = floated();
+        // Floating a pane that already floats, docking one that is flat.
+        let both = layers_of(&carded, 10);
+        assert_eq!(
+            plan(
+                &carded,
+                Move::Float {
+                    pane: 102,
+                    layers: both.clone()
+                },
+                &Cramped
+            ),
+            Err(Refusal::Quiet)
+        );
+        assert_eq!(
+            plan(
+                &flat,
+                Move::Dock {
+                    pane: 100,
+                    layers: layers_of(&flat, 10)
+                },
+                &Cramped
+            ),
+            Err(Refusal::Quiet)
+        );
+        // A pane nowhere.
+        assert_eq!(
+            plan(
+                &flat,
+                Move::Float {
+                    pane: 9,
+                    layers: layers_of(&flat, 10)
+                },
+                &Cramped
+            ),
+            Err(Refusal::Quiet)
+        );
+        // Layers that are not the tab's panes: one lost, one made up.
+        let mut lost = layers_of(&flat, 10);
+        assert!(lost.float(100, Area::opening()));
+        lost.cards.push(Card::of(77, Area::opening()));
+        assert_eq!(
+            plan(
+                &flat,
+                Move::Float {
+                    pane: 100,
+                    layers: lost
+                },
+                &Cramped
+            ),
+            Err(Refusal::Beep)
+        );
+        // A window that holds a question of its own holds the move back.
+        let mut asking = flat.clone();
+        asking[0].asking = true;
+        let mut layers = layers_of(&asking, 10);
+        assert!(layers.float(100, Area::opening()));
+        assert_eq!(
+            plan(&asking, Move::Float { pane: 100, layers }, &Cramped),
+            Err(Refusal::Beep)
+        );
+    }
+
+    #[test]
+    fn a_floating_pane_leaves_its_tab_like_any_other_and_is_never_the_tabs_last() {
+        let world = floated();
+        let host = roomy(&world);
+        let plan = plan(
+            &world,
+            Move::PaneToTab {
+                pane: 102,
+                into: 11,
+                place: beside(),
+            },
+            &host,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.steps[0],
+            Step::ReleasePane {
+                window: 1,
+                tab: 10,
+                pane: 102
+            }
+        );
+        // The flat area's last pane with a card in the tab is not "the tab's only pane": the
+        // pane is released, it is not the whole tab that goes.
+        let mut world = floated();
+        world[0].tabs[0].tree = Tree::Leaf(100);
+        world[0].tabs[0].cards = vec![Card::of(102, Area::opening())];
+        let moved = super::plan(
+            &world,
+            Move::PaneToNewWindow {
+                pane: 100,
+                at: None,
+            },
+            &roomy(&world),
+        )
+        .unwrap();
+        assert!(matches!(
+            moved.steps[0],
+            Step::ReleasePane { pane: 100, .. }
+        ));
+    }
+
+    #[test]
+    fn a_tab_with_floating_panes_is_not_merged_into_another_tab() {
+        let world = floated();
+        assert_eq!(
+            plan(
+                &world,
+                Move::TabToTab {
+                    tab: 10,
+                    into: 11,
+                    place: beside()
+                },
+                &roomy(&world)
+            ),
+            Err(Refusal::Beep)
+        );
+        // The same tab without its card merges as it always did.
+        let flat = super::tests::world();
+        assert!(
+            plan(
+                &flat,
+                Move::TabToTab {
+                    tab: 10,
+                    into: 11,
+                    place: beside()
+                },
+                &roomy(&flat)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn undo_move_of_a_pane_that_crossed_out_of_a_card_names_the_pane_it_took() {
+        // A pane that floated and then left the tab: the picture accounts for it through the
+        // card, so a pane that is missing from the tab makes the record false.
+        let world = floated();
+        let record = plan(
+            &world,
+            Move::PaneToTab {
+                pane: 102,
+                into: 11,
+                place: beside(),
+            },
+            &roomy(&world),
+        )
+        .unwrap()
+        .undo
+        .unwrap();
+        assert_eq!(
+            record.scenes[0].shape(10).unwrap().cards,
+            vec![Card::of(102, Area::new(0.2, 0.2, 0.4, 0.4))]
+        );
+        let mut after = world.clone();
+        after[0].tabs[0].cards = Vec::new();
+        after[0].tabs[1].tree = split(Tree::Leaf(110), Tree::Leaf(102));
+        assert!(standing(&after, &record));
+        let back = undoing(&after, record).unwrap();
+        assert!(back.steps.contains(&Step::ReleasePane {
+            window: 1,
+            tab: 11,
+            pane: 102
+        }));
     }
 }

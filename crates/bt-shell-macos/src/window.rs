@@ -3486,6 +3486,8 @@ impl TerminalWindow {
                     tab: tab.id(),
                     name: tab.name(),
                     tree: tab.container().tree(),
+                    // The view has no floating card yet.
+                    cards: Vec::new(),
                     focus: tab.focused_pane().id(),
                 })
                 .collect(),
