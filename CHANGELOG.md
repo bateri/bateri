@@ -12,6 +12,14 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **A view can show a PDF.** A pane that runs a view written as a script (textpen, for one) can draw a
+  page of a PDF as a picture, at any size and sharp at it, so a PDF on the other end of an ssh
+  session opens in the pane without anything installed there. The reader is part of bateri and reads
+  the pages without running what a PDF holds; the fallback fonts and CMaps it carries are credited in
+  the About window and in `THIRD-PARTY-LICENSES.txt`.
+
 ### Changed
 
 - Building from source now needs Rust 1.99 or later.

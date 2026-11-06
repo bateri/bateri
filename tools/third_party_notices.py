@@ -45,6 +45,13 @@ Choices:
   the font, and the SIL Open Font License text once. The Symbols Nerd Font combines icon
   sets that keep their own licenses; they are listed as its README gives them, and the
   attribution the Creative Commons ones ask for is written out.
+- What the PDF reader (`hayro`, which `pencere-sandbox` brings) carries besides code: the
+  fallback fonts of PDFium (Foxit's, BSD-3-Clause) and the predefined CMaps of Adobe
+  (BSD-3-Clause), each with the license file that lies beside the data in its crate, given
+  as it is. A binary that ships the data asks for the notice, as for any BSD license.
+- Crates under both of two licenses (`BSD-3-Clause AND MIT`, brotli) give the text of each:
+  the `AND` is not the option the MIT list above is made of. A crate under BSD-3-Clause or
+  Apache-2.0 is given under BSD-3-Clause, the text of the crate's own `LICENSE.md`.
 - The color schemes bateri adapts (`tools/import_themes.py`, the one list a
   theme is added to): the collection the values are read from and each
   project the schemes come from, with its copyright line and license — MIT
@@ -73,7 +80,17 @@ TARGET = "aarch64-apple-darwin"
 OWN_LICENSES = {
     "Apache-2.0", "Zlib", "ISC", "BSD-2-Clause", "BSD-3-Clause",
     "Apache-2.0 WITH LLVM-exception",
+    # The PDF reader's stack (hayro and what it brings, 2026-11-06, with the PDF tab): the
+    # color library and the scaler offer BSD-3-Clause beside Apache-2.0 and are given under
+    # BSD-3-Clause; the brotli crate is under both BSD-3-Clause and MIT (each text is given);
+    # the ICU4X crates `yoke` and `zerofrom` are under the Unicode license v3 (permissive,
+    # GPL-3 compatible), whose text and copyright line are the crate's own.
+    "BSD-3-Clause OR Apache-2.0", "BSD-3-Clause AND MIT", "Unicode-3.0",
 }
+# Crates of a repository that publishes one license file for several of them, and puts it
+# in one of them only: the crate whose package carries none is given the sibling's text,
+# of the same repository (the `repository` of both says so, and the check below).
+SIBLING_LICENSE = {"alloc-stdlib": "alloc-no-stdlib"}
 # The license of the WebAssembly runtime's crates (user decision 2026-10-23, with the runtime):
 # Apache-2.0 plus exceptions that only relax it (the object code of a compiled work need not
 # carry the notices), so GPL-3 compatible. Its crates share one text.
@@ -168,6 +185,9 @@ def is_ours(pkg):
 
 def offers_mit(pkg):
     expr = pkg.get("license") or ""
+    if expr == "BSD-3-Clause AND MIT":
+        # Both apply (brotli): MIT is no option to choose, its text is one of those to give.
+        return False
     # `/` is the old SPDX-less "or" (`Apache-2.0/MIT`, rustc-hash 1.1).
     return "MIT" in expr.replace("(", " ").replace(")", " ").replace("/", " ").split()
 
@@ -181,6 +201,17 @@ def own_license(pkg):
         sys.exit(f"{pkg['name']} {pkg['version']}: license '{expr}' neither offers "
                  "MIT nor is on the allow list")
     return expr
+
+
+def sibling_license(pkgs, pkg, sibling):
+    """The license file of `sibling`, a crate of the same repository as `pkg` (which carries
+    none in its package); stops if the repositories are not the same."""
+    found = [p for (name, _), p in pkgs.items() if name == sibling]
+    if len(found) != 1 or found[0].get("repository") != pkg.get("repository"):
+        sys.exit(f"{pkg['name']}: no license file, and {sibling} is not one crate of the "
+                 "same repository to take it from")
+    return read_first(os.path.dirname(found[0]["manifest_path"]),
+                      ("LICENSE", "LICENSE.md", "LICENSE.txt"))
 
 
 def read_first(root, names):
@@ -223,12 +254,27 @@ def main():
         else:
             # Zlib, ISC and BSD: the crate's own license file, which carries its
             # copyright line; the license requires the notice verbatim.
-            text = read_first(root, ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING",
-                                     f"LICENSE-{license.upper()}"))
+            if " AND " in license:
+                # Under both: the file of each (`LICENSE.BSD-3-Clause`, `LICENSE.MIT`).
+                parts = license.split(" AND ")
+                texts = [read_first(root, (f"LICENSE.{part}", f"LICENSE-{part}")) for part in parts]
+                if None in texts:
+                    sys.exit(f"{name} {version}: a license file of {license} not found")
+                text = "\n\n".join(texts)
+                words = f"the {' and the '.join(parts)} Licenses"
+            else:
+                if license == "BSD-3-Clause OR Apache-2.0":
+                    words, license = "the BSD-3-Clause License (it offers Apache-2.0 too)", "BSD-3-Clause"
+                else:
+                    words = f"the {license} License"
+                text = read_first(root, ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING",
+                                         f"LICENSE-{license.upper()}"))
+                if text is None and name in SIBLING_LICENSE:
+                    text = sibling_license(pkgs, pkg, SIBLING_LICENSE[name])
             if text is None:
                 sys.exit(f"{name} {version}: {license} license file not found")
             out += [RULE, name, pkg.get("repository") or "",
-                    f"Licensed under the {license} License; full text below.",
+                    f"Licensed under {words}; full text below.",
                     RULE, "", text, "", ""]
 
     if with_exceptions:
@@ -256,6 +302,7 @@ def main():
             "full text below.", RULE, "", sparkle, ""]
 
     out += module_notices(pkgs)
+    out += pdf_data_notices(pkgs)
 
     out += theme_notices("Version 2.0" in "\n".join(out))
     out += font_notices()
@@ -303,6 +350,36 @@ def module_notices(pkgs):
         "of the Apache License is given above, with the exceptions) and the licenses of the",
         "LLVM Project below.",
         RULE, "", licensed("llvm.txt"), "",
+    ]
+
+
+def pdf_data_notices(pkgs):
+    """The data the PDF reader carries in the binary: the fonts it falls back on for a PDF
+    that does not embed the fourteen standard ones (Foxit's, from PDFium) and the CMaps it
+    reads Chinese, Japanese and Korean text by (Adobe's). Each text is the file beside the
+    data in the crate that holds it, as it is."""
+    def text_of(crate, relative):
+        found = [p for (name, _), p in pkgs.items() if name == crate]
+        if len(found) != 1:
+            sys.exit(f"{crate}: expected one version in the build, found {len(found)}")
+        path = os.path.join(os.path.dirname(found[0]["manifest_path"]), relative)
+        if not os.path.isfile(path):
+            sys.exit(f"{crate} carries no {relative}")
+        with open(path, encoding="utf-8") as f:
+            return f.read().rstrip()
+
+    return [
+        RULE, "Foxit fonts (from PDFium), in hayro-font",
+        "https://github.com/LaurenzV/hayro",
+        "The fonts a PDF is drawn in where it does not carry the standard ones (Helvetica,",
+        "Times, Courier, Symbol, ZapfDingbats): BSD-3-Clause; full text below, as the crate",
+        "has it.",
+        RULE, "", text_of("hayro-font", "assets/LICENSE_FOXIT"), "",
+        RULE, "Predefined CMaps of Adobe, in hayro-cmap",
+        "https://github.com/LaurenzV/hayro",
+        "The tables that read the text of a PDF set in a CJK or other composite font: BSD-3-Clause;",
+        "full text below, as the crate has it.",
+        RULE, "", text_of("hayro-cmap", "assets/LICENSE.txt"), "",
     ]
 
 

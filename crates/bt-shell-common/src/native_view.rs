@@ -432,8 +432,8 @@ fn to_list(
             // None yet — being decoded, or an SVG not yet drawn at its first size — is a box with
             // nothing in it until the decoder wakes the pane; one it refused stays so.
             Paint::Image(picture) => {
-                let Some(bitmap) =
-                    images.and_then(|images| images.bitmap(&picture.src, picture.full()))
+                let Some(bitmap) = images
+                    .and_then(|images| images.bitmap(&picture.src, picture.page, picture.full()))
                 else {
                     continue;
                 };
@@ -958,6 +958,7 @@ mod tests {
     fn a_picture_that_spins_is_drawn_turned_about_its_middle_and_cut_where_it_was() {
         let picture = |turn: f32| Picture {
             src: "spinner.png".to_owned(),
+            page: 1,
             rect: Rect::new(10.0, 20.0, 24.0, 8.0),
             crop: Rect::new(0.0, 0.0, 1.0, 1.0),
             tint: None,
