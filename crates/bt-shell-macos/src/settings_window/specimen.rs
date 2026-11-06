@@ -43,13 +43,13 @@ use super::pictures::{PICTURE_HEIGHT, PICTURE_WIDTH, Palette, Picture};
 use super::tabs_specimen::{self, TabsView};
 use super::{Category, DETAIL_WIDTH, PAGE_MARGIN};
 use crate::snapshot;
+use crate::tab_bar::Tint;
 
-/// The width of a page's content, in points: what an example is as wide as.
+/// The width of a page's content, in points, as the window is designed: what an example is as
+/// wide as until the window has laid out and says how wide its groups really are.
 const WIDTH: f64 = DETAIL_WIDTH - 2.0 * PAGE_MARGIN;
 /// The room between the two cards of a pair.
 const GAP: f64 = 12.0;
-/// The terminal examples' corner.
-const CORNER: f64 = 8.0;
 
 /// Which example.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -635,8 +635,9 @@ impl Card {
         image.setImageScaling(NSImageScaling::ScaleProportionallyDown);
         image.setWantsLayer(true);
         if let Some(layer) = image.layer() {
-            layer.setCornerRadius(CORNER);
+            layer.setCornerRadius(super::GROUP_RADIUS);
             layer.setMasksToBounds(true);
+            layer.setBorderWidth(0.5);
         }
         let label = |mtm: MainThreadMarker| {
             let label = super::text_label(&NSString::from_str(""), mtm);
@@ -645,26 +646,33 @@ impl Card {
             label
         };
         let (caption, tag) = (label(mtm), label(mtm));
+        // "In use now" is the accent beside the name: the one of a pair the window is in.
+        tag.setTextColor(Some(&look::ink(Ink::Accent)));
+        // The name and its tag together, centred under the card, every card alike.
         let line = super::stack(
             mtm,
             &[&caption, &tag],
             NSUserInterfaceLayoutOrientation::Horizontal,
-            8.0,
+            6.0,
             NSLayoutAttribute::FirstBaseline,
         );
-        line.setDistribution(NSStackViewDistribution::EqualSpacing);
+        // As wide as what it shows, or a line with its tag hidden spreads to the card's width and
+        // its name stands at the left.
+        line.setHuggingPriority_forOrientation(
+            objc2_app_kit::NSLayoutPriorityRequired - 1.0,
+            objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
+        );
         let column = super::stack(
             mtm,
             &[&image, &line],
             NSUserInterfaceLayoutOrientation::Vertical,
             6.0,
-            NSLayoutAttribute::Leading,
+            NSLayoutAttribute::CenterX,
         );
-        for view in [&image as &NSView, &line] {
-            view.widthAnchor()
-                .constraintEqualToAnchor(&column.widthAnchor())
-                .setActive(true);
-        }
+        image
+            .widthAnchor()
+            .constraintEqualToAnchor(&column.widthAnchor())
+            .setActive(true);
         Card {
             column,
             image,
@@ -773,8 +781,42 @@ impl Specimens {
             .map(|specimen| &*specimen.view)
     }
 
-    /// Draws `kind`'s example from `inputs` at `scale` pixels to the point.
-    pub(super) fn show(&self, kind: Kind, inputs: &Inputs, scale: f64) {
+    /// Every example's view, to be placed where the window shows them.
+    pub(super) fn views(&self) -> impl Iterator<Item = &NSView> {
+        self.all.iter().map(|specimen| &*specimen.view)
+    }
+
+    /// For each card `kind` shows: how wide its picture is and how wide the place it stands in,
+    /// in points. Equal when the picture was drawn for the page as it is laid out.
+    pub(super) fn card_widths(&self, kind: Kind) -> Vec<(f64, f64)> {
+        let Some(Body::Cards(cards)) = self
+            .all
+            .iter()
+            .find(|specimen| specimen.kind == kind)
+            .map(|specimen| &specimen.body)
+        else {
+            return Vec::new();
+        };
+        cards
+            .iter()
+            .filter(|card| !card.column.isHidden())
+            .filter_map(|card| {
+                let image = card.image.image()?;
+                Some((image.size().width, card.image.frame().size.width))
+            })
+            .collect()
+    }
+
+    /// Hides every example: the open page shows its own again ([`Specimens::show`]).
+    pub(super) fn hide_all(&self) {
+        for specimen in &self.all {
+            specimen.view.setHidden(true);
+        }
+    }
+
+    /// Draws `kind`'s example from `inputs` at `scale` pixels to the point, `width` points wide
+    /// (the page's groups'; none yet, the window's design width).
+    pub(super) fn show(&self, kind: Kind, inputs: &Inputs, scale: f64, width: f64) {
         // One page shows at a time, and a change starts a blink lit, as typing does in a pane.
         self.stop_blink();
         let Some(specimen) = self.all.iter().find(|specimen| specimen.kind == kind) else {
@@ -782,6 +824,7 @@ impl Specimens {
         };
         match &specimen.body {
             Body::Tabs(view) => {
+                specimen.view.setHidden(false);
                 let settings = &inputs.settings;
                 view.set_look(tabs_specimen::Look {
                     palette: Palette::of(&inputs.on_screen),
@@ -805,17 +848,23 @@ impl Specimens {
                     return;
                 };
                 specimen.view.setHidden(faces.is_empty());
+                let width = if width >= 1.0 { width } else { WIDTH };
                 let width_pt = if faces.len() > 1 {
-                    (WIDTH - GAP) / 2.0
+                    (width - GAP) / 2.0
                 } else {
-                    WIDTH
+                    width
                 };
+                // The frame round a card is the window's, the line round each group.
+                let frame = Tint::of(look::palette().separator, 1.0).color().CGColor();
                 for (i, card) in cards.iter().enumerate() {
                     let Some(face) = faces.get(i) else {
                         card.column.setHidden(true);
                         continue;
                     };
                     card.column.setHidden(false);
+                    if let Some(layer) = card.image.layer() {
+                        layer.setBorderColor(Some(&frame));
+                    }
                     card.name(face);
                     paint(stage, card, kind, face, &inputs.settings, width_pt, scale);
                     if blinks(kind, face, inputs)

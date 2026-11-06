@@ -167,6 +167,69 @@ impl SettingsWindow {
                 }
             }
 
+            // The page's example: as wide as its groups, its cards filled by their pictures, and
+            // still where it was with the rows scrolled to their end.
+            if let Some(kind) = specimen::Kind::of(category)
+                && let Some(specimens) = ivars.specimens.get()
+                && let Some(example) = specimens.view(kind)
+                && !example.isHidden()
+            {
+                let boxed = controls
+                    .groups
+                    .iter()
+                    .filter(|group| specs.iter().any(|spec| std::ptr::eq(spec, group.spec)))
+                    .find(|group| !group.view.isHidden())
+                    .and_then(|group| group.view.arrangedSubviews().lastObject());
+                let shown = in_window(example);
+                if let Some(boxed) = boxed {
+                    let groups = in_window(&boxed);
+                    let left = (shown.origin.x - groups.origin.x).abs();
+                    let right =
+                        (shown.origin.x + shown.size.width - groups.origin.x - groups.size.width)
+                            .abs();
+                    if left > SLACK || right > SLACK {
+                        say(format!(
+                            "the example ({:.1}–{:.1}) is not as wide as the groups ({:.1}–{:.1})",
+                            shown.origin.x,
+                            shown.origin.x + shown.size.width,
+                            groups.origin.x,
+                            groups.origin.x + groups.size.width
+                        ));
+                    }
+                }
+                for (picture, place) in specimens.card_widths(kind) {
+                    if (picture - place).abs() > SLACK {
+                        say(format!(
+                            "a card's picture is {picture:.1} wide in a place {place:.1} wide"
+                        ));
+                    }
+                }
+                let clip = scroll.contentView();
+                let end = (document.frame().size.height - clip.bounds().size.height).max(0.0);
+                clip.scrollToPoint(objc2_foundation::NSPoint::new(0.0, end));
+                scroll.reflectScrolledClipView(&clip);
+                content.layoutSubtreeIfNeeded();
+                let scrolled = in_window(example);
+                if let Some(dir) = shots {
+                    let slug = page.to_lowercase().replace(' ', "-");
+                    picture(&content, &dir.join(format!("{slug}-scrolled-window.png")));
+                }
+                if (scrolled.origin.y - shown.origin.y).abs() > SLACK {
+                    say(format!(
+                        "the example moved from {:.1} to {:.1} with the rows scrolled",
+                        shown.origin.y, scrolled.origin.y
+                    ));
+                }
+                if end > SLACK
+                    && let Some(sticky) = ivars.sticky.get()
+                    && sticky.rule.isHidden()
+                {
+                    say("no line under the example with rows scrolled under it".to_owned());
+                }
+                clip.scrollToPoint(objc2_foundation::NSPoint::new(0.0, 0.0));
+                scroll.reflectScrolledClipView(&clip);
+            }
+
             if let Some(dir) = shots {
                 let slug = page.to_lowercase().replace(' ', "-");
                 picture(&document, &dir.join(format!("{slug}.png")));
@@ -284,11 +347,11 @@ impl SettingsWindow {
     /// left open; a machine with no GPU has no example to follow.
     fn drag_problems(&self, shots: Option<&Path>, problems: &mut Vec<String>) {
         let ivars = self.ivars();
-        let (Some(specimens), Some(scroll)) = (ivars.specimens.get(), ivars.pane_scroll.get())
-        else {
+        let Some(specimens) = ivars.specimens.get() else {
             return;
         };
-        let Some(document) = scroll.documentView() else {
+        // The window, not the pages' document: the example stands above it.
+        let Some(document) = ivars.window.get().and_then(|window| window.contentView()) else {
             return;
         };
         if specimens
@@ -335,11 +398,7 @@ impl SettingsWindow {
         problems: &mut Vec<String>,
     ) {
         let ivars = self.ivars();
-        let (Some(sidebar), Some(specimens), Some(scroll)) = (
-            ivars.sidebar.get(),
-            ivars.specimens.get(),
-            ivars.pane_scroll.get(),
-        ) else {
+        let (Some(sidebar), Some(specimens)) = (ivars.sidebar.get(), ivars.specimens.get()) else {
             return;
         };
         let settings = Settings {
@@ -370,8 +429,11 @@ impl SettingsWindow {
                 half * 1.5
             ));
         }
-        if let (Some(dir), Some(document)) = (shots, scroll.documentView()) {
-            picture(&document, &dir.join("cursor-blink-dark.png"));
+        if let (Some(dir), Some(content)) = (
+            shots,
+            ivars.window.get().and_then(|window| window.contentView()),
+        ) {
+            picture(&content, &dir.join("cursor-blink-dark.png"));
         }
         self.cancel_blink();
         specimens.stop_blink();
@@ -386,6 +448,11 @@ fn column(table: &NSView) -> Retained<NSView> {
         // SAFETY: the window is built and open for the check; its views are alive.
         .and_then(|scroll| unsafe { scroll.superview() })
         .unwrap_or_else(|| table.retain())
+}
+
+/// `view`'s frame in the window.
+fn in_window(view: &NSView) -> NSRect {
+    view.convertRect_toView(view.bounds(), None)
 }
 
 /// `view`'s frame in the pages' document (flipped: y grows downwards).

@@ -60,8 +60,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
-    NSInteger, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
-    NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
+    NSInteger, NSNotification, NSNotificationCenter, NSObject, NSObjectNSDelayedPerforming,
+    NSObjectProtocol, NSPoint, NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
 };
 
 use crate::app;
@@ -1585,6 +1585,34 @@ struct Slide {
     value: Retained<NSTextField>,
 }
 
+/// The place above the pages' scroll where the open page's example stands: the stack of the
+/// examples (one shown at most), the room between it and the rows, and the hairline the rows
+/// scroll under.
+struct Sticky {
+    stack: Retained<NSStackView>,
+    gap: Retained<NSLayoutConstraint>,
+    rule: Retained<NSBox>,
+}
+
+impl Sticky {
+    /// The room under a shown example, before the first group.
+    const GAP: f64 = 14.0;
+
+    fn shows(&self) -> bool {
+        self.stack
+            .arrangedSubviews()
+            .iter()
+            .any(|view| !view.isHidden())
+    }
+
+    /// Fits the room to what shows, and shows the hairline when rows have scrolled under it.
+    fn settle(&self, scrolled: bool) {
+        let shows = self.shows();
+        self.gap.setConstant(if shows { Self::GAP } else { 0.0 });
+        self.rule.setHidden(!(shows && scrolled));
+    }
+}
+
 /// The window's controls — what `refresh` writes and the actions read.
 struct Controls {
     confirm_close: Retained<NSPopUpButton>,
@@ -1801,6 +1829,8 @@ pub(crate) struct Ivars {
     /// Whether the window has been shown once (the gate of centring).
     shown_once: Cell<bool>,
     pane_tops: OnceCell<PaneTops>,
+    /// Where the open page's example stands, above the pages' scroll.
+    sticky: OnceCell<Sticky>,
     /// The scroll view the panes sit in; scrolled back to the top when the
     /// category changes.
     pane_scroll: OnceCell<Retained<NSScrollView>>,
@@ -2210,6 +2240,14 @@ define_class!(
             }
         }
 
+        /// The pages scrolled: the hairline under the example shows while rows are under it.
+        #[unsafe(method(pagesScrolled:))]
+        fn pages_scrolled_note(&self, _note: Option<&NSNotification>) {
+            if let Some(sticky) = self.ivars().sticky.get() {
+                sticky.settle(self.pages_scrolled());
+            }
+        }
+
         /// The example's blinking caret turns to its other half, and the next turn is asked for
         /// unless the blink has stopped.
         #[unsafe(method(blinkSpecimen:))]
@@ -2355,6 +2393,7 @@ impl SettingsWindow {
             banner: OnceCell::new(),
             shown_once: Cell::new(false),
             pane_tops: OnceCell::new(),
+            sticky: OnceCell::new(),
             pane_scroll: OnceCell::new(),
             pane_bottoms: OnceCell::new(),
             side_open: OnceCell::new(),
@@ -3044,19 +3083,23 @@ impl SettingsWindow {
             return;
         };
         // A blink belongs to the Cursor page as it was drawn: whatever is shown now starts it
-        // again or leaves it stopped.
+        // again or leaves it stopped. Only the open page's example shows.
         self.cancel_blink();
         specimens.stop_blink();
-        let Some(SideItem::Page(category)) = SideItem::at(sidebar.selectedRow()) else {
-            return;
+        specimens.hide_all();
+        let settle = || {
+            if let Some(sticky) = self.ivars().sticky.get() {
+                sticky.settle(self.pages_scrolled());
+            }
         };
-        let Some(kind) = specimen::Kind::of(category) else {
-            return;
+        let shown = match SideItem::at(sidebar.selectedRow()) {
+            Some(SideItem::Page(category)) if !self.searching() => {
+                specimen::Kind::of(category).zip(inputs)
+            }
+            _ => None,
         };
-        if self.searching() {
-            return;
-        }
-        let Some(inputs) = inputs else {
+        let Some((kind, inputs)) = shown else {
+            settle();
             return;
         };
         let scale = self
@@ -3064,7 +3107,20 @@ impl SettingsWindow {
             .window
             .get()
             .map_or(2.0, |window| window.backingScaleFactor());
-        specimens.show(kind, inputs, scale);
+        // As wide as the page's groups: the window lays out first, so the width is the one shown.
+        let width = self.ivars().sticky.get().map_or(0.0, |sticky| {
+            if let Some(content) = self
+                .ivars()
+                .window
+                .get()
+                .and_then(|window| window.contentView())
+            {
+                content.layoutSubtreeIfNeeded();
+            }
+            sticky.stack.frame().size.width
+        });
+        specimens.show(kind, inputs, scale, width);
+        settle();
         // The cursor rows' options are the renderer's caret too, drawn with the page like its
         // example.
         if kind == specimen::Kind::Cursor
@@ -3077,6 +3133,14 @@ impl SettingsWindow {
         if let Some(half) = specimens.blink_half() {
             self.blink_after(half);
         }
+    }
+
+    /// Whether the pages are scrolled off their top: rows are under the example.
+    fn pages_scrolled(&self) -> bool {
+        self.ivars()
+            .pane_scroll
+            .get()
+            .is_some_and(|scroll| scroll.contentView().bounds().origin.y > 0.5)
     }
 
     /// Turns the example's blinking caret after `delay` seconds, in every run-loop mode: a
@@ -3515,17 +3579,77 @@ impl SettingsWindow {
                     .constraintEqualToAnchor_constant(&pane.bottomAnchor(), PAGE_BOTTOM),
             );
         }
+        // The open page's example stands still above its rows: the rows scroll under it, so a
+        // change made far down the page shows in the example as it is made. It is as wide as the
+        // page's groups, and a hairline under it marks the edge the rows scroll under.
+        let sticky = stack(
+            mtm,
+            &[],
+            NSUserInterfaceLayoutOrientation::Vertical,
+            0.0,
+            NSLayoutAttribute::Leading,
+        );
+        add_pinned(&detail, &sticky);
+        if let Some(specimens) = self.ivars().specimens.get() {
+            for view in specimens.views() {
+                sticky.addArrangedSubview(view);
+                view.widthAnchor()
+                    .constraintEqualToAnchor(&sticky.widthAnchor())
+                    .setActive(true);
+                view.setHidden(true);
+            }
+        }
+        let sticky_gap = scroll
+            .topAnchor()
+            .constraintEqualToAnchor_constant(&sticky.bottomAnchor(), 0.0);
+        activate(&[
+            sticky
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), PAGE_MARGIN),
+            sticky
+                .trailingAnchor()
+                .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -PAGE_MARGIN),
+            sticky_gap.clone(),
+        ]);
+        let rule = surface(mtm, Ink::Line);
+        add_pinned(&detail, &rule);
+        activate(&[
+            rule.topAnchor()
+                .constraintEqualToAnchor(&scroll.topAnchor()),
+            rule.leadingAnchor()
+                .constraintEqualToAnchor(&detail.leadingAnchor()),
+            rule.trailingAnchor()
+                .constraintEqualToAnchor(&detail.trailingAnchor()),
+            rule.heightAnchor().constraintEqualToConstant(1.0),
+        ]);
+        rule.setHidden(true);
+        clip.setPostsBoundsChangedNotifications(true);
+        // SAFETY: the observer is this object, which lives for the whole process, and the
+        // selector is its own `pagesScrolled:`, taking the notification.
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                self.as_ref(),
+                sel!(pagesScrolled:),
+                Some(objc2_app_kit::NSViewBoundsDidChangeNotification),
+                Some(&clip),
+            );
+        }
         let under_header = vec![
-            scroll
+            sticky
                 .topAnchor()
                 .constraintEqualToAnchor_constant(&detail.topAnchor(), HEAD_HEIGHT),
         ];
         let under_banner = vec![
-            scroll
+            sticky
                 .topAnchor()
                 .constraintEqualToAnchor_constant(&banner.frame.bottomAnchor(), 8.0),
         ];
         activate(&under_header);
+        let _ = self.ivars().sticky.set(Sticky {
+            stack: sticky,
+            gap: sticky_gap,
+            rule,
+        });
         banner.frame.setHidden(true);
 
         // Keyboard is a table of its own, in the place the pages' scroll view has.
@@ -3742,13 +3866,8 @@ impl SettingsWindow {
                 GROUP_SPACING,
                 NSLayoutAttribute::Leading,
             );
-            // The page's live example, above its groups.
-            if let Some(view) = specimen::Kind::of(category).and_then(|kind| specimens.view(kind)) {
-                page.addArrangedSubview(view);
-                view.widthAnchor()
-                    .constraintEqualToAnchor(&page.widthAnchor())
-                    .setActive(true);
-            }
+            // The page's live example stands above the page, out of its scroll
+            // ([`SettingsWindow::build_detail`]).
             for spec in pages::groups(category) {
                 let first = rows.len();
                 let (boxed, inner) = group_box(mtm);
