@@ -69,7 +69,7 @@ impl Ink {
 
 /// Of the theme's background and foreground, the one that stands out more on the accent: a mark
 /// on the open page's tile.
-fn on_accent(palette: &Palette) -> u32 {
+pub(super) fn on_accent(palette: &Palette) -> u32 {
     let against = |rgb| bt_core::contrast_ratio(rgb, palette.accent);
     if against(palette.background) >= against(palette.foreground) {
         palette.background
@@ -79,7 +79,7 @@ fn on_accent(palette: &Palette) -> u32 {
 }
 
 /// The palette the colours read now: the last one set, else the default theme's.
-fn current() -> Palette {
+pub(super) fn palette() -> Palette {
     let palette = PALETTE.lock().ok().and_then(|palette| *palette);
     palette.unwrap_or_else(|| Palette::of(&Theme::BATERI))
 }
@@ -122,7 +122,7 @@ pub(super) fn faded(ink: Ink, alpha: f64) -> Retained<NSColor> {
         return color;
     }
     let provider = RcBlock::new(move |_: NonNull<NSAppearance>| -> NonNull<NSColor> {
-        let color = Tint::of(ink.rgb(&current()), alpha).color();
+        let color = Tint::of(ink.rgb(&palette()), alpha).color();
         // SAFETY: an autoreleased object's pointer is the one the `Retained` held, never null;
         // the block's caller takes it at +0, inside the pool it draws in.
         unsafe { NonNull::new_unchecked(Retained::autorelease_ptr(color)) }
@@ -174,6 +174,6 @@ mod tests {
         set(dark);
         assert!(!set(dark));
         assert!(set(other));
-        assert_eq!(current(), other);
+        assert_eq!(palette(), other);
     }
 }

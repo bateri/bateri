@@ -85,6 +85,8 @@ pub(super) struct Palette {
     /// The file's warnings: a value not taken, a file that cannot be read.
     pub(super) warning: u32,
     pub(super) error: u32,
+    /// The theme is a dark one ([`Theme::is_dark`]).
+    pub(super) dark: bool,
 }
 
 fn pack(rgb: [u8; 3]) -> u32 {
@@ -111,6 +113,7 @@ impl Palette {
             raised: pack([byte(raised[0]), byte(raised[1]), byte(raised[2])]),
             warning: theme.warning,
             error: theme.error,
+            dark: theme.is_dark(),
         }
     }
 }

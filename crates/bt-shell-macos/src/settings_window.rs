@@ -47,17 +47,16 @@ use objc2::{
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSAppearanceCustomization, NSApplication,
     NSBackingStoreType, NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl,
-    NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType,
-    NSFont, NSFontAttributeName, NSFontDescriptor, NSImage, NSImageScaling,
-    NSImageSymbolConfiguration, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
-    NSLineBreakMode, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
-    NSScrollView, NSSearchField, NSSegmentSwitchTracking, NSSegmentedControl, NSSlider,
-    NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch, NSTableColumn,
-    NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
-    NSTableViewStyle, NSTextField, NSTitlePosition, NSUserInterfaceItemIdentification,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowDelegate,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
-    NSWorkspace,
+    NSControlTextEditingDelegate, NSEventType, NSFont, NSFontAttributeName, NSFontDescriptor,
+    NSImage, NSImageScaling, NSImageSymbolConfiguration, NSImageView, NSLayoutAttribute,
+    NSLayoutConstraint, NSLineBreakMode, NSMenuItem, NSModalResponse, NSModalResponseOK,
+    NSOpenPanel, NSPopUpButton, NSScrollView, NSSearchField, NSSegmentSwitchTracking,
+    NSSegmentedControl, NSSlider, NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper,
+    NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTitlePosition,
+    NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
+    NSWindow, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
@@ -74,6 +73,7 @@ use crate::upload::format_bytes;
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
 use look::Ink;
 use pictures::{Palette, Picture, PictureChoice};
+use switch::ThemeSwitch;
 
 mod font_options;
 mod keyboard;
@@ -84,6 +84,7 @@ mod pictures;
 mod recorder;
 mod search;
 mod specimen;
+mod switch;
 mod tabs_specimen;
 
 /// Whether the keyboard is in a field of Settings ▸ Keyboard that listens for a shortcut: then
@@ -1589,7 +1590,7 @@ struct Controls {
     confirm_close: Retained<NSPopUpButton>,
     restore_windows: Retained<NSPopUpButton>,
     keep_running: Retained<NSPopUpButton>,
-    clipboard: Retained<NSSwitch>,
+    clipboard: Retained<ThemeSwitch>,
     scrollback: Number,
     shell_integration: Retained<NSPopUpButton>,
     command_level: Retained<NSPopUpButton>,
@@ -1606,8 +1607,8 @@ struct Controls {
     content_edge: Retained<PictureChoice>,
     split_style: Retained<PictureChoice>,
     tab_details: Retained<NSSegmentedControl>,
-    tab_icons: Retained<NSSwitch>,
-    font_smoothing: Retained<NSSwitch>,
+    tab_icons: Retained<ThemeSwitch>,
+    font_smoothing: Retained<ThemeSwitch>,
     tab_icon_colors: Retained<NSSegmentedControl>,
     tab_running: Retained<PictureChoice>,
     tab_position: Retained<PictureChoice>,
@@ -1619,14 +1620,14 @@ struct Controls {
     glow: Slide,
     unfocused: Retained<PictureChoice>,
     cursor_motion: Retained<NSSegmentedControl>,
-    smooth_scroll: Retained<NSSwitch>,
-    scroll_bounce: Retained<NSSwitch>,
+    smooth_scroll: Retained<ThemeSwitch>,
+    scroll_bounce: Retained<ThemeSwitch>,
     reduce_motion: Retained<NSPopUpButton>,
     keypress: Retained<NSPopUpButton>,
     erase: Retained<NSPopUpButton>,
     dock_arrival: Retained<NSPopUpButton>,
     preview_max_size: Retained<NSPopUpButton>,
-    preview_read_only: Retained<NSSwitch>,
+    preview_read_only: Retained<ThemeSwitch>,
     preview_dir: Folder,
     /// The preview folder's Show in Finder, beside its path; it writes nothing.
     show_previews: Retained<NSButton>,
@@ -1638,16 +1639,16 @@ struct Controls {
     clear: Retained<NSButton>,
     download_dir: Folder,
     download_conflict: Retained<NSPopUpButton>,
-    download_notify: Retained<NSSwitch>,
+    download_notify: Retained<ThemeSwitch>,
     remote_stats: Retained<NSPopUpButton>,
     stats_interval: Number,
-    remote_integration: Retained<NSSwitch>,
-    ports: Retained<NSSwitch>,
-    python_env: Retained<NSSwitch>,
-    node_version: Retained<NSSwitch>,
-    dim_splits: Retained<NSSwitch>,
-    focus_frame: Retained<NSSwitch>,
-    resize_in_steps: Retained<NSSwitch>,
+    remote_integration: Retained<ThemeSwitch>,
+    ports: Retained<ThemeSwitch>,
+    python_env: Retained<ThemeSwitch>,
+    node_version: Retained<ThemeSwitch>,
+    dim_splits: Retained<ThemeSwitch>,
+    focus_frame: Retained<ThemeSwitch>,
+    resize_in_steps: Retained<ThemeSwitch>,
     /// The pages' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
@@ -2006,10 +2007,10 @@ define_class!(
         /// list the last refresh showed.
         #[unsafe(method(fontOptionChanged:))]
         fn font_option_changed(&self, sender: Option<&AnyObject>) {
-            let Some(switch) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) else {
+            let Some(switch) = switch::of(sender) else {
                 return;
             };
-            let on = switch.state() == NSControlStateValueOn;
+            let on = switch.is_on();
             let option = usize::try_from(switch.tag())
                 .ok()
                 .and_then(|at| self.ivars().font_options.borrow().get(at).cloned());
@@ -2060,10 +2061,10 @@ define_class!(
 
         #[unsafe(method(switchChanged:))]
         fn switch_changed(&self, sender: Option<&AnyObject>) {
-            let Some(switch) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) else {
+            let Some(switch) = switch::of(sender) else {
                 return;
             };
-            let on = switch.state() == NSControlStateValueOn;
+            let on = switch.is_on();
             let edit = match Key::from_tag(switch.tag()) {
                 Some(Key::Clipboard) => Some(SettingsEdit::Osc52(if on {
                     Osc52::Copy
@@ -3206,8 +3207,8 @@ impl SettingsWindow {
         Folder { path, change }
     }
 
-    fn switch(&self, key: Key) -> Retained<NSSwitch> {
-        let switch = NSSwitch::new(self.mtm());
+    fn switch(&self, key: Key) -> Retained<ThemeSwitch> {
+        let switch = ThemeSwitch::new(self.mtm());
         self.wire(&switch, key, sel!(switchChanged:));
         switch
     }
@@ -4629,12 +4630,8 @@ fn select_segment<T: Choice>(control: &NSSegmentedControl, value: T) {
     }
 }
 
-fn set_switch(switch: &NSSwitch, on: bool) {
-    switch.setState(if on {
-        NSControlStateValueOn
-    } else {
-        NSControlStateValueOff
-    });
+fn set_switch(switch: &ThemeSwitch, on: bool) {
+    switch.set_on(on);
 }
 
 /// Sets the field and the stepper to the file's value.

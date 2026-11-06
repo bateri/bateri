@@ -32,8 +32,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSBezierPath, NSButton, NSColor, NSControl, NSControlSize, NSEvent, NSFont, NSFontDescriptor,
-    NSFontFeatureSettingsAttribute, NSLayoutAttribute, NSStackView, NSStringDrawing, NSSwitch,
-    NSTextField, NSUserInterfaceLayoutOrientation, NSView,
+    NSFontFeatureSettingsAttribute, NSLayoutAttribute, NSStackView, NSStringDrawing, NSTextField,
+    NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSDictionary, NSInteger, NSMutableAttributedString, NSNumber,
@@ -42,6 +42,7 @@ use objc2_foundation::{
 
 use super::look::{self, Ink};
 use super::pictures::attributes;
+use super::switch::ThemeSwitch;
 use super::{ROW_WIDTH, SettingsWindow, set_switch};
 
 /// The vertical space between two rows, and between the parts of the section, in points.
@@ -429,7 +430,7 @@ struct Signature {
 struct Built {
     signature: Signature,
     /// The rows' switches and the option each is.
-    switches: Vec<(usize, Retained<NSSwitch>)>,
+    switches: Vec<(usize, Retained<ThemeSwitch>)>,
     /// The tiles, with the options they show.
     tiles: Option<(Retained<LetterTiles>, Vec<usize>)>,
     /// The orange line about a tag the font lacks.
@@ -540,7 +541,7 @@ impl Options {
             .enumerate()
             .filter(|(_, option)| option.is_row())
         {
-            let switch = NSSwitch::new(mtm);
+            let switch = ThemeSwitch::new(mtm);
             switch.setTag(NSInteger::try_from(at).unwrap_or_default());
             // SAFETY: the target is a weak reference and the window lives for the whole
             // process; the selector is the window's own action.
