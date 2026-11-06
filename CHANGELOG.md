@@ -18,7 +18,9 @@ of every installed copy. A version without a section is not released.
   page of a PDF as a picture, at any size and sharp at it, so a PDF on the other end of an ssh
   session opens in the pane without anything installed there. The reader is part of bateri and reads
   the pages without running what a PDF holds; the fallback fonts and CMaps it carries are credited in
-  the About window and in `THIRD-PARTY-LICENSES.txt`.
+  the About window and in `THIRD-PARTY-LICENSES.txt`. A large page, or an SVG, is drawn only where it
+  shows (a page zoomed to 400% is sharp, and what is scrolled to is sharp a moment after it is
+  coarse), so the memory a picture holds is the pane's and not the page's.
 
 ### Changed
 
