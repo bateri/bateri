@@ -219,15 +219,15 @@ pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
     out
 }
 
-/// The engine's image as the renderer's, moved to `origin` pixels: the part of the file the
-/// rectangle shows, its corners and its clip as a box has them, its opacity, how far it is turned
+/// The engine's image as the renderer's, moved to `origin` pixels: the part of the pixels the
+/// rectangle shows (`crop`: shares of the bitmap, which is of the part of the file that is seen,
+/// `Bitmap::crop_of`), its corners and its clip as a box has them, its opacity, how far it is turned
 /// (`Picture::turn`: a spinner's, degrees clockwise about the middle of its rectangle, the clip not
 /// turned with it), and the tint — a
 /// colour the page said, resolved in the theme like a fill ([`resolve`]) and not held to the
 /// contrast floor: it paints a shape, not words.
-pub fn image(theme: &Theme, picture: &Picture, origin: (f32, f32)) -> UiImage {
+pub fn image(theme: &Theme, picture: &Picture, crop: Rect, origin: (f32, f32)) -> UiImage {
     let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
-    let crop = picture.crop;
     let mut out = UiImage::new(at(picture.rect))
         .crop(UiRect::new(crop.x, crop.y, crop.w, crop.h))
         .opacity(picture.opacity)
@@ -446,13 +446,12 @@ fn to_list(
                     list.quad(UiQuad::new(rule).fill(color).clip(clip));
                 }
             }
-            // The file's pixels, drawn at the size the page gave them (an SVG is drawn at it).
-            // None yet — being decoded, or an SVG not yet drawn at its first size — is a box with
-            // nothing in it until the decoder wakes the pane; one it refused stays so.
+            // The file's pixels, drawn at the size the page gave them (an SVG is drawn at it), and a
+            // large SVG or page only where it is seen. None yet — being decoded, or an SVG not yet
+            // drawn at its first size — is a box with nothing in it until the decoder wakes the
+            // pane; one it refused stays so.
             Paint::Image(picture) => {
-                let Some(bitmap) =
-                    images.and_then(|images| images.bitmap(&picture.src, picture.full()))
-                else {
+                let Some(bitmap) = images.and_then(|images| images.picture(picture)) else {
                     continue;
                 };
                 renderer.ui_image(
@@ -463,7 +462,7 @@ fn to_list(
                         height: bitmap.height,
                         pixels: bitmap.pixels(),
                     },
-                    image(theme, picture, origin),
+                    image(theme, picture, bitmap.crop_of(picture), origin),
                 );
             }
             // A canvas comes again with every frame, and drawing it costs what its pixels do, so
@@ -976,8 +975,10 @@ mod tests {
     fn a_picture_that_spins_is_drawn_turned_about_its_middle_and_cut_where_it_was() {
         let picture = |turn: f32| Picture {
             src: "spinner.png".to_owned(),
+            page: 1,
             rect: Rect::new(10.0, 20.0, 24.0, 8.0),
             crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+            shown: Rect::new(0.0, 0.0, 1.0, 1.0),
             tint: None,
             opacity: 1.0,
             radii: [0.0; 4],
@@ -987,7 +988,7 @@ mod tests {
         let theme = Theme::BATERI;
         let at = (3.0, 4.0);
         // Not turned is the image as it was (a page that does not spin draws as before).
-        let plain = image(&theme, &picture(0.0), at);
+        let plain = image(&theme, &picture(0.0), picture(0.0).crop, at);
         assert_eq!(
             plain,
             UiImage::new(UiRect::new(13.0, 24.0, 24.0, 8.0))
@@ -995,8 +996,9 @@ mod tests {
         );
         // Turned, the renderer is told how far (clockwise, degrees on the page's side), and the
         // rectangle and the clip stay where they are: the renderer turns the shape about the middle.
-        assert_eq!(image(&theme, &picture(90.0), at), plain.turn(90.0));
-        assert_ne!(image(&theme, &picture(90.0), at), plain);
+        let spun = picture(90.0);
+        assert_eq!(image(&theme, &spun, spun.crop, at), plain.turn(90.0));
+        assert_ne!(image(&theme, &spun, spun.crop, at), plain);
     }
 
     #[test]
