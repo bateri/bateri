@@ -59,6 +59,70 @@ pub struct Area {
     pub height: f64,
 }
 
+/// The room a card keeps from the tab's edges once it is let go, as fractions of the tab's
+/// content area: under cards the flat cards' own margins (their outer edges are the line it
+/// lines up with), under lines a margin of its own, so it never lies flush on the window's edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Margins {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+impl Margins {
+    /// Margins of `left`, `top`, `right` and `bottom` points in a tab of `bounds`; none when the
+    /// tab has no size.
+    pub fn of_points(left: f64, top: f64, right: f64, bottom: f64, bounds: Rect) -> Self {
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return Self::NONE;
+        }
+        Self {
+            left: left / bounds.width,
+            top: top / bounds.height,
+            right: right / bounds.width,
+            bottom: bottom / bounds.height,
+        }
+    }
+
+    /// No margin: the tab's own edges.
+    pub const NONE: Self = Self {
+        left: 0.0,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    };
+}
+
+/// How a carried card meets its margins ([`Area::carried`]), as fractions of the tab along x
+/// and y: how near the tab's edge the spring lets it come (`gap`: never nearer), and how far
+/// from a corner of the margins the magnet starts pulling it in (`reach`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pull {
+    pub gap: (f64, f64),
+    pub reach: (f64, f64),
+}
+
+impl Pull {
+    /// A gap of `gap` points and a reach of `reach` points in a tab of `bounds`; none when the
+    /// tab has no size.
+    pub fn of_points(gap: f64, reach: f64, bounds: Rect) -> Self {
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return Self::NONE;
+        }
+        Self {
+            gap: (gap / bounds.width, gap / bounds.height),
+            reach: (reach / bounds.width, reach / bounds.height),
+        }
+    }
+
+    /// No gap and no magnet: the spring runs to the tab's edge.
+    pub const NONE: Self = Self {
+        gap: (0.0, 0.0),
+        reach: (0.0, 0.0),
+    };
+}
+
 /// An edge or a corner of a card a pointer takes hold of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grip {
@@ -187,6 +251,116 @@ impl Area {
         Self::new(kept.x + dx, kept.y + dy, kept.width, kept.height).within(least)
     }
 
+    /// The area pulled inside `margins`, the same size where it fits there, moved in from the
+    /// edge it went past: where a card that was carried to the tab's edge comes back to. A card
+    /// larger than the room is cut down to it.
+    pub fn inside(self, margins: Margins) -> Self {
+        let room_width = (1.0 - margins.left - margins.right).max(0.0);
+        let room_height = (1.0 - margins.top - margins.bottom).max(0.0);
+        let width = self.width.min(room_width);
+        let height = self.height.min(room_height);
+        Self::new(
+            self.x.clamp(
+                margins.left,
+                (1.0 - margins.right - width).max(margins.left),
+            ),
+            self.y.clamp(
+                margins.top,
+                (1.0 - margins.bottom - height).max(margins.top),
+            ),
+            width,
+            height,
+        )
+    }
+
+    /// Where a card a pointer carries to `self` (its place, wherever the pointer took it) is
+    /// shown: inside the margins it follows the pointer, and near a corner of them a magnet
+    /// pulls it in, harder the nearer it comes, until it sits in the corner and holds there —
+    /// also against a pointer that goes on past the corner, up to the magnet's reach. Past a
+    /// margin (and past the magnet's hold) it goes on into it against a growing resistance
+    /// ([`resisted`]), so the hand feels the edge coming, and never nearer the tab's edge than
+    /// `pull`'s gap; let go, it comes to rest ([`Area::rest`]). Where there is no margin (cards
+    /// under the tabs), the edge is a wall.
+    pub fn carried(self, margins: Margins, pull: Pull) -> Self {
+        let (Some(x), Some(y)) = (
+            Lane::of(self.x, self.width, margins.left, margins.right, pull.gap.0),
+            Lane::of(self.y, self.height, margins.top, margins.bottom, pull.gap.1),
+        ) else {
+            // Larger than the room between the margins: inside the tab, no spring, no magnet.
+            return self.within((self.width, self.height));
+        };
+        let drawn = drawn(x.inward, y.inward, pull.reach);
+        Self::new(
+            x.place(self.x, drawn, pull.reach.0),
+            y.place(self.y, drawn, pull.reach.1),
+            self.width,
+            self.height,
+        )
+    }
+
+    /// Where a carried card comes to rest when let go at `self`: inside the margins
+    /// ([`Area::inside`]), and in the corner when it was let go within the magnet's reach of one
+    /// ([`Area::carried`]) — the pull finishes rather than leave it half drawn.
+    pub fn rest(self, margins: Margins, pull: Pull) -> Self {
+        let inside = self.inside(margins);
+        let (Some(x), Some(y)) = (
+            Lane::of(
+                inside.x,
+                inside.width,
+                margins.left,
+                margins.right,
+                pull.gap.0,
+            ),
+            Lane::of(
+                inside.y,
+                inside.height,
+                margins.top,
+                margins.bottom,
+                pull.gap.1,
+            ),
+        ) else {
+            return inside;
+        };
+        if drawn(x.inward, y.inward, pull.reach) <= 0.0 {
+            return inside;
+        }
+        Self::new(x.line, y.line, inside.width, inside.height)
+    }
+
+    /// The edges `grip` holds kept inside `margins`, the others where they are: a card's edge
+    /// pulled toward the tab's edge stops at the margin, as at a wall, and the card is never
+    /// smaller than `least` for it.
+    pub fn held_inside(self, grip: Grip, margins: Margins, least: (f64, f64)) -> Self {
+        let (least_width, least_height) = (least.0.clamp(0.0, 1.0), least.1.clamp(0.0, 1.0));
+        let (mut left, mut top) = (self.x, self.y);
+        let (mut right, mut bottom) = (self.x + self.width, self.y + self.height);
+        if grip.west() {
+            left = left.max(margins.left).min(right - least_width);
+        }
+        if grip.east() {
+            right = right.min(1.0 - margins.right).max(left + least_width);
+        }
+        if grip.north() {
+            top = top.max(margins.top).min(bottom - least_height);
+        }
+        if grip.south() {
+            bottom = bottom.min(1.0 - margins.bottom).max(top + least_height);
+        }
+        Self::new(left, top, right - left, bottom - top)
+    }
+
+    /// The area `share` of the way from `self` to `to` (0 is `self`, 1 is `to`): a card on its
+    /// way back inside its margins.
+    pub fn toward(self, to: Self, share: f64) -> Self {
+        let mix = |a: f64, b: f64| a + (b - a) * share;
+        Self::new(
+            mix(self.x, to.x),
+            mix(self.y, to.y),
+            mix(self.width, to.width),
+            mix(self.height, to.height),
+        )
+    }
+
     /// The area with the edges `grip` holds moved by `dx`, `dy` (fractions): an edge stops at
     /// the tab's edge and at `least` from the opposite one, the opposite edge never moves.
     pub fn dragged(self, grip: Grip, dx: f64, dy: f64, least: (f64, f64)) -> Self {
@@ -207,6 +381,90 @@ impl Area {
             bottom = (bottom + dy).clamp(top + least_height, 1.0);
         }
         Self::new(left, top, right - left, bottom - top)
+    }
+}
+
+/// How hard a margin resists a card pushed into it: the share of the push it gives at first. A
+/// design constant, the springiness of the scroll views' edges.
+const RESISTANCE: f64 = 0.55;
+
+/// How far into a margin `room` wide a card pushed `over` past it goes: about [`RESISTANCE`] of
+/// the push at first, less and less after, the margin's whole width only in the limit.
+fn resisted(over: f64, room: f64) -> f64 {
+    if room <= 0.0 || over <= 0.0 {
+        return 0.0;
+    }
+    room * (1.0 - 1.0 / (over * RESISTANCE / room + 1.0))
+}
+
+/// The share of a magnet's reach in which it holds a card fast in the corner: the last quarter.
+const LOCK_SHARE: f64 = 0.25;
+
+/// How much of the way to a corner of the margins the magnet draws a card whose start is
+/// `inward_x`, `inward_y` inside the corner's lines (0 or less: on or past the line): nothing at
+/// the reach's end or beyond on either axis, more and more nearer, all of it in the last
+/// [`LOCK_SHARE`]. A line the card is past counts as reached: the magnet holds it there.
+fn drawn(inward_x: f64, inward_y: f64, (reach_x, reach_y): (f64, f64)) -> f64 {
+    if reach_x <= 0.0 || reach_y <= 0.0 {
+        return 0.0;
+    }
+    let near = (inward_x.max(0.0) / reach_x).max(inward_y.max(0.0) / reach_y);
+    if near >= 1.0 {
+        0.0
+    } else if near <= LOCK_SHARE {
+        1.0
+    } else {
+        ((1.0 - near) / (1.0 - LOCK_SHARE)).powi(2)
+    }
+}
+
+/// One axis of a carried card ([`Area::carried`]): the margin line nearest its start (the
+/// first margin or the last place before the far one), how far inside that line it starts
+/// (less than 0: past it), which way is out, and how deep into the margin the spring may take it
+/// (the margin less the gap it keeps from the tab's edge).
+struct Lane {
+    line: f64,
+    inward: f64,
+    outward: f64,
+    room: f64,
+}
+
+impl Lane {
+    /// The lane of a card starting at `start`, `size` long, between margins `low` and `high`,
+    /// keeping `gap` from the tab's edges; `None` when it is larger than the room between them.
+    fn of(start: f64, size: f64, low: f64, high: f64, gap: f64) -> Option<Self> {
+        let last = 1.0 - high - size;
+        if last < low {
+            return None;
+        }
+        Some(if start - low <= last - start {
+            Self {
+                line: low,
+                inward: start - low,
+                outward: -1.0,
+                room: (low - gap).max(0.0),
+            }
+        } else {
+            Self {
+                line: last,
+                inward: last - start,
+                outward: 1.0,
+                room: (high - gap).max(0.0),
+            }
+        })
+    }
+
+    /// Where the card is shown on this axis, the magnet drawing it `drawn` of the way to the
+    /// line: inside, toward the line; past it, held on the line for as much of the push as the
+    /// magnet's `reach` takes (all of it, held fast), and into the margin against the spring for
+    /// the rest.
+    fn place(&self, start: f64, drawn: f64, reach: f64) -> f64 {
+        if self.inward >= 0.0 {
+            start + (self.line - start) * drawn
+        } else {
+            let over = (-self.inward - reach * drawn).max(0.0);
+            self.line + self.outward * resisted(over, self.room)
+        }
     }
 }
 
@@ -331,6 +589,13 @@ pub struct Ground<'a> {
     /// The spacing of the panes inside one card.
     pub card: Spacing,
     pub min: &'a dyn Fn(u64) -> Size,
+    /// The room every card keeps from the tab's edges ([`Margins`]): a card is shown inside it
+    /// and every change of its place or size ends inside it, whatever made it.
+    pub margins: Margins,
+    /// The pane of the one card shown where its area says even inside the margins: the card a
+    /// pointer carries (it goes into them, resisting: [`Area::carried`]) and the one on its way
+    /// back from there.
+    pub loose: Option<u64>,
 }
 
 impl<'a> Ground<'a> {
@@ -377,7 +642,21 @@ impl<'a> Ground<'a> {
 
     /// The card's frame in points: its share, at least what its tree needs.
     pub fn rect_of(&self, card: &Card) -> Rect {
-        card.area.within(self.least(&card.tree)).rect(self.bounds)
+        self.shown(card).rect(self.bounds)
+    }
+
+    /// The share `card` is shown at: inside the tab, no smaller than its least and inside the
+    /// margins — but for the [`Ground::loose`] card, which is where a pointer has it.
+    pub fn shown(&self, card: &Card) -> Area {
+        let kept = card.area.within(self.least(&card.tree));
+        if self
+            .loose
+            .is_some_and(|pane| card.tree.leaves().contains(&pane))
+        {
+            kept
+        } else {
+            kept.inside(self.margins)
+        }
     }
 }
 
@@ -516,7 +795,9 @@ impl Layers {
         if self.panes().contains(&pane) {
             return false;
         }
-        let area = Area::opening().wished(at, size, ground.least(&Tree::Leaf(pane)));
+        let area = Area::opening()
+            .wished(at, size, ground.least(&Tree::Leaf(pane)))
+            .inside(ground.margins);
         self.cards.push(Card::of(pane, area));
         true
     }
@@ -549,7 +830,9 @@ impl Layers {
             return false;
         };
         let base = Area::floated_from(Area::of(*place, ground.bounds));
-        let area = base.wished(at, size, ground.least(&Tree::Leaf(pane)));
+        let area = base
+            .wished(at, size, ground.least(&Tree::Leaf(pane)))
+            .inside(ground.margins);
         self.float(pane, area)
     }
 
@@ -865,6 +1148,7 @@ impl Layers {
             Direction::Down => (Grip::Bottom, 0.0, step),
             Direction::Up => (Grip::Bottom, 0.0, -step),
         };
+        let margins = ground.margins;
         self.edit_area(pane, ground, |area, least| {
             area.dragged(
                 grip,
@@ -872,6 +1156,7 @@ impl Layers {
                 dy / ground.bounds.height,
                 least,
             )
+            .held_inside(grip, margins, least)
         })
     }
 
@@ -909,10 +1194,11 @@ impl Layers {
         let Some(index) = self.card_of(pane) else {
             return false;
         };
+        let shown = ground.shown(&self.cards[index]);
         let card = &mut self.cards[index];
         let least = ground.least(&card.tree);
-        let shown = card.area.within(least);
-        let area = change(shown, least);
+        // Whatever the change, the card ends inside the margins.
+        let area = change(shown, least).inside(ground.margins);
         let moved = (area.x - shown.x).abs() > EPSILON
             || (area.y - shown.y).abs() > EPSILON
             || (area.width - shown.width).abs() > EPSILON
@@ -1049,6 +1335,8 @@ mod tests {
             flat: Spacing::DIVIDED,
             card: Spacing::DIVIDED,
             min,
+            margins: Margins::NONE,
+            loose: None,
         }
     }
 
@@ -1487,6 +1775,8 @@ mod tests {
             flat: Spacing::DIVIDED,
             card: Spacing::DIVIDED,
             min: &wide,
+            margins: Margins::NONE,
+            loose: None,
         };
         let mut stack = Tree::Leaf(1);
         assert!(stack.split(1, Axis::Vertical, 2));
@@ -1521,6 +1811,8 @@ mod tests {
             flat: Spacing::DIVIDED,
             card: Spacing::DIVIDED,
             min: &huge,
+            margins: Margins::NONE,
+            loose: None,
         };
         let mut layers = Layers {
             flat: Tree::Leaf(1),
@@ -1575,6 +1867,8 @@ mod tests {
             flat: Spacing::DIVIDED,
             card: Spacing::DIVIDED,
             min: &huge,
+            margins: Margins::NONE,
+            loose: None,
         };
         let mut layers = Layers {
             flat: Tree::Leaf(1),
@@ -1933,6 +2227,186 @@ mod tests {
         assert!(near(capsule::strip(CapsulePlace::Strip, 0), 0.0));
         assert!(near(capsule::strip(CapsulePlace::Strip, 3), 34.0));
         assert!(near(capsule::strip(CapsulePlace::TopRight, 3), 0.0));
+    }
+
+    #[test]
+    fn a_card_let_go_past_its_margin_comes_back_inside_it_at_the_same_size() {
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 500.0);
+        let margins = Margins::of_points(8.0, 0.0, 8.0, 8.0, bounds);
+        // Carried to the right and bottom edges: back to the margin, the size kept.
+        let at_edge = Area::new(0.6, 0.6, 0.4, 0.4);
+        let back = at_edge.inside(margins);
+        assert!(near(back.width, 0.4) && near(back.height, 0.4));
+        assert!(near(back.x + back.width, 1.0 - 0.008));
+        assert!(near(back.y + back.height, 1.0 - 0.016));
+        // To the left edge: the left margin; the top has none under cards.
+        let left = Area::new(0.0, 0.0, 0.4, 0.4).inside(margins);
+        assert!(near(left.x, 0.008) && near(left.y, 0.0));
+        // Inside already: where it is.
+        let kept = Area::new(0.3, 0.2, 0.3, 0.3);
+        assert_eq!(kept.inside(margins), kept);
+        // Larger than the room: cut down to it.
+        let wide = Area::new(0.0, 0.0, 1.0, 0.5).inside(margins);
+        assert!(near(wide.x, 0.008) && near(wide.width, 1.0 - 0.016));
+    }
+
+    #[test]
+    fn a_carried_card_goes_into_the_margin_against_a_spring_and_never_past_the_edge() {
+        let margins = Margins {
+            left: 0.01,
+            top: 0.0,
+            right: 0.01,
+            bottom: 0.02,
+        };
+        let width = 0.3;
+        // Inside the margins: where the pointer has it.
+        let free = Area::new(0.4, 0.3, width, 0.3);
+        assert_eq!(free.carried(margins, Pull::NONE), free);
+        // Pushed a little past the right margin: into it, by less than the push.
+        let last = 1.0 - 0.01 - width;
+        let little = Area::new(last + 0.01, 0.3, width, 0.3).carried(margins, Pull::NONE);
+        assert!(little.x > last && little.x < last + 0.01);
+        // Pushed further: further in, but by less each time, and never to the edge.
+        let more = Area::new(last + 0.05, 0.3, width, 0.3).carried(margins, Pull::NONE);
+        let most = Area::new(last + 1.0, 0.3, width, 0.3).carried(margins, Pull::NONE);
+        assert!(more.x > little.x && most.x > more.x);
+        assert!(most.x + width < 1.0);
+        assert!(most.x - more.x < more.x - little.x);
+        // Where there is no margin (the top under cards), the edge is a wall.
+        let up = Area::new(0.4, -0.2, width, 0.3).carried(margins, Pull::NONE);
+        assert!(near(up.y, 0.0));
+        // Let go, it comes back inside.
+        assert!(near(most.inside(margins).x, last));
+    }
+
+    #[test]
+    fn a_carried_card_stops_short_of_the_tabs_edge_however_hard_it_is_pushed() {
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 500.0);
+        let margins = Margins::of_points(8.0, 8.0, 8.0, 8.0, bounds);
+        let pull = Pull::of_points(3.0, 0.0, bounds);
+        let width = 0.3;
+        let pushed = Area::new(-5.0, 0.4, width, 0.3).carried(margins, pull);
+        // Never nearer the left edge than the gap: 3 points of 1000.
+        assert!(pushed.x >= 0.003 - 1e-9);
+        assert!(pushed.x < 0.008);
+        let right = Area::new(5.0, 0.4, width, 0.3).carried(margins, pull);
+        assert!(right.x + width <= 1.0 - 0.003 + 1e-9);
+    }
+
+    #[test]
+    fn near_a_corner_of_the_margins_a_magnet_pulls_the_card_in_and_holds_it() {
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 1000.0);
+        let margins = Margins::of_points(8.0, 8.0, 8.0, 8.0, bounds);
+        let pull = Pull::of_points(3.0, 24.0, bounds);
+        let size = 0.3;
+        let corner = (0.008, 0.008);
+        // Far from every corner: where the pointer has it.
+        let free = Area::new(0.3, 0.3, size, size);
+        assert_eq!(free.carried(margins, pull), free);
+        // Near the top left corner on one axis only: no pull (a corner, not an edge).
+        let edge = Area::new(0.010, 0.3, size, size);
+        assert_eq!(edge.carried(margins, pull), edge);
+        // Within the last quarter of the reach on both axes: in the corner.
+        let close = Area::new(0.008 + 0.005, 0.008 + 0.004, size, size).carried(margins, pull);
+        assert!(near(close.x, corner.0) && near(close.y, corner.1));
+        // Within the reach but not that close: drawn part of the way, more the nearer.
+        let farther = Area::new(0.008 + 0.020, 0.008 + 0.020, size, size).carried(margins, pull);
+        let nearer = Area::new(0.008 + 0.012, 0.008 + 0.012, size, size).carried(margins, pull);
+        assert!(farther.x < 0.028 && farther.x > corner.0);
+        assert!(nearer.x - corner.0 < (0.020 - 0.008) * (farther.x - corner.0) / 0.020);
+        // The bottom right corner pulls the same way.
+        let last = 1.0 - 0.008 - size;
+        let low = Area::new(last - 0.004, last - 0.004, size, size).carried(margins, pull);
+        assert!(near(low.x, last) && near(low.y, last));
+        // Pushed past the margin, the spring has it, not the magnet.
+        let past = Area::new(-0.02, 0.009, size, size).carried(margins, pull);
+        assert!(past.x < corner.0);
+        // Pushed a little past the corner, the magnet holds it there: it does not go out first.
+        let over = Area::new(0.008 - 0.010, 0.008 - 0.006, size, size).carried(margins, pull);
+        assert!(near(over.x, corner.0) && near(over.y, corner.1));
+        // Coming at the corner from inside and going on past it, the card never goes out
+        // before the magnet's reach is spent.
+        for step in 0..=46 {
+            // From 22 points inside the corner to 24 past it: the magnet's reach.
+            let at = 0.030 - f64::from(step) * 0.001;
+            let shown = Area::new(at, at, size, size).carried(margins, pull);
+            assert!(shown.x >= corner.0 - 1e-9, "{at}: {shown:?}");
+        }
+        // Past the reach, the spring takes it on from the corner, a little at first.
+        let beyond = Area::new(-0.020, -0.020, size, size).carried(margins, pull);
+        assert!(beyond.x < corner.0 && beyond.x > corner.0 - 0.002);
+        // Let go within the reach, it rests in the corner; let go past the margin near a corner,
+        // it comes back inside and into the corner; far away, where it is.
+        assert_eq!(
+            farther.rest(margins, pull),
+            Area::new(corner.0, corner.1, size, size)
+        );
+        assert_eq!(
+            past.rest(margins, pull),
+            Area::new(corner.0, corner.1, size, size)
+        );
+        assert_eq!(free.rest(margins, pull), free);
+    }
+
+    #[test]
+    fn every_change_of_a_cards_place_ends_inside_the_margins() {
+        let ground = Ground {
+            margins: Margins {
+                left: 0.01,
+                top: 0.0,
+                right: 0.01,
+                bottom: 0.02,
+            },
+            ..ground(&small)
+        };
+        let mut layers = with_cards(vec![card(7)]);
+        // A command that puts it at the corner: inside the margins.
+        assert!(layers.reframe(7, Some((0.0, 0.9)), None, &ground));
+        let area = layers.cards[0].area;
+        assert!(near(area.x, 0.01));
+        assert!(near(area.y + area.height, 0.98));
+        // Keys that push it right to the edge: it stops at the margin.
+        for _ in 0..40 {
+            layers.move_key(7, Direction::Right, 40.0, &ground);
+        }
+        let area = layers.cards[0].area;
+        assert!(near(area.x + area.width, 0.99));
+        for _ in 0..40 {
+            layers.resize_key(7, Direction::Down, 40.0, &ground);
+        }
+        let area = layers.cards[0].area;
+        assert!(near(area.y + area.height, 0.98));
+        // A card whose area is past the margins (an older session's) is shown inside them, but
+        // the carried one is shown where it is.
+        layers.cards[0].area = Area::new(0.8, 0.0, 0.2, 0.2);
+        let shown = ground.shown(&layers.cards[0]);
+        assert!(near(shown.x + shown.width, 0.99));
+        let loose = Ground {
+            loose: Some(7),
+            ..ground
+        };
+        assert!(near(loose.shown(&layers.cards[0]).x, 0.8));
+    }
+
+    #[test]
+    fn a_grip_pulled_past_the_margin_stops_at_it_and_the_other_edges_stay() {
+        let margins = Margins {
+            left: 0.01,
+            top: 0.02,
+            right: 0.01,
+            bottom: 0.02,
+        };
+        let pulled = Area::new(0.5, 0.5, 0.5, 0.5);
+        let held = pulled.held_inside(Grip::BottomRight, margins, (0.1, 0.1));
+        assert!(near(held.x, 0.5) && near(held.y, 0.5));
+        assert!(near(held.x + held.width, 0.99) && near(held.y + held.height, 0.98));
+        // A grip that does not hold an edge leaves it past the margin: only the pulled edge is
+        // the drag's.
+        let left = Area::new(0.0, 0.3, 0.4, 0.4).held_inside(Grip::Right, margins, (0.1, 0.1));
+        assert!(near(left.x, 0.0));
+        // The way back is a straight line.
+        let half = Area::new(0.0, 0.0, 0.4, 0.4).toward(Area::new(0.2, 0.1, 0.4, 0.4), 0.5);
+        assert!(near(half.x, 0.1) && near(half.y, 0.05) && near(half.width, 0.4));
     }
 
     #[test]

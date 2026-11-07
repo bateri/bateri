@@ -68,18 +68,24 @@
 //! that of an occluded window ([`SplitView::apply_visibility`]).
 
 use std::cell::{Cell, RefCell};
+use std::ptr::NonNull;
+
+use block2::RcBlock;
 
 use bt_core::{ContentEdge, MinimizedPanes, SplitStyle, Theme};
 use bt_shell_common::floating::{
-    self, Area, CapsulePlace, Card, Gone, Grip, Ground, Layers, capsule,
+    self, Area, CapsulePlace, Card, Gone, Grip, Ground, Layers, Margins, Pull, capsule,
 };
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
-use objc2_app_kit::{
-    NSBox, NSBoxType, NSColor, NSCursor, NSEvent, NSTitlePosition, NSView, NSWindowOcclusionState,
-    NSWindowOrderingMode,
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
 };
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
+use objc2_app_kit::{
+    NSBezierPath, NSBox, NSBoxType, NSColor, NSCursor, NSEvent, NSImage, NSTitlePosition, NSView,
+    NSWindowOcclusionState, NSWindowOrderingMode,
+};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSTimer};
+use objc2_quartz_core::CACurrentMediaTime;
 
 use crate::card::{self, Change, GAP_PT};
 use crate::pane::TerminalPane;
@@ -139,17 +145,123 @@ fn spaced(scale: f64, style: SplitStyle, beside_tabs: bool) -> Spacing {
     }
 }
 
-/// The space inside one floating card: a gap between its panes and no margin round them (the
-/// card's edge is its own frame), each pane's header above it. A floating pane is a card
-/// under either split style.
+/// The space inside one floating card: its panes touch, one line between them as lines' do,
+/// and no margin round them (the card's edge is its own frame), each pane's header above it.
+/// A floating pane is a card under either split style, rounded where the card is and square
+/// where its panes meet ([`card_corners`]).
 fn card_spacing(scale: f64) -> Spacing {
-    Spacing::gapped(GAP_PT, 0.0, scale).with_head(card::HEAD_PT, scale)
+    Spacing::DIVIDED.with_head(card::HEAD_PT, scale)
 }
+
+/// Which corners of a pane of a floating card are the card's own, and so round: the header's
+/// top left and right where it stands at the card's top, the pane's bottom left and right where
+/// it stands at the card's bottom — each on the side the pane meets the card's edge. `frame` is
+/// the pane's, under its header; `card` the card's outline, headers included.
+fn card_corners(frame: Rect, card: Rect) -> CardCorners {
+    let on = |edge: f64, of: f64| (edge - of).abs() <= EDGE_EPS;
+    let left = on(frame.x, card.x);
+    let right = on(frame.x + frame.width, card.x + card.width);
+    let top = on(frame.y - card::HEAD_PT, card.y);
+    let bottom = on(frame.y + frame.height, card.y + card.height);
+    CardCorners {
+        top: (top && left, top && right),
+        bottom: (bottom && left, bottom && right),
+    }
+}
+
+/// [`card_corners`]: left and right, at the header's top and at the pane's bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CardCorners {
+    top: (bool, bool),
+    bottom: (bool, bool),
+}
+
+/// The parts of a divider's handle at `rect` (the container's space) that none of `covers`
+/// stands over, along its length: a handle is a thin strip, so a card over it cuts it in two at
+/// most. `axis` is the split's: a side-by-side split's handle runs top to bottom.
+fn uncovered(rect: Rect, axis: Axis, covers: &[Rect]) -> Vec<Rect> {
+    let (start, end) = match axis {
+        Axis::Horizontal => (rect.y, rect.y + rect.height),
+        Axis::Vertical => (rect.x, rect.x + rect.width),
+    };
+    let mut open = vec![(start, end)];
+    for cover in covers {
+        let across = match axis {
+            Axis::Horizontal => cover.x < rect.x + rect.width && rect.x < cover.x + cover.width,
+            Axis::Vertical => cover.y < rect.y + rect.height && rect.y < cover.y + cover.height,
+        };
+        if !across {
+            continue;
+        }
+        let (from, to) = match axis {
+            Axis::Horizontal => (cover.y, cover.y + cover.height),
+            Axis::Vertical => (cover.x, cover.x + cover.width),
+        };
+        open = open
+            .into_iter()
+            .flat_map(|(a, b)| {
+                let before = (a, b.min(from));
+                let after = (a.max(to), b);
+                [before, after]
+                    .into_iter()
+                    .filter(|(a, b)| b - a > 0.0)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    open.into_iter()
+        .map(|(a, b)| match axis {
+            Axis::Horizontal => Rect::new(rect.x, a, rect.width, b - a),
+            Axis::Vertical => Rect::new(a, rect.y, b - a, rect.height),
+        })
+        .collect()
+}
+
+/// A card growing out of its capsule ([`card::fly`]): its panes, its frame and its capsule's (in
+/// the container's space) and when it began (`CACurrentMediaTime`).
+struct Growth {
+    leaves: Vec<u64>,
+    card: Rect,
+    capsule: Rect,
+    begin: f64,
+}
+
+/// How far a floating card keeps from the window's edges under lines, where the flat panes keep
+/// none, once it is let go: the cards' gap, so it reads as standing over the panes.
+const FLOAT_MARGIN_PT: f64 = GAP_PT;
+
+/// How near the window's edge a carried card may be pushed into its margin: never nearer
+/// than this, so it never lies on the edge.
+const EDGE_GAP_PT: f64 = 3.0;
+
+/// How far from a corner of the margins a carried card is pulled toward it, as by a magnet
+/// ([`Area::carried`]); it holds fast in the last quarter of that.
+const MAGNET_PT: f64 = 24.0;
+
+/// How long a card let go past its margin takes to come back inside it: the motions' base.
+const SETTLE_SECS: f64 = 0.24;
 
 /// How far a pane's edge may stand from the container's and still be on it,
 /// in points: the frames' sub-pixel rounding, not a gap. The smallest pane is
 /// far larger than this, so no pane stands this close to an edge it is not on.
 const EDGE_EPS: f64 = 0.5;
+
+/// The radii, in points, of a lined pane's top left and right corners where its frame (header
+/// included) stands in the container (`bounds`): the window's corner where the pane meets the
+/// window's top edge and its right edge — only with the tabs in the side column, the
+/// container's top edge being the window's then —, square everywhere else. The bottom's twin
+/// ([`bottom_corners`]), for the focus frame. Pure.
+fn top_corners(rect: Rect, bounds: Rect, beside_tabs: bool, window: f64) -> (f64, f64) {
+    // With the tabs in the title row the container starts under it: its top edge is not the
+    // window's. In the side column it is, but the left corner is the column's.
+    if !beside_tabs {
+        return (0.0, 0.0);
+    }
+    let on = |edge: f64, of: f64| (edge - of).abs() <= EDGE_EPS;
+    let top = on(rect.y, bounds.y);
+    let right = top && on(rect.x + rect.width, bounds.x + bounds.width);
+    (0.0, if right { window } else { 0.0 })
+}
 
 /// The radii, in points, of a pane's bottom left and right corners, given
 /// where it stands in the container (`bounds`, which is the window's content
@@ -215,6 +327,10 @@ define_class!(
         /// `resizeLeftRightCursor`/`resizeUpDownCursor` are deprecated but
         /// their replacement `columnResizeCursorInDirections:` arrives in
         /// macOS 15; the floor is macOS 14.
+        ///
+        /// Only where no card in front of the line covers it: AppKit gives a cursor rect its
+        /// cursor whatever stands over the view, so a line under a floating card would turn the
+        /// pointer on the card into a resize arrow.
         #[unsafe(method(resetCursorRects))]
         #[allow(deprecated)]
         fn reset_cursor_rects(&self) {
@@ -222,7 +338,39 @@ define_class!(
                 Axis::Horizontal => NSCursor::resizeLeftRightCursor(),
                 Axis::Vertical => NSCursor::resizeUpDownCursor(),
             };
-            self.addCursorRect_cursor(self.bounds(), &cursor);
+            let Some(container) = self.container() else {
+                return;
+            };
+            let own = self.ivars().card.get();
+            let covers: Vec<Rect> = container
+                .outlines_with_cards()
+                .into_iter()
+                .filter(|(card, _)| own.is_none_or(|own| *card > own))
+                .map(|(_, rect)| rect)
+                .collect();
+            let frame = self.frame();
+            for open in uncovered(
+                Rect::new(
+                    frame.origin.x,
+                    frame.origin.y,
+                    frame.size.width,
+                    frame.size.height,
+                ),
+                self.ivars().axis.get(),
+                &covers,
+            ) {
+                // From the container's space to the handle's own: the handle is not flipped.
+                let local = self.convertRect_fromView(
+                    NSRect::new(
+                        NSPoint::new(open.x, open.y),
+                        NSSize::new(open.width, open.height),
+                    ),
+                    Some(&*container),
+                );
+                if local.size.width > 0.0 && local.size.height > 0.0 {
+                    self.addCursorRect_cursor(local, &cursor);
+                }
+            }
         }
 
         /// The press is swallowed (it must not climb the responder chain to
@@ -508,6 +656,8 @@ pub(crate) struct SplitIvars {
     /// Each card's shadow, in the order of `cards`: a subview of this container standing just
     /// under the card's panes, so a card's shadow falls on the cards behind it and not on its own.
     shades: RefCell<Vec<Retained<card::Shade>>>,
+    /// The floating cards' headers and which of their top corners are round ([`card_corners`]).
+    head_corners: RefCell<Vec<(u64, (bool, bool))>>,
     /// The dividers' drag handles of the cards' own splits, per card, in the order of
     /// `cards`.
     card_handles: RefCell<Vec<Vec<Retained<DividerHandle>>>>,
@@ -518,6 +668,15 @@ pub(crate) struct SplitIvars {
     grips: RefCell<Option<Retained<CardGrips>>>,
     /// The press on a card's border or header that is being dragged.
     card_drag: Cell<Option<CardDrag>>,
+    /// Counts the cards let go past their margins: a card on its way back stops when a newer
+    /// drag (or way back) begins ([`SplitView::settle_card`]).
+    settling: Cell<u64>,
+    /// The pane of the card a pointer carries, or that is on its way back inside its margins:
+    /// shown where its area says ([`Ground::loose`]).
+    loose: Cell<Option<u64>>,
+    /// The cards growing out of their capsules now: the focus frame that comes round one of
+    /// them grows with it.
+    growing: RefCell<Vec<Growth>>,
     /// The capsules of the minimized cards, oldest first, the newest at the right end
     /// ([`Layers::capsules`]): subviews over everything of the container.
     capsules: RefCell<Vec<Retained<Capsule>>>,
@@ -613,10 +772,14 @@ impl SplitView {
             tree: RefCell::new(Tree::Leaf(first.id())),
             cards: RefCell::new(Vec::new()),
             shades: RefCell::new(Vec::new()),
+            head_corners: RefCell::new(Vec::new()),
             card_handles: RefCell::new(Vec::new()),
             outlines: RefCell::new(Vec::new()),
             grips: RefCell::new(None),
             card_drag: Cell::new(None),
+            settling: Cell::new(0),
+            loose: Cell::new(None),
+            growing: RefCell::new(Vec::new()),
             capsules: RefCell::new(Vec::new()),
             looks: RefCell::new(Vec::new()),
             floor: floor.clone(),
@@ -710,6 +873,8 @@ impl SplitView {
             flat: spacing(scale, self.style(), self.beside_tabs()),
             card: card_spacing(scale),
             min,
+            margins: self.card_margins(),
+            loose: self.ivars().loose.get(),
         }
     }
 
@@ -920,8 +1085,25 @@ impl SplitView {
             // Only a float or a dock slides; a pane moved into a tab that merely has a card
             // takes its place at once, as it does in a tab without one.
             self.slide(&before, None, card::MOVE_SECS);
+            self.hide_backdrop_while_sliding(card::MOVE_SECS);
         }
         true
+    }
+
+    /// Under lines the backdrop (the dividers' tone behind the flat panes) would show as a light
+    /// frame round a pane that slides into the flat area or out of it, in the part of its place
+    /// it has not reached yet: it is hidden for the slide and comes back with it.
+    fn hide_backdrop_while_sliding(&self, secs: f64) {
+        let backdrop = &self.ivars().backdrop;
+        if backdrop.isHidden() {
+            return;
+        }
+        backdrop.setHidden(true);
+        let this = self.retain();
+        let back = RcBlock::new(move |_timer: NonNull<NSTimer>| this.sync_backdrop());
+        // SAFETY: a one-shot timer on the main run loop with a block that takes it.
+        let _ =
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, false, &back) };
     }
 
     /// A new pane floats in front, where and as big as the wish says (`None`: the opening place
@@ -1032,19 +1214,241 @@ impl SplitView {
     /// again.
     pub(crate) fn set_cards(&self, cards: Vec<Card>) {
         let before = (self.strip_of(&cards) != self.strip_height()).then(|| self.snapshot());
-        self.ivars().cards.replace(cards);
-        self.layout_panes();
-        // A minimized card's panes are hidden now — their frames stop, the programs run on — and
-        // an opened one's ask for a frame again.
+        // The cards that go into their capsules and the ones that come out: the first fly from
+        // their pictures as they are now, the second from their capsules as they are now.
         let visible = self.window().is_some_and(|window| {
             window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible)
         });
+        let still = !visible
+            || self.isHidden()
+            || crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        let (going, coming) = if still {
+            (Vec::new(), Vec::new())
+        } else {
+            let was: Vec<(u64, bool)> = self
+                .ivars()
+                .cards
+                .borrow()
+                .iter()
+                .map(|card| (card.tree.leaves()[0], card.minimized))
+                .collect();
+            let turned = |minimized: bool| -> Vec<u64> {
+                cards
+                    .iter()
+                    .filter(|card| card.minimized == minimized)
+                    .map(|card| card.tree.leaves()[0])
+                    .filter(|id| was.contains(&(*id, !minimized)))
+                    .collect()
+            };
+            let going: Vec<(u64, NSRect, Retained<NSImage>)> = turned(true)
+                .into_iter()
+                .filter_map(|id| {
+                    let (frame, picture) = self.card_picture(id)?;
+                    Some((id, frame, picture))
+                })
+                .collect();
+            let coming: Vec<(u64, NSRect)> = turned(false)
+                .into_iter()
+                .filter_map(|id| Some((id, self.capsule_frame(id)?)))
+                .collect();
+            (going, coming)
+        };
+        self.ivars().cards.replace(cards);
+        self.layout_panes();
+        // A minimized card's panes are hidden now — their frames stop, the programs run on — and
+        // an opened one's ask for a frame again.
         self.apply_visibility(visible);
         if let Some(before) = before {
             self.slide(&before, None, card::MOVE_SECS);
         }
+        let begin = CACurrentMediaTime();
+        for (id, frame, picture) in going {
+            let Some(capsule) = self.capsule_frame(id) else {
+                continue;
+            };
+            card::fly(
+                self,
+                &picture,
+                frame,
+                capsule,
+                card::Flight::Into,
+                begin,
+                || {},
+            );
+            if let Some(view) = self.capsule_view(id) {
+                card::arrive(&view);
+            }
+        }
+        for (id, capsule) in coming {
+            let Some((frame, picture)) = self.card_picture(id) else {
+                continue;
+            };
+            // The card's own views wait unseen under the picture until it has grown; the focus
+            // frame, when it comes round the card, grows with the picture ([`SplitView::place_ring`]).
+            let views = self.card_views(id);
+            for view in &views {
+                view.setAlphaValue(0.0);
+            }
+            let leaves = self.card_leaves(id);
+            let to_rect =
+                |at: NSRect| Rect::new(at.origin.x, at.origin.y, at.size.width, at.size.height);
+            self.ivars().growing.borrow_mut().push(Growth {
+                leaves: leaves.clone(),
+                card: to_rect(frame),
+                capsule: to_rect(capsule),
+                begin,
+            });
+            let this = self.retain();
+            card::fly(
+                self,
+                &picture,
+                frame,
+                capsule,
+                card::Flight::OutOf,
+                begin,
+                move || {
+                    for view in &views {
+                        view.setAlphaValue(1.0);
+                    }
+                    this.ivars()
+                        .growing
+                        .borrow_mut()
+                        .retain(|growth| growth.leaves != leaves);
+                },
+            );
+        }
+        // The focus frame may already stand round the card that opens: it grows with it.
+        if !self.ivars().growing.borrow().is_empty() {
+            self.place_ring();
+        }
+    }
+
+    /// The panes of the card holding `pane`.
+    fn card_leaves(&self, pane: u64) -> Vec<u64> {
+        self.ivars()
+            .cards
+            .borrow()
+            .iter()
+            .find(|card| card.tree.leaves().contains(&pane))
+            .map(|card| card.tree.leaves())
+            .unwrap_or_default()
+    }
+
+    /// A picture of the card holding `pane` as it stands now, and its frame: the card's ground
+    /// with its corners, each pane's picture (`TerminalPane::snapshot`, the terminal drawn off
+    /// screen) and each header as AppKit draws it, where they stand in the card. What a card
+    /// flies into its capsule and out of it as ([`card::fly`]). `None` for a card not shown.
+    fn card_picture(&self, pane: u64) -> Option<(NSRect, Retained<NSImage>)> {
+        let iv = self.ivars();
+        let leaves = {
+            let cards = iv.cards.borrow();
+            cards
+                .iter()
+                .find(|card| card.tree.leaves().contains(&pane))?
+                .tree
+                .leaves()
+        };
+        let outline = iv
+            .outlines
+            .borrow()
+            .iter()
+            .find(|(id, _)| leaves.contains(id))
+            .map(|(_, rect)| *rect)?;
+        let theme = iv.ring_theme.get()?;
+        let scale = self.scale();
+        let frame = NSRect::new(
+            NSPoint::new(outline.x, outline.y),
+            NSSize::new(outline.width, outline.height),
+        );
+        let mut pieces: Vec<(NSRect, Retained<NSImage>)> = Vec::new();
+        for id in &leaves {
+            let Some(view) = self.pane(*id) else {
+                continue;
+            };
+            let at = view.frame();
+            if let Some(still) = view.snapshot((at.size.width, at.size.height), scale) {
+                pieces.push((
+                    at,
+                    NSImage::initWithCGImage_size(NSImage::alloc(), &still, at.size),
+                ));
+            }
+            view.release_snapshot();
+            if let Some(head) = iv.heads.borrow().iter().find(|head| head.pane() == *id) {
+                let bounds = head.bounds();
+                if let Some(rep) = head.bitmapImageRepForCachingDisplayInRect(bounds) {
+                    head.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+                    let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+                    image.addRepresentation(&rep);
+                    pieces.push((head.frame(), image));
+                }
+            }
+        }
+        let [r, g, b] = [
+            (theme.background >> 16) & 0xff,
+            (theme.background >> 8) & 0xff,
+            theme.background & 0xff,
+        ]
+        .map(|byte| f64::from(byte) / 255.0);
+        let origin = frame.origin;
+        let draw = RcBlock::new(move |bounds: NSRect| -> objc2::runtime::Bool {
+            NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0).setFill();
+            NSBezierPath::fillRect(bounds);
+            for (at, image) in &pieces {
+                image.drawInRect(NSRect::new(
+                    NSPoint::new(at.origin.x - origin.x, at.origin.y - origin.y),
+                    at.size,
+                ));
+            }
+            objc2::runtime::Bool::YES
+        });
+        let picture = NSImage::imageWithSize_flipped_drawingHandler(frame.size, true, &draw);
+        Some((frame, picture))
+    }
+
+    /// The pill of the capsule of the card holding `pane`, in this view's space; `None` when
+    /// the card is not minimized.
+    fn capsule_frame(&self, pane: u64) -> Option<NSRect> {
+        self.capsule_view(pane).map(|view| view.pill_frame())
+    }
+
+    /// The capsule of the card whose first pane is `pane`.
+    fn capsule_view(&self, pane: u64) -> Option<Retained<Capsule>> {
+        self.ivars()
+            .capsules
+            .borrow()
+            .iter()
+            .find(|view| view.pane() == pane)
+            .cloned()
+    }
+
+    /// The views the card holding `pane` is drawn with: its shadow, its panes and their headers.
+    fn card_views(&self, pane: u64) -> Vec<Retained<NSView>> {
+        let iv = self.ivars();
+        let cards = iv.cards.borrow();
+        let Some(index) = cards
+            .iter()
+            .position(|card| card.tree.leaves().contains(&pane))
+        else {
+            return Vec::new();
+        };
+        let mut views: Vec<Retained<NSView>> = Vec::new();
+        if let Some(shade) = iv.shades.borrow().get(index) {
+            let view: &NSView = shade;
+            views.push(view.retain());
+        }
+        for id in cards[index].tree.leaves() {
+            if let Some(view) = self.pane(id) {
+                let view: &NSView = &view;
+                views.push(view.retain());
+            }
+            if let Some(head) = iv.heads.borrow().iter().find(|head| head.pane() == id) {
+                let view: &NSView = head;
+                views.push(view.retain());
+            }
+        }
+        views
     }
 
     /// Takes `id` out of its layer ([`Layers::remove`]); the pane stays in the view and the list —
@@ -1653,7 +2057,7 @@ impl SplitView {
         self.ivars().ring_theme.set(Some(*theme));
         for shade in self.ivars().shades.borrow().iter() {
             shade.paint(theme);
-            shade.set_plate(Some(theme.ground_srgb()));
+            shade.set_plate(Some(theme.separator_srgb()));
         }
         self.place_ring();
     }
@@ -1689,15 +2093,71 @@ impl SplitView {
             .filter(|pane| !pane.isHidden())
             .map(|pane| {
                 let (left, right) = pane.corners();
-                // A floating pane is a card under either style.
+                // A floating pane is a card under either style; a split card's header is round
+                // only at the card's own corners.
                 let top = if self.carded() || self.floating(pane.id()) {
                     card::corner_pt()
                 } else {
                     0.0
                 };
-                (pane.id(), self.card_frame(&pane), (top, left, right))
+                let (top_left, top_right) = iv
+                    .head_corners
+                    .borrow()
+                    .iter()
+                    .find(|(id, _)| *id == pane.id())
+                    .map_or((true, true), |(_, corners)| *corners);
+                let top_left = if top_left { top } else { 0.0 };
+                let top_right = if top_right { top } else { 0.0 };
+                let frame = self.card_frame(&pane);
+                // A lined pane at the window's top edge (the tabs in the side column) has the
+                // window's corner there, as its bottom corners do at the bottom edge: a square
+                // frame would run past the window's curve and be cut by it.
+                let (top_left, top_right) = if top > 0.0 {
+                    (top_left, top_right)
+                } else {
+                    top_corners(
+                        Rect::new(
+                            frame.origin.x,
+                            frame.origin.y,
+                            frame.size.width,
+                            frame.size.height,
+                        ),
+                        self.full_rect(),
+                        self.beside_tabs(),
+                        card::window_corner_pt(self.window().as_deref()),
+                    )
+                };
+                (pane.id(), frame, (top_left, top_right, left, right))
             });
-        iv.focus_ring.place(at, &theme, still);
+        // Round a card that is growing out of its capsule the frame does not slide there: it
+        // grows with the card, from the capsule, in step with it.
+        let growth = at.as_ref().and_then(|(id, _, _)| {
+            iv.growing
+                .borrow()
+                .iter()
+                .find(|growth| growth.leaves.contains(id))
+                .map(|growth| (growth.card, growth.capsule, growth.begin))
+        });
+        iv.focus_ring.place(at, &theme, still || growth.is_some());
+        if let Some((card_rect, capsule, begin)) = growth
+            && CACurrentMediaTime() < begin + card::SPRING_SECS
+            && let Some(layer) = iv.focus_ring.layer()
+        {
+            let frame = iv.focus_ring.frame();
+            card::follow(
+                &layer,
+                Rect::new(
+                    frame.origin.x,
+                    frame.origin.y,
+                    frame.size.width,
+                    frame.size.height,
+                ),
+                card_rect,
+                capsule,
+                card::Flight::OutOf,
+                begin,
+            );
+        }
     }
 
     /// What the content does at the panes' top edge: the hairline shows only
@@ -1971,7 +2431,7 @@ impl SplitView {
                 let shade = card::Shade::new(self.mtm(), bounds);
                 if let Some(theme) = &theme {
                     shade.paint(theme);
-                    shade.set_plate(Some(theme.ground_srgb()));
+                    shade.set_plate(Some(theme.separator_srgb()));
                 }
                 self.addSubview(&shade);
                 shades.push(shade);
@@ -1987,6 +2447,7 @@ impl SplitView {
         }
         let mut placed = Vec::new();
         let mut outlines = Vec::new();
+        let mut heads = Vec::new();
         for (index, (card, (rect, inner))) in layers.cards.iter().zip(&arranged).enumerate() {
             let mut focused = false;
             let mut last: Option<Retained<NSView>> = None;
@@ -1998,7 +2459,12 @@ impl SplitView {
                 pane.set_headed(true);
                 pane.set_card(true);
                 focused |= pane.shows_focus();
+                // Round only where the card is: panes that meet inside it are square there.
+                let corners = card_corners(*frame, *rect);
+                heads.push((*id, corners.top));
                 let (left, right) = self.corners_of(*frame, true);
+                let left = if corners.bottom.0 { left } else { 0.0 };
+                let right = if corners.bottom.1 { right } else { 0.0 };
                 pane.place(
                     NSRect::new(
                         NSPoint::new(frame.x, frame.y),
@@ -2037,6 +2503,7 @@ impl SplitView {
             }
         }
         iv.outlines.replace(outlines);
+        iv.head_corners.replace(heads);
         self.sync_grips();
         placed
     }
@@ -2065,11 +2532,32 @@ impl SplitView {
                 window.invalidateCursorRectsForView(view);
             }
         }
+        drop(grips);
+        // The dividers' cursors stop where the cards stand: a card that moved, came or went
+        // changes where they are.
+        if let Some(window) = self.window() {
+            for handle in iv.handles.borrow().iter() {
+                window.invalidateCursorRectsForView(handle);
+            }
+            for handle in iv.card_handles.borrow().iter().flatten() {
+                window.invalidateCursorRectsForView(handle);
+            }
+        }
     }
 
     /// The frames of the shown cards, back to front, with a pane of each.
     fn outlines(&self) -> Vec<(u64, Rect)> {
         self.ivars().outlines.borrow().clone()
+    }
+
+    /// The frames of the shown cards with each one's place among the cards (back to front):
+    /// what stands over a card's own dividers is only the cards in front of it.
+    fn outlines_with_cards(&self) -> Vec<(usize, Rect)> {
+        let layers = self.layers();
+        self.outlines()
+            .into_iter()
+            .filter_map(|(pane, rect)| Some((layers.card_of(pane)?, rect)))
+            .collect()
     }
 
     /// What a pointer at `point` (container coordinates) is on among the shown cards: a pane of
@@ -2091,14 +2579,23 @@ impl SplitView {
             return;
         };
         let min = self.limits();
-        let least = self.ground(&min).least(&layers.cards[index].tree);
+        // From where the card is seen, which may be inside its margins while its area is not.
+        let start = self.ground(&min).shown(&layers.cards[index]);
+        self.ivars().loose.set(Some(pane));
         self.ivars().card_drag.set(Some(CardDrag {
             pane,
             grip,
-            start: layers.cards[index].area.within(least),
+            start,
             origin: self.convertPoint_fromView(at, None),
             moved: false,
         }));
+        // The pointer keeps the cursor it was pressed with until the drag ends: under a moving
+        // card the cursor rects of what it passes over would take it.
+        if let Some(window) = self.window() {
+            window.disableCursorRects();
+        }
+        // A card still on its way back from the last drag stays where it is now.
+        self.ivars().settling.set(self.ivars().settling.get() + 1);
     }
 
     /// The pointer is at `at` (window coordinates) in a card drag: the card follows, inside the
@@ -2118,6 +2615,8 @@ impl SplitView {
         );
         let min = self.limits();
         let ground = self.ground(&min);
+        let margins = self.card_margins();
+        let pull = Pull::of_points(EDGE_GAP_PT, MAGNET_PT, self.bounds_rect());
         let changed = {
             let mut cards = self.ivars().cards.borrow_mut();
             let Some(card) = cards
@@ -2127,9 +2626,21 @@ impl SplitView {
                 return;
             };
             let least = ground.least(&card.tree);
+            // Carried, the card goes into its margins against a spring ([`Area::carried`]) and
+            // comes back inside them when let go ([`SplitView::end_card_drag`]); an edge pulled by
+            // a grip stops at the margin, so the card is not resized again on the way back.
             let area = match drag.grip {
-                None => drag.start.moved(dx, dy, least),
-                Some(grip) => drag.start.dragged(grip, dx, dy, least),
+                None => Area::new(
+                    drag.start.x + dx,
+                    drag.start.y + dy,
+                    drag.start.width,
+                    drag.start.height,
+                )
+                .carried(margins, pull),
+                Some(grip) => drag
+                    .start
+                    .dragged(grip, dx, dy, least)
+                    .held_inside(grip, margins, least),
             };
             let changed = area != card.area;
             card.area = area;
@@ -2150,12 +2661,130 @@ impl SplitView {
         let Some(drag) = self.ivars().card_drag.take() else {
             return false;
         };
+        if let Some(window) = self.window() {
+            window.enableCursorRects();
+            window.resetCursorRects();
+        }
+        // A card carried past its margins comes back inside them; the layout on disk takes
+        // where it comes to rest.
+        if drag.moved && drag.grip.is_none() && self.settle_card(drag.pane) {
+            return true;
+        }
+        self.ivars().loose.set(None);
         if drag.moved
             && let Some(app) = crate::app::delegate(self.mtm())
         {
             app.layout_changed();
         }
         true
+    }
+
+    /// The room a card keeps from the tab's edges once it is let go ([`Margins`]): under cards
+    /// the flat cards' own margins — its edges line up with theirs —, under lines
+    /// [`FLOAT_MARGIN_PT`] all round.
+    fn card_margins(&self) -> Margins {
+        let bounds = self.bounds_rect();
+        if self.carded() {
+            let panes = self.panes_rect();
+            Margins::of_points(
+                panes.x - bounds.x,
+                panes.y - bounds.y,
+                (bounds.x + bounds.width) - (panes.x + panes.width),
+                (bounds.y + bounds.height) - (panes.y + panes.height),
+                bounds,
+            )
+        } else {
+            let margin = FLOAT_MARGIN_PT;
+            Margins::of_points(margin, margin, margin, margin, bounds)
+        }
+    }
+
+    /// Brings the card holding `pane` to rest ([`Area::rest`]: back inside its margins, into a
+    /// corner it was let go near) over [`SETTLE_SECS`], easing out,
+    /// one layout a frame as a drag lays it out; at once under Reduce Motion. The layout on disk
+    /// takes where it ends. `false` when the card is inside them already (nothing to do).
+    fn settle_card(&self, pane: u64) -> bool {
+        let Some(from) = self
+            .ivars()
+            .cards
+            .borrow()
+            .iter()
+            .find(|card| card.tree.leaves().contains(&pane))
+            .map(|card| card.area)
+        else {
+            return false;
+        };
+        let pull = Pull::of_points(EDGE_GAP_PT, MAGNET_PT, self.bounds_rect());
+        let to = from.rest(self.card_margins(), pull);
+        if to == from {
+            return false;
+        }
+        let round = self.ivars().settling.get() + 1;
+        self.ivars().settling.set(round);
+        self.ivars().loose.set(Some(pane));
+        let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        if still {
+            self.ivars().loose.set(None);
+            self.set_card_area(pane, to);
+            self.settled();
+            return true;
+        }
+        let start = std::time::Instant::now();
+        let this = self.retain();
+        let tick = RcBlock::new(move |timer: NonNull<NSTimer>| {
+            let stop = || {
+                // SAFETY: the timer is the one this block runs for, alive while it runs.
+                unsafe { timer.as_ref() }.invalidate();
+            };
+            // A newer drag took the card: it stays where that one puts it.
+            if this.ivars().settling.get() != round {
+                stop();
+                return;
+            }
+            let t = (start.elapsed().as_secs_f64() / SETTLE_SECS).min(1.0);
+            let eased = 1.0 - (1.0 - t).powi(3);
+            if !this.set_card_area(pane, from.toward(to, eased)) && t < 1.0 {
+                // The card went (closed, docked) on the way.
+                this.ivars().loose.set(None);
+                stop();
+                return;
+            }
+            if t >= 1.0 {
+                this.ivars().loose.set(None);
+                this.set_card_area(pane, to);
+                this.settled();
+                stop();
+            }
+        });
+        // SAFETY: a repeating timer on the main run loop with a block that takes it.
+        let _ = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 120.0, true, &tick)
+        };
+        true
+    }
+
+    /// The card holding `pane` takes `area` and is laid out there; `false` when there is no
+    /// such card.
+    fn set_card_area(&self, pane: u64, area: Area) -> bool {
+        {
+            let mut cards = self.ivars().cards.borrow_mut();
+            let Some(card) = cards
+                .iter_mut()
+                .find(|card| card.tree.leaves().contains(&pane))
+            else {
+                return false;
+            };
+            card.area = area;
+        }
+        self.layout_panes();
+        true
+    }
+
+    /// A card came to rest: its place is part of the layout on disk.
+    fn settled(&self) {
+        if let Some(app) = crate::app::delegate(self.mtm()) {
+            app.layout_changed();
+        }
     }
 
     /// ⌃⌘ + arrow on floating pane `pane` ([`Layers::resize_key`]): its card's right and bottom
@@ -2208,6 +2837,18 @@ impl SplitView {
                 Some(head) => head.clone(),
                 None => {
                     let head = PaneHead::new(mtm, id);
+                    // A header made again (its card opened from a capsule) shows its pane's last
+                    // look at once, not a blank band until the tab's next look.
+                    if let (Some(theme), Some((_, look))) = (
+                        self.ivars().ring_theme.get(),
+                        self.ivars()
+                            .looks
+                            .borrow()
+                            .iter()
+                            .find(|(pane, _)| *pane == id),
+                    ) {
+                        head.set(look.clone(), &theme, card::corner_pt());
+                    }
                     // Over its pane, under the dividers' handles.
                     self.addSubview_positioned_relativeTo(
                         &head,
@@ -2222,6 +2863,16 @@ impl SplitView {
                 NSPoint::new(rect.x, rect.y - card::HEAD_PT),
                 NSSize::new(rect.width, card::HEAD_PT),
             ));
+            // A floating card's headers are round only at the card's top corners; every other
+            // header, a card of its own, at both.
+            let corners = self
+                .ivars()
+                .head_corners
+                .borrow()
+                .iter()
+                .find(|(pane, _)| *pane == id)
+                .map_or((true, true), |(_, corners)| *corners);
+            head.set_corners(corners);
             // The pane's own metrics say where its text starts: they carry the gutter and what
             // its corners take, told with its frame.
             if let Some(margins) = self.pane(id).and_then(|pane| pane.side_margins()) {
@@ -2453,18 +3104,107 @@ mod tests {
     }
 
     #[test]
-    fn inside_a_floating_card_panes_keep_a_gap_a_header_and_no_margin() {
+    fn inside_a_floating_card_panes_touch_with_a_line_a_header_and_no_margin() {
         // The card's edge is its own frame: no margin round its panes, whatever the split style,
-        // and the gap between panes is the card gap.
+        // and its panes meet on one line, as lines' do, each under its header.
         let inside = card_spacing(2.0);
-        assert_eq!(inside.between_px(), GAP_PT * 2.0);
         assert_eq!(inside.around_px(), 0.0);
+        assert_eq!(inside, Spacing::DIVIDED.with_head(card::HEAD_PT, 2.0));
+        assert_ne!(inside.between_px(), GAP_PT * 2.0);
+    }
+
+    #[test]
+    fn a_lined_pane_at_the_windows_top_right_has_the_windows_corner_there_beside_the_tabs() {
+        let bounds = Rect::new(0.0, 0.0, 900.0, 600.0);
+        let right = Rect::new(450.0, 0.0, 450.0, 600.0);
+        let left = Rect::new(0.0, 0.0, 449.0, 600.0);
+        let lower = Rect::new(450.0, 300.0, 450.0, 300.0);
+        // Tabs in the side column: the container's top edge is the window's.
+        assert_eq!(top_corners(right, bounds, true, 12.0), (0.0, 12.0));
+        // The left corner is the column's; a pane under another reaches no corner.
+        assert_eq!(top_corners(left, bounds, true, 12.0), (0.0, 0.0));
+        assert_eq!(top_corners(lower, bounds, true, 12.0), (0.0, 0.0));
+        // Tabs in the title row: the container starts under it, every top corner is square.
+        assert_eq!(top_corners(right, bounds, false, 12.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_dividers_cursor_stops_where_a_card_stands_over_it() {
+        // A side-by-side split's line runs top to bottom: a card across its middle leaves the
+        // part above it and the part below it.
+        let line = Rect::new(400.0, 0.0, 8.0, 500.0);
+        let card = Rect::new(300.0, 100.0, 300.0, 200.0);
         assert_eq!(
-            inside,
-            Spacing::gapped(GAP_PT, 0.0, 2.0).with_head(card::HEAD_PT, 2.0)
+            uncovered(line, Axis::Horizontal, &[card]),
+            vec![
+                Rect::new(400.0, 0.0, 8.0, 100.0),
+                Rect::new(400.0, 300.0, 8.0, 200.0)
+            ]
         );
-        // Lines touch in the flat area; a floating card does not follow it.
-        assert_ne!(inside, spaced(2.0, SplitStyle::Lines, false));
+        // A card beside the line leaves it whole; one over all of it leaves nothing.
+        let beside = Rect::new(500.0, 100.0, 100.0, 100.0);
+        assert_eq!(uncovered(line, Axis::Horizontal, &[beside]), vec![line]);
+        let over = Rect::new(300.0, -10.0, 300.0, 600.0);
+        assert!(uncovered(line, Axis::Horizontal, &[over]).is_empty());
+        // A line across, under a card: the parts left and right of it.
+        let across = Rect::new(0.0, 250.0, 800.0, 8.0);
+        assert_eq!(
+            uncovered(across, Axis::Vertical, &[card]),
+            vec![
+                Rect::new(0.0, 250.0, 300.0, 8.0),
+                Rect::new(600.0, 250.0, 200.0, 8.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_split_card_is_round_only_at_its_own_corners() {
+        let head = card::HEAD_PT;
+        let card = Rect::new(100.0, 50.0, 401.0, 300.0 + head);
+        // Side by side: the left pane has the card's left corners, the right one its right ones.
+        let left = Rect::new(100.0, 50.0 + head, 200.0, 300.0);
+        let right = Rect::new(301.0, 50.0 + head, 200.0, 300.0);
+        assert_eq!(
+            card_corners(left, card),
+            CardCorners {
+                top: (true, false),
+                bottom: (true, false)
+            }
+        );
+        assert_eq!(
+            card_corners(right, card),
+            CardCorners {
+                top: (false, true),
+                bottom: (false, true)
+            }
+        );
+        // One above the other: the top pane's header has the top corners and no bottom ones.
+        let tall = Rect::new(100.0, 50.0, 401.0, 2.0 * (150.0 + head) + 1.0);
+        let upper = Rect::new(100.0, 50.0 + head, 401.0, 150.0);
+        let lower = Rect::new(100.0, 50.0 + head + 150.0 + 1.0 + head, 401.0, 150.0);
+        assert_eq!(
+            card_corners(upper, tall),
+            CardCorners {
+                top: (true, true),
+                bottom: (false, false)
+            }
+        );
+        assert_eq!(
+            card_corners(lower, tall),
+            CardCorners {
+                top: (false, false),
+                bottom: (true, true)
+            }
+        );
+        // A card of one pane is round all round.
+        let alone = Rect::new(100.0, 50.0 + head, 401.0, 300.0);
+        assert_eq!(
+            card_corners(alone, card),
+            CardCorners {
+                top: (true, true),
+                bottom: (true, true)
+            }
+        );
     }
 
     #[test]

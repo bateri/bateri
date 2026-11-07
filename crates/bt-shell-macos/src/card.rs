@@ -53,13 +53,13 @@ use objc2_app_kit::{
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::{CGContext, CGImage};
 use objc2_foundation::{
-    NSNumber, NSObjectProtocol, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect, NSSize,
-    NSString, NSValue, ns_string,
+    NSArray, NSNumber, NSObjectProtocol, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect,
+    NSSize, NSString, NSTimer, NSValue, ns_string,
 };
 use objc2_quartz_core::{
-    CABasicAnimation, CACornerMask, CACurrentMediaTime, CALayer, CAMediaTiming,
-    CAMediaTimingFunction, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
-    kCAFillModeBackwards,
+    CABasicAnimation, CACornerMask, CACurrentMediaTime, CAKeyframeAnimation, CALayer,
+    CAMediaTiming, CAMediaTimingFunction, CATransaction, CATransform3D,
+    NSValueCATransform3DAdditions, kCAFillModeBackwards,
 };
 
 use crate::split::{self, Rect, Slide};
@@ -329,6 +329,9 @@ define_class!(
     }
 );
 
+/// A focus frame's corner radii: top left, top right, bottom left, bottom right.
+pub(crate) type RingCorners = (f64, f64, f64, f64);
+
 impl FocusRing {
     /// Born hidden: the container stands it round the focused card of a split tab.
     pub(crate) fn new(mtm: MainThreadMarker) -> Retained<Self> {
@@ -346,34 +349,28 @@ impl FocusRing {
     }
 
     /// Stands the line round `frame` (the container's space) of pane `pane`'s card, with the
-    /// card's corners `(top, bottom left, bottom right)`, in `theme`'s frame colour; `None` hides
-    /// it. A move to another pane's card slides there unless `still` (Reduce Motion); the same
-    /// card laid out again is followed at once.
-    pub(crate) fn place(
-        &self,
-        at: Option<(u64, NSRect, (f64, f64, f64))>,
-        theme: &Theme,
-        still: bool,
-    ) {
+    /// card's corners `(top left, top right, bottom left, bottom right)`, in `theme`'s frame
+    /// colour; `None` hides it. A move to another pane's card slides there unless `still`
+    /// (Reduce Motion); the same card laid out again is followed at once.
+    pub(crate) fn place(&self, at: Option<(u64, NSRect, RingCorners)>, theme: &Theme, still: bool) {
         let Some(layer) = self.layer() else {
             return;
         };
-        let Some((pane, frame, (top, left, right))) = at else {
+        let Some((pane, frame, (top_left, top_right, left, right))) = at else {
             self.ivars().on.set(None);
             self.setHidden(true);
             return;
         };
         layer.setBorderColor(Some(&srgb(theme.focus_frame_srgb(), 1.0).CGColor()));
-        // One radius for the corners that have one: a card's are all alike, a lined pane's are
-        // the window's curve where it meets the window's bottom and square elsewhere. The layer
-        // is not flipped: its minimum y is the bottom.
-        let radius = top.max(left).max(right);
+        // One radius for the corners that have one: a card's are all alike (a split floating
+        // card's square where its panes meet), a lined pane's are the window's curve where it
+        // meets the window's bottom and square elsewhere. The layer is not flipped: its minimum
+        // y is the bottom.
+        let radius = top_left.max(top_right).max(left).max(right);
         let mut corners = CACornerMask::empty();
         for (round, corner) in [
-            (
-                top,
-                CACornerMask::LayerMinXMaxYCorner | CACornerMask::LayerMaxXMaxYCorner,
-            ),
+            (top_left, CACornerMask::LayerMinXMaxYCorner),
+            (top_right, CACornerMask::LayerMaxXMaxYCorner),
             (left, CACornerMask::LayerMinXMinYCorner),
             (right, CACornerMask::LayerMaxXMinYCorner),
         ] {
@@ -401,12 +398,20 @@ impl FocusRing {
 }
 
 /// Rounds and clips the pane's own layer, or gives the corners back. Under a header (a split
-/// tab's pane) only the bottom corners are the pane's: the header takes the top ones.
-pub(crate) fn round(layer: &CALayer, carded: bool, headed: bool) {
+/// tab's pane) only the bottom corners are the pane's: the header takes the top ones. `square`
+/// (bottom left, bottom right) keeps a bottom corner square: where a split floating card's
+/// panes meet inside it.
+pub(crate) fn round(layer: &CALayer, carded: bool, headed: bool, square: (bool, bool)) {
     layer.setCornerRadius(if carded { corner_pt() } else { 0.0 });
     layer.setMasksToBounds(carded);
     // The pane's layer is not flipped: its minimum y is the bottom.
-    let bottom = CACornerMask::LayerMinXMinYCorner | CACornerMask::LayerMaxXMinYCorner;
+    let mut bottom = CACornerMask::empty();
+    if !square.0 {
+        bottom |= CACornerMask::LayerMinXMinYCorner;
+    }
+    if !square.1 {
+        bottom |= CACornerMask::LayerMaxXMinYCorner;
+    }
     let all = bottom | CACornerMask::LayerMinXMaxYCorner | CACornerMask::LayerMaxXMaxYCorner;
     layer.setMaskedCorners(if headed { bottom } else { all });
 }
@@ -518,6 +523,289 @@ fn play_for(
     layer.addAnimation_forKey(&animation, Some(key));
 }
 
+/// A floating card's flight between its place and its capsule ([`fly`]): into the capsule
+/// (minimized) or out of it (opened again).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flight {
+    Into,
+    OutOf,
+}
+
+/// Flies a picture of a card (`picture`, the card's look at `card`, both in `parent`'s space)
+/// between the card's place and its capsule at `capsule` over [`SPRING_SECS`], with a spring's
+/// give at both ends ([`GIVE`]): into the capsule it swells a little, then shrinks there and
+/// fades to a fifth; out of it it grows from there a little past the card, from two fifths to
+/// whole, and settles. It starts at `begin` (`CACurrentMediaTime`), so that what flies with it
+/// ([`follow`]: the focus frame round the opened card) keeps step. The picture is a view of its
+/// own over everything in `parent`, gone when the flight ends; `done` runs then (the opened
+/// card's own views show again). The motion is Core Animation's: no frame is asked of any pane.
+pub(crate) fn fly(
+    parent: &NSView,
+    picture: &NSImage,
+    card: NSRect,
+    capsule: NSRect,
+    flight: Flight,
+    begin: f64,
+    done: impl Fn() + 'static,
+) {
+    let mtm = MainThreadMarker::from(parent);
+    // The picture at the window's own resolution, as sharp as what it stands for.
+    let scale = parent
+        .window()
+        .map_or(2.0, |window| window.backingScaleFactor());
+    let ghost = NSView::initWithFrame(NSView::alloc(mtm), card);
+    ghost.setWantsLayer(true);
+    parent.addSubview(&ghost);
+    let Some(layer) = ghost.layer() else {
+        ghost.removeFromSuperview();
+        done();
+        return;
+    };
+    let contents = picture.layerContentsForContentsScale(scale);
+    let rect = |frame: NSRect| {
+        Rect::new(
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        )
+    };
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    layer.setContentsScale(scale);
+    // SAFETY: what `NSImage::layerContentsForContentsScale` returns is what `contents` takes.
+    unsafe { layer.setContents(Some(&contents)) };
+    layer.setCornerRadius(corner_pt());
+    layer.setMasksToBounds(true);
+    CATransaction::commit();
+    follow(&layer, rect(card), rect(card), rect(capsule), flight, begin);
+    let ended = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+        ghost.removeFromSuperview();
+        done();
+    });
+    // SAFETY: a one-shot timer on the main run loop with a block that takes it.
+    let _ = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(SPRING_SECS, false, &ended)
+    };
+}
+
+/// Plays a card's flight on `layer`, whose frame is `own` — the card itself, or a part of it
+/// (the focus frame round one of its panes) — as a piece of the card at `card` flying to or
+/// from its capsule at `capsule` (all in the container's space): it is shown where that piece of
+/// the flying card is, scaled with it, and faded with it, from `begin` (`CACurrentMediaTime`) on.
+/// The model values are the flight's end. Without a transform that lands (`fitted`) the
+/// layer is left where it is.
+pub(crate) fn follow(
+    layer: &CALayer,
+    own: Rect,
+    card: Rect,
+    capsule: Rect,
+    flight: Flight,
+    begin: f64,
+) {
+    let at = |to: Rect| fitted(layer, mapped(own, card, to), own);
+    let (Some(small), given) = (at(capsule), at(grown_by_share(card, GIVE))) else {
+        return;
+    };
+    let (keys, legs, faded) = match flight {
+        // To the largest on the slides' curve, back from it easing in and out.
+        Flight::OutOf => (
+            match given {
+                Some(past) => vec![(small, 0.0), (past, OUT_PEAK), (IDENTITY, 1.0)],
+                None => vec![(small, 0.0), (IDENTITY, 1.0)],
+            },
+            [(0.2, 0.8, 0.2, 1.0), (0.45, 0.0, 0.55, 1.0)],
+            (0.4, 1.0),
+        ),
+        // Out to the swell gently, then away, quickening and easing into the capsule.
+        Flight::Into => (
+            match given {
+                Some(swell) => vec![(IDENTITY, 0.0), (swell, INTO_PEAK), (small, 1.0)],
+                None => vec![(IDENTITY, 0.0), (small, 1.0)],
+            },
+            [(0.3, 0.0, 0.4, 1.0), (0.5, 0.0, 0.2, 1.0)],
+            (1.0, 0.2),
+        ),
+    };
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    if let Some((end, _)) = keys.last() {
+        layer.setTransform(*end);
+    }
+    // A picture that goes into its capsule is unseen once its flight is over: AppKit keeps a
+    // view's layer transform as it likes, and the picture must not show a frame where the card
+    // stood between the flight's end and its removal.
+    let rest = match flight {
+        Flight::Into => 0.0,
+        Flight::OutOf => faded.1,
+    };
+    layer.setOpacity(rest as f32);
+    CATransaction::commit();
+    let start = layer.convertTime_fromLayer(begin, None);
+    play_keys(
+        layer,
+        &keys,
+        &legs,
+        ns_string!("bateri.fly"),
+        SPRING_SECS,
+        start,
+    );
+    let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+    // SAFETY: plain `NSNumber`s, what `opacity` takes.
+    unsafe {
+        fade.setFromValue(Some(&NSNumber::numberWithDouble(faded.0)));
+        fade.setToValue(Some(&NSNumber::numberWithDouble(faded.1)));
+    }
+    fade.setDuration(SPRING_SECS);
+    fade.setBeginTime(start);
+    // SAFETY: a constant `NSString` Core Animation exposes, only read.
+    fade.setFillMode(unsafe { kCAFillModeBackwards });
+    layer.addAnimation_forKey(&fade, Some(ns_string!("bateri.fly.fade")));
+}
+
+/// Where `part` of a card at `card` is when the card is shown at `to`: the same share of it.
+fn mapped(part: Rect, card: Rect, to: Rect) -> Rect {
+    let (sx, sy) = if card.width > 0.0 && card.height > 0.0 {
+        (to.width / card.width, to.height / card.height)
+    } else {
+        (1.0, 1.0)
+    };
+    Rect::new(
+        to.x + (part.x - card.x) * sx,
+        to.y + (part.y - card.y) * sy,
+        part.width * sx,
+        part.height * sy,
+    )
+}
+
+/// How much a card gives at either end of its flight, as a share of its width and height: past
+/// its size as it opens, swollen as it gathers to go. Small, a touch of spring, not a bounce.
+const GIVE: f64 = 0.03;
+
+/// How long a flight with its give takes: the motions' base and the settle round it.
+pub(crate) const SPRING_SECS: f64 = 0.36;
+
+/// When the opening card is at its largest, as a share of [`SPRING_SECS`].
+const OUT_PEAK: f64 = 0.62;
+
+/// When the going card is at its fullest before it shrinks away, as a share of
+/// [`SPRING_SECS`].
+const INTO_PEAK: f64 = 0.22;
+
+/// `rect` grown by `share` of its size about its middle (less than 0: shrunk).
+fn grown_by_share(rect: Rect, share: f64) -> Rect {
+    let (dx, dy) = (rect.width * share / 2.0, rect.height * share / 2.0);
+    Rect::new(
+        rect.x - dx,
+        rect.y - dy,
+        rect.width + 2.0 * dx,
+        rect.height + 2.0 * dy,
+    )
+}
+
+/// The `transform` of `layer` through `keys` (each value at its share of `secs`), each leg on
+/// its own curve of `legs` (the control points of a cubic Bézier), from `begin` (the layer's
+/// time) on.
+fn play_keys(
+    layer: &CALayer,
+    keys: &[(CATransform3D, f64)],
+    legs: &[(f64, f64, f64, f64)],
+    key: &NSString,
+    secs: f64,
+    begin: f64,
+) {
+    let animation = CAKeyframeAnimation::animationWithKeyPath(Some(ns_string!("transform")));
+    let values: Vec<Retained<AnyObject>> = keys
+        .iter()
+        .map(|(transform, _)| {
+            // SAFETY: a plain `NSValue` around a `CATransform3D` value.
+            let value = unsafe { NSValue::valueWithCATransform3D(*transform) };
+            Retained::into_super(Retained::into_super(value))
+        })
+        .collect();
+    let times: Vec<Retained<NSNumber>> = keys
+        .iter()
+        .map(|(_, time)| NSNumber::numberWithDouble(*time))
+        .collect();
+    let curves: Vec<Retained<CAMediaTimingFunction>> = legs
+        .iter()
+        .take(keys.len().saturating_sub(1))
+        .map(|&(a, b, c, d)| {
+            CAMediaTimingFunction::functionWithControlPoints(a as f32, b as f32, c as f32, d as f32)
+        })
+        .collect();
+    // SAFETY: `NSValue`s around `CATransform3D` values, what `transform` takes.
+    unsafe { animation.setValues(Some(&NSArray::from_retained_slice(&values))) };
+    animation.setKeyTimes(Some(&NSArray::from_retained_slice(&times)));
+    animation.setTimingFunctions(Some(&NSArray::from_retained_slice(&curves)));
+    animation.setDuration(secs);
+    animation.setBeginTime(begin);
+    // SAFETY: a constant `NSString` Core Animation exposes, only read.
+    animation.setFillMode(unsafe { kCAFillModeBackwards });
+    layer.addAnimation_forKey(&animation, Some(key));
+}
+
+/// The capsule a card flew into comes in late, as the picture arrives: unseen for the first
+/// two thirds of the flight, then fading in with a little pop — from small, a touch past its
+/// size, and settling.
+pub(crate) fn arrive(view: &NSView) {
+    let Some(layer) = view.layer() else {
+        return;
+    };
+    let begin = layer.convertTime_fromLayer(CACurrentMediaTime(), None) + SPRING_SECS * 0.66;
+    let secs = 0.22;
+    let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+    // SAFETY: plain `NSNumber`s, what `opacity` takes.
+    unsafe {
+        fade.setFromValue(Some(&NSNumber::numberWithDouble(0.0)));
+        fade.setToValue(Some(&NSNumber::numberWithDouble(1.0)));
+    }
+    fade.setBeginTime(begin);
+    fade.setDuration(secs * 0.6);
+    // SAFETY: a constant `NSString` Core Animation exposes, only read.
+    fade.setFillMode(unsafe { kCAFillModeBackwards });
+    layer.addAnimation_forKey(&fade, Some(ns_string!("bateri.arrive")));
+    let frame = view.frame();
+    let at = Rect::new(
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+    );
+    let (Some(small), Some(past)) = (
+        fitted(&layer, grown_by_share(at, -0.2), at),
+        fitted(&layer, grown_by_share(at, 0.08), at),
+    ) else {
+        return;
+    };
+    let pop = CAKeyframeAnimation::animationWithKeyPath(Some(ns_string!("transform")));
+    let values: Vec<Retained<AnyObject>> = [small, past, IDENTITY]
+        .into_iter()
+        .map(|transform| {
+            // SAFETY: a plain `NSValue` around a `CATransform3D` value.
+            let value = unsafe { NSValue::valueWithCATransform3D(transform) };
+            Retained::into_super(Retained::into_super(value))
+        })
+        .collect();
+    let times: Vec<Retained<NSNumber>> = [0.0, 0.55, 1.0]
+        .into_iter()
+        .map(NSNumber::numberWithDouble)
+        .collect();
+    let curves = [
+        CAMediaTimingFunction::functionWithControlPoints(0.2, 0.8, 0.2, 1.0),
+        CAMediaTimingFunction::functionWithControlPoints(0.45, 0.0, 0.55, 1.0),
+    ];
+    // SAFETY: `NSValue`s around `CATransform3D` values, what `transform` takes.
+    unsafe { pop.setValues(Some(&NSArray::from_retained_slice(&values))) };
+    pop.setKeyTimes(Some(&NSArray::from_retained_slice(&times)));
+    pop.setTimingFunctions(Some(&NSArray::from_retained_slice(&curves)));
+    pop.setBeginTime(begin);
+    pop.setDuration(secs);
+    // SAFETY: a constant `NSString` Core Animation exposes, only read.
+    pop.setFillMode(unsafe { kCAFillModeBackwards });
+    layer.addAnimation_forKey(&pop, Some(ns_string!("bateri.arrive.pop")));
+}
+
 /// Settles whatever slide is still running on the pane's layers: the model
 /// values are the end of every slide, so dropping the animations is the end.
 pub(crate) fn settle(pane: &NSView, frame: &NSView) {
@@ -579,7 +867,12 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
         ns_string!("bateri.slide.corners"),
         secs,
     );
-    if let Some(frame_layer) = frame.layer() {
+    // Under a header the card's light is the header's and the frame stays unseen
+    // (`TerminalPane::set_card`): playing its opacity would flash a light frame round a pane
+    // that floats or docks under lines.
+    if frame.alphaValue() > 0.0
+        && let Some(frame_layer) = frame.layer()
+    {
         let opacity = |card: bool| NSNumber::numberWithDouble(if card { 1.0 } else { 0.0 });
         play_for(
             &frame_layer,
@@ -1078,9 +1371,10 @@ pub(crate) struct ShadeIvars {
     dark: Cell<bool>,
     /// One layer per card, in the cards' order ([`Slices`]).
     layers: RefCell<Vec<Retained<CALayer>>>,
-    /// The tone a plate under each card takes (`Theme::ground_srgb`), or no plate. A floating
-    /// card's panes can be split, and the gap between them shows the plate: without it the gap
-    /// would show the footing's caster, the fill that casts the shadow and is meant to be hidden.
+    /// The tone a plate under each card takes (`Theme::separator_srgb`), or no plate. A floating
+    /// card's panes can be split, and the line between them is the plate showing through:
+    /// without it the line would show the footing's caster, the fill that casts the shadow and
+    /// is meant to be hidden.
     plate: Cell<Option<[u8; 3]>>,
 }
 
@@ -1140,8 +1434,9 @@ impl Shade {
         }
     }
 
-    /// A plate of `tone` under each card (the floating cards' shades), or none (the window's,
-    /// whose cards are panes of their own); laid again only when it changed.
+    /// A plate of `tone` under each card (the floating cards' shades: the line between a split
+    /// card's panes), or none (the window's, whose cards are panes of their own); laid again
+    /// only when it changed.
     pub(crate) fn set_plate(&self, tone: Option<[u8; 3]>) {
         if self.ivars().plate.replace(tone) != tone {
             self.lay();

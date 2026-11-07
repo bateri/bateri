@@ -248,6 +248,9 @@ pub(crate) struct HeadIvars {
     dark: Cell<bool>,
     /// The card's corner radius, points.
     radius: Cell<f64>,
+    /// Which top corners take it, left and right: both on a card of its own, only the card's
+    /// own on the header of a split floating card, whose panes meet square.
+    corners: Cell<(bool, bool)>,
     /// The grid's left and right margins under it (`CellMetrics::with_corners`): the mark stands
     /// on the first, the tools end at the second.
     margins: Cell<(f64, f64)>,
@@ -378,6 +381,7 @@ impl PaneHead {
             ground: Cell::new(0),
             dark: Cell::new(true),
             radius: Cell::new(0.0),
+            corners: Cell::new((true, true)),
             margins: Cell::new((GUTTER, GUTTER)),
             hot: Cell::new(false),
             quit_lit: Cell::new(false),
@@ -425,6 +429,14 @@ impl PaneHead {
         iv.look.replace(Some(look));
         if changed {
             self.lay_out_parts();
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// Which of its top corners are round when the look is a card's (left, right); redrawn
+    /// only when that changed.
+    pub(crate) fn set_corners(&self, corners: (bool, bool)) {
+        if self.ivars().corners.replace(corners) != corners {
             self.setNeedsDisplay(true);
         }
     }
@@ -678,6 +690,11 @@ impl PaneHead {
         };
         let bounds = self.bounds();
         let radius = if look.carded { iv.radius.get() } else { 0.0 };
+        let (left, right) = iv.corners.get();
+        let radius = (
+            if left { radius } else { 0.0 },
+            if right { radius } else { 0.0 },
+        );
         // The band's ground: the pane's own, the card's top corners rounded.
         let band = top_rounded(bounds, radius);
         Tint::of(iv.ground.get(), 1.0).color().setFill();
@@ -999,25 +1016,28 @@ impl HeadTools {
     }
 }
 
-/// `rect` (top-down) with its two top corners rounded by `radius`.
-fn top_rounded(rect: NSRect, radius: f64) -> Retained<NSBezierPath> {
+/// `rect` (top-down) with its top left and top right corners rounded by `radius`'s two radii
+/// (0 is square).
+fn top_rounded(rect: NSRect, (left, right): (f64, f64)) -> Retained<NSBezierPath> {
     let (x0, y0) = (rect.origin.x, rect.origin.y);
     let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-    let radius = radius
-        .min(rect.size.width / 2.0)
-        .min(rect.size.height)
-        .max(0.0);
+    let fit = |radius: f64| {
+        radius
+            .min(rect.size.width / 2.0)
+            .min(rect.size.height)
+            .max(0.0)
+    };
     let path = NSBezierPath::bezierPath();
     path.moveToPoint(NSPoint::new(x0, y1));
     path.appendBezierPathWithArcFromPoint_toPoint_radius(
         NSPoint::new(x0, y0),
         NSPoint::new(x1, y0),
-        radius,
+        fit(left),
     );
     path.appendBezierPathWithArcFromPoint_toPoint_radius(
         NSPoint::new(x1, y0),
         NSPoint::new(x1, y1),
-        radius,
+        fit(right),
     );
     path.lineToPoint(NSPoint::new(x1, y1));
     path.closePath();

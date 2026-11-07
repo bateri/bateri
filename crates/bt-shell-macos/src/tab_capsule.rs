@@ -151,6 +151,8 @@ impl Capsule {
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        // A layer of its own from the start: it fades in as a card flies into it (`card::arrive`).
+        this.setWantsLayer(true);
         this.addSubview(this.ivars().title.view());
         this.ivars().title.field().setAccessibilityElement(false);
         this.setAccessibilityElement(true);
@@ -232,6 +234,18 @@ impl Capsule {
             self.lay_out_parts();
             self.setNeedsDisplay(true);
         }
+    }
+
+    /// The pill, in the container's space: where a card flies into it and out of it.
+    pub(crate) fn pill_frame(&self) -> NSRect {
+        let frame = self.frame();
+        NSRect::new(
+            NSPoint::new(frame.origin.x + REACH, frame.origin.y + REACH),
+            NSSize::new(
+                (frame.size.width - 2.0 * REACH).max(0.0),
+                (frame.size.height - 2.0 * REACH).max(0.0),
+            ),
+        )
     }
 
     /// The pill, in the view's space.

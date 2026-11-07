@@ -4501,8 +4501,21 @@ impl TerminalPane {
         if headed {
             self.ivars().card_frame.setAlphaValue(0.0);
         }
+        self.round_corners();
+    }
+
+    /// The layer's corners as the card and the bottom corners say: a corner [`Self::place`] was
+    /// given no radius stays square (where a split floating card's panes meet inside it).
+    fn round_corners(&self) {
+        let iv = self.ivars();
+        let (left, right) = iv.corners.get();
         if let Some(layer) = self.layer() {
-            card::round(&layer, carded, headed);
+            card::round(
+                &layer,
+                iv.card_frame.carded(),
+                iv.headed.get(),
+                (left <= 0.0, right <= 0.0),
+            );
         }
     }
 
@@ -4549,6 +4562,9 @@ impl TerminalPane {
     /// notification and the corners alone take the geometry again.
     pub(crate) fn place(&self, frame: NSRect, left: f64, right: f64) {
         let moved = self.take_corners(left, right);
+        if moved {
+            self.round_corners();
+        }
         let same_frame = self.frame() == frame;
         self.setFrame(frame);
         if moved && same_frame {
