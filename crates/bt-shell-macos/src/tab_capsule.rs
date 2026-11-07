@@ -74,6 +74,13 @@ define_class!(
     unsafe impl NSObjectProtocol for Capsule {}
 
     impl Capsule {
+        /// Top-down, as the header's and the bar's views are: the marks are drawn from their
+        /// icons' top-down points (`draw_mark`), and the dot stands at the mark's top right.
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
             true

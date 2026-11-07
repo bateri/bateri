@@ -1078,6 +1078,10 @@ pub(crate) struct ShadeIvars {
     dark: Cell<bool>,
     /// One layer per card, in the cards' order ([`Slices`]).
     layers: RefCell<Vec<Retained<CALayer>>>,
+    /// The tone a plate under each card takes (`Theme::ground_srgb`), or no plate. A floating
+    /// card's panes can be split, and the gap between them shows the plate: without it the gap
+    /// would show the footing's caster, the fill that casts the shadow and is meant to be hidden.
+    plate: Cell<Option<[u8; 3]>>,
 }
 
 define_class!(
@@ -1116,6 +1120,7 @@ impl Shade {
             cards: RefCell::new(Vec::new()),
             dark: Cell::new(true),
             layers: RefCell::new(Vec::new()),
+            plate: Cell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -1131,6 +1136,14 @@ impl Shade {
     /// The theme's lightness: which footing the cards stand on.
     pub(crate) fn paint(&self, theme: &Theme) {
         if self.ivars().dark.replace(theme.is_dark()) != theme.is_dark() {
+            self.lay();
+        }
+    }
+
+    /// A plate of `tone` under each card (the floating cards' shades), or none (the window's,
+    /// whose cards are panes of their own); laid again only when it changed.
+    pub(crate) fn set_plate(&self, tone: Option<[u8; 3]>) {
+        if self.ivars().plate.replace(tone) != tone {
             self.lay();
         }
     }
@@ -1178,6 +1191,27 @@ impl Shade {
             // AppKit keeps the view's own layer flipped or not as it likes (it flips it once the
             // view stands in the flipped root): the place goes through its conversion.
             layer.setFrame(self.convertRectToLayer(grown(*rect, slices.margin)));
+            // The plate is the footing's child, the card's own rectangle inside its margin: the
+            // margin is the same on every side, so it stands there flipped or not.
+            // SAFETY: the footing's sublayers are only ever the plate this view put there.
+            let plate = unsafe { layer.sublayers() }.and_then(|children| children.firstObject());
+            match (iv.plate.get(), plate) {
+                (Some(tone), plate) => {
+                    let plate = plate.unwrap_or_else(|| {
+                        let plate = CALayer::new();
+                        layer.addSublayer(&plate);
+                        plate
+                    });
+                    plate.setFrame(NSRect::new(
+                        NSPoint::new(slices.margin, slices.margin),
+                        rect.size,
+                    ));
+                    plate.setCornerRadius(corner);
+                    plate.setBackgroundColor(Some(&srgb(tone, 1.0).CGColor()));
+                }
+                (None, Some(plate)) => plate.removeFromSuperlayer(),
+                (None, None) => {}
+            }
         }
         CATransaction::commit();
     }

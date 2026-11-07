@@ -982,10 +982,12 @@ pub mod capsule {
     }
 
     /// The frames of `widths` (oldest first) in one row: the newest, last, stands at the right
-    /// end, and each older one is a gap to its left. `area` is the splits' area (the content
-    /// without the strip): the strip row stands under it at its right edge — 4 points down, 8
-    /// when the panes are cards of their own (`carded`) — and the corner row stands 8 in from
-    /// the right and `head` + 8 down. A row that is longer than the area runs off its left edge
+    /// end, and each older one is a gap to its left. `area` is where the splits' panes stand
+    /// (the content without the strip, less the cards' margins): the strip row stands under it
+    /// — 8 points down and flush with the cards' right edge when the panes are cards of their
+    /// own (`carded`), 4 down and 4 in from the right when they touch the window's edges, so the
+    /// window's corner does not cut the last capsule — and the corner row stands 8 in from the
+    /// right and `head` + 8 down. A row that is longer than the area runs off its left edge
     /// rather than stack.
     pub fn row(
         place: CapsulePlace,
@@ -995,10 +997,11 @@ pub mod capsule {
         widths: &[f64],
     ) -> Vec<Rect> {
         let (y, mut right) = match place {
-            CapsulePlace::Strip => (
-                area.y + area.height + if carded { 8.0 } else { 4.0 },
-                area.x + area.width,
-            ),
+            CapsulePlace::Strip => {
+                let margin = if carded { 8.0 } else { 4.0 };
+                let inset = if carded { 0.0 } else { margin };
+                (area.y + area.height + margin, area.x + area.width - inset)
+            }
             CapsulePlace::TopRight => (area.y + head + CORNER, area.x + area.width - CORNER),
         };
         let mut frames: Vec<Rect> = widths
@@ -1937,8 +1940,9 @@ mod tests {
         let area = Rect::new(10.0, 40.0, 800.0, 500.0);
         let frames = capsule::row(CapsulePlace::Strip, area, false, 30.0, &[100.0, 80.0, 60.0]);
         assert_eq!(frames.len(), 3);
-        // The newest, the last, ends at the area's right edge.
-        assert!(near(frames[2].x + frames[2].width, 810.0));
+        // The newest, the last, ends 4 in from the area's right edge: the panes touch the
+        // window's, and its corner would cut a capsule flush with it.
+        assert!(near(frames[2].x + frames[2].width, 806.0));
         assert!(near(
             frames[1].x + frames[1].width,
             frames[2].x - capsule::GAP
@@ -1953,9 +1957,10 @@ mod tests {
                 .iter()
                 .all(|frame| near(frame.y, 544.0) && near(frame.height, 26.0))
         );
-        // The cards of the card style stand 8 down, not 4.
+        // The cards of the card style stand 8 down, not 4, and the row ends flush with them.
         let carded = capsule::row(CapsulePlace::Strip, area, true, 30.0, &[100.0]);
         assert!(near(carded[0].y, 548.0));
+        assert!(near(carded[0].x + carded[0].width, 810.0));
     }
 
     #[test]

@@ -745,6 +745,27 @@ impl SplitView {
         )
     }
 
+    /// Where the flat area's panes stand: [`SplitView::bounds_rect`] less the margins the panes
+    /// keep from its edges (under cards, the gap round them; under lines, none). The capsules
+    /// line up with it: the strip's row under its bottom edge and flush with its right one, the
+    /// corner's row in from its top right corner.
+    fn panes_rect(&self) -> Rect {
+        let scale = self.scale();
+        let margins = spaced(scale, self.style(), self.beside_tabs());
+        let (left, top, around) = (
+            margins.left_px() / scale,
+            margins.top_px() / scale,
+            margins.around_px() / scale,
+        );
+        let rect = self.bounds_rect();
+        Rect::new(
+            rect.x + left,
+            rect.y + top,
+            (rect.width - left - around).max(0.0),
+            (rect.height - top - around).max(0.0),
+        )
+    }
+
     /// The whole container, strip included: what the window's corners are measured against.
     fn full_rect(&self) -> Rect {
         let size = self.bounds().size;
@@ -1098,8 +1119,11 @@ impl SplitView {
             wanted.push(view.retain());
         }
         let subviews = self.subviews();
+        // Read afresh at every step: once a view has moved, the order taken before it no longer
+        // says which view stands right over which (a card's header judged by the old order stayed
+        // under the shade its pane had been moved over).
         let at = |view: &NSView| {
-            subviews
+            self.subviews()
                 .iter()
                 .position(|candidate| std::ptr::eq(&*candidate, view))
         };
@@ -1629,6 +1653,7 @@ impl SplitView {
         self.ivars().ring_theme.set(Some(*theme));
         for shade in self.ivars().shades.borrow().iter() {
             shade.paint(theme);
+            shade.set_plate(Some(theme.ground_srgb()));
         }
         self.place_ring();
     }
@@ -1637,8 +1662,13 @@ impl SplitView {
     /// (`None`): the focused pane with `[appearance] focus_frame` on (`TerminalTab::refresh_look`),
     /// shown only while the tab shows a split. A move to another pane slides it there.
     pub(crate) fn set_focus_frame(&self, pane: Option<u64>, theme: &Theme) {
-        self.ivars().framed.set(pane);
+        let moved = self.ivars().framed.replace(pane) != pane;
         self.ivars().ring_theme.set(Some(*theme));
+        // Over the cards the frame stands among their views, right over the card it is round
+        // ([`SplitView::restack`]): a frame that goes to another card goes up or down with it.
+        if moved && !self.ivars().cards.borrow().is_empty() {
+            self.restack();
+        }
         self.place_ring();
     }
 
@@ -1941,6 +1971,7 @@ impl SplitView {
                 let shade = card::Shade::new(self.mtm(), bounds);
                 if let Some(theme) = &theme {
                     shade.paint(theme);
+                    shade.set_plate(Some(theme.ground_srgb()));
                 }
                 self.addSubview(&shade);
                 shades.push(shade);
@@ -1988,10 +2019,13 @@ impl SplitView {
             );
             if let Some(shade) = iv.shades.borrow().get(index) {
                 shade.setFrame(bounds);
+                // The shade is not flipped and the container is: the card's frame goes through
+                // the conversion, as the window's shade takes the flat cards' (`sync_ground`).
+                let at = shade.convertRect_fromView(outline, Some(self));
                 shade.set_cards(if card.minimized {
                     Vec::new()
                 } else {
-                    vec![(outline, focused)]
+                    vec![(at, focused)]
                 });
             }
             let dividers: &[Divider] = if card.minimized { &[] } else { &inner.dividers };
@@ -2257,7 +2291,7 @@ impl SplitView {
         let widths: Vec<f64> = views.iter().map(|view| view.width()).collect();
         let frames = capsule::row(
             place,
-            self.bounds_rect(),
+            self.panes_rect(),
             self.carded(),
             card::HEAD_PT,
             &widths,
