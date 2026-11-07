@@ -202,6 +202,25 @@ fn carry_out(
                 .zoom_pane(&target.pane, on_screen(&target.window, &target.tab));
             Ok(())
         }
+        Arrange::Minimize(named) => {
+            let target = pane_or_own(app, server, from, named.as_ref())?;
+            // Only a card has a capsule to turn into: a pane of the flat area has none.
+            if !target.tab.container().floating(target.pane.id()) {
+                return Err(usage(format!(
+                    "{} is not floating: only a floating pane minimizes",
+                    named_or(named.as_ref(), "the pane")
+                )));
+            }
+            lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
+            if target.tab.minimize_pane(target.pane.id()) {
+                Ok(())
+            } else {
+                Err(failed(format!(
+                    "{} could not be minimized",
+                    named_or(named.as_ref(), "the pane")
+                )))
+            }
+        }
         Arrange::Swap { pane, other } => {
             let first = pane_or_own(app, server, from, Some(pane))?;
             let second = pane_or_own(app, server, from, Some(other))?;
@@ -1085,6 +1104,21 @@ mod tests {
         assert!(
             zoom.find("floating(").expect(zoom) < zoom.find("zoom_pane(").expect(zoom),
             "{zoom}"
+        );
+        // Minimize looks at the layer first, then the keyboard rule, then the tab acts.
+        let minimize = arm(
+            "Arrange::Minimize(named) =>",
+            "Arrange::Swap { pane, other } =>",
+        );
+        let flat = minimize.find("is not floating").expect(minimize);
+        let lays = minimize.find("lays_out(").expect(minimize);
+        let made = minimize.find(".minimize_pane(").expect(minimize);
+        assert!(flat < lays && lays < made, "{minimize}");
+        // A capsule named by `focus pane` opens, whatever the keyboard rule says about layout:
+        // the card is revealed by the tab's own `focus_pane`.
+        assert!(
+            source.contains("tab.focus_pane(pane)"),
+            "focus reaches a pane through the tab's focus_pane, which opens its capsule"
         );
         let swap = arm("Arrange::Swap { pane, other } =>", "Arrange::Move { pane,");
         assert!(

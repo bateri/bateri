@@ -27,7 +27,7 @@
 use crate::split::{Direction, Layout, Rect, Removal, Room, Size, Spacing, Tree, Verdict};
 
 /// How much of the content area a new floating pane takes: 55% wide, 60% tall, in the middle
-/// (measured in Rex Beta 1829). A design constant.
+/// A design constant.
 pub const NEW_SHARE: (f64, f64) = (0.55, 0.60);
 
 /// How much of the place it stood in a pane that floats takes: four fifths of it each way, in
@@ -35,7 +35,7 @@ pub const NEW_SHARE: (f64, f64) = (0.55, 0.60);
 pub const FLOATED_SHARE: f64 = 0.80;
 
 /// What one press of the keys that move or resize a card moves it by: 4% of the tab's width
-/// (left, right) or height (up, down). A design constant (the mockup's `STEP`).
+/// (left, right) or height (up, down). A design constant.
 pub const KEY_STEP: f64 = 0.04;
 
 /// The tolerance of the geometry's comparisons.
@@ -724,6 +724,20 @@ impl Layers {
         Some(Focus::Pane(first))
     }
 
+    /// `bateri minimize p9` with the keyboard in `focus`: `pane`'s card opens if it is a capsule
+    /// (the keyboard stays where it is — `focus pane` gives it) and is minimized if it is shown
+    /// (the keyboard goes back if it was in the card). `None` when `pane` is not floating.
+    pub fn toggle_minimized(&mut self, pane: u64, focus: u64) -> Option<Focus> {
+        let index = self.card_of(pane)?;
+        if self.cards[index].minimized {
+            self.reveal(pane);
+            return Some(Focus::Keep);
+        }
+        let inside = self.cards[index].tree.leaves().contains(&focus);
+        self.minimize(pane);
+        Some(if inside { Focus::Back } else { Focus::Keep })
+    }
+
     /// ⌥⇧⌘↩ with the keyboard in `focus`: when a card is shown, all of them are minimized (back
     /// to front, so the front one is the newest capsule) and a keyboard that was in one goes
     /// back; when none is shown, all of the capsules open, each where it was. `None` when the
@@ -750,11 +764,18 @@ impl Layers {
         Some(if inside { Focus::Back } else { Focus::Keep })
     }
 
-    /// The order ⌘[ ⌘] walks: the flat area's panes in tree order, then the shown cards from the
-    /// front to the back, each in tree order. Capsules are skipped.
+    /// The order ⌘[ ⌘] walks: the flat area's panes in tree order, then the shown cards, the
+    /// oldest first (by the oldest pane in each), each in tree order. Capsules are skipped.
+    ///
+    /// **Not the stacking order.** The keyboard arriving in a card raises it, so a walk that went
+    /// front to back would change under the walker's feet: with two cards it went from the
+    /// first to the second to the first again and never came back to the flat area. A card's age
+    /// does not change when it is raised.
     pub fn order(&self) -> Vec<u64> {
+        let mut shown: Vec<&Card> = self.cards.iter().filter(|card| !card.minimized).collect();
+        shown.sort_by_key(|card| card.tree.leaves().into_iter().min());
         let mut out = self.flat.leaves();
-        for card in self.cards.iter().rev().filter(|card| !card.minimized) {
+        for card in shown {
             out.extend(card.tree.leaves());
         }
         out
@@ -1599,15 +1620,38 @@ mod tests {
     // ---- the order the keyboard walks --------------------------------------------------
 
     #[test]
-    fn the_keyboard_walks_the_flat_area_then_the_cards_front_to_back() {
-        // Back to front: 3, 4, 5. Front to back: 5, 4, 3.
-        let layers = with_cards(vec![card(3), card(4), card(5)]);
-        assert_eq!(layers.order(), vec![1, 2, 5, 4, 3]);
-        assert_eq!(layers.cycle(2, true), Some(5));
-        assert_eq!(layers.cycle(5, true), Some(4));
-        assert_eq!(layers.cycle(3, true), Some(1));
-        assert_eq!(layers.cycle(1, false), Some(3));
-        assert_eq!(layers.cycle(5, false), Some(2));
+    fn the_keyboard_walks_the_flat_area_then_the_cards_oldest_first() {
+        // Back to front: 3, 4, 5; the walk does not follow the stacking.
+        let layers = with_cards(vec![card(5), card(3), card(4)]);
+        assert_eq!(layers.order(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(layers.cycle(2, true), Some(3));
+        assert_eq!(layers.cycle(3, true), Some(4));
+        assert_eq!(layers.cycle(5, true), Some(1));
+        assert_eq!(layers.cycle(1, false), Some(5));
+        assert_eq!(layers.cycle(3, false), Some(2));
+    }
+
+    #[test]
+    fn a_walk_that_raises_each_card_it_reaches_still_comes_back_to_the_flat_area() {
+        // The keyboard arriving in a card raises it (`reveal`): the walk has to be the same
+        // after each step, or it goes round the cards and never returns.
+        let mut layers = with_cards(vec![card(3), card(4)]);
+        let all = layers.order();
+        let mut seen = vec![1];
+        let mut at = 1;
+        for _ in 0..all.len() {
+            at = layers.cycle(at, true).expect("a next pane");
+            layers.reveal(at);
+            seen.push(at);
+        }
+        assert_eq!(seen, vec![1, 2, 3, 4, 1]);
+        let mut back = vec![1];
+        for _ in 0..all.len() {
+            at = layers.cycle(at, false).expect("a previous pane");
+            layers.reveal(at);
+            back.push(at);
+        }
+        assert_eq!(back, vec![1, 4, 3, 2, 1]);
     }
 
     #[test]
@@ -1728,9 +1772,13 @@ mod tests {
         assert!(!layers.cards[1].minimized);
         assert_eq!(layers.cards[1].area, Area::new(0.2, 0.2, 0.4, 0.4));
         assert_eq!(layers.order(), vec![1, 2, 3, 4]);
-        // A click on a shown card raises it.
+        // A click on a shown card raises it; the walk keeps its order.
         assert!(layers.reveal(4));
-        assert_eq!(layers.order(), vec![1, 2, 4, 3]);
+        assert_eq!(
+            layers.cards.last().map(|card| card.tree.leaves()[0]),
+            Some(4)
+        );
+        assert_eq!(layers.order(), vec![1, 2, 3, 4]);
         assert!(!layers.reveal(1));
     }
 
@@ -1750,11 +1798,38 @@ mod tests {
         assert!(layers.minimize(5));
         assert_eq!(layers.minimize_key(1), Some(Focus::Pane(5)));
         assert_eq!(layers.capsules(), vec![3]);
-        assert_eq!(layers.order(), vec![1, 2, 5, 4]);
+        assert_eq!(layers.order(), vec![1, 2, 4, 5]);
         assert_eq!(layers.minimize_key(2), Some(Focus::Pane(3)));
         // No capsule left: nothing to open.
         assert_eq!(layers.minimize_key(1), None);
         assert_eq!(Layers::flat(pair()).minimize_key(1), None);
+    }
+
+    #[test]
+    fn the_minimize_command_toggles_a_card_and_moves_the_keyboard_only_out_of_it() {
+        let mut inner = Tree::Leaf(3);
+        assert!(inner.split(3, Axis::Horizontal, 6));
+        let mut layers = with_cards(vec![
+            Card {
+                tree: inner,
+                ..card(3)
+            },
+            card(4),
+        ]);
+        // A flat pane has no card.
+        assert_eq!(layers.toggle_minimized(1, 1), None);
+        // The keyboard in the card that goes: back. In another pane, even a flat one: stays.
+        assert_eq!(layers.toggle_minimized(6, 3), Some(Focus::Back));
+        assert_eq!(layers.capsules(), vec![3]);
+        // Opened again, in front, and the keyboard stays where it was (the flat area).
+        assert_eq!(layers.toggle_minimized(3, 1), Some(Focus::Keep));
+        assert!(layers.capsules().is_empty());
+        assert_eq!(
+            layers.cards.last().map(|card| card.tree.leaves()[0]),
+            Some(3)
+        );
+        assert_eq!(layers.toggle_minimized(4, 1), Some(Focus::Keep));
+        assert_eq!(layers.capsules(), vec![4]);
     }
 
     #[test]
@@ -1789,7 +1864,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             areas
         );
-        assert_eq!(layers.order(), vec![1, 2, 4, 3]);
+        // The walk keeps its order whatever the stacking is (4 was minimized last: in front).
+        assert_eq!(
+            layers.cards.last().map(|card| card.tree.leaves()[0]),
+            Some(4)
+        );
+        assert_eq!(layers.order(), vec![1, 2, 3, 4]);
         // And a tab with no card has nothing to hide or show.
         assert_eq!(Layers::flat(pair()).hide_key(1), None);
     }

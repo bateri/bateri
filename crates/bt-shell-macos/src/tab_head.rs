@@ -1052,7 +1052,7 @@ fn draw_tool(tool: Tool, rect: NSRect, color: u32, strength: f64) {
             path.moveToPoint(at(1.15, 6.0));
             path.lineToPoint(at(10.85, 6.0));
         }
-        // One glyph for both: a card standing over another (the mockup's `FLOAT_D`).
+        // One glyph for both: a card standing over another.
         Tool::Float | Tool::Dock => {
             path.appendBezierPathWithRoundedRect_xRadius_yRadius(
                 NSRect::new(at(1.0, 4.25), NSSize::new(7.5 * unit, 7.5 * unit)),
@@ -1077,7 +1077,7 @@ fn draw_tool(tool: Tool, rect: NSRect, color: u32, strength: f64) {
             );
             path.lineToPoint(at(8.6, 8.0));
         }
-        // A short bar (the mockup's `min`).
+        // A short bar.
         Tool::Minimize => {
             path.moveToPoint(at(3.2, 6.4));
             path.lineToPoint(at(8.8, 6.4));

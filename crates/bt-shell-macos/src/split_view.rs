@@ -327,6 +327,8 @@ struct CardDrag {
     /// the way it went.
     start: Area,
     origin: NSPoint,
+    /// The card has changed since the press: a click that moved nothing is no layout change.
+    moved: bool,
 }
 
 define_class!(
@@ -828,7 +830,6 @@ impl SplitView {
         self.ivars().panes.borrow_mut().push(pane.retain());
         self.add_pane(pane);
         self.layout_panes();
-        self.restack();
         // One pane became two: the first slides into its card, the newcomer
         // grows from the edge it was split off.
         if before.len() == 1 && !self.floating(target) {
@@ -859,7 +860,6 @@ impl SplitView {
             self.add_pane(pane);
         }
         self.layout_panes();
-        self.restack();
         true
     }
 
@@ -914,7 +914,6 @@ impl SplitView {
         self.ivars().panes.borrow_mut().push(pane.retain());
         self.add_pane(pane);
         self.layout_panes();
-        self.restack();
         true
     }
 
@@ -1004,7 +1003,6 @@ impl SplitView {
         let before = (self.strip_of(&cards) != self.strip_height()).then(|| self.snapshot());
         self.ivars().cards.replace(cards);
         self.layout_panes();
-        self.restack();
         // A minimized card's panes are hidden now — their frames stop, the programs run on — and
         // an opened one's ask for a frame again.
         let visible = self.window().is_some_and(|window| {
@@ -1032,9 +1030,9 @@ impl SplitView {
     }
 
     /// The views of the cards, back to front — each card's shadow, panes, headers and handles, in
-    /// that order — stand above everything of the flat area, and the focus frame stands over them
-    /// when it is round a floating pane (that card is the front one: a card the keyboard goes to
-    /// comes to the front) and under them otherwise. Only the views that are out of place are
+    /// that order — stand above everything of the flat area, and the focus frame stands over the
+    /// views of the card it is round (and under the cards in front of that one) when it is round a
+    /// floating pane, and under every card otherwise. Only the views that are out of place are
     /// moved: taking a pane out of its superview puts the keyboard down.
     fn restack(&self) {
         let iv = self.ivars();
@@ -1045,7 +1043,9 @@ impl SplitView {
         let ring: &NSView = &iv.focus_ring;
         let framed = iv.framed.get();
         let mut wanted: Vec<Retained<NSView>> = Vec::new();
-        let mut ring_over = false;
+        // How many card views stand under the focus frame when it is round a floating pane: it
+        // stands over that card's own views and under the cards in front of it.
+        let mut ring_slot: Option<usize> = None;
         for (index, card) in cards.iter().enumerate() {
             if let Some(shade) = shades.get(index) {
                 let view: &NSView = shade;
@@ -1068,7 +1068,9 @@ impl SplitView {
                     wanted.push(view.retain());
                 }
             }
-            ring_over = framed.is_some_and(|id| ids.contains(&id));
+            if framed.is_some_and(|id| ids.contains(&id)) {
+                ring_slot = Some(wanted.len());
+            }
         }
         if wanted.is_empty() {
             return;
@@ -1116,13 +1118,16 @@ impl SplitView {
             }
             *anchor = Some(view.retain());
         };
-        if !ring_over {
+        if ring_slot.is_none() {
             put(ring, &mut anchor);
         }
-        for view in &wanted {
+        for (placed, view) in wanted.iter().enumerate() {
+            if ring_slot == Some(placed) {
+                put(ring, &mut anchor);
+            }
             put(view, &mut anchor);
         }
-        if ring_over {
+        if ring_slot == Some(wanted.len()) {
             put(ring, &mut anchor);
         }
     }
@@ -1386,7 +1391,8 @@ impl SplitView {
         let scale = self.scale();
         let smallest = move |_: u64| min;
         let room = Room {
-            bounds: self.bounds_rect(),
+            // The whole container: a new tab has no capsule strip of its own yet.
+            bounds: self.full_rect(),
             scale,
             spacing: spacing(scale, self.style(), self.beside_tabs()),
             min: &smallest,
@@ -1464,7 +1470,7 @@ impl SplitView {
     }
 
     /// The next or previous pane (⌘] / ⌘[; [`Layers::cycle`]): the flat area, then the shown
-    /// cards from the front to the back.
+    /// cards, the oldest first.
     pub(crate) fn cycle(&self, from: u64, forward: bool) -> Option<u64> {
         self.layers().cycle(from, forward)
     }
@@ -2047,6 +2053,7 @@ impl SplitView {
             grip,
             start: layers.cards[index].area.within(least),
             origin: self.convertPoint_fromView(at, None),
+            moved: false,
         }));
     }
 
@@ -2085,18 +2092,26 @@ impl SplitView {
             changed
         };
         if changed {
+            self.ivars().card_drag.set(Some(CardDrag {
+                moved: true,
+                ..drag
+            }));
             self.layout_panes();
         }
     }
 
     /// The drag ended: the card's place is part of the layout on disk (once per drag, not per
-    /// step). `false` when no drag was on.
+    /// step), if the card moved at all. `false` when no drag was on.
     pub(crate) fn end_card_drag(&self) -> bool {
-        let was = self.ivars().card_drag.take().is_some();
-        if was && let Some(app) = crate::app::delegate(self.mtm()) {
+        let Some(drag) = self.ivars().card_drag.take() else {
+            return false;
+        };
+        if drag.moved
+            && let Some(app) = crate::app::delegate(self.mtm())
+        {
             app.layout_changed();
         }
-        was
+        true
     }
 
     /// ⌃⌘ + arrow on floating pane `pane` ([`Layers::resize_key`]): its card's right and bottom
@@ -2637,5 +2652,21 @@ mod tests {
             grips < capsules,
             "a capsule at the corner stands over the grips"
         );
+    }
+
+    #[test]
+    fn the_focus_frame_stands_over_its_own_card_and_under_the_cards_in_front() {
+        let restack = body_of("fn restack(");
+        // The slot is where the framed card's own views end, not "over everything".
+        assert!(restack.contains("ring_slot = Some(wanted.len())"));
+        assert!(!restack.contains("ring_over"));
+    }
+
+    #[test]
+    fn a_click_that_moved_no_card_is_not_a_layout_change() {
+        let end = body_of("pub(crate) fn end_card_drag(");
+        assert!(end.contains("drag.moved"));
+        let drag = body_of("pub(crate) fn drag_card(");
+        assert!(drag.contains("moved: true"));
     }
 }

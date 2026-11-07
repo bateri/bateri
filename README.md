@@ -29,6 +29,11 @@ Developer ID and notarized by Apple, so it opens without a warning.
 - **Tabs and splits.** Tabs along the top or in a column down the left edge;
   split any tab right or down, move between panes, resize, equalize and
   zoom — all from the keyboard.
+- **Floating panes.** A pane can float over its tab's splits as a card you move
+  and resize with the pointer or the keyboard, dock back among the splits, or
+  minimize to a capsule — in a strip under the splits or at the tab's top right
+  corner (`minimized_panes` in Settings) — and open again with a click. Programs
+  and agents open them from the `bateri` command.
 - **Search in scrollback** with case-sensitive and regular-expression modes and
   a live match count.
 - **SSH aware.** Over ssh or mosh the dock turns into a status bar showing the
@@ -89,6 +94,10 @@ curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
 | Select split in a direction | ⌥⌘ + arrow |
 | Resize split | ⌃⌘ + arrow |
 | Equalize splits / zoom split | ⌃⌘= / ⇧⌘↩ |
+| Float pane / dock pane | ⌥⌘↩ |
+| Move floating pane | ⌃⌥⌘ + arrow |
+| Minimize floating pane (or open the last one minimized) | ⌃⌘M |
+| Hide / show all floating panes | ⌥⇧⌘↩ |
 | Close pane or tab / close window | ⌘W / ⇧⌘W |
 | Find / next / previous | ⌘F / ⌘G / ⇧⌘G |
 | Clear screen and scrollback / scrollback only | ⌘K / ⌥⌘K |
@@ -195,6 +204,7 @@ bateri move pane p9 --new-tab web                # a tab of its own, its name op
 bateri zoom [p9]    bateri swap p9 p3    bateri resize [p9] --left [--by N]
 bateri split --float [--at X,Y] [--size W,H]     # a floating pane over this tab; a pane or --tab t3 says whose; percents of the tab
 bateri move pane p9 --float [--at X,Y] [--size W,H]   # a flat pane floats; --dock puts it back; --at, --size alone move or resize it
+bateri minimize [p9]                             # a floating pane shrinks to a capsule, or opens again
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
 bateri split -S prod -- make test                # a terminal on the server prod (full level only); prints p9@prod
 bateri send p9@prod 'q'                          # capture, send-key and wait reach it the same way
@@ -217,12 +227,18 @@ its own place and size, and the flat area always keeps at least one pane.
 place, `--dock` puts a floating one back among the flat panes and `--at X,Y`
 or `--size W,H` (percents of the tab, from 0 to 100) move or resize it. `--float`
 goes with no side, `--ratio`, `--new-tab`, `--group` or `--window`. `move pane
-p9 --beside p3 --right`, `--tab t3` and `--new-tab` take a floating pane too and
-put it flat where they say. `resize p9 --right` or `--left` changes the card's
-width and `--below` or `--above` its height, as ⌃⌘ + arrow does. `zoom p9` of a
-floating pane, `swap` of two panes that are not in one layer, `--dock` or `--at`
-of a flat pane are mistakes (64). `bateri ls` marks such a pane `(floating)`, and
-`--json` gives every pane `floating` and `minimized`.
+p9 --beside p3 --right`, `--tab t3` (another tab) and `--new-tab` take a floating
+pane too and put it flat where they say; `--dock` sets it back in its own tab.
+`resize p9 --right` or `--left` changes the card's width and `--below` or
+`--above` its height, as ⌃⌘ + arrow does. `zoom p9` of a floating pane, `swap`
+of two panes that are not in one layer, a plain `split` or `move --beside` beside
+a floating pane, `--dock` or `--at` of a flat pane are mistakes (64). `minimize
+p9` turns a floating pane's card into a capsule, or opens the capsule again where
+the card was, and is a mistake (64) on a flat pane; `focus pane p9` of a pane in a
+capsule opens it and takes the keyboard. The programs in a minimized card keep
+running. `bateri ls` marks such a pane `(floating)`, and `(minimized)` in a
+capsule, and in `--json` a pane's object carries `floating` and `minimized` (the
+tab's zoomed pane and the entries for another machine do not).
 
 **What a machine may do** is a setting per machine, `off`, `own`, `screen` or
 `full`, and nobody is asked ([`[commands]`](docs/SETTINGS.md#commands)). `own`,

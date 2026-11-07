@@ -932,11 +932,18 @@ impl TerminalTab {
         // A floating pane's card has edges of its own (⌃⌘ + arrow: the right and bottom ones move
         // by a step of the tab each), and the zoom, which is the flat area's, stays.
         if self.ivars().container.floating(pane.id()) {
-            let moved = (0..steps)
-                .filter(|_| self.ivars().container.resize_card(pane.id(), direction))
-                .count()
-                > 0;
-            self.layout_changed();
+            // Each step is one more nudge of the edge; the first that moves nothing is the tab's
+            // edge or the card's least, and the ones after it would not move either.
+            let mut moved = false;
+            for _ in 0..steps {
+                if !self.ivars().container.resize_card(pane.id(), direction) {
+                    break;
+                }
+                moved = true;
+            }
+            if moved {
+                self.layout_changed();
+            }
             return moved;
         }
         self.set_zoom(None);
@@ -1010,7 +1017,7 @@ impl TerminalTab {
     }
 
     /// Whether Float Pane / Dock Pane has something to do for the focused pane: a floating pane
-    /// docks, a flat one floats unless it is the flat area's only pane (Karar 3: the flat area
+    /// docks, a flat one floats unless it is the flat area's only pane (the flat area
     /// always holds a pane).
     pub(crate) fn can_float_or_dock(&self) -> bool {
         let container = &self.ivars().container;
@@ -1078,6 +1085,20 @@ impl TerminalTab {
         }
     }
 
+    /// `bateri minimize p9`: the card holding floating pane `pane` becomes a capsule, or opens
+    /// again where it was when it is one — a toggle, like `zoom`. Opening gives the card no
+    /// keyboard (`focus pane` does that); minimizing the card the keyboard is in sends it back,
+    /// as ⌃⌘M does. `false` when `pane` does not float.
+    pub(crate) fn minimize_pane(&self, pane: u64) -> bool {
+        let mut layers = self.ivars().container.layers();
+        let focus = self.focused_pane().id();
+        let Some(next) = layers.toggle_minimized(pane, focus) else {
+            return false;
+        };
+        self.apply_cards(layers, next, focus);
+        true
+    }
+
     /// A press on a capsule: its card opens where it was and takes the keyboard.
     pub(crate) fn show_capsule(&self, id: u64) {
         if let Some(pane) = self.ivars().container.pane(id) {
@@ -1089,6 +1110,10 @@ impl TerminalTab {
     /// ([`Focus`]): to a pane, back to where it was before, or nowhere.
     fn apply_cards(&self, layers: Layers, next: Focus, from: u64) {
         let container = &self.ivars().container;
+        // Asked before the views move: where the keyboard is, and whether it is `from`'s to give
+        // ([`handover`]) — a tab in the background keeps the window's keyboard where it is.
+        let handover = self.handover(from);
+        let held = self.responder_pane().map(|pane| pane.id());
         container.set_cards(layers.cards);
         let target = match next {
             Focus::Keep => None,
@@ -1096,8 +1121,21 @@ impl TerminalTab {
             Focus::Back => self.fallback_pane(from),
         };
         match target {
-            Some(pane) => self.focus_pane(&pane),
-            None => self.refresh_look(),
+            Some(pane) => {
+                self.hand_over(handover, Some(pane));
+                self.refresh_look();
+            }
+            None => {
+                // The restack may have taken the pane holding the keyboard out of its view and
+                // put it back, which puts the keyboard down.
+                if let Some(pane) = held
+                    .and_then(|id| container.pane(id))
+                    .filter(|pane| !pane.isHidden())
+                {
+                    let _ = pane.focus();
+                }
+                self.refresh_look();
+            }
         }
         self.layout_changed();
     }
@@ -1475,6 +1513,9 @@ impl TerminalTab {
                 pane.end_kept_terminal();
                 drop(pane.begin_close());
                 drop(container.detach(id));
+                // A card that came down whole shows panes that were hidden under a minimized
+                // card, or the other way round: their frames follow.
+                container.apply_visibility(self.window_visible());
                 self.refresh_title();
                 self.refresh_look();
                 if let Some(app) = app::delegate(self.mtm()) {
@@ -1502,7 +1543,14 @@ impl TerminalTab {
         if !self.ivars().container.floating(a) {
             self.set_zoom(None);
         }
-        self.ivars().container.swap(a, b)
+        // Two panes of a card trading places are put back in the stack, which puts the keyboard
+        // down if one of them held it.
+        let held = self.responder_pane().map(|pane| pane.id());
+        let done = self.ivars().container.swap(a, b);
+        if done && let Some(pane) = held.and_then(|id| self.ivars().container.pane(id)) {
+            let _ = pane.focus();
+        }
+        done
     }
 
     /// The panes take the places of `tree`, which holds exactly this tab's
@@ -1557,6 +1605,7 @@ impl TerminalTab {
         sheets::lift(&pane);
         self.hand_over(handover, next);
         let released = container.detach(id)?;
+        container.apply_visibility(self.window_visible());
         self.refresh_title();
         self.refresh_look();
         Some(released)
@@ -2700,8 +2749,39 @@ mod tests {
         ] {
             assert!(apply.contains(part), "{part}");
         }
+        // `minimize p9` toggles: a capsule opens with no keyboard given, a card the keyboard is in
+        // goes and sends it back.
+        assert!(
+            body("pub(crate) fn minimize_pane(").contains("layers.toggle_minimized(pane, focus)")
+        );
         // A capsule's press and the keyboard arriving in one are the same road: the card opens
         // and the pane takes the keyboard.
         assert!(body("pub(crate) fn show_capsule(").contains("self.focus_pane(&pane)"));
+    }
+
+    #[test]
+    fn a_layer_change_gives_the_keyboard_only_when_it_was_the_leaving_panes_to_give() {
+        let source = include_str!("tab.rs");
+        let body = |name: &str| {
+            let at = source.find(name).expect(name);
+            &source[at..at + source[at..].find("\n    }\n").expect("its end")]
+        };
+        // ⌃⌘M, ⌥⇧⌘↩ and `bateri minimize` ask the handover before the views move, and hand the
+        // keyboard over through it: a tab in the background does not take the window's.
+        let apply = body("fn apply_cards(");
+        let asked = apply.find("self.handover(from)").expect(apply);
+        let moved = apply.find("container.set_cards(").expect(apply);
+        let given = apply.find("self.hand_over(handover").expect(apply);
+        assert!(asked < moved && moved < given, "{apply}");
+        // A restack that puts the pane holding the keyboard down gives it back.
+        assert!(apply.contains("pane.focus()"), "{apply}");
+        assert!(body("pub(crate) fn swap(").contains("pane.focus()"));
+        // Panes that a closing or a release leaves in view ask for frames again.
+        for name in ["pub(crate) fn close_pane(", "pub(crate) fn release_pane("] {
+            let body = body(name);
+            let detached = body.find("container.detach(id)").expect(body);
+            let visible = body.find("container.apply_visibility(").expect(body);
+            assert!(detached < visible, "{name}");
+        }
     }
 }

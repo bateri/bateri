@@ -520,7 +520,14 @@ impl<'a> World<'a> {
             Dest::Anchor | Dest::Tab(_) => into
                 .container()
                 .plan_agent_pane(beside.id(), incoming, &ask)
-                .ok_or("the anchor is not a pane of its tab")?,
+                .ok_or_else(|| {
+                    // The plan looks at the flat area's tree only.
+                    if into.container().floating(beside.id()) {
+                        "the anchor floats: a split goes beside a pane of the flat area; dock it first"
+                    } else {
+                        "the anchor is not a pane of its tab"
+                    }
+                })?,
             // A tab or a window of its own has no neighbour to share a room with.
             Dest::Lodged(..) | Dest::Window => Landing {
                 spot: Spot::NewTab,

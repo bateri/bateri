@@ -85,6 +85,8 @@ pub(crate) fn cursor(shape: PointerShape) -> Retained<NSCursor> {
 /// The cursor over the edge or corner of a floating card that `grip` names: the frame-resize
 /// cursors of macOS 15, whose arrows say which edges move; on 14 an edge shows the two-way
 /// resize cursor, and a corner the arrow — AppKit has no public diagonal cursor before 15.
+// `resizeLeftRightCursor` and `resizeUpDownCursor` are deprecated in AppKit 15 for the
+// frame-resize cursors above, and the only cursors of that kind before it.
 #[allow(deprecated)]
 pub(crate) fn grip_cursor(grip: Grip) -> Retained<NSCursor> {
     if available!(macos = 15.0) {
