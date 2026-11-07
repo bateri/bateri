@@ -56,6 +56,8 @@ pub(super) enum Ink {
     Field,
     Warning,
     Error,
+    /// What went right: the prompt's mark, a green dot.
+    Success,
 }
 
 impl Ink {
@@ -72,6 +74,7 @@ impl Ink {
             Ink::Field => palette.raised,
             Ink::Warning => palette.warning,
             Ink::Error => palette.error,
+            Ink::Success => palette.success,
         }
     }
 }

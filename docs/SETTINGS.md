@@ -74,7 +74,7 @@ according to the keyboard layout; on a Turkish Q keyboard the same key
 carries a different letter, and the menu shows that letter instead. View ▸
 Bigger also shows as `⌘:` on that layout.
 
-bateri ▸ Settings… (Cmd ,) opens the settings window: a sidebar of nine pages on
+bateri ▸ Settings… (Cmd ,) opens the settings window: a sidebar of ten pages on
 the left and the chosen page on the right. A page is a few titled groups of
 rows. A row has the setting's name, a line under it that says what the current
 value does, and the control on the right; a unit (lines, pt, ×, seconds) stands
@@ -112,6 +112,9 @@ goes with them.
   on servers"; see [Remote shell integration](#remote-shell-integration)), the
   two keys of the load indicator (`stats`, `stats_interval`) and the eight
   preview and download keys of `[remote]`.
+- **Apps**, under Servers — the programs bateri keeps up to date (see
+  [`[apps]`](#apps) below): the list of what it follows, and a field to add to
+  it.
 
 Choices that change how something looks are shown as pictures drawn in the
 colours of the theme you have on screen (where the tabs sit, how split panes
@@ -588,10 +591,11 @@ stats_interval = 3
 # Programs bateri keeps up to date for you, such as the textpen editor. Each
 # entry says where a program publishes its releases: user/repo for a GitHub
 # project (its latest release), or the full https:// address of an app.json.
-# A program runs with your rights, here and on the servers you connect to, so a
-# program signed with a key you have not approved waits for your approval and
-# is not downloaded. Taking an entry out of the list removes the program from
-# this Mac at once.
+# A program runs with your rights, on this computer and on the servers with
+# shell integration, so a program signed with a key you have not approved waits
+# for your approval and is not downloaded. Taking an entry out of the list
+# removes the program from this computer at once and from those servers the
+# next time bateri connects to them.
 sources = ["bateri/textpen"]
 
 [keys]
@@ -2762,15 +2766,20 @@ sources = ["bateri/textpen"]
 
 An entry is `user/repo`, a GitHub project (bateri reads the `app.json` of its latest release), or a full
 `https://…` or `file:///…` address of an `app.json`. An entry that is none of these is dropped with a warning and the
-others stay; a `sources` that is not a list of strings keeps the list in use.
+others stay; a `sources` that is not a list of strings keeps the list in use. A program that leaves the list is
+deleted from this computer (and from the servers, in the background) — but not while the list has an entry that was
+dropped, or was not accepted: a mistake in a typed address does not delete the program it was meant to be. The warning
+stays until the line is mended, and the Apps page of Settings cannot add, review or remove anything until then (a
+change it wrote would write the list without that entry).
 
 **What bateri does with a source.** At launch and once a day it fetches the source's `app.json` and the signature
 beside it (`app.json.sig`), and takes the newest release this version of bateri can open (a release lists the
 protocol and the kinds of view it needs; one it cannot open waits for a bateri update, and an earlier one that opens is
-used meanwhile). It downloads the program's file for this Mac, checks its SHA-256 sum, and keeps it in
+used meanwhile). It downloads the program's file for this computer, checks its SHA-256 sum, and keeps it in
 `~/Library/Application Support/bateri/apps/<name>/<version>/`. A folder is kept for the release in use, the one before
 it, and anything newer than 30 days. A download that fails leaves what is there as it is, and tries again at the
-next check.
+next check; a check the network did not answer is made again after five minutes, then ten, and so on up to once an hour,
+so a program arrives soon after the connection does.
 
 **A key is approved once.** A release is signed with its author's key, and bateri compares the key with the
 one it trusts for that name. The key of bateri's own programs comes with bateri. Any other program waits, with
@@ -2779,20 +2788,47 @@ nothing but its `app.json` downloaded, until its key is approved: the key is kep
 release must be signed with it — a release signed with another key is not downloaded and asks again. A program's name
 belongs to the first source that uses it; `bateri`, `kablo` and `pencere` are never a program's name.
 
-**Where the programs run.** Each program in the list is also put where your shells find it, on this Mac and on every
-server bateri sets up (a server whose commands are `off` gets nothing): the file is in
-`~/.local/share/bateri/apps/<name>/<version>/<name>`, and `~/.local/share/bateri/apps/bin/<name>` is a link to the
-release in use. bateri's shell integration adds `~/.local/share/bateri/apps/bin` to the **end** of `PATH`, once, so
-a command you or the system already has under the same name is the one that runs. The link only ever moves to a newer
-release, and a `bin/<name>` that is not a link bateri made is left alone (bateri logs it). A server gets its
-programs when a connection to it is set up, in the background: a terminal never waits for them, and a server that is
-visited again within ten minutes with nothing new is not asked twice. The server's own kind of file (Linux or macOS,
-Intel or ARM) is downloaded to this Mac the first time a server of that kind needs it. Old releases on a machine are
-cleaned the same way as here: the one in use, the one before it and anything newer than 30 days stay.
+**Where the programs run.** Each program in the list is also put where your shells find it, on this computer and on
+the servers with shell integration (`remote.integration`, and a server marked Production only where the Shell menu turns
+it on; a server without it gets nothing): the file is in `~/.local/share/bateri/apps/<name>/<version>/<name>`, and
+`~/.local/share/bateri/apps/bin/<name>` is a link to the release in use. bateri's shell integration adds
+`~/.local/share/bateri/apps/bin` to the **end** of `PATH`, once, so a command you or the system already has under the
+same name is the one that runs. The link only ever moves to a newer release, and a `bin/<name>` that is not a link
+bateri made is left alone (bateri logs it). A server gets its programs when a connection to it is set up, in the
+background: a terminal never waits for them, and a server that is visited again within ten minutes with nothing new is
+not asked twice. The server's own kind of file (Linux or macOS, Intel or ARM) is downloaded to this computer the first
+time a server of that kind needs it. Old releases on a machine are cleaned the same way as here: the one in use, the
+one before it and anything newer than 30 days stay.
 
-**Taking a source out of the list** deletes its folder from this Mac at once; bateri remembers the name for 30 days,
-and a server that connects in that time loses its copy of the program too (and the `bin/<name>` link, if bateri made
-it).
+**The Apps page** (Settings ▸ Apps) is this list as rows, under Following, and a field under Add. A row has the
+program's name and version, the source it came from, and at the right a mark and two buttons. The mark is all the
+row says of its state: a green dot when the release in use is the newest, a grey dot when the release has no file for
+this computer (it still runs on the servers it has a file for), a turning ring while bateri has not read the source
+yet, and a triangle when something needs you — orange for a release that waits for a newer bateri, for a key not yet
+approved, or for a check that failed (bateri tries again: within the hour when the network did not answer, the next day otherwise), red when the key changed. Hold the pointer on a
+mark and a tip says what it means in one line and what will happen in a second; a screen reader reads the same words.
+A name, a version or a source that does not fit its line fades at the end and is whole in its tip.
+
+*Add.* Type `user/repo` or the address of an `app.json` and press Enter or Add. bateri reads the source first, and
+writes nothing: if the program is signed with the key that comes with bateri it is added at once; any other program
+asks, in a sheet that shows the name, the version, where it is from and the key that signed it, and says it runs on this
+computer and on the servers with shell integration with your permissions. Follow (Enter) keeps the key and adds the
+source to `[apps] sources`; Cancel (Esc) writes nothing and leaves what you typed in the field. A source that is not a
+GitHub project or an address, one the list has, one with no `app.json` and one whose name is taken are said under
+the field.
+
+*Review.* A row that waits for a key, or whose key changed, has a Review button that opens the same sheet. For a
+changed key it shows the approved key and the new one side by side; Cancel is the default (Enter and Esc), and Trust
+New Key, in red, replaces the approved key. Until you decide, the release you have stays and updates stop.
+
+*Remove.* The trash can on a row asks first (`Remove <name>?`), with Cancel as the default (Enter and Esc) and Remove in
+red. Remove writes the list without the entry; the program is deleted from this computer at once and from the
+servers with shell integration the next time bateri connects to them. Adding it again brings it back, and asks for its
+key again unless it is signed with bateri's own.
+
+**Taking a source out of the list** deletes its folder from this computer at once; bateri remembers the name for 30
+days, and a server that connects in that time loses its copy of the program too (and the `bin/<name>` link, if bateri
+made it).
 
 ### `[keys]`
 

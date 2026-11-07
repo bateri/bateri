@@ -64,14 +64,14 @@ if [ -x "$__bateri_bin/bateri" ]; then
   esac
 fi
 # The programs bateri follows (`apps/bin`, beside the `shell` directory) go at the END of `PATH`,
-# once, so none of them stands in for a command the server has.
+# once, so none of them stands in for a command the server has. The folder need not be there yet:
+# the first shell of a first visit starts before the first program is put in it, and an entry for
+# a folder that is not there does no harm.
 __bateri_apps=${__bateri_bin%/*/*}/apps/bin
-if [ -d "$__bateri_apps" ]; then
-  case ":$PATH:" in
-    *":$__bateri_apps:"*) ;;
-    *) PATH=$PATH:$__bateri_apps ;;
-  esac
-fi
+case ":$PATH:" in
+  *":$__bateri_apps:"*) ;;
+  *) PATH=$PATH:$__bateri_apps ;;
+esac
 unset __bateri_bin __bateri_apps
 
 # The agents' function (`agents.bash`, beside this file, shared with the Mac's own wrapper), after

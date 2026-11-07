@@ -15,7 +15,7 @@
 //! 3. **Landing.** The program's file for this machine's target is downloaded, its SHA-256 sum
 //!    checked against the signed one, and the release put in its folder whole ([`store`]).
 //!
-//! A program that leaves the list is deleted from this Mac at once and its name remembered for 30
+//! A program that leaves the list is deleted from this computer at once and its name remembered for 30
 //! days ([`store::removed`]); the check that deletes it is also the one that **cannot be wrong
 //! about the list** (`authoritative`): a settings file that could not be read at launch is
 //! the defaults, and the defaults are not what the person wrote.
@@ -30,6 +30,7 @@
 mod check;
 pub mod distribute;
 pub mod fetch;
+pub mod page;
 pub mod store;
 mod worker;
 
@@ -39,7 +40,7 @@ use std::path::PathBuf;
 use bt_core::pencere::apps::{self, Version};
 use bt_core::pencere::{Offer, SUPPORTED_VERSIONS, offered_views};
 
-pub use check::{check, fetch_target};
+pub use check::{Look, Program, check, fetch_target, look};
 pub use distribute::Distributor;
 pub use fetch::{Curl, Fetch};
 pub use worker::{After, Tracker};
@@ -186,7 +187,7 @@ impl fmt::Display for Failure {
             }
             Self::NameTaken => f.write_str("another program already has this name"),
             Self::Unreachable => {
-                f.write_str("a release on the network may not point at a file on this Mac")
+                f.write_str("a release on the network may not point at a file on this computer")
             }
             Self::Digest => f.write_str("the file does not match the sum its app.json signs"),
         }

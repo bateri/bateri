@@ -1,5 +1,5 @@
 //! One check of the sources: the rules of [`super`], written on [`Fetch`] and [`store`] so a test
-//! puts a map of addresses where the network is and a temporary folder where the Mac's is.
+//! puts a map of addresses where the network is and a temporary folder where the computer's is.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -63,6 +63,54 @@ pub fn check(
         .collect()
 }
 
+/// A source seen once, before it is followed: what the person is asked about when they add it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Look {
+    /// The program's name.
+    pub name: String,
+    /// The newest release.
+    pub version: Version,
+    /// The key the release is signed with (`ed25519:` and base64).
+    pub key: String,
+    /// The key the person approved for this name, when there is one: `Some` and not `key` means
+    /// the release is signed with another one.
+    pub approved: Option<String>,
+    /// Whether the release is taken without asking: its key comes in the application or is the
+    /// one approved.
+    pub trusted: bool,
+}
+
+/// Looks at `source` once: fetches its `app.json` and signature, reads them, and says who signed
+/// it, without downloading a program or writing a thing. The checks a follow makes about the
+/// name apply here too, so a program that could never be followed is refused when it is added and
+/// not after the person has approved it.
+pub fn look(config: &Config, source: &str, fetch: &dyn Fetch) -> Result<Look, Failure> {
+    let address = app_source_address(source).ok_or(Failure::Source)?;
+    let cx = Cx {
+        config,
+        fetch,
+        now: SystemTime::now(),
+    };
+    let release = cx.read(&address)?;
+    let manifest = release.manifest;
+    if RESERVED_NAMES.contains(&manifest.name.as_str()) {
+        return Err(Failure::Reserved);
+    }
+    if store::followed(cx.root(), &manifest.name).is_some_and(|owner| owner != address) {
+        return Err(Failure::NameTaken);
+    }
+    let approved = store::approved_key(cx.root(), &manifest.name);
+    let trusted = config.in_app_key.as_deref() == Some(manifest.key.as_str())
+        || approved.as_deref() == Some(manifest.key.as_str());
+    Ok(Look {
+        name: manifest.name,
+        version: manifest.version,
+        key: manifest.key,
+        approved,
+        trusted,
+    })
+}
+
 /// Deletes the programs that follow an address the list does not have any more.
 fn take_off_unlisted(root: &Path, listed: &[Option<String>], now: SystemTime) {
     for (name, address) in store::followed_names(root) {
@@ -113,8 +161,8 @@ struct Release {
 }
 
 /// Whether a release found through `source` may name `address`: a source on the network may
-/// not send the reader to a file on this Mac (a manifest cannot read a file its author has no
-/// business with), one on this Mac may name either.
+/// not send the reader to a file on this computer (a manifest cannot read a file its author has no
+/// business with), one on this computer may name either.
 fn reachable(source: &str, address: &str) -> bool {
     source.starts_with("file:") || address.starts_with("https://")
 }
@@ -280,6 +328,17 @@ impl Cx<'_> {
         }
         store::forget_removal(root, name, self.now);
         store::prune(root, name, self.now);
+        // A program that was at this address under another name is gone from it: its folder goes,
+        // and its name is one that was taken off, so the servers drop it too. Otherwise the old
+        // name would stay on the machines, on `PATH`, for as long as the address is listed.
+        for (old, address) in store::followed_names(root) {
+            if address == source
+                && old != name
+                && let Err(e) = store::remove(root, &old, self.now)
+            {
+                eprintln!("bateri: could not remove the program {old}: {e}");
+            }
+        }
         Ok(())
     }
 
@@ -288,7 +347,7 @@ impl Cx<'_> {
         let manifest = &release.manifest;
         let (name, version) = (manifest.name.as_str(), manifest.version);
         let folder = store::app_dir(root, name);
-        let temporary = folder.join(format!(".{version}.part-{}", std::process::id()));
+        let temporary = folder.join(format!(".{version}.part-{}", store::unique()));
         let _ = fs::remove_dir_all(&temporary);
         fs::create_dir_all(&temporary).map_err(disk)?;
         let result = self.fill(&temporary, release, file);
@@ -344,7 +403,7 @@ pub fn fetch_target(
     version: Version,
     target: &str,
     fetch: &dyn Fetch,
-) -> Result<Option<std::path::PathBuf>, Failure> {
+) -> Result<Option<Program>, Failure> {
     let folder = store::release_dir(root, name, version);
     let bytes = fs::read(folder.join("app.json")).map_err(disk)?;
     let signature = fs::read(folder.join("app.json.sig")).map_err(disk)?;
@@ -357,21 +416,38 @@ pub fn fetch_target(
     let Some(file) = manifest.files.get(target) else {
         return Ok(None);
     };
-    let program = store::program_path(root, name, version, target);
-    if fs::read(&program).is_ok_and(|bytes| sum(&bytes) == file.sha256) {
-        return Ok(Some(program));
+    let path = store::program_path(root, name, version, target);
+    let found = |path| {
+        Some(Program {
+            path,
+            sha256: file.sha256.clone(),
+        })
+    };
+    if fs::read(&path).is_ok_and(|bytes| sum(&bytes) == file.sha256) {
+        return Ok(found(path));
     }
     let source = store::followed(root, name).ok_or(Failure::Source)?;
     if !reachable(&source, &file.url) {
         return Err(Failure::Unreachable);
     }
-    let part = folder.join(format!(".{target}.part-{}", std::process::id()));
+    let part = folder.join(format!(".{target}.part-{}", store::unique()));
     download_program(fetch, file, &part)?;
-    fs::rename(&part, &program).map_err(|e| {
+    fs::rename(&part, &path).map_err(|e| {
         let _ = fs::remove_file(&part);
         disk(e)
     })?;
-    Ok(Some(program))
+    Ok(found(path))
+}
+
+/// A program file on this computer that is the one the author signed: `sha256` is the signed
+/// sum, which what is put on a machine is checked against, not a sum taken of whatever is on the
+/// disk at that moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    /// The file.
+    pub path: std::path::PathBuf,
+    /// Its sum as the signed `app.json` gives it.
+    pub sha256: String,
 }
 
 /// `Ready`, with the newest release when it is newer than the one in use.

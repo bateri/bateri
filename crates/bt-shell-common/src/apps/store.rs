@@ -21,6 +21,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bt_core::pencere::apps::Version;
@@ -44,6 +45,21 @@ pub fn program_path(root: &Path, name: &str, version: Version, target: &str) -> 
     release_dir(root, name, version).join(target)
 }
 
+/// A name that no other call has had: not in this process (a counter), not in another one (its
+/// process id), not on another computer or after a restart (the clock). For the temporary files
+/// and folders a download or an upload is built in, so that two at once do not meet in one.
+pub fn unique() -> String {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    format!(
+        "{:x}-{nanos:x}-{:x}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// The first line of a small text file, trimmed; `None` if it is missing or empty.
 fn first_line(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
@@ -54,7 +70,7 @@ fn first_line(path: &Path) -> Option<String> {
 /// A small file written whole under a temporary name and renamed over the old one.
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".part-{}", std::process::id()));
+    temporary.push(format!(".part-{}", unique()));
     let temporary = PathBuf::from(temporary);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

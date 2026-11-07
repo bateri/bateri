@@ -16,9 +16,9 @@ use objc2::rc::Retained;
 
 use bt_core::{CursorBlink, Settings, TabDetails, TabPosition, Theme};
 use bt_gpu::ScrollbarMode;
-use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message, sel};
+use objc2::{AllocAnyThread, ClassType, DefinedClass, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSBitmapImageFileType, NSBitmapImageRep, NSView, NSWindow,
+    NSAppearanceCustomization, NSBitmapImageFileType, NSBitmapImageRep, NSBox, NSView, NSWindow,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGImage;
@@ -262,6 +262,7 @@ impl SettingsWindow {
         self.blink_problems(&themes, resolved, shots, &mut problems);
         self.drag_problems(shots, &mut problems);
         self.agents_problems(&themes, resolved, shots, &mut problems);
+        self.apps_problems(&themes, resolved, &dark, shots, &mut problems);
         if let Some(dir) = shots {
             // The Keyboard page is a list of its own, not a grid: its picture only.
             sidebar.selectRowIndexes_byExtendingSelection(
@@ -315,6 +316,258 @@ impl SettingsWindow {
             self.search_pictures(&themes, resolved, dir);
         }
         problems
+    }
+
+    /// The Apps page with a row of every state, with long names, with nothing, with the Add field
+    /// typed in, refused and looking; and the three sheets. Each row stands inside its box with
+    /// nothing running into anything, each sheet is as wide as it was made and holds its text.
+    fn apps_problems(
+        &self,
+        themes: &ThemeLists<'_>,
+        resolved: Resolved,
+        dark: &Theme,
+        shots: Option<&Path>,
+        problems: &mut Vec<String>,
+    ) {
+        use bt_core::pencere::apps::Version;
+        use bt_shell_common::apps::{Failure, State, Status};
+
+        let ivars = self.ivars();
+        let (Some(window), Some(sidebar), Some(apps)) =
+            (ivars.window.get(), ivars.sidebar.get(), ivars.apps.get())
+        else {
+            return;
+        };
+        let version = |text: &str| Version::parse(text);
+        let status = |source: &str, name: Option<&str>, state: State| Status {
+            source: source.to_owned(),
+            name: name.map(str::to_owned),
+            state,
+            problem: None,
+        };
+        let key = "ed25519:Zk3mP9wLq1xD7sVb0nJ4tHc8RaE2yUf6OgIiKd5Yh+A=".to_owned();
+        let (Some(v1), Some(v03), Some(v09), Some(v14), Some(v21), Some(v30), Some(v124)) = (
+            version("1.0.0"),
+            version("0.3.1"),
+            version("0.9.0"),
+            version("1.4.2"),
+            version("2.1.0"),
+            version("3.0.0"),
+            version("12.4.10"),
+        ) else {
+            problems.push("Apps: a version of the check does not parse".to_owned());
+            return;
+        };
+        let long_source =
+            "https://downloads.internal.example-company.org/releases/latest/lab/app.json";
+        let all: Vec<Status> = vec![
+            status(
+                "bateri/textpen",
+                Some("textpen"),
+                State::Ready {
+                    version: v1,
+                    newer: None,
+                },
+            ),
+            status(
+                "acme/notes",
+                Some("notes"),
+                State::Ready {
+                    version: v03,
+                    newer: None,
+                },
+            ),
+            status(
+                "mina/sketch",
+                Some("sketch"),
+                State::Ready {
+                    version: v21,
+                    newer: Some(v30),
+                },
+            ),
+            status(
+                "https://lab.example.org/app.json",
+                Some("lab"),
+                State::Awaiting {
+                    version: v09,
+                    key: key.clone(),
+                    changed: false,
+                },
+            ),
+            status(
+                "kerem/draw",
+                Some("draw"),
+                State::Awaiting {
+                    version: v14,
+                    key: key.clone(),
+                    changed: true,
+                },
+            ),
+            status("ozge/mono", Some("mono"), State::NotHere { version: v1 }),
+            status(
+                "dev/flaky",
+                None,
+                State::Error(Failure::Fetch(
+                    "Could not resolve host: github.com".to_owned(),
+                )),
+            ),
+        ];
+        let long: Vec<Status> = vec![
+            status(
+                "bateri/textpen",
+                Some("textpen"),
+                State::Ready {
+                    version: v1,
+                    newer: None,
+                },
+            ),
+            status(
+                "platform-engineering-tools/kubernetes-cluster-resource-inspector",
+                Some("kubernetes-cluster-resource-inspector-and-log-follower"),
+                State::Ready {
+                    version: v124,
+                    newer: None,
+                },
+            ),
+            status(
+                long_source,
+                Some("lab"),
+                State::Awaiting {
+                    version: v09,
+                    key,
+                    changed: false,
+                },
+            ),
+        ];
+        let sources_of = |statuses: &[Status]| -> Vec<String> {
+            statuses
+                .iter()
+                .map(|status| status.source.clone())
+                .collect()
+        };
+        // A source nobody has checked yet is a row that is still looking.
+        let mut waiting = all.clone();
+        waiting.truncate(1);
+        let mut waiting_sources = sources_of(&waiting);
+        waiting_sources.push("acme/fresh".to_owned());
+        let scenes: [(&str, Vec<String>, Vec<Status>); 4] = [
+            ("all", sources_of(&all), all),
+            ("long", sources_of(&long), long),
+            ("empty", Vec::new(), Vec::new()),
+            ("looking", waiting_sources, waiting),
+        ];
+        sidebar.selectRowIndexes_byExtendingSelection(
+            &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Apps)),
+            false,
+        );
+        self.show_selected();
+        for (suffix, dark_pass) in [("", false), ("-dark", true)] {
+            if dark_pass {
+                let settings = Settings {
+                    theme: "bateri".to_owned(),
+                    ..Settings::default()
+                };
+                let themes = ThemeLists {
+                    on_screen: dark,
+                    dark_appearance: true,
+                    ..*themes
+                };
+                self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+                sidebar.selectRowIndexes_byExtendingSelection(
+                    &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Apps)),
+                    false,
+                );
+                self.show_selected();
+            }
+            for (name, sources, statuses) in &scenes {
+                apps.show(self, sources, statuses, false);
+                apps.sample("", None, false);
+                let Some(content) = window.contentView() else {
+                    continue;
+                };
+                content.layoutSubtreeIfNeeded();
+                let list = apps.rows_view();
+                let box_frame = in_window(list);
+                for (at, row) in list.arrangedSubviews().iter().enumerate() {
+                    let frame = in_window(&row);
+                    if frame.size.height < 1.0 {
+                        problems.push(format!("Apps ({name}): row {at} has no height"));
+                    }
+                    if !contains(box_frame, frame) {
+                        problems.push(format!("Apps ({name}): row {at} leaves its box"));
+                    }
+                    let bounds = row.bounds();
+                    let parts: Vec<NSRect> = row
+                        .subviews()
+                        .iter()
+                        .filter(|view| !view.isHidden() && !view.isKindOfClass(NSBox::class()))
+                        .map(|view| view.alignmentRectForFrame(view.frame()))
+                        .collect();
+                    for (i, part) in parts.iter().enumerate() {
+                        if !contains(bounds, *part) {
+                            problems.push(format!("Apps ({name}): row {at} part {i} spills out"));
+                        }
+                        for (j, other) in parts.iter().enumerate().skip(i + 1) {
+                            if overlap(*part, *other) {
+                                problems.push(format!(
+                                    "Apps ({name}): row {at}: part {i} runs into part {j}"
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some(dir) = shots {
+                    picture(
+                        &content,
+                        &dir.join(format!("apps-{name}{suffix}-window.png")),
+                    );
+                }
+            }
+            // The Add field typed in, refused, and looking.
+            apps.show(self, &scenes[0].1[..1], &scenes[0].2[..1], false);
+            for (name, typed, error, looking) in [
+                ("typing", "acme/notes", None, false),
+                ("looking-up", "acme/notes", None, true),
+                (
+                    "error",
+                    "acme/missing",
+                    Some("No release of acme/missing has an app.json."),
+                    false,
+                ),
+            ] {
+                apps.sample(typed, error, looking);
+                if let Some(content) = window.contentView() {
+                    content.layoutSubtreeIfNeeded();
+                    if let Some(dir) = shots {
+                        picture(
+                            &content,
+                            &dir.join(format!("apps-add-{name}{suffix}-window.png")),
+                        );
+                    }
+                }
+            }
+            apps.sample("", None, false);
+            for (name, view) in super::apps::sample_sheets(self.mtm(), self) {
+                let size = view.frame().size;
+                if (size.width - 460.0).abs() > SLACK || size.height < 150.0 {
+                    problems.push(format!(
+                        "Apps: the {name} sheet is {:.0} × {:.0}",
+                        size.width, size.height
+                    ));
+                }
+                if let Some(dir) = shots {
+                    picture(&view, &dir.join(format!("apps-sheet-{name}{suffix}.png")));
+                }
+            }
+        }
+        // The page as the person leaves it: the list the file has.
+        self.refresh(
+            &Settings::default(),
+            resolved,
+            &FileState::Missing,
+            &[],
+            themes,
+        );
     }
 
     /// A theme that changes and keeps the appearance (one dark theme for another) draws the

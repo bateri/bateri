@@ -56,6 +56,17 @@ pub(super) fn entries(settings: &Settings, resolved: Resolved) -> Vec<Entry> {
             });
             continue;
         }
+        if page == Category::Apps {
+            entries.push(Entry {
+                page,
+                key: None,
+                name: "Apps".to_owned(),
+                description: String::new(),
+                options: "programs textpen follow source add remove review key signed".to_owned(),
+                file_key: "apps.sources",
+            });
+            continue;
+        }
         for group in pages::groups(page) {
             for item in group.items {
                 let pages::Item::Key(key) = *item else {

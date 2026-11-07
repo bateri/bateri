@@ -1,4 +1,4 @@
-//! The programs on every machine: what [`super::check`] landed in the apps folder on this Mac is
+//! The programs on every machine: what [`super::check`] landed in the apps folder on this computer is
 //! put on this computer and on each server a terminal connects to, the way kablo is.
 //!
 //! **The layout is the same everywhere**, below the home directory:
@@ -19,15 +19,15 @@
 //! **There is no record of what was sent: the machine's disk is the truth.** One call asks what
 //! `bin/<name>` points to and what versions are there; the answer is compared here, with
 //! [`Version`]s, and only a release newer than the one in use is sent. The link is switched in
-//! one step (a temporary link and `mv -f`) and **never goes back**: two Macs that follow the same
-//! program leave each other's newer release alone, and a link that is not the one a Mac would
+//! one step (a temporary link and `mv -f`) and **never goes back**: two computers that follow the same
+//! program leave each other's newer release alone, and a link that is not the one a computer would
 //! write (a command of the person's own at `bin/<name>`) is not touched.
 //!
-//! **Cleanup is in the same visit** and only of what this Mac follows or removed: the release in
+//! **Cleanup is in the same visit** and only of what this computer follows or removed: the release in
 //! use, the one before it, and every folder newer than 30 days stay; the rest of that program's
-//! releases go (a second Mac may use the one before). A program this Mac took off the list in
+//! releases go (a second computer may use the one before). A program this computer took off the list in
 //! the last 30 days ([`store::removed`]) is deleted from the machine, folder and link.
-//! Programs it has never heard of are none of its business: another Mac's, or another copy of
+//! Programs it has never heard of are none of its business: another computer's, or another copy of
 //! bateri's (`make dev` shares this folder with the installed one).
 //!
 //! **Nothing waits for it.** [`Distributor::sync_in_background`] runs on a thread of its own
@@ -44,7 +44,7 @@ use std::time::{Duration, SystemTime};
 use bt_core::pencere::Digest;
 use bt_core::pencere::apps::{Version, is_name};
 
-use super::check::fetch_target;
+use super::check::{Program, fetch_target};
 use super::fetch::Fetch;
 use super::store::{self, KEEP};
 use crate::kablo::install::{Channel, Reply};
@@ -64,10 +64,10 @@ const SPACING: Duration = Duration::from_secs(10 * 60);
 const EXIT_DAMAGED: i32 = 7;
 const EXIT_INCOMPLETE: i32 = 8;
 const EXIT_UNWRITABLE: i32 = 9;
-/// The link was not what the Mac saw a moment ago: someone else moved it, and it is left.
+/// The link was not what the computer saw a moment ago: someone else moved it, and it is left.
 const EXIT_MOVED: i32 = 11;
 
-/// A program of this Mac's apps folder, as far as a machine needs to know: the release in use
+/// A program of this computer's apps folder, as far as a machine needs to know: the release in use
 /// here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Want {
@@ -75,7 +75,7 @@ pub struct Want {
     pub name: String,
     /// The newest release that landed.
     pub version: Version,
-    /// Its folder on this Mac (`app.json` is in it).
+    /// Its folder on this computer (`app.json` is in it).
     pub dir: PathBuf,
 }
 
@@ -103,7 +103,7 @@ pub struct Report {
     pub result: Result<Summary, String>,
 }
 
-/// What this Mac has, which tells whether a visit made a minute ago would be the same.
+/// What this computer has, which tells whether a visit made a minute ago would be the same.
 type Fingerprint = (Vec<(String, Version)>, Vec<String>);
 
 #[derive(Default)]
@@ -113,7 +113,7 @@ struct Machine {
     report: Option<Report>,
 }
 
-/// Puts the programs of this Mac's apps folder on machines. One for the process: it remembers
+/// Puts the programs of this computer's apps folder on machines. One for the process: it remembers
 /// which machine is being visited and when it was last.
 pub struct Distributor {
     root: PathBuf,
@@ -262,7 +262,7 @@ fn visit(
     channel: &dyn Channel,
     wanted: &[Want],
     gone: &[String],
-    resolve: &dyn Fn(&Want) -> Result<Option<PathBuf>, String>,
+    resolve: &dyn Fn(&Want) -> Result<Option<Program>, String>,
 ) -> Result<Summary, String> {
     let mut summary = Summary::default();
     if wanted.is_empty() && gone.is_empty() {
@@ -321,7 +321,7 @@ fn one(
     channel: &dyn Channel,
     want: &Want,
     seen: &Seen,
-    resolve: &dyn Fn(&Want) -> Result<Option<PathBuf>, String>,
+    resolve: &dyn Fn(&Want) -> Result<Option<Program>, String>,
 ) -> Result<Done, String> {
     let current = seen.current(&want.name);
     if (seen.link.is_some() && current.is_none()) || seen.foreign {
@@ -344,13 +344,19 @@ fn one(
             current,
         });
     };
+    // This visit's own temporary place on the machine: another visit (another alias of the same
+    // server, another computer) is never in the same folder.
+    let part = store::unique();
     if !seen.dirs.contains(&want.version) {
-        let bytes =
-            fs::read(&program).map_err(|e| format!("reading {}: {e}", program.display()))?;
-        let sum = Digest::of(&bytes).to_string();
+        let bytes = fs::read(&program.path)
+            .map_err(|e| format!("reading {}: {e}", program.path.display()))?;
+        // What is sent is the file the author signed, not whatever the disk holds now.
+        if Digest::of(&bytes).to_string() != program.sha256 {
+            return Err("the program on this computer is not the one that was signed".to_owned());
+        }
         let reply = run(
             channel,
-            &upload_script(&want.name, want.version, &sum),
+            &upload_script(&want.name, want.version, &program.sha256, &part),
             &bytes,
         )?;
         if reply.status != Some(0) {
@@ -361,7 +367,13 @@ fn one(
         .map_err(|e| format!("reading app.json of {}: {e}", want.name))?;
     let reply = run(
         channel,
-        &switch_script(&want.name, want.version, seen.link.as_deref()),
+        &switch_script(
+            &want.name,
+            want.version,
+            &program.sha256,
+            &part,
+            seen.link.as_deref(),
+        ),
         &manifest,
     )?;
     match reply.status {
@@ -420,7 +432,7 @@ struct Seen {
 }
 
 impl Seen {
-    /// The release the link names, if it is the link a Mac writes for this program.
+    /// The release the link names, if it is the link a computer writes for this program.
     fn current(&self, name: &str) -> Option<Version> {
         let link = self.link.as_deref()?;
         let rest = link
@@ -525,12 +537,15 @@ fn probe_script(names: &[&str], gone: &[String]) -> String {
 }
 
 /// The program: its bytes on the standard input, written to a temporary folder beside the
-/// release's own place (`.<version>.part`), checked against `sum`, made executable. The release
-/// is not in its place until [`switch_script`] puts it there.
-fn upload_script(name: &str, version: Version, sum: &str) -> String {
+/// release's own place (`.<version>.part-<part>`, the visit's own), checked against `sum`, made
+/// executable. The release is not in its place until [`switch_script`] puts it there. Folders of
+/// this kind that a visit that ended badly left more than a day ago are swept away.
+fn upload_script(name: &str, version: Version, sum: &str, part: &str) -> String {
     format!(
-        "r={ROOT}; p=$r/{name}/.{version}.part; f=$p/{name}; \
-         rm -rf $p; mkdir -p $p || exit {EXIT_UNWRITABLE}; \
+        "r={ROOT}; p=$r/{name}/.{version}.part-{part}; f=$p/{name}; \
+         find $r/{name}/. ! -name . -prune -type d -name '.*.part-*' -mtime +0 \
+           -exec rm -rf {{}} \\; 2>/dev/null; \
+         mkdir -p $p || exit {EXIT_UNWRITABLE}; \
          cat >$f && chmod 755 $f || {{ rm -rf $p; exit {EXIT_INCOMPLETE}; }}; \
          s=$(sha256sum $f 2>/dev/null || shasum -a 256 $f 2>/dev/null); \
          case $s in {sum}*) ;; ?*) rm -rf $p; exit {EXIT_DAMAGED};; esac"
@@ -538,16 +553,21 @@ fn upload_script(name: &str, version: Version, sum: &str) -> String {
 }
 
 /// The release's `app.json` on the standard input, then the release in its place and the link to
-/// it, in one step and only if the link is still what the Mac saw (`was`: its text, or none).
-fn switch_script(name: &str, version: Version, was: Option<&str>) -> String {
+/// it, in one step and only if the link is still what the computer saw (`was`: its text, or none).
+/// The program the visit put in its folder is checked against `sum` once more before the folder
+/// is moved: it is what the author signed, or the release is not put in its place.
+fn switch_script(name: &str, version: Version, sum: &str, part: &str, was: Option<&str>) -> String {
     let expected = was.unwrap_or("");
     // The text of a link is a path a machine made; it is compared, never run.
     let expected = expected.replace('\'', "'\\''");
     format!(
-        "r={ROOT}; a={name}; v={version}; d=$r/$a/$v; p=$r/$a/.$v.part; l=$r/bin/.$a.new-$$; \
+        "r={ROOT}; a={name}; v={version}; d=$r/$a/$v; p=$r/$a/.$v.part-{part}; l=$r/bin/.$a.new-$$; \
          mkdir -p $r/bin $r/$a || exit {EXIT_UNWRITABLE}; \
          if [ -d $d ]; then rm -rf $p; cat >$d/app.json || exit {EXIT_INCOMPLETE}; \
-         else mkdir -p $p; cat >$p/app.json || {{ rm -rf $p; exit {EXIT_INCOMPLETE}; }}; \
+         else [ -x $p/$a ] || exit {EXIT_INCOMPLETE}; \
+           s=$(sha256sum $p/$a 2>/dev/null || shasum -a 256 $p/$a 2>/dev/null); \
+           case $s in {sum}*) ;; ?*) rm -rf $p; exit {EXIT_DAMAGED};; esac; \
+           cat >$p/app.json || {{ rm -rf $p; exit {EXIT_INCOMPLETE}; }}; \
            mv $p $d || {{ rm -rf $p; exit {EXIT_UNWRITABLE}; }}; fi; \
          now=$(readlink $r/bin/$a 2>/dev/null); \
          if [ \"$now\" != '{expected}' ]; then exit {EXIT_MOVED}; fi; \
@@ -557,7 +577,7 @@ fn switch_script(name: &str, version: Version, was: Option<&str>) -> String {
 }
 
 /// The cleanup: the releases named, and the programs of the removed list (folder and link, the
-/// link only if it is one a Mac wrote).
+/// link only if it is one a computer wrote).
 fn remove_script(releases: &[(String, Version)], gone: &[&String]) -> String {
     let mut script = format!("r={ROOT}; cd $r 2>/dev/null || exit 0; ");
     for (name, version) in releases {

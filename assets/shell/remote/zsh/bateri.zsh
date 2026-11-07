@@ -62,9 +62,11 @@ __bateri_hooks() {
     source $__bateri_dir/agents.zsh 2>/dev/null
   fi
   # The programs bateri follows (`apps/bin`, beside the `shell` directory) go at the END of `path`,
-  # once, so none of them stands in for a command the server has.
+  # once, so none of them stands in for a command the server has. The folder need not be there
+  # yet: the first shell of a first visit starts before the first program is put in it, and an
+  # entry for a folder that is not there does no harm.
   local bt_apps=${__bateri_dir:h:h}/apps/bin
-  if [[ -d $bt_apps ]] && (( ! ${path[(Ie)$bt_apps]} )); then
+  if (( ! ${path[(Ie)$bt_apps]} )); then
     path+=($bt_apps)
   fi
   add-zsh-hook precmd __bateri_cwd

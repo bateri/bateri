@@ -102,7 +102,7 @@ impl Channel for Machine {
     }
 }
 
-/// This Mac's apps folder with a release of `name` in it: the program for `TARGET`, which says
+/// This computer's apps folder with a release of `name` in it: the program for `TARGET`, which says
 /// its version when run, and the `app.json`.
 fn release(root: &Path, name: &str, version: &str) -> Want {
     let dir = root.join(name).join(version);
@@ -124,13 +124,27 @@ fn release(root: &Path, name: &str, version: &str) -> Want {
     }
 }
 
-/// The program of a want, for the target the tests run as.
-fn program(want: &Want) -> Result<Option<PathBuf>, String> {
-    Ok(Some(want.dir.join(TARGET)))
+/// The program of a want, for the target the tests run as, with the sum its release signs.
+fn program(want: &Want) -> Result<Option<Program>, String> {
+    let path = want.dir.join(TARGET);
+    let sha256 = Digest::of(&fs::read(&path).map_err(|e| e.to_string())?).to_string();
+    Ok(Some(Program { path, sha256 }))
 }
 
-fn nothing(_: &Want) -> Result<Option<PathBuf>, String> {
+fn nothing(_: &Want) -> Result<Option<Program>, String> {
     Ok(None)
+}
+
+/// The folders of a release's temporary kind that a machine has under `name`.
+fn parts(machine: &Machine, name: &str) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(machine.path(name)) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|entry| entry.contains(".part"))
+        .collect()
 }
 
 fn visit_with(machine: &Machine, wanted: &[Want], gone: &[String]) -> Result<Summary, String> {
@@ -176,7 +190,7 @@ fn a_first_visit_puts_the_program_there_and_points_the_link_at_it() {
         let program = machine.path("demo/1.0.0/demo");
         assert_eq!(
             fs::read(&program).expect("the program"),
-            fs::read(want.dir.join(TARGET)).expect("the Mac's")
+            fs::read(want.dir.join(TARGET)).expect("the computer's")
         );
         assert_eq!(
             fs::metadata(&program)
@@ -188,10 +202,10 @@ fn a_first_visit_puts_the_program_there_and_points_the_link_at_it() {
         );
         assert_eq!(
             fs::read(machine.path("demo/1.0.0/app.json")).expect("app.json"),
-            fs::read(want.dir.join("app.json")).expect("the Mac's")
+            fs::read(want.dir.join("app.json")).expect("the computer's")
         );
         // The temporary folder is gone, and the command runs through the link.
-        assert!(!machine.path("demo/.1.0.0.part").exists());
+        assert_eq!(parts(&machine, "demo"), Vec::<String>::new(), "{shell:?}");
         let out = std::process::Command::new(machine.path("bin/demo"))
             .output()
             .expect("the command runs");
@@ -312,7 +326,7 @@ fn a_program_taken_off_the_list_is_deleted_and_others_are_left() {
     for shell in shells() {
         let (mac, home) = (Temp::new("mac"), Temp::new("home"));
         let machine = Machine::new(&shell, &home.0);
-        // `old` was put there by this Mac; `other` by another Mac; `mine` is the person's.
+        // `old` was put there by this computer; `other` by another computer; `mine` is the person's.
         visit_with(&machine, &[release(&mac.0, "old", "1.0.0")], &[]).expect("a visit");
         visit_with(&machine, &[release(&mac.0, "other", "1.0.0")], &[]).expect("a visit");
         fs::write(machine.path("bin/mine"), "#!/bin/sh\n").expect("the person's command");
@@ -361,10 +375,15 @@ fn a_link_someone_else_moved_in_the_meantime_is_left_where_they_put_it() {
         let machine = Machine::new(&shell, &home.0);
         fs::create_dir_all(machine.path("bin")).expect("bin");
         std::os::unix::fs::symlink("../demo/2.0.0/demo", machine.path("bin/demo")).expect("link");
-        // The Mac saw 0.9.0 and is putting 1.0.0 there: the machine says 2.0.0 now.
+        // The computer saw 0.9.0 and is putting 1.0.0 there: the machine says 2.0.0 now.
+        let sum = Digest::of(b"the bytes").to_string();
+        let uploaded = machine
+            .run(&upload_script("demo", v("1.0.0"), &sum, "p1"), b"the bytes")
+            .expect("a reply");
+        assert_eq!(uploaded.status, Some(0), "{shell:?}");
         let reply = machine
             .run(
-                &switch_script("demo", v("1.0.0"), Some("../demo/0.9.0/demo")),
+                &switch_script("demo", v("1.0.0"), &sum, "p1", Some("../demo/0.9.0/demo")),
                 b"{}",
             )
             .expect("a reply");
@@ -383,20 +402,140 @@ fn a_program_that_arrives_damaged_is_not_put_in_place() {
         let machine = Machine::new(&shell, &home.0);
         let sum = Digest::of(b"the right bytes").to_string();
         let reply = machine
-            .run(&upload_script("demo", v("1.0.0"), &sum), b"other bytes")
+            .run(
+                &upload_script("demo", v("1.0.0"), &sum, "p1"),
+                b"other bytes",
+            )
             .expect("a reply");
         // A machine with no tool to sum with takes the file's own word, so the test needs one.
-        let has_tool = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1")
-            .status()
-            .is_ok_and(|status| status.success());
-        if has_tool {
+        if has_sum_tool() {
             assert_eq!(reply.status, Some(EXIT_DAMAGED), "{shell:?}");
-            assert!(!machine.path("demo/.1.0.0.part").exists());
+            assert_eq!(parts(&machine, "demo"), Vec::<String>::new(), "{shell:?}");
         }
         assert!(!machine.path("demo/1.0.0").exists());
         assert!(!machine.path("bin/demo").exists());
+    }
+}
+
+/// A machine has a tool to sum with (one that has none takes a file's own word).
+fn has_sum_tool() -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1")
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn two_visits_at_once_each_have_a_folder_of_their_own_and_leave_one_whole_release() {
+    for shell in shells() {
+        let home = Temp::new("home");
+        let machine = Machine::new(&shell, &home.0);
+        let sum = Digest::of(b"the bytes").to_string();
+        for part in ["a", "b"] {
+            let reply = machine
+                .run(&upload_script("demo", v("1.0.0"), &sum, part), b"the bytes")
+                .expect("a reply");
+            assert_eq!(reply.status, Some(0), "{shell:?}");
+        }
+        // Both uploads are there side by side: the second did not wipe the first.
+        assert_eq!(parts(&machine, "demo").len(), 2, "{shell:?}");
+        // The first to switch makes the link; the second finds it made (both saw none) and leaves
+        // it, with the release it brought already in place.
+        for (part, status) in [("a", 0), ("b", EXIT_MOVED)] {
+            let reply = machine
+                .run(
+                    &switch_script("demo", v("1.0.0"), &sum, part, None),
+                    b"{\"name\":\"demo\"}",
+                )
+                .expect("a reply");
+            assert_eq!(reply.status, Some(status), "{part}: {shell:?}");
+        }
+        assert_eq!(
+            fs::read(machine.path("demo/1.0.0/demo")).expect("the program"),
+            b"the bytes"
+        );
+        assert_eq!(parts(&machine, "demo"), Vec::<String>::new(), "{shell:?}");
+        assert_eq!(
+            link(&machine, "demo").as_deref(),
+            Some("../demo/1.0.0/demo"),
+            "{shell:?}"
+        );
+    }
+}
+
+#[test]
+fn a_release_whose_upload_is_gone_or_changed_is_not_put_in_place() {
+    for shell in shells() {
+        let home = Temp::new("home");
+        let machine = Machine::new(&shell, &home.0);
+        let sum = Digest::of(b"the bytes").to_string();
+        // Nothing was uploaded for this visit (another visit's sweep took it): no release, with no
+        // program in it.
+        let reply = machine
+            .run(&switch_script("demo", v("1.0.0"), &sum, "p1", None), b"{}")
+            .expect("a reply");
+        assert_eq!(reply.status, Some(EXIT_INCOMPLETE), "{shell:?}");
+        assert!(!machine.path("demo/1.0.0").exists(), "{shell:?}");
+        assert!(!machine.path("bin/demo").exists(), "{shell:?}");
+        // The file changed between the upload and the switch.
+        let uploaded = machine
+            .run(&upload_script("demo", v("1.0.0"), &sum, "p2"), b"the bytes")
+            .expect("a reply");
+        assert_eq!(uploaded.status, Some(0), "{shell:?}");
+        fs::write(machine.path("demo/.1.0.0.part-p2/demo"), b"changed").expect("changed");
+        let reply = machine
+            .run(&switch_script("demo", v("1.0.0"), &sum, "p2", None), b"{}")
+            .expect("a reply");
+        if has_sum_tool() {
+            assert_eq!(reply.status, Some(EXIT_DAMAGED), "{shell:?}");
+            assert!(!machine.path("demo/1.0.0").exists(), "{shell:?}");
+            assert!(!machine.path("bin/demo").exists(), "{shell:?}");
+        }
+    }
+}
+
+#[test]
+fn an_upload_sweeps_the_temporary_folders_of_visits_that_ended_badly_long_ago() {
+    for shell in shells() {
+        let home = Temp::new("home");
+        let machine = Machine::new(&shell, &home.0);
+        let (old, recent) = (
+            machine.path("demo/.0.9.0.part-old"),
+            machine.path("demo/.0.9.0.part-recent"),
+        );
+        fs::create_dir_all(&old).expect("old");
+        fs::create_dir_all(&recent).expect("recent");
+        let long_ago = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+        fs::File::open(&old)
+            .and_then(|folder| folder.set_modified(long_ago))
+            .expect("aged");
+        let sum = Digest::of(b"the bytes").to_string();
+        let reply = machine
+            .run(&upload_script("demo", v("1.0.0"), &sum, "p1"), b"the bytes")
+            .expect("a reply");
+        assert_eq!(reply.status, Some(0), "{shell:?}");
+        assert!(!old.exists(), "{shell:?}");
+        assert!(recent.exists(), "{shell:?}");
+    }
+}
+
+#[test]
+fn a_program_that_is_not_the_signed_one_is_not_sent() {
+    for shell in shells() {
+        let (mac, home) = (Temp::new("mac"), Temp::new("home"));
+        let machine = Machine::new(&shell, &home.0);
+        let want = release(&mac.0, "demo", "1.0.0");
+        let wrong_sum = |want: &Want| {
+            Ok(Some(Program {
+                path: want.dir.join(TARGET),
+                sha256: Digest::of(b"what the author signed").to_string(),
+            }))
+        };
+        let summary = visit(&machine, &[want], &[], &wrong_sum).expect("a visit");
+        assert_eq!(summary.problems.len(), 1, "{summary:?}");
+        assert_eq!(machine.calls(), 1, "only the look: {shell:?}");
+        assert!(!machine.path("demo").exists(), "{shell:?}");
     }
 }
 

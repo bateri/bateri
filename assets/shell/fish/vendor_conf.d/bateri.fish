@@ -71,9 +71,11 @@ function __bateri_path --on-event fish_prompt
     end
     # The programs bateri follows (`~/.local/share/bateri/apps/bin`, beside `shell`) go at the END
     # of `PATH`, once: unlike the agent's command they never stand in for a command the system or
-    # the user has. The folder is there once a first program has been put in it.
+    # the user has. The folder need not be there yet: the first shell of a first visit starts
+    # before the first program is put in it, and an entry for a folder that is not there does no
+    # harm.
     set -l bt_apps $HOME/.local/share/bateri/apps/bin
-    if test -d $bt_apps; and not contains -- $bt_apps $PATH
+    if not contains -- $bt_apps $PATH
         set -gx PATH $PATH $bt_apps
     end
 end

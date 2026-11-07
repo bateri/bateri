@@ -1134,7 +1134,32 @@ fn setting_a_server_up_has_the_apps_distributor_visit_it_and_a_build_without_one
     std::thread::sleep(Duration::from_millis(300));
     assert!(distributor.reports().is_empty(), "no distributor, no visit");
 
+    // A server whose shells get no integration is not visited: the programs would be nowhere on
+    // its `PATH`.
     backend.apps = Some(Arc::clone(&distributor));
+    backend.settings = Box::new(|| Settings {
+        remote_integration: false,
+        ..Settings::default()
+    });
+    backend.install(&host, &[]).expect("found");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(distributor.reports().is_empty(), "no integration, no visit");
+
+    // Nor one whose `bateri` command is off: nothing of ours is put there.
+    backend.settings = Box::new(|| Settings {
+        remote_hosts: vec![bt_core::HostRule {
+            pattern: "rasp".to_owned(),
+            mark: None,
+            integration: None,
+            commands: Some(CommandLevel::Off),
+        }],
+        ..Settings::default()
+    });
+    backend.install(&host, &[]).expect("found");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(distributor.reports().is_empty(), "commands off, no visit");
+
+    backend.settings = Box::new(Settings::default);
     backend.install(&host, &[]).expect("found");
     let until = Instant::now() + Duration::from_secs(20);
     while distributor.reports().is_empty() {

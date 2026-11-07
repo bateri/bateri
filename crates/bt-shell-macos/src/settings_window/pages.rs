@@ -24,6 +24,11 @@ pub(super) enum Item {
     /// Where on the screen the line shows: it follows Tab Details and the tabs' position, with
     /// the button that opens the page those are on.
     AgentWhere,
+    /// Apps ▸ Following: a row for each entry of `[apps] sources`, with its sign, Review and
+    /// Remove ([`super::apps`]). Written only by those buttons, through the list.
+    Followed,
+    /// Apps ▸ Add: the field that takes a new source, and its button.
+    Add,
 }
 
 /// A titled run of rows in one rounded box. A group without a title is a page's first.
@@ -214,6 +219,19 @@ const AGENTS: &[Group] = &[group(
     ],
 )];
 
+fn following_aside(_: &Settings) -> Option<&'static str> {
+    Some("run on this computer and on servers with shell integration")
+}
+
+const APPS: &[Group] = &[
+    Group {
+        title: Some("Following"),
+        aside: following_aside,
+        items: &[Item::Followed],
+    },
+    group(Some("Add"), &[Item::Add]),
+];
+
 /// A page's groups, top to bottom. Keyboard is a table of its own and has none.
 pub(super) fn groups(category: Category) -> &'static [Group] {
     match category {
@@ -227,6 +245,7 @@ pub(super) fn groups(category: Category) -> &'static [Group] {
         Category::Keyboard => &[],
         Category::Servers => SERVERS,
         Category::Agents => AGENTS,
+        Category::Apps => APPS,
     }
 }
 

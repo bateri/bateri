@@ -17,9 +17,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use bt_core::pencere::apps;
-use bt_core::pencere::{SUPPORTED_VERSIONS, offered_views};
+use bt_core::pencere::{Digest, SUPPORTED_VERSIONS, offered_views};
+use bt_shell_common::apps::page::{self, AddRefused, Review, Sign};
 use bt_shell_common::apps::{
-    Config, Curl, Distributor, Failure, Fetch, State, Status, Tracker, check, fetch_target, store,
+    Config, Curl, Distributor, Failure, Fetch, Program, State, Status, Tracker, check,
+    fetch_target, look, store,
 };
 use bt_shell_common::kablo::local::LocalChannel;
 use support::{Author, Net, OTHER_TARGET, Release, TARGET, Temp, v};
@@ -409,6 +411,39 @@ fn a_program_that_leaves_the_list_is_deleted_and_its_name_remembered() {
 }
 
 #[test]
+fn a_program_that_changes_its_name_at_the_same_address_leaves_the_old_name_behind_nowhere() {
+    let world = World::new("renamed");
+    let author = Author::new(1);
+    world.approve("demo", &author);
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    assert_eq!(world.one(SOURCE).state, ready("1.0.0"));
+
+    // The same address now says another name; until that key is approved nothing is taken away.
+    Release::new("renamed", "2.0.0").publish(&world.net, SOURCE, &author);
+    assert!(matches!(world.one(SOURCE).state, State::Awaiting { .. }));
+    assert_eq!(world.versions("demo"), ["1.0.0"]);
+
+    world.approve("renamed", &author);
+    let found = world.one(SOURCE);
+    assert_eq!(found.name.as_deref(), Some("renamed"));
+    assert_eq!(found.state, ready("2.0.0"));
+    // The old name's folder is gone and the name is on the removed list; the new one follows.
+    assert!(!world.root.path().join("demo").exists());
+    let removed = store::removed(world.root.path(), SystemTime::now());
+    assert_eq!(
+        removed
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["demo"]
+    );
+    assert_eq!(
+        store::followed_names(world.root.path()),
+        [("renamed".to_owned(), SOURCE.to_owned())]
+    );
+}
+
+#[test]
 fn a_list_that_may_not_be_the_persons_deletes_nothing() {
     let world = World::new("not-authoritative");
     let author = Author::new(1);
@@ -608,7 +643,7 @@ fn curl_does_not_read_more_than_the_limit() {
     curl.download(&address, 5000, &part).expect("downloaded");
     assert_eq!(fs::metadata(&part).expect("metadata").len(), 5000);
     // Only the two protocols a source has are spoken, and a call on the network does not read a
-    // file on this Mac.
+    // file on this computer.
     assert!(curl.get("ftp://example.invalid/x", 10).is_err());
     assert!(curl.get(&address.replace("file:", "https:"), 10).is_err());
 }
@@ -693,7 +728,7 @@ fn a_machine_of_another_kind_gets_its_own_file_and_follows_the_releases_and_the_
     let folder = world.root.path().join("demo/1.0.0");
     assert!(
         !folder.join(OTHER_TARGET).exists(),
-        "only this Mac's file came down"
+        "only this computer's file came down"
     );
 
     let distributor = Distributor::new(
@@ -720,11 +755,11 @@ fn a_machine_of_another_kind_gets_its_own_file_and_follows_the_releases_and_the_
     );
     assert_eq!(
         fs::read(machine_apps(server.path()).join("demo/1.0.0/app.json")).expect("app.json"),
-        fs::read(folder.join("app.json")).expect("the Mac's")
+        fs::read(folder.join("app.json")).expect("the computer's")
     );
-    // This Mac's own account has the file that came down with the release: nothing more is asked.
+    // This computer's own account has the file that came down with the release: nothing more is asked.
     let asked = world.net.asked().len();
-    distributor.sync_unless_recent("this Mac", TARGET, &this_mac, now);
+    distributor.sync_unless_recent("this computer", TARGET, &this_mac, now);
     assert_eq!(runs(mac.path(), "demo"), "demo 1.0.0");
     assert_eq!(world.net.asked().len(), asked);
 
@@ -732,13 +767,13 @@ fn a_machine_of_another_kind_gets_its_own_file_and_follows_the_releases_and_the_
     Release::new("demo", "1.1.0").publish(&world.net, SOURCE, &author);
     assert_eq!(world.one(SOURCE).state, ready("1.1.0"));
     distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, later(1));
-    distributor.sync_unless_recent("this Mac", TARGET, &this_mac, later(1));
+    distributor.sync_unless_recent("this computer", TARGET, &this_mac, later(1));
     for home in [server.path(), mac.path()] {
         assert_eq!(runs(home, "demo"), "demo 1.1.0");
         assert!(machine_apps(home).join("demo/1.0.0/demo").is_file());
     }
 
-    // Taken off the list: the Mac deletes it, and the machines do at their next visit.
+    // Taken off the list: the computer deletes it, and the machines do at their next visit.
     store::remove(world.root.path(), "demo", later(2)).expect("removed");
     distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, later(2));
     let reports = distributor.reports();
@@ -750,8 +785,8 @@ fn a_machine_of_another_kind_gets_its_own_file_and_follows_the_releases_and_the_
     assert_eq!(summary.removed, ["demo"]);
     assert!(!machine_apps(server.path()).join("demo").exists());
     assert!(!machine_apps(server.path()).join("bin/demo").exists());
-    // This Mac's own account loses it the same way.
-    distributor.sync_unless_recent("this Mac", TARGET, &this_mac, later(2));
+    // This computer's own account loses it the same way.
+    distributor.sync_unless_recent("this computer", TARGET, &this_mac, later(2));
     assert!(!machine_apps(mac.path()).join("demo").exists());
 }
 
@@ -800,9 +835,13 @@ fn a_file_for_a_machine_is_fetched_only_from_a_release_that_still_holds() {
 
     // The right bytes arrive, and are kept; asked again, they are not fetched again.
     world.net.put(&address, release.body.as_bytes());
-    assert_eq!(ask(OTHER_TARGET), Ok(Some(folder.join(OTHER_TARGET))));
+    let wanted = Some(Program {
+        path: folder.join(OTHER_TARGET),
+        sha256: Digest::of(release.body.as_bytes()).to_string(),
+    });
+    assert_eq!(ask(OTHER_TARGET), Ok(wanted.clone()));
     let asked = world.net.asked().len();
-    assert_eq!(ask(OTHER_TARGET), Ok(Some(folder.join(OTHER_TARGET))));
+    assert_eq!(ask(OTHER_TARGET), Ok(wanted));
     assert_eq!(world.net.asked().len(), asked);
 
     // An `app.json` on the disk that is not what the author signed is not a release.
@@ -811,4 +850,227 @@ fn a_file_for_a_machine_is_fetched_only_from_a_release_that_still_holds() {
     fs::write(folder.join("app.json"), manifest).expect("tampered");
     fs::remove_file(folder.join(OTHER_TARGET)).expect("removed");
     assert!(matches!(ask(OTHER_TARGET), Err(Failure::Manifest(_))));
+}
+
+// ---- the Apps page: looking, approving, saying no, removing --------------------------------------
+
+impl World {
+    fn look(&self, source: &str) -> Result<bt_shell_common::apps::Look, Failure> {
+        look(&self.config(), source, self.net.as_ref())
+    }
+
+    /// Everything the apps folder holds, by name, whatever it is.
+    fn files(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(self.root.path()) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+#[test]
+fn looking_at_a_source_says_who_signed_it_and_writes_nothing() {
+    let world = World::new("look");
+    let author = Author::new(1);
+    Release::new("demo", "1.2.0").publish(&world.net, SOURCE, &author);
+    let seen = world.look(SOURCE).expect("a source that can be read");
+    assert_eq!(seen.name, "demo");
+    assert_eq!(seen.version, v("1.2.0"));
+    assert_eq!(seen.key, author.key());
+    assert_eq!(seen.approved, None);
+    assert!(!seen.trusted);
+    // Not a key, not a folder, not a record: the folder is as it was.
+    assert!(world.files().is_empty());
+}
+
+#[test]
+fn a_source_is_trusted_by_the_key_in_the_application_or_the_key_approved() {
+    let world = World::new("look-trust");
+    let (author, other) = (Author::new(1), Author::new(2));
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+
+    let mut config = world.config();
+    config.in_app_key = Some(author.key());
+    assert!(
+        look(&config, SOURCE, world.net.as_ref())
+            .expect("read")
+            .trusted
+    );
+
+    world.approve("demo", &author);
+    assert!(world.look(SOURCE).expect("read").trusted);
+
+    // Another key signs the next release: not trusted, and the approved one is told.
+    Release::new("demo", "1.1.0").publish(&world.net, SOURCE, &other);
+    let seen = world.look(SOURCE).expect("read");
+    assert!(!seen.trusted);
+    assert_eq!(seen.approved, Some(author.key()));
+    assert_eq!(seen.key, other.key());
+    let review = Review::from_look(SOURCE, &seen);
+    assert_eq!(review.was, Some(author.key()));
+}
+
+#[test]
+fn a_source_that_could_never_be_followed_is_refused_when_it_is_added() {
+    let world = World::new("look-refuse");
+    let author = Author::new(1);
+    assert_eq!(world.look("not a source"), Err(Failure::Source));
+    // Nothing is there at the address.
+    assert!(matches!(world.look(SOURCE), Err(Failure::Fetch(_))));
+    Release::new("pencere", "1.0.0").publish(
+        &world.net,
+        "https://apps.example.test/pencere/app.json",
+        &author,
+    );
+    assert_eq!(
+        world.look("https://apps.example.test/pencere/app.json"),
+        Err(Failure::Reserved)
+    );
+    // The name is another source's.
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    world.approve("demo", &author);
+    assert_eq!(world.one(SOURCE).state, ready("1.0.0"));
+    let mirror = "https://mirror.example.test/demo/app.json";
+    Release::new("demo", "1.0.0").publish(&world.net, mirror, &author);
+    assert_eq!(world.look(mirror), Err(Failure::NameTaken));
+    assert!(world.look(SOURCE).is_ok());
+}
+
+#[test]
+fn approving_keeps_the_key_and_the_list_the_page_writes_lands_the_program() {
+    let world = World::new("approve");
+    let author = Author::new(1);
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    let list: Vec<String> = Vec::new();
+
+    // Add: the lookup asks, nothing is written yet.
+    let seen = world.look(SOURCE).expect("read");
+    assert!(!seen.trusted);
+    let review = Review::from_look(SOURCE, &seen);
+    assert_eq!(review.was, None);
+
+    // Yes: the key is kept, then the list is written (the edit the window sends).
+    page::approve(world.root.path(), &review).expect("the key is kept");
+    assert_eq!(
+        store::approved_key(world.root.path(), "demo"),
+        Some(author.key())
+    );
+    let list = page::added(&list, SOURCE).expect("a new source");
+    assert_eq!(list, [SOURCE]);
+    // The line the file gets, and what reading the file gives back.
+    let text = bt_core::Settings::with_edit(
+        "[apps]\nsources = [\"bateri/textpen\"]\n",
+        &bt_core::SettingsEdit::AppsSources(["bateri/textpen", SOURCE].map(str::to_owned).to_vec()),
+    )
+    .expect("a writable file");
+    let parsed = bt_core::Settings::parse_keeping(&text, &bt_core::Settings::default())
+        .expect("a readable file");
+    assert_eq!(parsed.settings.apps_sources, ["bateri/textpen", SOURCE]);
+
+    // The check the list change starts lands it, and the page shows a green dot.
+    let statuses = world.check(&[SOURCE]);
+    assert_eq!(statuses[0].state, ready("1.0.0"));
+    let rows = page::rows(&list, &statuses, world.root.path());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "demo");
+    assert_eq!(rows[0].version.as_deref(), Some("1.0.0"));
+    assert_eq!(rows[0].sign, Sign::Good);
+    assert_eq!(rows[0].tip.title, "Up to date");
+    assert!(rows[0].review.is_none());
+}
+
+#[test]
+fn saying_no_writes_nothing() {
+    let world = World::new("reject");
+    let author = Author::new(1);
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    let list = vec!["bateri/textpen".to_owned()];
+
+    let seen = world.look(SOURCE).expect("read");
+    let _review = Review::from_look(SOURCE, &seen);
+    // No: the page does neither `approve` nor `added`. The folder holds nothing and the list is
+    // the list it was; a check of it never goes near the source.
+    assert!(world.files().is_empty());
+    assert_eq!(list, ["bateri/textpen"]);
+    let asked_before = world.net.asked().len();
+    let _ = world.check(&[]);
+    assert_eq!(world.net.asked().len(), asked_before);
+    assert!(world.files().is_empty());
+    assert_eq!(store::approved_key(world.root.path(), "demo"), None);
+}
+
+#[test]
+fn a_waiting_row_is_reviewed_and_a_changed_key_is_shown_beside_the_one_approved() {
+    let world = World::new("review");
+    let (author, other) = (Author::new(1), Author::new(2));
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    let list = vec![SOURCE.to_owned()];
+
+    // A source nobody approved: a warning, and Review with the key that signed.
+    let rows = page::rows(&list, &world.check(&[SOURCE]), world.root.path());
+    assert_eq!(rows[0].sign, Sign::Warn);
+    assert_eq!(rows[0].tip.title, "Waiting for approval");
+    let review = rows[0].review.clone().expect("a decision is asked for");
+    assert_eq!(review.key, author.key());
+    assert_eq!(review.was, None);
+    page::approve(world.root.path(), &review).expect("the key is kept");
+    assert_eq!(world.one(SOURCE).state, ready("1.0.0"));
+
+    // The author's key changes: red, the approved key beside the new one, updates stopped.
+    Release::new("demo", "1.1.0").publish(&world.net, SOURCE, &other);
+    let rows = page::rows(&list, &world.check(&[SOURCE]), world.root.path());
+    assert_eq!(rows[0].sign, Sign::Bad);
+    assert_eq!(
+        rows[0].tip.more.as_deref(),
+        Some("Updates stopped. Review to decide.")
+    );
+    let review = rows[0].review.clone().expect("a decision is asked for");
+    assert_eq!(review.was, Some(author.key()));
+    assert_eq!(review.key, other.key());
+    // Trusting the new key is what lets the release land.
+    page::approve(world.root.path(), &review).expect("the key is kept");
+    let rows = page::rows(&list, &world.check(&[SOURCE]), world.root.path());
+    assert_eq!(rows[0].sign, Sign::Good);
+    assert_eq!(rows[0].version.as_deref(), Some("1.1.0"));
+}
+
+#[test]
+fn removing_takes_the_row_and_the_folder_away_and_remembers_the_name() {
+    let world = World::new("remove");
+    let author = Author::new(1);
+    world.approve("demo", &author);
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    let list = vec!["bateri/textpen".to_owned(), SOURCE.to_owned()];
+    let statuses = world.check(&[SOURCE]);
+    assert_eq!(statuses[0].state, ready("1.0.0"));
+    assert!(world.root.path().join("demo").exists());
+
+    // What the trash can writes: the list without the entry. The tracker's next check is what
+    // deletes the program.
+    let list = page::without(&list, SOURCE);
+    assert_eq!(list, ["bateri/textpen"]);
+    let statuses = world.check(&[]);
+    let rows = page::rows(&list, &statuses, world.root.path());
+    assert!(rows.iter().all(|row| row.source != SOURCE));
+    assert!(!world.root.path().join("demo").exists());
+    let removed = store::removed(world.root.path(), SystemTime::now());
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].name, "demo");
+}
+
+#[test]
+fn the_list_refuses_what_it_has_or_cannot_follow() {
+    let list = vec!["acme/notes".to_owned()];
+    assert_eq!(page::added(&list, "acme/notes"), Err(AddRefused::Listed));
+    assert_eq!(page::added(&list, " acme/notes "), Err(AddRefused::Listed));
+    assert_eq!(page::added(&list, "nothing"), Err(AddRefused::NotASource));
+    assert_eq!(
+        page::added(&list, "https://example.com/tool/app.json").expect("an address"),
+        ["acme/notes", "https://example.com/tool/app.json"]
+    );
 }

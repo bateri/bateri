@@ -171,8 +171,14 @@ pub(crate) fn apps_path(home: &std::path::Path, profile: Option<&str>) -> std::p
         .join("apps")
 }
 
+/// The folder of the programs this copy follows ([`apps_path`] under the home directory), for the
+/// Apps page's lookups and approvals; `None` without a home directory.
+pub(crate) fn apps_root() -> Option<std::path::PathBuf> {
+    Some(apps_path(&child::home()?, profile().as_deref()))
+}
+
 /// What puts the programs of [`apps_path`]'s folder on the machines bateri sets up: one for the
-/// process, since it remembers which machine it is visiting and when it was last (the Mac's own
+/// process, since it remembers which machine it is visiting and when it was last (this computer's own
 /// account is one of them: [`app::AppDelegate::start_apps`]). `None` without a home directory.
 pub(crate) fn apps_distributor() -> Option<std::sync::Arc<bt_shell_common::apps::Distributor>> {
     static DISTRIBUTOR: std::sync::OnceLock<

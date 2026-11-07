@@ -92,14 +92,13 @@ unset __bateri_agents_file
 
 # The programs bateri follows (`~/.local/share/bateri/apps/bin`, beside `shell`) go at the END of
 # `PATH`, once: unlike the agent's command they never stand in for a command the system or the
-# user has. The folder is there once a first program has been put in it.
+# user has. The folder need not be there yet: the first shell of a first visit starts before the
+# first program is put in it, and an entry for a folder that is not there does no harm.
 __bateri_apps=$HOME/.local/share/bateri/apps/bin
-if [ -d "$__bateri_apps" ]; then
-  case ":$PATH:" in
-    *":$__bateri_apps:"*) ;;
-    *) PATH=$PATH:$__bateri_apps ;;
-  esac
-fi
+case ":$PATH:" in
+  *":$__bateri_apps:"*) ;;
+  *) PATH=$PATH:$__bateri_apps ;;
+esac
 unset __bateri_apps
 
 # The dock's functions and the hooks' installer (`dock.bash`, beside this file, shared with the

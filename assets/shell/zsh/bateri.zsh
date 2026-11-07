@@ -149,9 +149,10 @@ __bateri_hooks() {
   fi
   # The programs bateri follows (`~/.local/share/bateri/apps/bin`, beside `shell`) go at the END of
   # `path`, once: unlike the agent's command they never stand in for a command the system or the
-  # user has. The folder is there once a first program has been put in it.
+  # user has. The folder need not be there yet: the first shell of a first visit starts before the
+  # first program is put in it, and an entry for a folder that is not there does no harm.
   local bt_apps=$HOME/.local/share/bateri/apps/bin
-  if [[ -d $bt_apps ]] && (( ! ${path[(Ie)$bt_apps]} )); then
+  if (( ! ${path[(Ie)$bt_apps]} )); then
     path+=($bt_apps)
   fi
   # "Has a command run since the last prompt": `D` is printed only after a command

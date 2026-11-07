@@ -1788,6 +1788,12 @@ pub struct Settings {
     /// reads them), in the file's order. `["bateri/textpen"]` unless the file writes the key;
     /// written, even empty, the file's list is the list.
     pub apps_sources: Vec<String>,
+    /// Whether `apps_sources` is **all** that the file wrote: `false` when an entry was dropped
+    /// (it names nothing) or the key was not accepted and the list is the previous one (or the
+    /// default). A program is deleted from the computer because it left the list, and a list that
+    /// is not the person's whole one must not do that: a typed address with a mistake in it would
+    /// otherwise delete the program it was meant to be, with the key approved for it.
+    pub apps_sources_whole: bool,
     /// `[keys]`: the shortcuts the file gives the commands, by the command's fixed name, in the
     /// file's order. A command that has no entry has its default; the names are the shell
     /// layer's, and an entry for a name it does not know is kept here and reported there.
@@ -1856,6 +1862,7 @@ impl Default for Settings {
                 .iter()
                 .map(|source| (*source).to_owned())
                 .collect(),
+            apps_sources_whole: true,
             keys: Vec::new(),
         }
     }
@@ -2032,6 +2039,10 @@ pub enum SettingsEdit {
     DefaultShortcuts {
         names: Vec<String>,
     },
+    /// Settings ▸ Apps: the whole `[apps] sources` list, as the window wants it written (an entry
+    /// added, one taken out). Written as given; the entries are the window's to have checked
+    /// ([`app_source_address`] reads them back).
+    AppsSources(Vec<String>),
 }
 
 impl SettingsEdit {
@@ -2123,6 +2134,7 @@ impl SettingsEdit {
                 ("remote", "hosts", "remote.hosts")
             }
             Self::RemoteIntegration(_) => ("remote", "integration", "remote.integration"),
+            Self::AppsSources(_) => ("apps", "sources", "apps.sources"),
             Self::PreviewMaxSize(_) => ("remote", "preview_max_size", "remote.preview_max_size"),
             Self::PreviewReadOnly(_) => ("remote", "preview_read_only", "remote.preview_read_only"),
             Self::PreviewDir(_) => ("remote", "preview_dir", "remote.preview_dir"),
@@ -2187,6 +2199,7 @@ impl SettingsEdit {
             // The line's value; a removal writes none and never asks.
             Self::Shortcut { shortcuts, .. } => keys::value_of(shortcuts.as_deref()),
             Self::DefaultShortcuts { .. } => String::new().into(),
+            Self::AppsSources(sources) => sources_value(sources),
             // The line's value; a removal writes none and never asks.
             Self::FontFeature { on, .. } => on.unwrap_or_default().into(),
             Self::PreviewMaxSize(bytes) | Self::PreviewLimit(bytes) => format_size(*bytes).into(),
@@ -2217,6 +2230,23 @@ impl SettingsEdit {
             | Self::DownloadDir(name) => name.as_str().into(),
         }
     }
+}
+
+/// The `[apps] sources` value: one line while it fits, one entry a line (with the trailing comma
+/// the template's own lists use) once it does not.
+fn sources_value(sources: &[String]) -> toml_edit::Value {
+    const ONE_LINE: usize = 64;
+    let mut array: toml_edit::Array = sources.iter().map(String::as_str).collect();
+    let written: usize = sources.iter().map(|source| source.len() + 4).sum();
+    if written > ONE_LINE {
+        for value in array.iter_mut() {
+            value.decor_mut().set_prefix("\n  ");
+            value.decor_mut().set_suffix("");
+        }
+        array.set_trailing_comma(true);
+        array.set_trailing("\n");
+    }
+    array.into()
 }
 
 impl Settings {
@@ -2573,10 +2603,11 @@ stats_interval = 3
 # Programs bateri keeps up to date for you, such as the textpen editor. Each
 # entry says where a program publishes its releases: user/repo for a GitHub
 # project (its latest release), or the full https:// address of an app.json.
-# A program runs with your rights, here and on the servers you connect to, so a
-# program signed with a key you have not approved waits for your approval and
-# is not downloaded. Taking an entry out of the list removes the program from
-# this Mac at once.
+# A program runs with your rights, on this computer and on the servers with
+# shell integration, so a program signed with a key you have not approved waits
+# for your approval and is not downloaded. Taking an entry out of the list
+# removes the program from this computer at once and from those servers the
+# next time bateri connects to them.
 sources = ["bateri/textpen"]
 
 [keys]
@@ -3264,8 +3295,10 @@ sources = ["bateri/textpen"]
         match section(text, root, "apps", &mut parsed.diagnostics) {
             Some(apps) => {
                 if let Some(item) = apps.get("sources") {
-                    parsed.settings.apps_sources =
+                    let (list, whole) =
                         app_sources(text, item, &fallback.apps_sources, &mut parsed.diagnostics);
+                    parsed.settings.apps_sources = list;
+                    parsed.settings.apps_sources_whole = whole;
                 }
             }
             None if root.contains_key("apps") => {
@@ -3273,6 +3306,7 @@ sources = ["bateri/textpen"]
                     .settings
                     .apps_sources
                     .clone_from(&fallback.apps_sources);
+                parsed.settings.apps_sources_whole = false;
             }
             None => {}
         }
@@ -3471,6 +3505,7 @@ sources = ["bateri/textpen"]
                 toml_edit::Value::String(_) => "a string",
                 toml_edit::Value::Integer(_) => "an integer",
                 toml_edit::Value::Boolean(_) => "a boolean",
+                toml_edit::Value::Array(_) => "a list",
                 _ => "a number",
             };
             refused.push(Diagnostic {
@@ -4789,7 +4824,7 @@ pub const DEFAULT_APP_SOURCES: &[&str] = &["bateri/textpen"];
 /// The address of the `app.json` an `[apps] sources` entry names, or `None` if it names none.
 ///
 /// Three spellings: `user/repo`, a GitHub project (its **latest release**'s `app.json`), a full
-/// `https://` address, and a `file:///` one (a folder on this Mac or one it mounts; what the
+/// `https://` address, and a `file:///` one (a folder on this computer or one it mounts; what the
 /// tests and a mirror use). An address is what `pencere_host::apps::is_address` says it is, and
 /// the shorthand's parts are what GitHub lets a user and a repository be called. The entry is
 /// compared as written otherwise (no trimming): [`app_sources`] trims what the file holds.
@@ -4817,13 +4852,14 @@ pub fn app_source_address(source: &str) -> Option<String> {
 /// **An entry that names nothing is dropped alone**, with a diagnostic naming it, and the others
 /// stay: the list has no order that means something (two entries with the same address are one,
 /// the first kept), unlike `remote.hosts`. A value that is not a list of strings is rejected
-/// whole and `fallback`'s list stays.
+/// whole and `fallback`'s list stays. The flag is whether the list is all that the file wrote
+/// (`false` when an entry was dropped or the value was rejected): [`Settings::apps_sources_whole`].
 fn app_sources(
     text: &str,
     item: &Item,
     fallback: &[String],
     diagnostics: &mut Vec<Diagnostic>,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     const KEY: &str = "apps.sources";
     let Some(array) = item.as_array() else {
         diagnostics.push(Diagnostic {
@@ -4834,10 +4870,11 @@ fn app_sources(
                 kind(item)
             ),
         });
-        return fallback.to_vec();
+        return (fallback.to_vec(), false);
     };
     let mut sources: Vec<String> = Vec::with_capacity(array.len());
     let mut addresses: Vec<String> = Vec::with_capacity(array.len());
+    let mut whole = true;
     for value in array {
         let line = value.span().and_then(|span| line_of(text, span.start));
         let Some(entry) = value.as_str() else {
@@ -4849,6 +4886,7 @@ fn app_sources(
                     kind(&Item::Value(value.clone()))
                 ),
             });
+            whole = false;
             continue;
         };
         let entry = entry.trim();
@@ -4860,6 +4898,7 @@ fn app_sources(
                     "`{KEY}` entry {entry:?} is not user/repo, an https:// address or a file:/// one; dropping it"
                 ),
             });
+            whole = false;
             continue;
         };
         if !addresses.contains(&address) {
@@ -4867,7 +4906,7 @@ fn app_sources(
             sources.push(entry.to_owned());
         }
     }
-    sources
+    (sources, whole)
 }
 
 /// `remote.hosts`: the array of `{ host, mark }` entries.
@@ -5384,6 +5423,7 @@ mod tests {
             remote_stats: RemoteStatsSettings::default(),
             remote_integration: true,
             apps_sources: Settings::default().apps_sources,
+            apps_sources_whole: true,
             keys: Vec::new(),
         };
         let parsed = Settings::parse_keeping(
@@ -8241,6 +8281,9 @@ hosts = [
         );
         // The second spelling of an address already listed is the same entry.
         assert_eq!(settings.apps_sources, ["acme/tool", "other/tool"]);
+        // A list with an entry gone is not the person's whole one: nothing is deleted for it.
+        assert!(!settings.apps_sources_whole);
+        assert!(clean("[apps]\nsources = [\"acme/tool\", \"acme/tool\"]\n").apps_sources_whole);
         assert_eq!(diagnostic.key, Some("apps.sources"));
         assert_eq!(diagnostic.line, Some(4));
         assert!(
@@ -8251,6 +8294,7 @@ hosts = [
         // An entry that is not a string goes the same way.
         let (settings, diagnostic) = rejected("[apps]\nsources = [\"acme/tool\", 5]\n");
         assert_eq!(settings.apps_sources, ["acme/tool"]);
+        assert!(!settings.apps_sources_whole);
         assert!(diagnostic.message.contains("is an integer"), "{diagnostic}");
     }
 
@@ -8266,6 +8310,7 @@ hosts = [
         ] {
             let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
             assert_eq!(parsed.settings.apps_sources, current.apps_sources, "{text}");
+            assert!(!parsed.settings.apps_sources_whole, "{text}");
             let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
                 .unwrap_or_else(|got| panic!("a single diagnostic expected: {got:?}"));
             assert_eq!(diagnostic.key, Some("apps.sources"));
@@ -8275,6 +8320,7 @@ hosts = [
         // A section of the wrong type keeps it too; at startup the same text is the default.
         let parsed = Settings::parse_keeping("apps = 1\n", &current).expect("parseable");
         assert_eq!(parsed.settings.apps_sources, current.apps_sources);
+        assert!(!parsed.settings.apps_sources_whole);
         let (settings, _) = rejected("[apps]\nsources = \"acme/tool\"\n");
         assert_eq!(settings.apps_sources, ["bateri/textpen"]);
     }
@@ -8596,6 +8642,7 @@ cursor = \"spring\"
                 },
             ),
             SettingsEdit::RemoteIntegration(on) => settings.remote_integration = on,
+            SettingsEdit::AppsSources(sources) => settings.apps_sources = sources,
             SettingsEdit::PreviewMaxSize(bytes) => settings.remote_files.preview_max_size = bytes,
             SettingsEdit::PreviewReadOnly(on) => settings.remote_files.preview_read_only = on,
             SettingsEdit::PreviewDir(path) => settings.remote_files.preview_dir = path,
@@ -8708,6 +8755,10 @@ cursor = \"spring\"
                 on: false,
             },
             SettingsEdit::RemoteIntegration(false),
+            SettingsEdit::AppsSources(vec![
+                "acme/tool".to_owned(),
+                "https://example.com/tool/app.json".to_owned(),
+            ]),
             SettingsEdit::ShellPorts(false),
             SettingsEdit::ShellPythonEnv(false),
             SettingsEdit::ShellNodeVersion(false),
@@ -8776,6 +8827,52 @@ cursor = \"spring\"
             ),
             "[remote]\nhosts = [{ host = \"b\", mark = \"development\" }, \
              { host = \"a\", mark = \"staging\" }]\n"
+        );
+    }
+
+    fn sourced(text: &str, sources: &[&str]) -> String {
+        let edit = SettingsEdit::AppsSources(sources.iter().map(|s| (*s).to_owned()).collect());
+        Settings::with_edit(text, &edit).expect("writable text")
+    }
+
+    #[test]
+    fn the_apps_list_is_written_whole_and_reads_back() {
+        // The key is born with its section; a short list is one line.
+        assert_eq!(
+            sourced("", &["acme/tool"]),
+            "[apps]\nsources = [\"acme/tool\"]\n"
+        );
+        // An emptied list is written, not removed: the file's list is the list.
+        assert_eq!(
+            sourced("[apps]\nsources = [\"acme/tool\"] # mine\n", &[]),
+            "[apps]\nsources = [] # mine\n"
+        );
+        // A longer one is a line each, the way the template's own lists are.
+        let long = sourced(
+            "[apps]\nfuture = 1\n",
+            &[
+                "bateri/textpen",
+                "acme/tool",
+                "https://example.com/tool/app.json",
+            ],
+        );
+        assert_eq!(
+            long,
+            "[apps]\nfuture = 1\nsources = [\n  \"bateri/textpen\",\n  \"acme/tool\",\n  \
+             \"https://example.com/tool/app.json\",\n]\n"
+        );
+        assert_eq!(
+            clean(&long).apps_sources,
+            [
+                "bateri/textpen",
+                "acme/tool",
+                "https://example.com/tool/app.json"
+            ]
+        );
+        // A list of the wrong kind is replaced; the rest of the file is kept.
+        assert_eq!(
+            sourced("[apps]\nsources = \"acme/tool\"\n", &["acme/tool"]),
+            "[apps]\nsources = [\"acme/tool\"]\n"
         );
     }
 

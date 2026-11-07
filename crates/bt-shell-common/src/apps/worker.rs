@@ -1,8 +1,8 @@
 //! The thread that follows the sources: a check at launch, another when the list changes, and one
-//! a day. The window never waits for it and never asks it anything it cannot answer from memory:
+//! a day (sooner and sooner again after a check the network was down for). The window never waits for it and never asks it anything it cannot answer from memory:
 //! [`Tracker::statuses`] is the result of the last check that finished. When a check ends the
 //! worker runs what it was given to do next (`after`): the application puts what landed on this
-//! Mac's own account there, on this thread, which nothing else waits for.
+//! computer's own account there, on this thread, which nothing else waits for.
 
 use std::io;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -12,14 +12,45 @@ use std::time::{Duration, SystemTime};
 
 use super::check::check;
 use super::fetch::{Curl, Fetch};
-use super::{Config, Status};
+use super::{Config, Failure, State, Status};
 
-/// How often the worker looks at the clock between checks: an hour, so a Mac that slept past the
-/// day is checked within the hour it wakes (an `Instant` does not run while the Mac sleeps).
+/// How often the worker looks at the clock between checks: an hour, so a computer that slept past the
+/// day is checked within the hour it wakes (an `Instant` does not run while the computer sleeps).
 const WAKE: Duration = Duration::from_secs(60 * 60);
 
 /// The time between two checks.
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The first wait before a check that could not reach the network is made again; it doubles after
+/// each such check up to [`WAKE`]. A program does not wait a day to arrive after the computer was
+/// opened offline.
+const RETRY: Duration = Duration::from_secs(5 * 60);
+
+/// Whether a check left something that a later try may mend: an address that did not answer (the
+/// network is down, the host is busy) or a file that arrived wrong. A source that is wrong in
+/// itself (a name, a signature, a key) waits for the person, not for the clock.
+fn mendable(found: &[Status]) -> bool {
+    found.iter().any(|status| {
+        matches!(
+            (&status.state, &status.problem),
+            (State::Error(Failure::Fetch(_) | Failure::Digest), _)
+                | (_, Some(Failure::Fetch(_) | Failure::Digest))
+        )
+    })
+}
+
+/// The wait until the next check, from what the last one found: the day it is, or a short one that
+/// grows (`backoff`, which starts again from [`RETRY`] when a check leaves nothing to mend).
+fn wait_after(found: &[Status], backoff: &mut Duration) -> Duration {
+    if mendable(found) {
+        let wait = *backoff;
+        *backoff = (*backoff * 2).min(WAKE);
+        wait
+    } else {
+        *backoff = RETRY;
+        DAY
+    }
+}
 
 /// What the worker does when a check has ended.
 pub type After = Box<dyn Fn() + Send + 'static>;
@@ -73,12 +104,11 @@ impl Tracker {
             .name("bateri-apps".into())
             .spawn(move || {
                 let mut checked: Option<SystemTime> = None;
+                let (mut wait, mut backoff) = (DAY, RETRY);
                 loop {
+                    let elapsed = |at: SystemTime| SystemTime::now().duration_since(at);
                     let due = checked.is_none_or(|at| {
-                        SystemTime::now()
-                            .duration_since(at)
-                            .is_ok_and(|elapsed| elapsed >= DAY)
-                            || SystemTime::now() < at
+                        elapsed(at).is_ok_and(|elapsed| elapsed >= wait) || SystemTime::now() < at
                     });
                     if due {
                         let found = check(
@@ -88,11 +118,17 @@ impl Tracker {
                             fetch.as_ref(),
                             SystemTime::now(),
                         );
+                        wait = wait_after(&found, &mut backoff);
                         *lock(&shared) = found;
                         checked = Some(SystemTime::now());
                         after();
                     }
-                    match inbox.recv_timeout(WAKE) {
+                    // Sleeps until the check that is next, or the hour at most (the clock is
+                    // looked at again then).
+                    let left = checked
+                        .and_then(|at| elapsed(at).ok())
+                        .map_or(Duration::ZERO, |elapsed| wait.saturating_sub(elapsed));
+                    match inbox.recv_timeout(left.clamp(Duration::from_secs(1), WAKE)) {
                         Ok(mut latest) => {
                             // A burst of saves is one check, of the last list.
                             while let Ok(next) = inbox.try_recv() {
@@ -100,6 +136,7 @@ impl Tracker {
                             }
                             current = latest;
                             checked = None;
+                            backoff = RETRY;
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -140,5 +177,58 @@ impl Tracker {
     /// How each source stood at the last check that finished; empty until the first one has.
     pub fn statuses(&self) -> Vec<Status> {
         lock(&self.statuses).clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bt_core::pencere::apps::Version;
+
+    use super::*;
+
+    fn status(state: State, problem: Option<Failure>) -> Status {
+        Status {
+            source: "acme/notes".to_owned(),
+            name: Some("notes".to_owned()),
+            state,
+            problem,
+        }
+    }
+
+    fn ready() -> State {
+        State::Ready {
+            version: Version::parse("1.0.0").expect("a version"),
+            newer: None,
+        }
+    }
+
+    #[test]
+    fn a_check_the_network_failed_is_tried_again_soon_at_growing_intervals() {
+        let down = [status(
+            State::Error(Failure::Fetch("no route".into())),
+            None,
+        )];
+        let mut backoff = RETRY;
+        let waits: Vec<u64> = (0..6)
+            .map(|_| wait_after(&down, &mut backoff).as_secs() / 60)
+            .collect();
+        // Five minutes, doubling, never more than the hour.
+        assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+        // A release that landed before and could not be refreshed is the same.
+        let stale = [status(ready(), Some(Failure::Fetch("timeout".into())))];
+        let mut backoff = RETRY;
+        assert_eq!(wait_after(&stale, &mut backoff), RETRY);
+        // When it works again the day is back, and the next failure starts from the short wait.
+        assert_eq!(wait_after(&[status(ready(), None)], &mut backoff), DAY);
+        assert_eq!(backoff, RETRY);
+    }
+
+    #[test]
+    fn a_source_that_is_wrong_in_itself_waits_for_the_person_not_the_clock() {
+        for failure in [Failure::Source, Failure::NameTaken, Failure::Reserved] {
+            let mut backoff = RETRY;
+            let found = [status(State::Error(failure), None)];
+            assert_eq!(wait_after(&found, &mut backoff), DAY);
+        }
     }
 }

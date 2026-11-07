@@ -396,9 +396,14 @@ impl Backend for SshBackend {
                     renew(&channel.argv, &installed, live);
                 }
                 // The programs the person follows go to the server beside kablo: on a thread of
-                // their own (the pane waits for this call, not for them), and not when the
-                // `bateri` command is not wanted there, where nothing of ours is put.
-                if let Some(apps) = self.apps.as_ref().filter(|_| self.agent_wanted(server)) {
+                // their own (the pane waits for this call, not for them), and only where both
+                // hold: the `bateri` command is wanted there (`commands = "off"` puts nothing of
+                // ours), and the server's shells get bateri's integration
+                // ([`Settings::integration_for`]), which is what puts the programs' folder on
+                // `PATH`.
+                if let Some(apps) = self.apps.as_ref().filter(|_| {
+                    self.agent_wanted(server) && (self.settings)().integration_for(&server.host)
+                }) {
                     apps.sync_in_background(
                         server.key.clone(),
                         installed.target.triple(),

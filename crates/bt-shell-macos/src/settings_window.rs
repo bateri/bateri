@@ -1,4 +1,4 @@
-//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar of nine pages on the left, the
+//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar of ten pages on the left, the
 //! chosen page on the right: titled groups of rows, each row a name and a description with its
 //! control beside them (which rows a page holds and in what order is the table in [`pages`];
 //! Keyboard is a table of its own: [`keyboard`]).
@@ -54,10 +54,10 @@ use objc2_app_kit::{
     NSOpenPanel, NSPopUpButton, NSScrollView, NSSearchField, NSSegmentSwitchTracking,
     NSSegmentedControl, NSSlider, NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper,
     NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTitlePosition,
-    NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
-    NSWindow, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode,
-    NSWindowTitleVisibility, NSWorkspace,
+    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTextFieldDelegate,
+    NSTitlePosition, NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView,
+    NSViewController, NSWindow, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
@@ -79,6 +79,7 @@ use switch::ThemeSwitch;
 use theme_gallery::ThemeGallery;
 
 mod agent_sample;
+mod apps;
 mod font_options;
 mod keyboard;
 mod layout_check;
@@ -210,10 +211,11 @@ enum Category {
     Keyboard,
     Servers,
     Agents,
+    Apps,
 }
 
 impl Category {
-    const ALL: [Category; 10] = [
+    const ALL: [Category; 11] = [
         Category::General,
         Category::Appearance,
         Category::Font,
@@ -224,6 +226,7 @@ impl Category {
         Category::Keyboard,
         Category::Servers,
         Category::Agents,
+        Category::Apps,
     ];
 
     /// The page's stack in `panes`: the pages that have rows, in order; the Keyboard page is a
@@ -250,6 +253,7 @@ impl Category {
             Category::Keyboard => "Keyboard",
             Category::Servers => "Servers",
             Category::Agents => "Agents",
+            Category::Apps => "Apps",
         }
     }
 
@@ -266,6 +270,7 @@ impl Category {
             Category::Keyboard => "keyboard",
             Category::Servers => "network",
             Category::Agents => "sparkles",
+            Category::Apps => "square.grid.2x2",
         }
     }
 }
@@ -1972,6 +1977,8 @@ pub(crate) struct Ivars {
     specimen_inputs: RefCell<Option<specimen::Inputs>>,
     /// Keyboard: the table of the commands and their shortcuts, shown in the pages' place.
     keyboard: OnceCell<Retained<KeyboardPage>>,
+    /// Apps: the list of the programs followed, the Add field and the sheets ([`apps`]).
+    apps: OnceCell<apps::Apps>,
     controls: OnceCell<Controls>,
     /// The popups' item lists — the meaning of the selected index. Rebuilt on
     /// every `refresh`.
@@ -2013,7 +2020,17 @@ define_class!(
         }
     }
 
-    unsafe impl NSControlTextEditingDelegate for SettingsWindow {}
+    unsafe impl NSTextFieldDelegate for SettingsWindow {}
+
+    unsafe impl NSControlTextEditingDelegate for SettingsWindow {
+        /// The Add field of Apps changed: a refusal said before no longer applies.
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, _note: &NSNotification) {
+            if let Some(apps) = self.ivars().apps.get() {
+                apps.typed();
+            }
+        }
+    }
 
     unsafe impl NSWindowDelegate for SettingsWindow {
         /// A closed window gives the examples' renderer and sessions back; opening it draws them
@@ -2023,6 +2040,9 @@ define_class!(
             self.cancel_blink();
             if let Some(specimens) = self.ivars().specimens.get() {
                 specimens.release();
+            }
+            if let Some(apps) = self.ivars().apps.get() {
+                apps.closed();
             }
         }
     }
@@ -2137,6 +2157,36 @@ define_class!(
             }
             self.rebuild_results();
             self.show_selected();
+        }
+
+        /// Apps: Add, from the button or from Enter in its field.
+        #[unsafe(method(appsAdd:))]
+        fn apps_add(&self, _sender: Option<&AnyObject>) {
+            if let Some(apps) = self.ivars().apps.get() {
+                apps.add_clicked(self);
+            }
+        }
+
+        /// Apps: Review on a row (its tag is the row).
+        #[unsafe(method(appsReview:))]
+        fn apps_review(&self, sender: Option<&AnyObject>) {
+            if let (Some(apps), Some(at)) = (self.ivars().apps.get(), apps::Apps::tag_of(sender)) {
+                apps.review(self, at);
+            }
+        }
+
+        /// Apps: the trash can of a row (its tag is the row).
+        #[unsafe(method(appsRemove:))]
+        fn apps_remove(&self, sender: Option<&AnyObject>) {
+            if let (Some(apps), Some(at)) = (self.ivars().apps.get(), apps::Apps::tag_of(sender)) {
+                apps.remove(self, at);
+            }
+        }
+
+        /// Apps: a button of a sheet (its tag is the answer).
+        #[unsafe(method(appsSheetDone:))]
+        fn apps_sheet_done(&self, sender: Option<&AnyObject>) {
+            apps::Apps::sheet_done(sender);
         }
 
         /// A result was clicked: open its page, and bring its row into view.
@@ -2558,6 +2608,7 @@ impl SettingsWindow {
             specimens: OnceCell::new(),
             specimen_inputs: RefCell::new(None),
             keyboard: OnceCell::new(),
+            apps: OnceCell::new(),
             controls: OnceCell::new(),
             fonts: RefCell::new(Vec::new()),
             font_options: RefCell::new(Vec::new()),
@@ -2877,6 +2928,16 @@ impl SettingsWindow {
         if let Some(keyboard) = self.ivars().keyboard.get() {
             keyboard.refresh(settings, status.locked);
         }
+        if let Some(apps) = self.ivars().apps.get() {
+            let statuses = app::delegate(self.mtm())
+                .map(|app| app.apps_statuses())
+                .unwrap_or_default();
+            // A list with an entry that was dropped is not the person's whole one, and a write from
+            // this page would write it without that entry (and the program it was meant to be
+            // would go with it): the page is read-only until the line in the file is mended.
+            let locked = status.locked || !settings.apps_sources_whole;
+            apps.show(self, &settings.apps_sources, &statuses, locked);
+        }
         if let Some(banner) = self.ivars().banner.get() {
             banner.show(&status.banner);
         }
@@ -2895,6 +2956,30 @@ impl SettingsWindow {
             reduce_motion: resolved.reduce,
         }));
         self.show_specimen();
+    }
+
+    /// The Apps page drawn again from the list and the statuses a check just gave: nothing else
+    /// of the window has changed. The lock is the last refresh's.
+    pub(crate) fn refresh_apps(
+        &self,
+        sources: &[String],
+        statuses: &[bt_shell_common::apps::Status],
+    ) {
+        if let Some(apps) = self.ivars().apps.get() {
+            apps.refresh(self, sources, statuses);
+        }
+    }
+
+    /// The lookup of a source typed in Apps ▸ Add ended.
+    pub(crate) fn apps_looked(
+        &self,
+        generation: u64,
+        source: &str,
+        found: Result<bt_shell_common::apps::Look, bt_shell_common::apps::Failure>,
+    ) {
+        if let Some(apps) = self.ivars().apps.get() {
+            apps.looked(self, generation, source, found);
+        }
     }
 
     /// A new usage measurement starts: its generation, which
@@ -4081,6 +4166,7 @@ impl SettingsWindow {
         let mut groups = Vec::new();
         let mut agent_where = None;
         let specimens = specimen::Specimens::new(mtm);
+        let apps = apps::Apps::new(self);
         for category in Category::ALL {
             if category.grid().is_none() {
                 continue;
@@ -4177,6 +4263,8 @@ impl SettingsWindow {
                             });
                             row
                         }
+                        pages::Item::Followed => apps.followed_row(mtm),
+                        pages::Item::Add => apps.add_row(mtm),
                         pages::Item::Usage => build_row(
                             mtm,
                             None,
@@ -4209,6 +4297,15 @@ impl SettingsWindow {
                 view.widthAnchor()
                     .constraintEqualToAnchor(&page.widthAnchor())
                     .setActive(true);
+                if spec.items.contains(&pages::Item::Add) {
+                    // What Add refuses is said under its box.
+                    let line = apps.note_line();
+                    page.addArrangedSubview(line);
+                    page.setCustomSpacing_afterView(6.0, &view);
+                    line.widthAnchor()
+                        .constraintEqualToAnchor(&page.widthAnchor())
+                        .setActive(true);
+                }
                 groups.push(GroupView {
                     view,
                     aside,
@@ -4222,6 +4319,7 @@ impl SettingsWindow {
         controls.rows = rows;
         controls.groups = groups;
         controls.agent_where = agent_where;
+        let _ = self.ivars().apps.set(apps);
         let _ = self.ivars().specimens.set(specimens);
         (panes, controls)
     }
@@ -5124,7 +5222,7 @@ fn activate(constraints: &[Retained<NSLayoutConstraint>]) {
     }
 }
 
-/// What a row of the sidebar is: a page, or the gap that sets Servers (and Agents after it) apart.
+/// What a row of the sidebar is: a page, or the gap that sets Servers (and Agents and Apps after it) apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SideItem {
     Page(Category),
@@ -5133,7 +5231,7 @@ enum SideItem {
 
 impl SideItem {
     /// The sidebar's rows, top to bottom: the pages in order, a gap before Servers.
-    const ALL: [SideItem; 11] = [
+    const ALL: [SideItem; 12] = [
         SideItem::Page(Category::General),
         SideItem::Page(Category::Appearance),
         SideItem::Page(Category::Font),
@@ -5145,6 +5243,7 @@ impl SideItem {
         SideItem::Gap,
         SideItem::Page(Category::Servers),
         SideItem::Page(Category::Agents),
+        SideItem::Page(Category::Apps),
     ];
 
     /// The table row of `category`.
@@ -6191,12 +6290,13 @@ mod tests {
     }
 
     /// Every settings key stands once in the page table, and the Keyboard page, a table of its
-    /// own, holds none; the one row that is not a key ("In use") stands once too.
+    /// own, holds none; the rows that are not keys ("In use", the Apps page's two) stand once too.
     #[test]
     fn every_key_has_exactly_one_place_on_the_pages() {
         let mut keys = Vec::new();
         let mut usage = 0;
         let (mut about, mut place) = (0, 0);
+        let (mut followed, mut add) = (0, 0);
         for category in Category::ALL {
             for group in pages::groups(category) {
                 assert!(!group.items.is_empty(), "{category:?} has an empty group");
@@ -6206,12 +6306,14 @@ mod tests {
                         pages::Item::Usage => usage += 1,
                         pages::Item::AgentAbout => about += 1,
                         pages::Item::AgentWhere => place += 1,
+                        pages::Item::Followed => followed += 1,
+                        pages::Item::Add => add += 1,
                     }
                 }
             }
         }
         assert!(pages::groups(Category::Keyboard).is_empty());
-        assert_eq!((usage, about, place), (1, 1, 1));
+        assert_eq!((usage, about, place, followed, add), (1, 1, 1, 1, 1));
         keys.sort_by_key(|key| key.tag());
         assert_eq!(keys, Key::ALL);
         // Each key sits on the page its topic belongs to.
@@ -6321,6 +6423,7 @@ mod tests {
             .expect("a gap");
         assert_eq!(SideItem::ALL[gap + 1], SideItem::Page(Category::Servers));
         assert_eq!(SideItem::ALL[gap + 2], SideItem::Page(Category::Agents));
+        assert_eq!(SideItem::ALL[gap + 3], SideItem::Page(Category::Apps));
         for (row, item) in SideItem::ALL.iter().enumerate() {
             assert_eq!(SideItem::at(row as NSInteger), Some(*item));
             if let SideItem::Page(category) = item {
@@ -6342,7 +6445,8 @@ mod tests {
                 Some(6),
                 None,
                 Some(7),
-                Some(8)
+                Some(8),
+                Some(9)
             ]
         );
     }

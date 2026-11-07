@@ -6110,13 +6110,22 @@ impl AppDelegate {
             settings::FileState::Locked(_)
         );
         let sources = self.settings().apps_sources.clone();
-        // What landed goes to this Mac's own account too (where its shells look for the
+        let persons = persons && self.settings().apps_sources_whole;
+        // What landed goes to this computer's own account too (where its shells look for the
         // programs), once the check that brought it has ended, on the worker's thread. The
         // servers are visited when a connection to one is set up ([`SshBackend::install`]).
         let after: bt_shell_common::apps::After = {
             let distributor = crate::apps_distributor();
             let target = bt_shell_common::apps::this_target();
             Box::new(move || {
+                // The Apps page shows what the check found, from the main thread.
+                DispatchQueue::main().exec_async(|| {
+                    // audit: a block running on the main queue is on the main thread by definition.
+                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                    if let Some(delegate) = delegate(mtm) {
+                        delegate.apps_changed();
+                    }
+                });
                 let (Some(distributor), Some(target)) = (&distributor, target) else {
                     return;
                 };
@@ -6136,11 +6145,44 @@ impl AppDelegate {
         }
     }
 
-    /// The settings file was read and is the person's: the programs follow its list (a list the
-    /// worker already has is not checked again).
-    fn follow_apps(&self, sources: &[String]) {
+    /// The settings window, when it has been made.
+    pub(crate) fn settings_window(&self) -> Option<Retained<SettingsWindow>> {
+        self.ivars().settings_window.borrow().clone()
+    }
+
+    /// How each source of the list stood at the last check that finished (the Apps page's rows).
+    pub(crate) fn apps_statuses(&self) -> Vec<bt_shell_common::apps::Status> {
+        self.ivars()
+            .apps
+            .get()
+            .map(bt_shell_common::apps::Tracker::statuses)
+            .unwrap_or_default()
+    }
+
+    /// A check ended: the Apps page, when it is open, shows what it found. Only that page is drawn
+    /// again; the rest of the window has not changed.
+    fn apps_changed(&self) {
+        let Some(window) = self.ivars().settings_window.borrow().clone() else {
+            return;
+        };
+        if window.is_open() {
+            window.refresh_apps(&self.file_settings().apps_sources, &self.apps_statuses());
+        }
+    }
+
+    /// Checks the list again now: a key was approved on the Apps page.
+    pub(crate) fn apps_check_now(&self) {
         if let Some(tracker) = self.ivars().apps.get() {
-            tracker.set_sources(sources.to_vec(), true);
+            tracker.refresh();
+        }
+    }
+
+    /// The settings file was read and is the person's: the programs follow its list (a list the
+    /// worker already has is not checked again). Only a `whole` list, one with nothing dropped
+    /// from it, is one a program may be deleted for.
+    fn follow_apps(&self, sources: &[String], whole: bool) {
+        if let Some(tracker) = self.ivars().apps.get() {
+            tracker.set_sources(sources.to_vec(), whole);
         }
     }
 
@@ -6349,7 +6391,7 @@ impl AppDelegate {
             let shown = self.shown_over(&root, &file);
             let old = self.settings().clone();
             self.apply_settings(&old, shown, font_reset);
-            self.follow_apps(&file.apps_sources);
+            self.follow_apps(&file.apps_sources, file.apps_sources_whole);
             self.post_notices(Source::Write, Vec::new());
         }
         self.apply_theme(&root);

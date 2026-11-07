@@ -3886,7 +3886,8 @@ mod remote_shells {
 
     /// The programs bateri follows (`~/.local/share/bateri/apps/bin`) go at the END of the shell's
     /// own `PATH`, once — also when the environment has the directory already — in all three
-    /// shells, and nothing is added where no program has been put there yet.
+    /// shells, and also before the folder is there: the first shell of a first visit starts before
+    /// the first program is put in it.
     #[test]
     fn the_local_wrappers_put_the_followed_programs_last_on_path_once_in_all_three_shells() {
         let root = TempRoot::new("local-apps-path");
@@ -3937,7 +3938,7 @@ mod remote_shells {
             ),
         ] {
             let mut tried = false;
-            // (the environment has the directory already, a program has been put there)
+            // (the environment has the directory already, the folder is there)
             for (seeded, present) in [(false, true), (true, true), (false, false)] {
                 let _ = std::fs::remove_dir_all(home.join(".local"));
                 if present {
@@ -3958,7 +3959,7 @@ mod remote_shells {
                 };
                 let text = String::from_utf8_lossy(&output.stdout);
                 let lines: Vec<&str> = text.lines().collect();
-                if name == "bash" && present && !lines.contains(&wanted.as_str()) {
+                if name == "bash" && !lines.contains(&wanted.as_str()) {
                     // bash older than 4.4 stops at the wrapper's own version check.
                     let version = std::process::Command::new(program)
                         .args(["-c", "echo ${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}"])
@@ -3971,16 +3972,15 @@ mod remote_shells {
                 }
                 tried = true;
                 let count = lines.iter().filter(|line| **line == wanted).count();
-                if present {
-                    assert_eq!(count, 1, "{name} (seeded: {seeded}): {text:?}");
-                    assert_eq!(
-                        lines.last().copied(),
-                        Some(wanted.as_str()),
-                        "{name} (seeded: {seeded}): not last: {text:?}"
-                    );
-                } else {
-                    assert_eq!(count, 0, "{name}: added with no program there: {text:?}");
-                }
+                assert_eq!(
+                    count, 1,
+                    "{name} (seeded: {seeded}, folder: {present}): {text:?}"
+                );
+                assert_eq!(
+                    lines.last().copied(),
+                    Some(wanted.as_str()),
+                    "{name} (seeded: {seeded}, folder: {present}): not last: {text:?}"
+                );
             }
             if tried {
                 ran += 1;
