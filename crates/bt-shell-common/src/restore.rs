@@ -662,6 +662,8 @@ impl SavedWindow {
                     history: false,
                     ..pane
                 }],
+                // A terminal found running for no pane comes back flat: it floated in no card.
+                cards: Vec::new(),
                 focused: 0,
                 zoomed: None,
                 name: None,
