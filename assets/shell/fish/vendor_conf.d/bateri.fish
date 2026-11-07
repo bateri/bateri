@@ -69,6 +69,13 @@ function __bateri_path --on-event fish_prompt
     if test -x $bt_bin/bateri; and not contains -- $bt_bin $PATH
         set -gx PATH $bt_bin $PATH
     end
+    # The programs bateri follows (`~/.local/share/bateri/apps/bin`, beside `shell`) go at the END
+    # of `PATH`, once: unlike the agent's command they never stand in for a command the system or
+    # the user has. The folder is there once a first program has been put in it.
+    set -l bt_apps $HOME/.local/share/bateri/apps/bin
+    if test -d $bt_apps; and not contains -- $bt_apps $PATH
+        set -gx PATH $PATH $bt_apps
+    end
 end
 
 # The agents' function (`agents.fish`, one level above this directory, shared with the server's

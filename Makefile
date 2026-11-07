@@ -1000,11 +1000,12 @@ linux: linux-run
 
 # What bateri runs on a server, which is Linux far more often than not: the line the window
 # sends another machine's shell (`agent::relay`), the agent's one-line command and the remote
-# shells' integration (`ssh_wrap::remote_shells`) and kablo's install steps, in a Linux shell
-# with Linux's tools. (The `bateri` command itself is kablo's: its tests are in kablo's
+# shells' integration (`ssh_wrap::remote_shells`), kablo's install steps and the steps that put
+# the programs the person follows on a server (`apps::distribute`), in a Linux shell with Linux's
+# tools. (The `bateri` command itself is kablo's: its tests are in kablo's
 # repository, `make e2e` and `make linux` there.) `make gate-push` runs it when their files
 # changed. The same test binaries as `linux` (`--lib`), so neither builds the other's again.
-SERVER_TESTS = agent::relay:: ssh_wrap::remote_shells:: kablo::install::
+SERVER_TESTS = agent::relay:: ssh_wrap::remote_shells:: kablo::install:: apps::distribute::
 linux-server: LINUX_CMD = cargo test $(LINUX_CRATES) --lib --locked -- --include-ignored \
 	$(NOT_HEAVY) $(SERVER_TESTS)
 linux-server: linux-run

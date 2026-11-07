@@ -130,6 +130,11 @@ pub struct SshBackend {
     pub filed: Mutex<std::collections::HashSet<String>>,
     /// What asks the service for programs and connections on a server ([`Backend::serving`]).
     pub streams: std::sync::OnceLock<Streams>,
+    /// What puts the programs of the apps folder ([`crate::apps`]) on a server: `Some` sends them
+    /// once a connection's install is done, on a thread of its own, so the pane never waits for
+    /// them ([`SshBackend::install`]). `None`: none are sent (the timed run keeps the person's
+    /// folder out of it).
+    pub apps: Option<Arc<crate::apps::Distributor>>,
 }
 
 impl SshBackend {
@@ -389,6 +394,19 @@ impl Backend for SshBackend {
                     // server run an earlier one, and are renewed before a bridge
                     // exists to be left behind.
                     renew(&channel.argv, &installed, live);
+                }
+                // The programs the person follows go to the server beside kablo: on a thread of
+                // their own (the pane waits for this call, not for them), and not when the
+                // `bateri` command is not wanted there, where nothing of ours is put.
+                if let Some(apps) = self.apps.as_ref().filter(|_| self.agent_wanted(server)) {
+                    apps.sync_in_background(
+                        server.key.clone(),
+                        installed.target.triple(),
+                        SshChannel {
+                            argv: channel.argv.clone(),
+                            limit: crate::apps::distribute::LIMIT,
+                        },
+                    );
                 }
                 Ok(installed)
             }

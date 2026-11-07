@@ -306,18 +306,72 @@ impl Cx<'_> {
     /// The program, its sum checked and made executable, and the `app.json` with its signature,
     /// in the folder a release is built in.
     fn fill(&self, folder: &Path, release: &Release, file: &File) -> Result<(), Failure> {
-        let part = folder.join(&self.config.target);
-        self.fetch
-            .download(&file.url, MAX_PROGRAM_BYTES, &part)
-            .map_err(Failure::Fetch)?;
-        let bytes = fs::read(&part).map_err(disk)?;
-        if sum(&bytes) != file.sha256 {
-            return Err(Failure::Digest);
-        }
-        fs::set_permissions(&part, fs::Permissions::from_mode(0o755)).map_err(disk)?;
+        download_program(self.fetch, file, &folder.join(&self.config.target))?;
         fs::write(folder.join("app.json"), &release.bytes).map_err(disk)?;
         fs::write(folder.join("app.json.sig"), &release.signature).map_err(disk)
     }
+}
+
+/// The program of `file` downloaded to `to`, its sum checked against the signed one, and made
+/// executable. A file that is not the signed one is deleted, not left to be run.
+fn download_program(fetch: &dyn Fetch, file: &File, to: &Path) -> Result<(), Failure> {
+    let result = fetch
+        .download(&file.url, MAX_PROGRAM_BYTES, to)
+        .map_err(Failure::Fetch)
+        .and_then(|()| {
+            let bytes = fs::read(to).map_err(disk)?;
+            if sum(&bytes) != file.sha256 {
+                return Err(Failure::Digest);
+            }
+            fs::set_permissions(to, fs::Permissions::from_mode(0o755)).map_err(disk)
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(to);
+    }
+    result
+}
+
+/// The program of a release that landed, for a `target` that is not this machine's: a server
+/// the release is to be put on is a machine of another kind, and its file is fetched when it is
+/// wanted, not before. The folder's `app.json` and its signature are read again and must hold
+/// (what is on the disk is not trusted because it was put there), and the address obeys the rule
+/// of the source that brought it.
+///
+/// `Ok(None)`: the release has no file for the target, and nothing is to be put on that machine.
+pub fn fetch_target(
+    root: &Path,
+    name: &str,
+    version: Version,
+    target: &str,
+    fetch: &dyn Fetch,
+) -> Result<Option<std::path::PathBuf>, Failure> {
+    let folder = store::release_dir(root, name, version);
+    let bytes = fs::read(folder.join("app.json")).map_err(disk)?;
+    let signature = fs::read(folder.join("app.json.sig")).map_err(disk)?;
+    let manifest = apps::verify(&bytes, &signature).map_err(Failure::Manifest)?;
+    if manifest.name != name || manifest.version != version {
+        return Err(Failure::Mismatch(
+            "the folder does not hold the release it is named for",
+        ));
+    }
+    let Some(file) = manifest.files.get(target) else {
+        return Ok(None);
+    };
+    let program = store::program_path(root, name, version, target);
+    if fs::read(&program).is_ok_and(|bytes| sum(&bytes) == file.sha256) {
+        return Ok(Some(program));
+    }
+    let source = store::followed(root, name).ok_or(Failure::Source)?;
+    if !reachable(&source, &file.url) {
+        return Err(Failure::Unreachable);
+    }
+    let part = folder.join(format!(".{target}.part-{}", std::process::id()));
+    download_program(fetch, file, &part)?;
+    fs::rename(&part, &program).map_err(|e| {
+        let _ = fs::remove_file(&part);
+        disk(e)
+    })?;
+    Ok(Some(program))
 }
 
 /// `Ready`, with the newest release when it is newer than the one in use.

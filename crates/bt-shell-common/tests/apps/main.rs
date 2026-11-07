@@ -13,11 +13,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use bt_core::pencere::apps;
 use bt_core::pencere::{SUPPORTED_VERSIONS, offered_views};
-use bt_shell_common::apps::{Config, Curl, Failure, Fetch, State, Status, Tracker, check, store};
+use bt_shell_common::apps::{
+    Config, Curl, Distributor, Failure, Fetch, State, Status, Tracker, check, fetch_target, store,
+};
+use bt_shell_common::kablo::local::LocalChannel;
 use support::{Author, Net, OTHER_TARGET, Release, TARGET, Temp, v};
 
 const SOURCE: &str = "https://apps.example.test/demo/app.json";
@@ -624,16 +628,23 @@ fn the_worker_checks_at_start_and_again_when_the_list_changes() {
     let world = World::new("worker");
     let author = Author::new(1);
     Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    let checks = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&checks);
     let tracker = Tracker::start_with(
         world.config(),
         Arc::clone(&world.net) as Arc<dyn Fetch>,
         vec![SOURCE.to_owned()],
         true,
+        Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }),
     )
     .expect("the worker starts");
     assert!(tracker.statuses().is_empty());
 
-    wait_for("the first check", || !tracker.statuses().is_empty());
+    // What the application does with a landed program runs after every check, on the worker.
+    wait_for("the first check", || checks.load(Ordering::SeqCst) == 1);
+    assert!(!tracker.statuses().is_empty());
     assert!(matches!(
         tracker.statuses()[0].state,
         State::Awaiting { changed: false, .. }
@@ -646,9 +657,158 @@ fn the_worker_checks_at_start_and_again_when_the_list_changes() {
     wait_for("the program", || {
         tracker.statuses().first().map(|s| s.state.clone()) == Some(ready("1.0.0"))
     });
+    wait_for("the second check's follow-up", || {
+        checks.load(Ordering::SeqCst) == 2
+    });
 
     tracker.set_sources(Vec::new(), true);
     wait_for("the program to go", || {
         tracker.statuses().is_empty() && !world.root.path().join("demo").exists()
     });
+}
+
+// ---- the programs go to machines -----------------------------------------------------------------
+
+/// The apps folder of a machine whose home is `home`, as the machine's shells find it.
+fn machine_apps(home: &Path) -> std::path::PathBuf {
+    home.join(".local/share/bateri/apps")
+}
+
+/// What the command `name` of a machine says when it is run: the shell's `PATH` is not at stake
+/// here, the link is.
+fn runs(home: &Path, name: &str) -> String {
+    let output = std::process::Command::new(machine_apps(home).join("bin").join(name))
+        .output()
+        .expect("the command runs");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_machine_of_another_kind_gets_its_own_file_and_follows_the_releases_and_the_removal() {
+    let world = World::new("distribute");
+    let author = Author::new(1);
+    world.approve("demo", &author);
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
+    assert_eq!(world.one(SOURCE).state, ready("1.0.0"));
+    let folder = world.root.path().join("demo/1.0.0");
+    assert!(
+        !folder.join(OTHER_TARGET).exists(),
+        "only this Mac's file came down"
+    );
+
+    let distributor = Distributor::new(
+        world.root.path().to_owned(),
+        Arc::clone(&world.net) as Arc<dyn Fetch>,
+    );
+    let server = Temp::new("server-home");
+    let channel = LocalChannel::new(server.path().to_owned());
+    let mac = Temp::new("mac-home");
+    let this_mac = LocalChannel::new(mac.path().to_owned());
+    let now = SystemTime::now();
+    let later = |hours: u64| now + Duration::from_secs(hours * 60 * 60);
+
+    // The server is of another kind: its file is fetched when it is wanted, and runs there.
+    distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, now);
+    let reports = distributor.reports();
+    let summary = reports[0].result.as_ref().expect("the machine answered");
+    assert_eq!(summary.shipped, [("demo".to_owned(), v("1.0.0"))]);
+    assert_eq!(summary.problems, Vec::<String>::new());
+    assert_eq!(runs(server.path(), "demo"), "demo 1.0.0");
+    assert!(
+        folder.join(OTHER_TARGET).is_file(),
+        "fetched for the machine"
+    );
+    assert_eq!(
+        fs::read(machine_apps(server.path()).join("demo/1.0.0/app.json")).expect("app.json"),
+        fs::read(folder.join("app.json")).expect("the Mac's")
+    );
+    // This Mac's own account has the file that came down with the release: nothing more is asked.
+    let asked = world.net.asked().len();
+    distributor.sync_unless_recent("this Mac", TARGET, &this_mac, now);
+    assert_eq!(runs(mac.path(), "demo"), "demo 1.0.0");
+    assert_eq!(world.net.asked().len(), asked);
+
+    // A newer release goes to both, and the one before stays on the machines.
+    Release::new("demo", "1.1.0").publish(&world.net, SOURCE, &author);
+    assert_eq!(world.one(SOURCE).state, ready("1.1.0"));
+    distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, later(1));
+    distributor.sync_unless_recent("this Mac", TARGET, &this_mac, later(1));
+    for home in [server.path(), mac.path()] {
+        assert_eq!(runs(home, "demo"), "demo 1.1.0");
+        assert!(machine_apps(home).join("demo/1.0.0/demo").is_file());
+    }
+
+    // Taken off the list: the Mac deletes it, and the machines do at their next visit.
+    store::remove(world.root.path(), "demo", later(2)).expect("removed");
+    distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, later(2));
+    let reports = distributor.reports();
+    let summary = reports
+        .iter()
+        .find(|report| report.machine == "rasp")
+        .and_then(|report| report.result.as_ref().ok())
+        .expect("the machine answered");
+    assert_eq!(summary.removed, ["demo"]);
+    assert!(!machine_apps(server.path()).join("demo").exists());
+    assert!(!machine_apps(server.path()).join("bin/demo").exists());
+    // This Mac's own account loses it the same way.
+    distributor.sync_unless_recent("this Mac", TARGET, &this_mac, later(2));
+    assert!(!machine_apps(mac.path()).join("demo").exists());
+}
+
+#[test]
+fn a_file_for_a_machine_is_fetched_only_from_a_release_that_still_holds() {
+    let world = World::new("fetch-target");
+    let author = Author::new(1);
+    world.approve("demo", &author);
+    let release = Release::new("demo", "1.0.0");
+    release.publish(&world.net, SOURCE, &author);
+    assert_eq!(world.one(SOURCE).state, ready("1.0.0"));
+    let folder = world.root.path().join("demo/1.0.0");
+    let ask = |target: &str| {
+        fetch_target(
+            world.root.path(),
+            "demo",
+            v("1.0.0"),
+            target,
+            world.net.as_ref(),
+        )
+    };
+
+    // A target the release has no file for gives nothing, and asks nothing.
+    let asked = world.net.asked().len();
+    assert_eq!(ask("riscv64-unknown-linux-musl"), Ok(None));
+    assert_eq!(world.net.asked().len(), asked);
+
+    // What the network gives back for the file is checked against the `app.json`'s sum, and
+    // nothing of it stays.
+    let address = release.file_address(SOURCE, OTHER_TARGET);
+    world.net.put(&address, "#!/bin/sh\necho something else\n");
+    assert_eq!(ask(OTHER_TARGET), Err(Failure::Digest));
+    assert!(!folder.join(OTHER_TARGET).exists());
+    let leftovers: Vec<String> = fs::read_dir(&folder)
+        .expect("the folder")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.contains(".part"))
+        .collect();
+    assert_eq!(leftovers, Vec::<String>::new());
+
+    // The right bytes arrive, and are kept; asked again, they are not fetched again.
+    world.net.put(&address, release.body.as_bytes());
+    assert_eq!(ask(OTHER_TARGET), Ok(Some(folder.join(OTHER_TARGET))));
+    let asked = world.net.asked().len();
+    assert_eq!(ask(OTHER_TARGET), Ok(Some(folder.join(OTHER_TARGET))));
+    assert_eq!(world.net.asked().len(), asked);
+
+    // An `app.json` on the disk that is not what the author signed is not a release.
+    let mut manifest = fs::read(folder.join("app.json")).expect("app.json");
+    manifest.extend_from_slice(b" ");
+    fs::write(folder.join("app.json"), manifest).expect("tampered");
+    fs::remove_file(folder.join(OTHER_TARGET)).expect("removed");
+    assert!(matches!(ask(OTHER_TARGET), Err(Failure::Manifest(_))));
 }

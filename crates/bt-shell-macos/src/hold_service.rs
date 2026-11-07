@@ -696,6 +696,7 @@ pub(crate) fn serve(
         let settings_of = settings_of.clone();
         move || u32::try_from(settings_of().scrollback).ok()
     };
+    let masters_kept = masters.is_some();
     let backend = SshBackend {
         filed: Default::default(),
         streams: Default::default(),
@@ -719,6 +720,8 @@ pub(crate) fn serve(
         staged: Box::new(stage_ready),
         mail: Some(Box::new(crate::agent::letter)),
         notes: Some(Box::new(crate::agent::notes)),
+        // A run that keeps no masters (the timed one) keeps the person's folder out of it.
+        apps: masters_kept.then(crate::apps_distributor).flatten(),
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
         let _ = SERVICE.set(service);

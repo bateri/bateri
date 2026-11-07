@@ -6110,7 +6110,25 @@ impl AppDelegate {
             settings::FileState::Locked(_)
         );
         let sources = self.settings().apps_sources.clone();
-        match bt_shell_common::apps::Tracker::start(config, sources, persons) {
+        // What landed goes to this Mac's own account too (where its shells look for the
+        // programs), once the check that brought it has ended, on the worker's thread. The
+        // servers are visited when a connection to one is set up ([`SshBackend::install`]).
+        let after: bt_shell_common::apps::After = {
+            let distributor = crate::apps_distributor();
+            let target = bt_shell_common::apps::this_target();
+            Box::new(move || {
+                let (Some(distributor), Some(target)) = (&distributor, target) else {
+                    return;
+                };
+                distributor.sync_unless_recent(
+                    &bt_shell_common::kablo::local::host().key,
+                    target,
+                    &bt_shell_common::kablo::local::LocalChannel::new(home.clone()),
+                    std::time::SystemTime::now(),
+                );
+            })
+        };
+        match bt_shell_common::apps::Tracker::start(config, sources, persons, after) {
             Ok(tracker) => {
                 let _ = self.ivars().apps.set(tracker);
             }

@@ -2917,14 +2917,23 @@ mod remote_shells {
         let before = snapshot(&home, &files);
 
         let agent_bin = home.join(".local/share/bateri/shell/bin");
+        // The programs bateri puts on a machine (`bin/<name>` of the apps folder), one of them
+        // already there: the directory is on `PATH` after everything else, once.
+        let apps_bin = home.join(".local/share/bateri/apps/bin");
+        std::fs::create_dir_all(&apps_bin).expect("apps bin");
+        let demo = apps_bin.join("bateri-demo-app");
+        std::fs::write(&demo, "#!/bin/sh\necho demo\n").expect("a followed program");
+        std::fs::set_permissions(&demo, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("executable");
         let mut extra = Vec::new();
         if preseed {
             extra.push((
                 "PATH",
                 format!(
-                    "{}:{}",
+                    "{}:{}:{}",
                     agent_bin.display(),
-                    std::env::var("PATH").unwrap_or_default()
+                    std::env::var("PATH").unwrap_or_default(),
+                    apps_bin.display()
                 ),
             ));
         }
@@ -2962,6 +2971,37 @@ mod remote_shells {
         wait_until(&format!("{name}: bateri not on PATH once"), || {
             screen_has(&session, "[agent-on-path-1]")
         });
+        // The followed programs: found, and the directory is on `PATH` once and after
+        // `/usr/bin` (a system's own command is not hidden by a program of the same name).
+        let (test, once) = if name == "fish" {
+            (
+                format!(
+                    "test (command -v bateri-demo-app) = '{}'; and ",
+                    demo.display()
+                ),
+                "printf '%s\\n' $PATH",
+            )
+        } else {
+            (
+                format!(
+                    "test \"$(command -v bateri-demo-app)\" = '{}' && ",
+                    demo.display()
+                ),
+                "echo \"$PATH\" | tr : '\\n'",
+            )
+        };
+        session.write(
+            format!(
+                "{test}{once} | awk -v a='{}' '$0==a{{n++; x=NR}} $0==\"/usr/bin\"{{u=NR}} \
+                 END{{print \"[apps-on-path-\" n \"-\" (x>u) \"]\"}}'\n",
+                apps_bin.display()
+            )
+            .as_bytes(),
+        );
+        wait_until(
+            &format!("{name}: the followed programs are not on PATH once, last"),
+            || screen_has(&session, "[apps-on-path-1-1]"),
+        );
         assert_eq!(
             snapshot(&home, &files),
             before,
@@ -3842,6 +3882,111 @@ mod remote_shells {
                 close(&session);
             }
         }
+    }
+
+    /// The programs bateri follows (`~/.local/share/bateri/apps/bin`) go at the END of the shell's
+    /// own `PATH`, once — also when the environment has the directory already — in all three
+    /// shells, and nothing is added where no program has been put there yet.
+    #[test]
+    fn the_local_wrappers_put_the_followed_programs_last_on_path_once_in_all_three_shells() {
+        let root = TempRoot::new("local-apps-path");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let apps = home.join(".local/share/bateri/apps/bin");
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell");
+        let wanted = apps.display().to_string();
+        let mut ran = 0;
+        for (name, program, args, env) in [
+            (
+                "zsh",
+                "zsh",
+                vec![
+                    "-f".to_owned(),
+                    "-c".to_owned(),
+                    "source $ZDOTDIR/bateri.zsh; __bateri_hooks; print -rl -- $path".to_owned(),
+                ],
+                vec![("ZDOTDIR", assets.join("zsh").display().to_string())],
+            ),
+            (
+                "bash",
+                "bash",
+                vec![
+                    "--noprofile".to_owned(),
+                    "--norc".to_owned(),
+                    "-c".to_owned(),
+                    format!(
+                        "source {}; printf '%s\\n' \"$PATH\" | tr : '\\n'",
+                        assets.join("bash/bateri.bash").display()
+                    ),
+                ],
+                vec![],
+            ),
+            (
+                "fish",
+                "fish",
+                vec![
+                    "--no-config".to_owned(),
+                    "-i".to_owned(),
+                    "-c".to_owned(),
+                    format!(
+                        "source {}; emit fish_prompt; printf '%s\\n' $PATH",
+                        assets.join("fish/vendor_conf.d/bateri.fish").display()
+                    ),
+                ],
+                vec![],
+            ),
+        ] {
+            let mut tried = false;
+            // (the environment has the directory already, a program has been put there)
+            for (seeded, present) in [(false, true), (true, true), (false, false)] {
+                let _ = std::fs::remove_dir_all(home.join(".local"));
+                if present {
+                    std::fs::create_dir_all(&apps).expect("apps bin");
+                }
+                let mut path = std::env::var("PATH").unwrap_or_default();
+                if seeded {
+                    path = format!("{path}:{wanted}");
+                }
+                let mut command = std::process::Command::new(program);
+                command.args(&args).env("HOME", &home).env("PATH", &path);
+                for (key, value) in &env {
+                    command.env(key, value);
+                }
+                // A shell this machine does not have is not tried.
+                let Ok(output) = command.output() else {
+                    break;
+                };
+                let text = String::from_utf8_lossy(&output.stdout);
+                let lines: Vec<&str> = text.lines().collect();
+                if name == "bash" && present && !lines.contains(&wanted.as_str()) {
+                    // bash older than 4.4 stops at the wrapper's own version check.
+                    let version = std::process::Command::new(program)
+                        .args(["-c", "echo ${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}"])
+                        .output()
+                        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+                        .unwrap_or_default();
+                    if version.parse::<u32>().is_ok_and(|version| version < 44) {
+                        break;
+                    }
+                }
+                tried = true;
+                let count = lines.iter().filter(|line| **line == wanted).count();
+                if present {
+                    assert_eq!(count, 1, "{name} (seeded: {seeded}): {text:?}");
+                    assert_eq!(
+                        lines.last().copied(),
+                        Some(wanted.as_str()),
+                        "{name} (seeded: {seeded}): not last: {text:?}"
+                    );
+                } else {
+                    assert_eq!(count, 0, "{name}: added with no program there: {text:?}");
+                }
+            }
+            if tried {
+                ran += 1;
+            }
+        }
+        assert!(ran > 0, "no shell to try");
     }
 
     /// The local wrappers put the agent's command, where the app writes it on this Mac

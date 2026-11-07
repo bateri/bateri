@@ -63,7 +63,16 @@ if [ -x "$__bateri_bin/bateri" ]; then
     *) PATH=$__bateri_bin:$PATH ;;
   esac
 fi
-unset __bateri_bin
+# The programs bateri follows (`apps/bin`, beside the `shell` directory) go at the END of `PATH`,
+# once, so none of them stands in for a command the server has.
+__bateri_apps=${__bateri_bin%/*/*}/apps/bin
+if [ -d "$__bateri_apps" ]; then
+  case ":$PATH:" in
+    *":$__bateri_apps:"*) ;;
+    *) PATH=$PATH:$__bateri_apps ;;
+  esac
+fi
+unset __bateri_bin __bateri_apps
 
 # The agents' function (`agents.bash`, beside this file, shared with the Mac's own wrapper), after
 # the user's login files: a `claude` function of theirs is seen and wins. Without the file, or if

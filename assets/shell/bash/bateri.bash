@@ -90,6 +90,18 @@ if [[ -r $__bateri_agents_file ]]; then
 fi
 unset __bateri_agents_file
 
+# The programs bateri follows (`~/.local/share/bateri/apps/bin`, beside `shell`) go at the END of
+# `PATH`, once: unlike the agent's command they never stand in for a command the system or the
+# user has. The folder is there once a first program has been put in it.
+__bateri_apps=$HOME/.local/share/bateri/apps/bin
+if [ -d "$__bateri_apps" ]; then
+  case ":$PATH:" in
+    *":$__bateri_apps:"*) ;;
+    *) PATH=$PATH:$__bateri_apps ;;
+  esac
+fi
+unset __bateri_apps
+
 # The dock's functions and the hooks' installer (`dock.bash`, beside this file, shared with the
 # server's wrapper). Read at every start, `"blocks"` too: the installer is in it. Without the
 # file the shell is the user's, unmarked.

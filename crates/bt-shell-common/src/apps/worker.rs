@@ -1,6 +1,8 @@
 //! The thread that follows the sources: a check at launch, another when the list changes, and one
 //! a day. The window never waits for it and never asks it anything it cannot answer from memory:
-//! [`Tracker::statuses`] is the result of the last check that finished.
+//! [`Tracker::statuses`] is the result of the last check that finished. When a check ends the
+//! worker runs what it was given to do next (`after`): the application puts what landed on this
+//! Mac's own account there, on this thread, which nothing else waits for.
 
 use std::io;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -18,6 +20,9 @@ const WAKE: Duration = Duration::from_secs(60 * 60);
 
 /// The time between two checks.
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What the worker does when a check has ended.
+pub type After = Box<dyn Fn() + Send + 'static>;
 
 /// The list a check follows, and whether it is the one the person wrote ([`check`]).
 struct Sources {
@@ -39,8 +44,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Tracker {
     /// Starts the worker with `curl`: the first check begins at once, on the thread.
-    pub fn start(config: Config, sources: Vec<String>, authoritative: bool) -> io::Result<Self> {
-        Self::start_with(config, Arc::new(Curl), sources, authoritative)
+    pub fn start(
+        config: Config,
+        sources: Vec<String>,
+        authoritative: bool,
+        after: After,
+    ) -> io::Result<Self> {
+        Self::start_with(config, Arc::new(Curl), sources, authoritative, after)
     }
 
     /// [`Tracker::start`] with another way to fetch.
@@ -49,6 +59,7 @@ impl Tracker {
         fetch: Arc<dyn Fetch>,
         sources: Vec<String>,
         authoritative: bool,
+        after: After,
     ) -> io::Result<Self> {
         let (commands, inbox) = mpsc::channel::<Sources>();
         let statuses = Arc::new(Mutex::new(Vec::new()));
@@ -79,6 +90,7 @@ impl Tracker {
                         );
                         *lock(&shared) = found;
                         checked = Some(SystemTime::now());
+                        after();
                     }
                     match inbox.recv_timeout(WAKE) {
                         Ok(mut latest) => {

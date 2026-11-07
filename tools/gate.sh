@@ -114,8 +114,8 @@ while IFS= read -r f; do
     esac
     case $f in
     assets/shell/* | crates/bt-shell-common/src/agent/* | crates/bt-shell-common/src/ssh_wrap* | \
-        crates/bt-shell-common/src/kablo/install* | tools/linux/* | Cargo.lock | Makefile | \
-        tools/gate.sh) server=1 ;;
+        crates/bt-shell-common/src/kablo/install* | crates/bt-shell-common/src/apps/distribute* | \
+        tools/linux/* | Cargo.lock | Makefile | tools/gate.sh) server=1 ;;
     esac
     case $f in assets/bundle/* | assets/shell/* | crates/bateri/*) bundle=1 ;; esac
     case $f in crates/bt-shell-macos/src/* | crates/bt-gpu/src/*) smoke=1 ;; esac

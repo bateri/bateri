@@ -61,6 +61,12 @@ __bateri_hooks() {
   if [[ -r $__bateri_dir/agents.zsh ]]; then
     source $__bateri_dir/agents.zsh 2>/dev/null
   fi
+  # The programs bateri follows (`apps/bin`, beside the `shell` directory) go at the END of `path`,
+  # once, so none of them stands in for a command the server has.
+  local bt_apps=${__bateri_dir:h:h}/apps/bin
+  if [[ -d $bt_apps ]] && (( ! ${path[(Ie)$bt_apps]} )); then
+    path+=($bt_apps)
+  fi
   add-zsh-hook precmd __bateri_cwd
   if [[ $__bateri_rblock == <-> ]]; then
     # `<P>.<S>`: the parent and this shell's pid — two shells under one `ssh`

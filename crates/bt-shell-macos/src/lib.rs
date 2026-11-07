@@ -171,6 +171,26 @@ pub(crate) fn apps_path(home: &std::path::Path, profile: Option<&str>) -> std::p
         .join("apps")
 }
 
+/// What puts the programs of [`apps_path`]'s folder on the machines bateri sets up: one for the
+/// process, since it remembers which machine it is visiting and when it was last (the Mac's own
+/// account is one of them: [`app::AppDelegate::start_apps`]). `None` without a home directory.
+pub(crate) fn apps_distributor() -> Option<std::sync::Arc<bt_shell_common::apps::Distributor>> {
+    static DISTRIBUTOR: std::sync::OnceLock<
+        Option<std::sync::Arc<bt_shell_common::apps::Distributor>>,
+    > = std::sync::OnceLock::new();
+    DISTRIBUTOR
+        .get_or_init(|| {
+            let home = child::home()?;
+            Some(std::sync::Arc::new(
+                bt_shell_common::apps::Distributor::new(
+                    apps_path(&home, profile().as_deref()),
+                    std::sync::Arc::new(bt_shell_common::apps::Curl),
+                ),
+            ))
+        })
+        .clone()
+}
+
 /// `bateri ssh-argv [--tty] [--block N] [--instance I] [--cwd D] -- <ssh arguments…>`: `Some(exit code)` when
 /// the process was started as the subcommand, `None` otherwise. `main` calls
 /// it before the window-server check — a shell started before an update has

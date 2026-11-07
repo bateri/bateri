@@ -53,6 +53,12 @@ if set -q __bateri_bin
         if test -x $__bateri_bin/bateri; and not contains -- $__bateri_bin $PATH
             set -gx PATH $__bateri_bin $PATH
         end
+        # The programs bateri follows (`apps/bin`, beside the `shell` directory) go at the END of
+        # `PATH`, once, so none of them stands in for a command the server has.
+        set -l bt_apps (string replace -r '/[^/]*/[^/]*$' '' -- $__bateri_bin)/apps/bin
+        if test -d $bt_apps; and not contains -- $bt_apps $PATH
+            set -gx PATH $PATH $bt_apps
+        end
         set -e __bateri_bin
     end
 end

@@ -2779,7 +2779,20 @@ nothing but its `app.json` downloaded, until its key is approved: the key is kep
 release must be signed with it — a release signed with another key is not downloaded and asks again. A program's name
 belongs to the first source that uses it; `bateri`, `kablo` and `pencere` are never a program's name.
 
-**Taking a source out of the list** deletes its folder from this Mac at once; bateri remembers the name for 30 days.
+**Where the programs run.** Each program in the list is also put where your shells find it, on this Mac and on every
+server bateri sets up (a server whose commands are `off` gets nothing): the file is in
+`~/.local/share/bateri/apps/<name>/<version>/<name>`, and `~/.local/share/bateri/apps/bin/<name>` is a link to the
+release in use. bateri's shell integration adds `~/.local/share/bateri/apps/bin` to the **end** of `PATH`, once, so
+a command you or the system already has under the same name is the one that runs. The link only ever moves to a newer
+release, and a `bin/<name>` that is not a link bateri made is left alone (bateri logs it). A server gets its
+programs when a connection to it is set up, in the background: a terminal never waits for them, and a server that is
+visited again within ten minutes with nothing new is not asked twice. The server's own kind of file (Linux or macOS,
+Intel or ARM) is downloaded to this Mac the first time a server of that kind needs it. Old releases on a machine are
+cleaned the same way as here: the one in use, the one before it and anything newer than 30 days stay.
+
+**Taking a source out of the list** deletes its folder from this Mac at once; bateri remembers the name for 30 days,
+and a server that connects in that time loses its copy of the program too (and the `bin/<name>` link, if bateri made
+it).
 
 ### `[keys]`
 

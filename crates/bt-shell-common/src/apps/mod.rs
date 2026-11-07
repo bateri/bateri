@@ -28,6 +28,7 @@
 //! are [`check`]. The shell gives the folder (`~/Library/Application Support/bateri/apps`).
 
 mod check;
+pub mod distribute;
 pub mod fetch;
 pub mod store;
 mod worker;
@@ -38,9 +39,10 @@ use std::path::PathBuf;
 use bt_core::pencere::apps::{self, Version};
 use bt_core::pencere::{Offer, SUPPORTED_VERSIONS, offered_views};
 
-pub use check::check;
+pub use check::{check, fetch_target};
+pub use distribute::Distributor;
 pub use fetch::{Curl, Fetch};
-pub use worker::Tracker;
+pub use worker::{After, Tracker};
 
 /// The public key the programs bateri itself publishes are signed with (`ed25519:` and base64),
 /// which comes in the application: a release signed with it is taken without asking.

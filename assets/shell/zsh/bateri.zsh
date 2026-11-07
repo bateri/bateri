@@ -147,6 +147,13 @@ __bateri_hooks() {
   if [[ -r $__bateri_dir/agents.zsh ]]; then
     source $__bateri_dir/agents.zsh 2>/dev/null
   fi
+  # The programs bateri follows (`~/.local/share/bateri/apps/bin`, beside `shell`) go at the END of
+  # `path`, once: unlike the agent's command they never stand in for a command the system or the
+  # user has. The folder is there once a first program has been put in it.
+  local bt_apps=$HOME/.local/share/bateri/apps/bin
+  if [[ -d $bt_apps ]] && (( ! ${path[(Ie)$bt_apps]} )); then
+    path+=($bt_apps)
+  fi
   # "Has a command run since the last prompt": `D` is printed only after a command
   # that really ran. An Enter on an empty line spawns a new prompt but there is
   # no command that finished.
