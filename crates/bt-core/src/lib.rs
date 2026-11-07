@@ -122,7 +122,7 @@ pub use settings::{
     RemoteStatsSettings, RestoreWindows, SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE,
     SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, Shortcut,
     ShortcutError, SmoothScroll, SplitStyle, TabDetails, TabPosition, TabRunning, UnfocusedCaret,
-    bare_host, expand_home, format_size, host_mark, parse_size,
+    app_source_address, bare_host, expand_home, format_size, host_mark, parse_size,
 };
 pub use shell::{
     ButtonState, DockContext, DockEnvironment, DockFault, DockState, DockStatus,

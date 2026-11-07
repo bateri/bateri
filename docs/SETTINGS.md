@@ -584,6 +584,16 @@ stats = "alerts"
 # Seconds between two samples, 2 to 60.
 stats_interval = 3
 
+[apps]
+# Programs bateri keeps up to date for you, such as the textpen editor. Each
+# entry says where a program publishes its releases: user/repo for a GitHub
+# project (its latest release), or the full https:// address of an app.json.
+# A program runs with your rights, here and on the servers you connect to, so a
+# program signed with a key you have not approved waits for your approval and
+# is not downloaded. Taking an entry out of the list removes the program from
+# this Mac at once.
+sources = ["bateri/textpen"]
+
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
 # all). A name left out keeps the command's own shortcut, "" leaves it with
@@ -2738,6 +2748,38 @@ PROMPT_COMMAND='printf "\033]7;file://%s%s\007" "$HOSTNAME" "$PWD"'"${PROMPT_COM
 # ~/.zshrc
 _bt_osc7() { printf '\033]7;file://%s%s\007' "$HOST" "$PWD"; }; precmd_functions+=(_bt_osc7)
 ```
+
+### `[apps]`
+
+```toml
+[apps]
+sources = ["bateri/textpen"]
+```
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `sources` | array of strings | `["bateri/textpen"]` | where the programs bateri keeps up to date publish their releases; written, even as `[]`, the file's list is the list |
+
+An entry is `user/repo`, a GitHub project (bateri reads the `app.json` of its latest release), or a full
+`https://…` or `file:///…` address of an `app.json`. An entry that is none of these is dropped with a warning and the
+others stay; a `sources` that is not a list of strings keeps the list in use.
+
+**What bateri does with a source.** At launch and once a day it fetches the source's `app.json` and the signature
+beside it (`app.json.sig`), and takes the newest release this version of bateri can open (a release lists the
+protocol and the kinds of view it needs; one it cannot open waits for a bateri update, and an earlier one that opens is
+used meanwhile). It downloads the program's file for this Mac, checks its SHA-256 sum, and keeps it in
+`~/Library/Application Support/bateri/apps/<name>/<version>/`. A folder is kept for the release in use, the one before
+it, and anything newer than 30 days. A download that fails leaves what is there as it is, and tries again at the
+next check.
+
+**A key is approved once.** A release is signed with its author's key, and bateri compares the key with the
+one it trusts for that name. The key of bateri's own programs comes with bateri. Any other program waits, with
+nothing but its `app.json` downloaded, until its key is approved: the key is kept in
+`~/Library/Application Support/bateri/apps/<name>/key` (one line, `ed25519:` and the key in base64), and every later
+release must be signed with it — a release signed with another key is not downloaded and asks again. A program's name
+belongs to the first source that uses it; `bateri`, `kablo` and `pencere` are never a program's name.
+
+**Taking a source out of the list** deletes its folder from this Mac at once; bateri remembers the name for 30 days.
 
 ### `[keys]`
 

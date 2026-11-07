@@ -45,3 +45,9 @@ kablo-bateri = { workspace = true }
 # notification centre here.
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = { workspace = true }
+
+[dev-dependencies]
+# The tests of `apps` make their own signed releases (a key the tests invent, a release that needs
+# more than this bateri has, a second author's key); `pencere-host` only verifies. The crate is in the
+# graph already, through `pencere-host`, with the same version and features.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }

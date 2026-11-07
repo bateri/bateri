@@ -157,6 +157,20 @@ pub(crate) fn remote_hosts_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join("Library/Application Support/bateri/remote-hosts")
 }
 
+/// The folder of the programs bateri follows (`[apps] sources`, [`bt_shell_common::apps`]) on macOS:
+/// `~/Library/Application Support/bateri/apps`, beside the remote shell integration's state — and,
+/// for a copy that names a profile of its own (`make dev`), under `bateri-{profile}`: a copy with
+/// another settings file must not take the installed application's programs off the list.
+pub(crate) fn apps_path(home: &std::path::Path, profile: Option<&str>) -> std::path::PathBuf {
+    let folder = match bt_shell_common::settings::plain_profile(profile) {
+        Some(profile) => format!("bateri-{profile}"),
+        None => "bateri".to_owned(),
+    };
+    home.join("Library/Application Support")
+        .join(folder)
+        .join("apps")
+}
+
 /// `bateri ssh-argv [--tty] [--block N] [--instance I] [--cwd D] -- <ssh arguments…>`: `Some(exit code)` when
 /// the process was started as the subcommand, `None` otherwise. `main` calls
 /// it before the window-server check — a shell started before an update has

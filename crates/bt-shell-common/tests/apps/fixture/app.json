@@ -1,0 +1,26 @@
+{
+  "name": "demo",
+  "version": "1.0.0",
+  "protocol": [1],
+  "views": [{"kind":"lua","versions":["0.1"]}],
+  "key": "ed25519:Np4OxpmoWVDn6zzjifM9DlAGY66VerYiu0xshePYu9g=",
+  "files": {
+    "aarch64-apple-darwin": {
+      "url": "https://apps.example.test/demo/1.0.0/demo-1.0.0-aarch64-apple-darwin",
+      "sha256": "5d80116dc9073713e72d9f32de4338c9f67975f3704c96b4550fda43d7113306"
+    },
+    "aarch64-unknown-linux-musl": {
+      "url": "https://apps.example.test/demo/1.0.0/demo-1.0.0-aarch64-unknown-linux-musl",
+      "sha256": "e18f589d59bad639205b6f4590ef885f98e56fbb17d225eb548deb351c0dd9d7"
+    },
+    "x86_64-apple-darwin": {
+      "url": "https://apps.example.test/demo/1.0.0/demo-1.0.0-x86_64-apple-darwin",
+      "sha256": "eccd2532ebe0520a700628f97eb50dd06b7012c0814eeb78547b23c93d7bb6b8"
+    },
+    "x86_64-unknown-linux-musl": {
+      "url": "https://apps.example.test/demo/1.0.0/demo-1.0.0-x86_64-unknown-linux-musl",
+      "sha256": "70b66203e458a74166f385495be48261d6f39c28cb9bc4605dd953a6c051e1c6"
+    }
+  },
+  "previous": []
+}

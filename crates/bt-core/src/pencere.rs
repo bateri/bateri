@@ -58,19 +58,20 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use ::pencere_host::frame::Message;
-use ::pencere_host::session::{Config, Observed, Offer, Session as Conversation};
+use ::pencere_host::session::{Config, Observed, Session as Conversation};
 use ::pencere_host::theme::{Rgb, Theme as ViewTheme};
 use ::pencere_host::token::Entropy;
 
+pub use ::pencere_host::apps;
 pub use ::pencere_host::bundle::{Digest, Store, Verified};
 pub use ::pencere_host::icon;
-pub use ::pencere_host::message::HostInfo;
+pub use ::pencere_host::message::{HostInfo, SUPPORTED_VERSIONS};
 pub use ::pencere_host::sandbox::{
     Consent, Declared, Directive, Domain, Grant, Locality, Permission,
 };
 pub use ::pencere_host::session::{
     ATTACHED_SCHEME, Action, AttachedFiles, FetchError, FileError, FileGrant, MAX_BACKLOG,
-    MAX_FILE_PIECE, MAX_OPEN_TRANSFERS, MAX_VIEW_MESSAGE, Size, StageDir, StageError, State,
+    MAX_FILE_PIECE, MAX_OPEN_TRANSFERS, MAX_VIEW_MESSAGE, Offer, Size, StageDir, StageError, State,
     ViewKind, ViewStart, WEB_BRIDGE_VERSION, has_files,
 };
 
@@ -145,6 +146,17 @@ pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 /// (`pencere.files`, specification §8.8 to §8.10): it is given the pictures its program attaches
 /// and the files the person gives it.
 pub const LUA_VERSION: &str = "0.1";
+
+/// The kinds of view the application opens, each with the versions of its interface the
+/// application speaks: what a pane lists in its session's `Config::views` and what `[apps]`
+/// selects a release by (`apps::Manifest::select`). One list for both, so a program the app
+/// takes in is one a pane opens.
+pub fn offered_views() -> Vec<Offer> {
+    vec![
+        Offer::new(ViewKind::Lua, &[LUA_VERSION]),
+        Offer::new(ViewKind::Web, &[WEB_BRIDGE_VERSION]),
+    ]
+}
 
 /// The bytes the in-memory shelf keeps before the oldest go. A view's bundle is
 /// at most 64 MiB (the protocol's limit), so one bundle always fits; the number is a
@@ -852,10 +864,7 @@ impl Desk {
         // web view. The program's `hello` lists what it can
         // show and the `welcome` keeps what both sides have, in the program's order.
         if let Some(limit) = native_entry_limit {
-            config.views = vec![
-                Offer::new(ViewKind::Lua, &[LUA_VERSION]),
-                Offer::new(ViewKind::Web, &[WEB_BRIDGE_VERSION]),
-            ];
+            config.views = offered_views();
             config.native_entry_limit = limit;
         }
         config.view.locale = locale;

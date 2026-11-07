@@ -48,6 +48,7 @@
 //! {bt-atlas, bt-core}`; nothing here depends upward (`make audit` checks it).
 
 pub mod agent;
+pub mod apps;
 pub mod child;
 pub mod download;
 pub mod environment;

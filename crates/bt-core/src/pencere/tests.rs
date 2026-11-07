@@ -2788,3 +2788,33 @@ fn a_pane_with_a_master_flushes_what_the_program_left_unread_unless_it_is_elsewh
         "the program is on another machine: not this tty's to flush"
     );
 }
+
+#[test]
+fn a_release_of_the_lua_kit_opens_by_the_list_a_pane_offers() {
+    // `[apps]` selects a release by `offered_views` and the pane offers the same list, so a
+    // program the app takes in is one a pane opens — and a program that shows what `pencere new`
+    // makes (textpen's `hello`: protocol 1, `lua` 0.1) is one of them.
+    let release = |kind: &str, version: &str| apps::Manifest {
+        name: "demo".to_owned(),
+        version: apps::Version::parse("1.0.0").expect("a version"),
+        protocol: vec![1],
+        views: vec![::pencere_host::message::ViewOffer {
+            kind: kind.to_owned(),
+            versions: vec![version.to_owned()],
+        }],
+        key: String::new(),
+        files: std::collections::BTreeMap::new(),
+        previous: Vec::new(),
+    };
+    let opens = |kind: &str, version: &str| {
+        matches!(
+            release(kind, version).select(SUPPORTED_VERSIONS, &offered_views()),
+            apps::Selection::Current
+        )
+    };
+    assert!(opens("lua", "0.1"));
+    assert!(opens("lua", LUA_VERSION));
+    assert!(opens("web", WEB_BRIDGE_VERSION));
+    assert!(!opens("lua", "9.0"));
+    assert!(!opens("tui", "0.1"));
+}

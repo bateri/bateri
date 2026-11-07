@@ -46,13 +46,18 @@ pub fn config_root(home: &Path) -> PathBuf {
 /// installed bateri's. No profile, or a name that is not a plain word (letters, digits, `-`), is
 /// the application's root ([`config_root`]).
 pub fn profile_root(home: &Path, profile: Option<&str>) -> PathBuf {
-    let plain = |name: &&str| {
-        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    };
-    match profile.filter(plain) {
+    match plain_profile(profile) {
         Some(profile) => home.join(".config").join(format!("bateri-{profile}")),
         None => config_root(home),
     }
+}
+
+/// The profile's name when it is a plain word (letters, digits, `-`), else `None`: the one rule
+/// every folder a copy of its own has ([`profile_root`], the apps folder) is named by.
+pub fn plain_profile(profile: Option<&str>) -> Option<&str> {
+    profile.filter(|name| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
 }
 
 /// The root's watched paths (`watch`): the root itself, `themes/` and `settings.toml`. The

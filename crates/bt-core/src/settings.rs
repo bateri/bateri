@@ -1783,6 +1783,11 @@ pub struct Settings {
     /// value that is not accepted and an unusable file turn it **off**: a wrong
     /// guess here writes to servers silently.
     pub remote_integration: bool,
+    /// `[apps] sources`: where the programs bateri keeps up to date publish their releases, as
+    /// written (`user/repo`, an `https://` address or a `file:///` one — [`app_source_address`]
+    /// reads them), in the file's order. `["bateri/textpen"]` unless the file writes the key;
+    /// written, even empty, the file's list is the list.
+    pub apps_sources: Vec<String>,
     /// `[keys]`: the shortcuts the file gives the commands, by the command's fixed name, in the
     /// file's order. A command that has no entry has its default; the names are the shell
     /// layer's, and an entry for a name it does not know is kept here and reported there.
@@ -1847,6 +1852,10 @@ impl Default for Settings {
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
             remote_integration: true,
+            apps_sources: DEFAULT_APP_SOURCES
+                .iter()
+                .map(|source| (*source).to_owned())
+                .collect(),
             keys: Vec::new(),
         }
     }
@@ -2560,6 +2569,16 @@ stats = "alerts"
 # Seconds between two samples, 2 to 60.
 stats_interval = 3
 
+[apps]
+# Programs bateri keeps up to date for you, such as the textpen editor. Each
+# entry says where a program publishes its releases: user/repo for a GitHub
+# project (its latest release), or the full https:// address of an app.json.
+# A program runs with your rights, here and on the servers you connect to, so a
+# program signed with a key you have not approved waits for your approval and
+# is not downloaded. Taking an entry out of the list removes the program from
+# this Mac at once.
+sources = ["bateri/textpen"]
+
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
 # all). A name left out keeps the command's own shortcut, "" leaves it with
@@ -3239,6 +3258,21 @@ stats_interval = 3
                     .clone_from(&fallback.remote_files);
                 parsed.settings.remote_stats = fallback.remote_stats;
                 parsed.settings.remote_integration = false;
+            }
+            None => {}
+        }
+        match section(text, root, "apps", &mut parsed.diagnostics) {
+            Some(apps) => {
+                if let Some(item) = apps.get("sources") {
+                    parsed.settings.apps_sources =
+                        app_sources(text, item, &fallback.apps_sources, &mut parsed.diagnostics);
+                }
+            }
+            None if root.contains_key("apps") => {
+                parsed
+                    .settings
+                    .apps_sources
+                    .clone_from(&fallback.apps_sources);
             }
             None => {}
         }
@@ -4749,6 +4783,93 @@ fn folder(
     fallback.to_owned()
 }
 
+/// `[apps] sources` when the file does not write the key.
+pub const DEFAULT_APP_SOURCES: &[&str] = &["bateri/textpen"];
+
+/// The address of the `app.json` an `[apps] sources` entry names, or `None` if it names none.
+///
+/// Three spellings: `user/repo`, a GitHub project (its **latest release**'s `app.json`), a full
+/// `https://` address, and a `file:///` one (a folder on this Mac or one it mounts; what the
+/// tests and a mirror use). An address is what `pencere_host::apps::is_address` says it is, and
+/// the shorthand's parts are what GitHub lets a user and a repository be called. The entry is
+/// compared as written otherwise (no trimming): [`app_sources`] trims what the file holds.
+pub fn app_source_address(source: &str) -> Option<String> {
+    if pencere_host::apps::is_address(source) {
+        return Some(source.to_owned());
+    }
+    let (user, repo) = source.split_once('/')?;
+    let user_ok = (1..=39).contains(&user.len())
+        && user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !user.starts_with('-')
+        && !user.ends_with('-');
+    let repo_ok = (1..=100).contains(&repo.len())
+        && repo
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && repo != "."
+        && repo != "..";
+    (user_ok && repo_ok)
+        .then(|| format!("https://github.com/{user}/{repo}/releases/latest/download/app.json"))
+}
+
+/// `apps.sources`: an array of strings, each one an entry [`app_source_address`] reads.
+///
+/// **An entry that names nothing is dropped alone**, with a diagnostic naming it, and the others
+/// stay: the list has no order that means something (two entries with the same address are one,
+/// the first kept), unlike `remote.hosts`. A value that is not a list of strings is rejected
+/// whole and `fallback`'s list stays.
+fn app_sources(
+    text: &str,
+    item: &Item,
+    fallback: &[String],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<String> {
+    const KEY: &str = "apps.sources";
+    let Some(array) = item.as_array() else {
+        diagnostics.push(Diagnostic {
+            key: Some(KEY),
+            line: item.span().and_then(|span| line_of(text, span.start)),
+            message: format!(
+                "`{KEY}` must be a list of strings like \"user/repo\", found {}; keeping the previous list",
+                kind(item)
+            ),
+        });
+        return fallback.to_vec();
+    };
+    let mut sources: Vec<String> = Vec::with_capacity(array.len());
+    let mut addresses: Vec<String> = Vec::with_capacity(array.len());
+    for value in array {
+        let line = value.span().and_then(|span| line_of(text, span.start));
+        let Some(entry) = value.as_str() else {
+            diagnostics.push(Diagnostic {
+                key: Some(KEY),
+                line,
+                message: format!(
+                    "`{KEY}` entry is {}, not a string like \"user/repo\"; dropping it",
+                    kind(&Item::Value(value.clone()))
+                ),
+            });
+            continue;
+        };
+        let entry = entry.trim();
+        let Some(address) = app_source_address(entry) else {
+            diagnostics.push(Diagnostic {
+                key: Some(KEY),
+                line,
+                message: format!(
+                    "`{KEY}` entry {entry:?} is not user/repo, an https:// address or a file:/// one; dropping it"
+                ),
+            });
+            continue;
+        };
+        if !addresses.contains(&address) {
+            addresses.push(address);
+            sources.push(entry.to_owned());
+        }
+    }
+    sources
+}
+
 /// `remote.hosts`: the array of `{ host, mark }` entries.
 ///
 /// **A single broken entry rejects the whole key** and `fallback`'s list stays —
@@ -5030,6 +5151,7 @@ mod tests {
             ("remote", "stats"),
             ("remote", "stats_interval"),
             ("remote", "integration"),
+            ("apps", "sources"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -5261,6 +5383,7 @@ mod tests {
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
             remote_integration: true,
+            apps_sources: Settings::default().apps_sources,
             keys: Vec::new(),
         };
         let parsed = Settings::parse_keeping(
@@ -8041,6 +8164,119 @@ hosts = [
         assert_eq!(settings.remote_hosts, []);
         let parsed = Settings::parse_keeping("remote = 1\n", &current).expect("parseable");
         assert_eq!(parsed.settings.remote_hosts, current.remote_hosts);
+    }
+
+    #[test]
+    fn app_sources_are_the_default_until_the_file_writes_them() {
+        assert_eq!(Settings::default().apps_sources, ["bateri/textpen"]);
+        assert_eq!(clean("").apps_sources, ["bateri/textpen"]);
+        // The section alone says nothing about the list.
+        assert_eq!(clean("[apps]\n").apps_sources, ["bateri/textpen"]);
+        // Written, even empty, the file's list is the list.
+        assert_eq!(
+            clean("[apps]\nsources = []\n").apps_sources,
+            Vec::<String>::new()
+        );
+        let settings = clean(
+            "[apps]\nsources = [\n  \"acme/tool\",\n  \" https://example.com/tool/app.json \",\n  \
+             \"file:///tmp/tool/app.json\",\n]\n",
+        );
+        assert_eq!(
+            settings.apps_sources,
+            [
+                "acme/tool",
+                "https://example.com/tool/app.json",
+                "file:///tmp/tool/app.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn app_source_address_reads_the_three_spellings() {
+        assert_eq!(
+            app_source_address("bateri/textpen").as_deref(),
+            Some("https://github.com/bateri/textpen/releases/latest/download/app.json")
+        );
+        assert_eq!(
+            app_source_address("a-b/c.d_e").as_deref(),
+            Some("https://github.com/a-b/c.d_e/releases/latest/download/app.json")
+        );
+        for address in [
+            "https://example.com/tool/app.json",
+            "file:///tmp/tool/app.json",
+        ] {
+            assert_eq!(app_source_address(address).as_deref(), Some(address));
+        }
+        for none in [
+            "",
+            "textpen",
+            "/textpen",
+            "bateri/",
+            "bateri/textpen/extra",
+            "-bateri/textpen",
+            "bateri-/textpen",
+            "bate ri/textpen",
+            "bateri/text pen",
+            "bateri/..",
+            "http://example.com/app.json",
+            "https://",
+            "file:/tmp/app.json",
+            "ftp://example.com/app.json",
+            "https://example.com/a b",
+            " bateri/textpen",
+        ] {
+            assert_eq!(app_source_address(none), None, "{none:?}");
+        }
+        assert_eq!(
+            app_source_address(&format!("{}/repo", "u".repeat(40))),
+            None
+        );
+    }
+
+    #[test]
+    fn an_app_source_that_names_nothing_is_dropped_alone() {
+        let (settings, diagnostic) = rejected(
+            "[apps]\nsources = [\n  \"acme/tool\",\n  \"not a source\",\n  \"acme/tool\",\n  \
+             \"https://github.com/acme/tool/releases/latest/download/app.json\",\n  \"other/tool\",\n]\n",
+        );
+        // The second spelling of an address already listed is the same entry.
+        assert_eq!(settings.apps_sources, ["acme/tool", "other/tool"]);
+        assert_eq!(diagnostic.key, Some("apps.sources"));
+        assert_eq!(diagnostic.line, Some(4));
+        assert!(
+            diagnostic.message.contains("\"not a source\""),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.message.ends_with("dropping it"), "{diagnostic}");
+        // An entry that is not a string goes the same way.
+        let (settings, diagnostic) = rejected("[apps]\nsources = [\"acme/tool\", 5]\n");
+        assert_eq!(settings.apps_sources, ["acme/tool"]);
+        assert!(diagnostic.message.contains("is an integer"), "{diagnostic}");
+    }
+
+    #[test]
+    fn a_wrong_kind_of_app_sources_keeps_the_given_list() {
+        let current = Settings {
+            apps_sources: vec!["acme/tool".to_owned()],
+            ..Settings::default()
+        };
+        for (text, line) in [
+            ("[apps]\nsources = \"acme/tool\"\n", Some(2)),
+            ("[apps]\nsources = { a = 1 }\n", Some(2)),
+        ] {
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
+            assert_eq!(parsed.settings.apps_sources, current.apps_sources, "{text}");
+            let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
+                .unwrap_or_else(|got| panic!("a single diagnostic expected: {got:?}"));
+            assert_eq!(diagnostic.key, Some("apps.sources"));
+            assert_eq!(diagnostic.line, line);
+            assert!(diagnostic.message.ends_with("keeping the previous list"));
+        }
+        // A section of the wrong type keeps it too; at startup the same text is the default.
+        let parsed = Settings::parse_keeping("apps = 1\n", &current).expect("parseable");
+        assert_eq!(parsed.settings.apps_sources, current.apps_sources);
+        let (settings, _) = rejected("[apps]\nsources = \"acme/tool\"\n");
+        assert_eq!(settings.apps_sources, ["bateri/textpen"]);
     }
 
     #[test]

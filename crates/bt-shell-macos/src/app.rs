@@ -988,6 +988,10 @@ pub(crate) struct Ivars {
     /// window's lock and line diagnostics come from here. Written at startup
     /// and at every live read, so even if the window opens later it sees the file's state.
     settings_state: RefCell<settings::FileState>,
+    /// The programs `[apps] sources` lists, followed on a thread of their own
+    /// ([`bt_shell_common::apps`]): started once the settings are read
+    /// ([`AppDelegate::start_apps`]), never in a timed run.
+    apps: OnceCell<bt_shell_common::apps::Tracker>,
     /// The Shell menu's delegate ([`crate::menu::install`]): the menu holds it
     /// weakly, this is what keeps it alive.
     shell_menu: OnceCell<Retained<ShellMenuDelegate>>,
@@ -1161,6 +1165,7 @@ define_class!(
             // first for the diagnostics to reach the subtitle: the new window takes
             // its subtitle over from the slots (`open_window`).
             self.load_settings();
+            self.start_apps();
             // The menu was built with the table's defaults; the file's `[keys]` go in now.
             self.apply_keys(&self.settings());
             // Quit and End Programs is there only under `keep_running = "quit"`.
@@ -2704,6 +2709,7 @@ impl AppDelegate {
             scrollbar: Cell::new(None),
             settings_window: RefCell::new(None),
             settings_state: RefCell::new(settings::FileState::Missing),
+            apps: OnceCell::new(),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
             masters,
@@ -6078,6 +6084,48 @@ impl AppDelegate {
         self.ivars().settings.replace(settings);
     }
 
+    /// Starts following the programs `[apps] sources` lists, with the list the settings
+    /// hold now: the first check begins at once, on a thread of its own, and so does one a day
+    /// ([`bt_shell_common::apps::Tracker`]). Nothing waits for it. Nothing in a timed run, which
+    /// goes out to no network and writes no file of the person's.
+    ///
+    /// The list is the person's only if the file could be read: a file that could not
+    /// (`FileState::Locked`) leaves the defaults, and a program the person added is not
+    /// deleted for being missing from those.
+    fn start_apps(&self) {
+        if !matches!(self.inputs(), Inputs::User { .. }) {
+            return;
+        }
+        let Some(home) = child::home() else {
+            return;
+        };
+        let Some(config) = bt_shell_common::apps::Config::for_this_machine(crate::apps_path(
+            &home,
+            crate::profile().as_deref(),
+        )) else {
+            return;
+        };
+        let persons = !matches!(
+            *self.ivars().settings_state.borrow(),
+            settings::FileState::Locked(_)
+        );
+        let sources = self.settings().apps_sources.clone();
+        match bt_shell_common::apps::Tracker::start(config, sources, persons) {
+            Ok(tracker) => {
+                let _ = self.ivars().apps.set(tracker);
+            }
+            Err(e) => eprintln!("bateri: could not start following programs: {e}"),
+        }
+    }
+
+    /// The settings file was read and is the person's: the programs follow its list (a list the
+    /// worker already has is not checked again).
+    fn follow_apps(&self, sources: &[String]) {
+        if let Some(tracker) = self.ivars().apps.get() {
+            tracker.set_sources(sources.to_vec(), true);
+        }
+    }
+
     /// Sweeps the preview cache on a background thread with
     /// the settings as they are now: `Launch` at startup, `Daily` from
     /// [`AppDelegate::schedule_daily_sweep`] and `ClearNow` — the single method
@@ -6283,6 +6331,7 @@ impl AppDelegate {
             let shown = self.shown_over(&root, &file);
             let old = self.settings().clone();
             self.apply_settings(&old, shown, font_reset);
+            self.follow_apps(&file.apps_sources);
             self.post_notices(Source::Write, Vec::new());
         }
         self.apply_theme(&root);
