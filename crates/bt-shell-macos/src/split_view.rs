@@ -117,6 +117,14 @@ fn spacing(scale: f64, style: SplitStyle, beside_tabs: bool) -> Spacing {
     spaced(scale, style, beside_tabs).with_head(card::HEAD_PT, scale)
 }
 
+/// The panes that float in `cards`, in id order: two sets differ only when a pane floated or
+/// docked (or a card was split or lost a pane), not when a card came to the front.
+fn floating_panes(cards: &[Card]) -> Vec<u64> {
+    let mut out: Vec<u64> = cards.iter().flat_map(|card| card.tree.leaves()).collect();
+    out.sort_unstable();
+    out
+}
+
 /// [`spacing`] without the panes' headers.
 fn spaced(scale: f64, style: SplitStyle, beside_tabs: bool) -> Spacing {
     if style == SplitStyle::Cards {
@@ -880,14 +888,16 @@ impl SplitView {
     /// changed) slides from where it stood to where it stands.
     pub(crate) fn receive_layers(&self, layers: Layers, panes: &[Retained<TerminalPane>]) -> bool {
         let before = self.snapshot();
-        let had_cards = !self.ivars().cards.borrow().is_empty();
-        let has_cards = !layers.cards.is_empty();
+        let floating_before = floating_panes(&self.ivars().cards.borrow());
+        let floating_after = floating_panes(&layers.cards);
         if !self.adopt_layers(layers, panes) {
             return false;
         }
         if before.len() == 1 {
             self.slide(&before, None, card::SLIDE_SECS);
-        } else if had_cards || has_cards {
+        } else if floating_before != floating_after {
+            // Only a float or a dock slides; a pane moved into a tab that merely has a card
+            // takes its place at once, as it does in a tab without one.
             self.slide(&before, None, card::MOVE_SECS);
         }
         true
