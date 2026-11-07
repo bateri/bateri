@@ -559,6 +559,25 @@ impl Ledger {
         })
     }
 
+    /// The terminals of this Mac that are meant to live and that none of `shown` carries — the
+    /// panes that show their terminals now. What a launch finds left over this way runs a program
+    /// nobody sees: its pane did not come back (a layout that was lost, a tab that could not be
+    /// built), or came back as an ordinary pane before the terminal could be reached. It is shown
+    /// again, never ended: ending it would end a program the user did not close.
+    pub fn unshown_local(&self, shown: &[PaneUuid]) -> Vec<SessionId> {
+        self.read(|rows| {
+            rows.terminals
+                .iter()
+                .filter(|row| {
+                    !row.ending
+                        && local::is_account(&row.account)
+                        && !row.pane.as_ref().is_some_and(|pane| shown.contains(pane))
+                })
+                .map(|row| row.terminal.clone())
+                .collect()
+        })
+    }
+
     /// Whether the program in the pane the terminal carries has a view open: said as the view
     /// opens and closes, read by the bateri that finds the terminal again.
     pub fn set_view(&self, account: &str, terminal: &SessionId, open: bool) {

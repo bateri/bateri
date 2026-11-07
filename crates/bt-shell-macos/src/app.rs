@@ -4395,21 +4395,112 @@ impl AppDelegate {
         let opened = self.restore_or_open_windows();
         let skipping = self.ivars().skip_restore.get();
         crate::hold_service::launch_over();
-        // The first windows are built and every pane of them has asked for its terminal: what
-        // the bateri before left on this Mac and none of them showed again is a program running
-        // for no window, and ends. Not when this launch built no windows from the save (⇧ at
-        // launch leaves the save for the next), and not in a bateri that does not hold the
-        // session directory (a second instance of the bundle: the first one's terminals are its
-        // own).
+        // The first windows are built and every pane of them has asked for its terminal. What
+        // the bateri before left on this Mac and none of them shows is a program the user did not
+        // close: once this Mac's account is there it is shown again, in tabs of its own
+        // ([`AppDelegate::show_unshown_terminals`]) — never ended, whatever became of the layout
+        // that named it. Not when this launch skipped the save (⇧ at launch leaves the terminals
+        // for the next), and not in a bateri that does not hold the session directory (a second
+        // instance of the bundle: the first one's terminals are its own).
         if opened.is_ok() && !skipping && self.ivars().restore_lock.borrow().is_some() {
-            let panes: Vec<_> = self
-                .all_panes()
-                .iter()
-                .map(|pane| pane.uuid().clone())
-                .collect();
-            crate::hold_service::end_unclaimed(&panes);
+            crate::hold_service::when_local(|ready| {
+                if !ready {
+                    return;
+                }
+                DispatchQueue::main().exec_async(|| {
+                    // audit: a block running on the main queue is on the main thread by definition.
+                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                    if let Some(app) = delegate(mtm) {
+                        app.show_unshown_terminals();
+                    }
+                });
+            });
         }
         opened
+    }
+
+    /// The terminals of this Mac that are meant to live and that no pane shows now
+    /// ([`crate::hold_service::unshown_local`]) come back as tabs of the front window, one each,
+    /// with what runs in them as it is: a pane is born for each, its terminal named to it in the
+    /// ledger first, so that the pane finds the terminal instead of making one. What leaves a
+    /// terminal like that is a layout that was lost or could not be read, a tab that could not be
+    /// built, and a pane that came back before this Mac's account was there and is an ordinary
+    /// shell — that pane stays, and the terminal it did not get is shown beside it. The first of
+    /// them is selected, so that what came back is seen.
+    fn show_unshown_terminals(&self) {
+        if self.is_terminating() || self.ivars().restore_lock.borrow().is_none() {
+            return;
+        }
+        let shown: Vec<PaneUuid> = self
+            .all_panes()
+            .iter()
+            .filter(|pane| pane.is_streamed())
+            .map(|pane| pane.uuid().clone())
+            .collect();
+        let terminals = crate::hold_service::unshown_local(&shown);
+        if terminals.is_empty() {
+            return;
+        }
+        let panes = terminals
+            .iter()
+            .map(|terminal| {
+                let uuid = crate::pane::new_pane_uuid();
+                crate::hold_service::register_local(&uuid, terminal);
+                SavedPane {
+                    uuid,
+                    dir: None,
+                    zoom_steps: 0,
+                    remote_line: None,
+                    kept: None,
+                    history: false,
+                    runs: PaneRuns::UserShell,
+                }
+            })
+            .collect();
+        let app = NSApplication::sharedApplication(self.mtm());
+        let into = app
+            .keyWindow()
+            .into_iter()
+            .chain(app.mainWindow())
+            .find_map(|window| self.window_owning(&window))
+            .or_else(|| {
+                self.front_terminal_window()
+                    .and_then(|window| self.window_owning(&window))
+            })
+            .or_else(|| self.windows().into_iter().next())
+            .or_else(|| self.open_window(None, Opening::Window).ok());
+        let frame = into.as_ref().map_or(
+            Frame {
+                x: 0.0,
+                y: 0.0,
+                width: 900.0,
+                height: 600.0,
+            },
+            |window| {
+                let rect = window.ns_window().frame();
+                Frame {
+                    x: rect.origin.x,
+                    y: rect.origin.y,
+                    width: rect.size.width,
+                    height: rect.size.height,
+                }
+            },
+        );
+        let Some(saved) = SavedWindow::of_panes(panes, frame) else {
+            return;
+        };
+        let screens = self.visible_frames();
+        let Some((window, tabs)) = self.restore_window(&saved, &screens, into) else {
+            return;
+        };
+        if let Some(&(_, first)) = tabs.first() {
+            window.select_tab(first);
+        }
+        eprintln!(
+            "bateri: {} of {} terminal(s) of this Mac that no pane showed came back as tabs",
+            tabs.len(),
+            terminals.len()
+        );
     }
 
     /// [`AppDelegate::restore_or_open`]'s body: the windows.
@@ -4493,7 +4584,19 @@ impl AppDelegate {
             },
             child::home,
         )
-        .and_then(|dir| restore::lock(&dir))
+        .and_then(|dir| {
+            let lock = restore::lock(&dir);
+            if lock.is_none() {
+                // Said, because what follows is otherwise silent: no saved window comes back,
+                // nothing of this one is saved, and the terminals the save names wait.
+                eprintln!(
+                    "bateri: {} is held by another bateri or could not be locked; no saved \
+                     window comes back and none of these is saved",
+                    dir.display()
+                );
+            }
+            lock
+        })
     }
 
     /// Takes the saved layout, under the directory's `lock` (a timed run, an
@@ -4555,7 +4658,7 @@ impl AppDelegate {
         let mut key = None;
         let mut restored = false;
         for window in &saved.windows {
-            let Some((built, tabs)) = self.restore_window(window, &screens) else {
+            let Some((built, tabs)) = self.restore_window(window, &screens, None) else {
                 continue;
             };
             let selected = tabs
@@ -4577,19 +4680,27 @@ impl AppDelegate {
         (restored, key)
     }
 
-    /// One saved window: its tabs built in order into one window; the
+    /// One saved window: its tabs built in order into one window — `into` when it is given, a
+    /// window of its own otherwise; the
     /// return pairs each built tab's id with its index in `window.tabs`. A
     /// pane that does not come back ([`AppDelegate::restored_pane_launch`]'s
     /// `None`) leaves its tab without it ([`restore::SavedTab::retain`]), a
-    /// tab left with none is not built; `None` if no tab was.
-    fn restore_window(&self, window: &SavedWindow, screens: &[Frame]) -> Option<RestoredWindow> {
+    /// tab left with none is not built; `None` if no tab was and no window was given.
+    fn restore_window(
+        &self,
+        window: &SavedWindow,
+        screens: &[Frame],
+        into: Option<Retained<TerminalWindow>>,
+    ) -> Option<RestoredWindow> {
         let mtm = self.mtm();
         let frame = clamp_frame(window.frame, screens);
         let frame = NSRect::new(
             NSPoint::new(frame.x, frame.y),
             NSSize::new(frame.width, frame.height),
         );
-        let mut built: Option<Retained<TerminalWindow>> = None;
+        // Tabs that join a window that is there take its frame and chrome; a window of their own
+        // is built at the first tab that can be.
+        let mut built = into;
         let mut tabs: Vec<(usize, u64)> = Vec::new();
         for (index, tab) in window.tabs.iter().enumerate() {
             let tab_id = self.next_id();
@@ -4706,6 +4817,13 @@ impl AppDelegate {
             RestoreWindows::Off => restore::clear(&lock),
             RestoreWindows::All | RestoreWindows::Layout => {
                 let (saved, histories) = self.saved_session(setting == RestoreWindows::All);
+                if saved.windows.is_empty() {
+                    eprintln!(
+                        "bateri: no window could be saved at quit ({} open); the saved windows \
+                         are cleared",
+                        self.windows().len()
+                    );
+                }
                 restore::save(&lock, &saved, &histories)
             }
         };
@@ -9796,6 +9914,37 @@ mod tests {
         assert!(
             body[skip..].contains("keeps_local()"),
             "a skipped launch with terminals waiting gives up the lock"
+        );
+    }
+
+    /// What the bateri before left on this Mac and no pane of the launch shows is shown again,
+    /// never ended: the launch waits for this Mac's account, and each terminal is named to its new
+    /// pane in the ledger before the pane is built, so that the pane finds it. Before, a launch
+    /// that built no windows from a lost layout ended every program the quit had kept. A source
+    /// scan, because the launch needs a window server.
+    #[test]
+    fn a_launch_shows_again_what_no_pane_of_it_shows_and_ends_none_of_it() {
+        let app = include_str!("app.rs");
+        let body_of = |name: &str| {
+            let at = app.find(name).expect(name);
+            &app[at..at + app[at..].find("\n    }\n").expect("its end")]
+        };
+        let launch = body_of("    fn restore_or_open(");
+        assert!(launch.contains("hold_service::when_local("));
+        assert!(launch.contains("show_unshown_terminals()"));
+        assert!(
+            !launch.contains("end_"),
+            "a launch ends nothing of what was left"
+        );
+        let show = body_of("    fn show_unshown_terminals(");
+        let named = show
+            .find("hold_service::register_local(")
+            .expect("named first");
+        let built = show.find("self.restore_window(").expect("then built");
+        assert!(named < built);
+        assert!(
+            show.contains(".filter(|pane| pane.is_streamed())"),
+            "an ordinary pane shows none"
         );
     }
 

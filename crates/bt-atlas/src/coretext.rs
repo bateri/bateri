@@ -1153,3 +1153,34 @@ pub mod fixture {
         unsafe { font.family_name() }.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A page's italic in a family with no italic face is the regular one slanted by its matrix
+    /// (`slanted`); the font's rules are put on after it and must not set it upright again. The
+    /// descriptor carries the matrix, which is why `with_features` can pass a null one.
+    #[test]
+    fn the_rules_keep_a_slanted_faces_slant() {
+        fixture::register_test_fonts();
+        let (font, _) = CoreText::open(fixture::OBEL_MONO, 26.0);
+        let lean = CGAffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.21,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        // SAFETY: `font` is alive; the matrix lives for the call and no attributes are added.
+        let leaned = unsafe { font.copy_with_attributes(0.0, &lean, None) };
+        let ruled = CoreText::with_features(&leaned, &[("ss01".to_owned(), true)]);
+        // SAFETY: `ruled` is alive; a pure read.
+        let slant = unsafe { ruled.matrix() }.c;
+        assert!(
+            (slant - 0.21).abs() < 1e-6,
+            "the face with its rules leans {slant}, not 0.21"
+        );
+    }
+}

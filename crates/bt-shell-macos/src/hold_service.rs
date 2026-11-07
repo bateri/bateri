@@ -69,16 +69,26 @@ pub(crate) fn end_leftovers() -> usize {
     ledger().end_all()
 }
 
-/// The first windows of a launch are built, and `panes` are the panes they have: the terminals of
-/// this Mac that the bateri before left and that no pane of them is for are ended
-/// ([`Service::end_unclaimed`]) — a
-/// program running for no window. What became of the terminals at the launch's start (a crash
-/// under `keep_running = "update"`, [`end_leftovers`]) was decided before, and what the table
-/// says of a quit was done by the quit itself.
-pub(crate) fn end_unclaimed(panes: &[PaneUuid]) {
-    if let Some(service) = SERVICE.get() {
-        service.end_unclaimed(panes);
-    }
+/// `done` is told, on a thread of its own, whether this Mac's account is there
+/// ([`Service::when_local`]) — `false` at once where there is no service, and when the service did
+/// not come up in [`SERVICE_WAIT`]: the launch's first windows do not wait for it.
+pub(crate) fn when_local(done: impl FnOnce(bool) + Send + 'static) {
+    // No thread to wait on: nothing is shown again now, and nothing is ended either — the
+    // terminals wait for the next launch.
+    let _ = std::thread::Builder::new()
+        .name("bateri waits for this Mac's account".into())
+        .spawn(move || match service() {
+            Some(service) => service.when_local(done),
+            None => done(false),
+        });
+}
+
+/// The terminals of this Mac that are meant to live and that none of `shown` carries
+/// ([`Ledger::unshown_local`]): a launch shows them again. What became of the terminals at the
+/// launch's start (a crash under `keep_running = "update"`, [`end_leftovers`]) was decided before,
+/// and what the table says of a quit was done by the quit itself.
+pub(crate) fn unshown_local(shown: &[PaneUuid]) -> Vec<SessionId> {
+    ledger().unshown_local(shown)
 }
 
 /// Whether the ledger has a terminal of this Mac that is meant to live: a launch that asks it

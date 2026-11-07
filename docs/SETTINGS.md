@@ -1559,8 +1559,10 @@ smoothing = false
   grid. Two things differ from the grid. Fira Code's italic: a page slants its regular
   face, where the grid draws it upright. The symbol font: the page does not get
   it, so an icon of the private use area is drawn from the system's fonts there,
-  or not at all. `smoothing` and the font options do not reach a page: they
-  belong to the terminal's own text.
+  or not at all. `smoothing` and the font options do not reach a web page: the
+  web engine draws it. A program's native page gets both for the text it sets
+  in the terminal's font (see [Font
+  options](#font-options-ligatures-alternate-letters-and-hiding-secrets)).
 
 #### Font options: ligatures, alternate letters and hiding secrets
 
@@ -1570,8 +1572,10 @@ slashed zero, and Obel Mono Masked draws API keys and tokens as dots. bateri
 runs the font's own rules, so what you see is what the font was designed to
 show; a font that carries no rules (Menlo) is drawn character by character,
 exactly as before. The options work on the terminal grid, the history above
-it, the input line at the bottom and the effects of typing in it. They work on
-macOS; the Linux build draws every font as before.
+it, the input line at the bottom, the effects of typing in it and the text a
+program's native page sets in the terminal's font (an editor's lines, a
+table's cells). They work on macOS; the Linux build draws every font as
+before.
 
 **Where the options are.** The selected font's options are in Settings ▸
 Font (the Options group), in the command palette (type the
@@ -1650,9 +1654,12 @@ terminal does:
   blank can still be masked;
 - the font decides what is a secret: a format it does not know is not masked.
 
-**Known limits.** The options reach the terminal's own text; program views
-(the web and native views a program opens) use their own fonts and are not
-shaped. A shape the cells cannot hold — a character the font draws as several
+**Known limits.** The options reach the text bateri draws in the terminal's
+font. In a program's native page each line of that text is shaped on its own:
+a key the page wraps onto a second line is masked only as far as the font
+recognises it within each line, and a change of the options shows at once. The
+page's text in the system font keeps its own look, and a web view a program
+opens is drawn by the web engine, which does not get the options. A shape the cells cannot hold — a character the font draws as several
 glyphs, characters the font reorders, ink that reaches outside the cells it
 stands for — is drawn as the plain characters.
 

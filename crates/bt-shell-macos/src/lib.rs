@@ -59,6 +59,7 @@ mod leaving;
 mod locale;
 mod menu;
 mod native_page;
+mod open_files;
 mod overview;
 mod pacer;
 mod palette;
@@ -82,6 +83,7 @@ mod sheets;
 mod snapshot;
 mod split_view;
 mod stats;
+mod stderr_log;
 mod tab;
 mod tab_bar;
 mod tab_drag;
@@ -125,6 +127,16 @@ pub fn settings_layout_problems(
     shots: Option<&std::path::Path>,
 ) -> Vec<String> {
     settings_window::SettingsWindow::new(mtm).layout_problems(shots)
+}
+
+/// Builds the settings window, shows it off the screen before it has a theme, refreshes it in two
+/// light themes and lists each time the sidebar's "Open settings.toml" is not titled in the
+/// theme's text colour. Only for `tests/settings_window.rs`, before anything else there: a button
+/// keeps the colour its title had when it was first drawn, and a light grey left from before the
+/// theme reads as a button that is off.
+#[doc(hidden)]
+pub fn settings_title_problems(mtm: MainThreadMarker) -> Vec<String> {
+    settings_window::SettingsWindow::new(mtm).title_problems()
 }
 
 /// The profile this copy of the application names in its `Info.plist` (`BateriProfile`): a
@@ -354,6 +366,19 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     // window), and the type enforces it: `Options` carries an `Instant`, not
     // a flag.
     let skip_restore = app::shift_held_at_launch(&opts);
+    // Before the first window: every pane is a few descriptors, and launchd's 256 is some forty
+    // tabs (`open_files`).
+    open_files::raise();
+    // An interactive launch from Finder or the Dock writes nowhere: its lines go to a file
+    // (`stderr_log`). A timed run's standard error is the gate's to read, and stays.
+    if opts.run.is_none() {
+        stderr_log::keep(
+            child::home(),
+            objc2_foundation::NSBundle::mainBundle()
+                .bundleIdentifier()
+                .map(|id| id.to_string()),
+        );
+    }
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // `delegate` outlives `app.run()` in this scope: AppKit's and the

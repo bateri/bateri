@@ -143,6 +143,10 @@ const UNNAMED: u32 = 1;
 
 /// The layout file's name inside the directory.
 const LAYOUT: &str = "layout";
+
+/// Where a layout that did not parse is set aside ([`take`]): the windows it named do not come
+/// back, and what it said stays to be read. One at a time — the next replaces it.
+const UNREADABLE: &str = "layout.unreadable";
 /// The lock file's name: the layout cannot carry the lock, every save renames a new inode onto
 /// its path (`ssh_wrap`'s lock precedent).
 const LOCK: &str = "lock";
@@ -639,6 +643,44 @@ impl Saved {
 }
 
 impl SavedWindow {
+    /// A window of one tab for each of `panes`, each pane its user's shell — the shape the
+    /// application builds again what it has to show without a layout naming it: the terminals of
+    /// this Mac that a launch found running for no pane
+    /// ([`crate::kablo::ledger::Ledger::unshown_local`]). `frame` is only read for a window of
+    /// its own; tabs that join a window take that window's. `None` without panes.
+    pub fn of_panes(panes: Vec<SavedPane>, frame: Frame) -> Option<SavedWindow> {
+        if panes.is_empty() {
+            return None;
+        }
+        let tabs = panes
+            .into_iter()
+            .map(|pane| SavedTab {
+                id: None,
+                shape: Shape::Leaf(0),
+                panes: vec![SavedPane {
+                    runs: PaneRuns::UserShell,
+                    history: false,
+                    ..pane
+                }],
+                focused: 0,
+                zoomed: None,
+                name: None,
+                group: None,
+            })
+            .collect();
+        Some(SavedWindow {
+            id: None,
+            frame,
+            tabs,
+            selected: 0,
+            key: false,
+            side_width: None,
+            column_hidden: false,
+            activity: false,
+            groups: Vec::new(),
+        })
+    }
+
     /// The groups over the tabs that were built again: `built` pairs a tab's index here with the
     /// id it was given. A group none of them is in is left out; a resident that was not built is
     /// forgotten. Tabs left out leave the rest a grouping of the strip — a part of one is.
@@ -1437,6 +1479,7 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
         };
         if name == LOCK
             || name == LAYOUT
+            || name == UNREADABLE
             || name == RECENT
             || name == ATTEMPT
             || name == crate::ids::FILE
@@ -1453,20 +1496,26 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
 }
 
 /// Reads the layout and leaves it until the launch writes its own (module doc). A missing or
-/// unreadable layout is `None`; one that does not parse is `None`, deleted, and takes its
-/// histories with it. Histories the layout does not name are swept.
+/// unreadable layout is `None`; one that does not parse is `None`, set aside as
+/// [`UNREADABLE`] with a line to standard error, and takes its histories with it. Histories the
+/// layout does not name are swept.
 ///
 /// Without `histories` (`restore_windows = "layout"`) every history is swept **unread** and no
 /// returned pane claims one: a user who said the scrollback should not come back must not see an
 /// earlier `"all"` save's once more.
 pub fn take(lock: &Lock, histories: bool) -> Option<Saved> {
     let path = lock.dir.join(LAYOUT);
-    let mut saved = fs::read_to_string(&path)
-        .ok()
-        .as_deref()
-        .and_then(Saved::parse);
-    if saved.is_none() {
-        let _ = fs::remove_file(&path);
+    let text = fs::read_to_string(&path).ok();
+    let mut saved = text.as_deref().and_then(Saved::parse);
+    if saved.is_none() && text.is_some() {
+        let aside = lock.dir.join(UNREADABLE);
+        eprintln!(
+            "bateri: the saved windows could not be read; they are set aside as {}",
+            aside.display()
+        );
+        if fs::rename(&path, &aside).is_err() {
+            let _ = fs::remove_file(&path);
+        }
     }
     if !histories {
         for pane in saved
@@ -1622,6 +1671,37 @@ mod tests {
             history: false,
             runs: PaneRuns::UserShell,
         }
+    }
+
+    /// Terminals a launch found running for no pane come back one tab each, as shells, in a
+    /// window that renders and reads back like any other — and nothing for none.
+    #[test]
+    fn panes_with_no_layout_come_back_one_tab_each() {
+        let frame = Frame {
+            x: 10.0,
+            y: 20.0,
+            width: 900.0,
+            height: 600.0,
+        };
+        assert_eq!(SavedWindow::of_panes(Vec::new(), frame), None);
+        let program = SavedPane {
+            runs: PaneRuns::Program { keep_open: false },
+            history: true,
+            ..pane(B)
+        };
+        let window = SavedWindow::of_panes(vec![pane(A), program], frame).expect("a window");
+        assert_eq!(window.tabs.len(), 2);
+        assert_eq!(window.tabs[0].panes, vec![pane(A)]);
+        assert_eq!(
+            window.tabs[1].panes,
+            vec![pane(B)],
+            "a shell, with no history to read"
+        );
+        assert_eq!(window.tabs[1].shape, Shape::Leaf(0));
+        let saved = Saved {
+            windows: vec![window],
+        };
+        assert_eq!(Saved::parse(&saved.render()), Some(saved));
     }
 
     fn single(tab: &str) -> SavedTab {
@@ -3045,7 +3125,17 @@ mod tests {
         save(&lock, &rich(), &[(id(A), b"x".to_vec())]).expect("save");
         fs::write(lock.dir().join(LAYOUT), b"bateri-session 9\n").expect("overwrite");
         assert_eq!(take(&lock, true), None);
-        assert_eq!(names(lock.dir()), vec!["lock".to_owned()]);
+        // What it said is kept beside the lock, to be read; the next take leaves it.
+        assert_eq!(
+            names(lock.dir()),
+            vec!["layout.unreadable".to_owned(), "lock".to_owned()]
+        );
+        assert_eq!(
+            fs::read(lock.dir().join(UNREADABLE)).expect("set aside"),
+            b"bateri-session 9\n"
+        );
+        assert_eq!(take(&lock, true), None);
+        assert!(lock.dir().join(UNREADABLE).exists());
     }
 
     #[test]

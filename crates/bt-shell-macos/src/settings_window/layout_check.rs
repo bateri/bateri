@@ -10,17 +10,23 @@
 //! give.
 
 use std::path::Path;
+use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 
 use bt_core::{CursorBlink, Settings, Theme};
 use bt_gpu::ScrollbarMode;
-use objc2::{DefinedClass, MainThreadOnly, Message};
-use objc2_app_kit::{NSBitmapImageFileType, NSView};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message};
+use objc2_app_kit::{
+    NSAppearanceCustomization, NSBitmapImageFileType, NSBitmapImageRep, NSView, NSWindow,
+};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSDate, NSDictionary, NSIndexSet, NSObjectProtocol, NSRect, NSRunLoop, ns_string,
+    NSDate, NSDictionary, NSIndexSet, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, ns_string,
 };
 
+use super::pictures::Palette;
 use super::{Category, Key, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
 use crate::settings::{self, FileState};
 
@@ -654,6 +660,152 @@ impl SettingsWindow {
         self.cancel_blink();
         specimens.stop_blink();
     }
+
+    /// Shows the window before it has a theme, then refreshes it in a light theme and in a second
+    /// light theme whose text is another colour, and lists each time the "Open settings.toml"
+    /// button at the sidebar's foot is not titled in that theme's text colour on the screen. A
+    /// button reads its title's colour when it is first drawn on the screen and keeps it: drawing
+    /// it again does not read it again, nor does a title in the same colour object. A title left
+    /// from before the theme came is a light grey on a light button, which reads as a button that
+    /// is off. The window is shown off the screen and the window server's copy of it is read:
+    /// drawing the sidebar into a bitmap draws its button afresh, in the right colour whatever the
+    /// screen shows. The light themes keep the window's light appearance, so only the theme
+    /// changes. Runs before anything else in the process sets the window's palette.
+    pub(crate) fn title_problems(&self) -> Vec<String> {
+        let ivars = self.ivars();
+        let (Some(window), Some(open)) = (ivars.window.get(), ivars.side_open.get()) else {
+            return vec!["the window was not built".to_owned()];
+        };
+        let settings = Settings::default();
+        let embedded = Theme::embedded_groups();
+        let (first, _) = settings::load_theme(None, &settings.light_theme).or_embedded(false);
+        let text = |theme: &Theme| luma(Palette::of(theme).foreground);
+        // The light theme whose text is farthest from the first one's, so the two are told apart.
+        let Some(second) = embedded[2]
+            .iter()
+            .filter_map(|name| Theme::embedded(name))
+            .max_by(|a, b| {
+                let away = |theme: &Theme| (text(theme) - text(&first)).abs();
+                away(a).total_cmp(&away(b))
+            })
+        else {
+            return vec!["there is no second light theme".to_owned()];
+        };
+
+        window.setAppearance(super::look::appearance(&first).as_deref());
+        window.setFrameTopLeftPoint(NSPoint::new(-4000.0, -4000.0));
+        window.orderFront(None);
+        let settle = || {
+            NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.3));
+        };
+        settle();
+        let mut problems = Vec::new();
+        // The text colours the window had before: first its own, before it has a theme.
+        let mut before = vec![luma(super::look::palette().foreground)];
+        for (which, theme) in [
+            ("the light theme", &first),
+            ("a second light theme", &second),
+        ] {
+            let themes = ThemeLists {
+                embedded: &embedded,
+                user: &[],
+                user_themes: &[],
+                on_screen: theme,
+                light: theme,
+                dark: theme,
+                dark_appearance: false,
+            };
+            let resolved = Resolved {
+                reduce: false,
+                scrollbar: ScrollbarMode::Auto,
+            };
+            self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+            settle();
+            let want = text(theme);
+            match darkest_on_screen(window, open) {
+                None => {
+                    problems.push("the window could not be read from the screen".to_owned());
+                    break;
+                }
+                Some(got) => {
+                    let off = |earlier: &f64| (got - earlier).abs();
+                    if let Some(stale) = before
+                        .iter()
+                        .find(|earlier| off(earlier) <= (got - want).abs())
+                    {
+                        problems.push(format!(
+                            "{which}: \"Open settings.toml\" is titled at {got:.2}, nearer a text \
+                             colour the window had before ({stale:.2}) than the theme's ({want:.2})"
+                        ));
+                    }
+                }
+            }
+            before.push(want);
+        }
+        window.orderOut(None);
+        problems
+    }
+}
+
+/// An sRGB `0xRRGGBB`'s luma (Rec. 709 weights on the encoded channels), 0 to 1.
+fn luma(rgb: u32) -> f64 {
+    let channel = |shift: u32| f64::from(rgb >> shift & 0xff) / 255.0;
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+/// The darkest luma in the middle of `button` as the screen shows it, where its title's strokes
+/// are: read from the window server's copy of `window`. `None` when it cannot be read.
+fn darkest_on_screen(window: &NSWindow, button: &NSView) -> Option<f64> {
+    type Capture = unsafe extern "C" fn(CGRect, u32, u32, u32) -> *mut CGImage;
+    const INCLUDING_WINDOW: u32 = 1 << 3;
+    const IGNORE_FRAMING: u32 = 1 << 0;
+    const BEST_RESOLUTION: u32 = 1 << 3;
+    // Looked up when the check runs, not linked: the system marks the call for removal, and a
+    // symbol gone from a later system must not keep the application from starting.
+    // SAFETY: a NUL-terminated name; `RTLD_DEFAULT` searches every image the process loaded.
+    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGWindowListCreateImage".as_ptr()) };
+    if symbol.is_null() {
+        return None;
+    }
+    // SAFETY: the symbol is CoreGraphics' `CGWindowListCreateImage`, which has this signature.
+    let capture: Capture = unsafe { std::mem::transmute::<*mut libc::c_void, Capture>(symbol) };
+    let null = CGRect::new(
+        CGPoint::new(f64::INFINITY, f64::INFINITY),
+        CGSize::new(0.0, 0.0),
+    );
+    let number = u32::try_from(window.windowNumber()).ok()?;
+    // SAFETY: the window is this process's and on the screen; the image follows the Create rule.
+    let image = unsafe {
+        capture(
+            null,
+            INCLUDING_WINDOW,
+            number,
+            IGNORE_FRAMING | BEST_RESOLUTION,
+        )
+    };
+    // SAFETY: a +1 reference the call returned, or null.
+    let image = unsafe { CFRetained::from_raw(NonNull::new(image)?) };
+    let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
+    let frame = window.frame();
+    let scale = rep.pixelsWide() as f64 / frame.size.width;
+    let place = button.convertRect_toView(button.bounds(), None);
+    // The image's rows run down from the window's top; the window's coordinates run up.
+    let top = (frame.size.height - place.origin.y - place.size.height) * scale;
+    let left = place.origin.x * scale;
+    let (wide, high) = (place.size.width * scale, place.size.height * scale);
+    let mut darkest: Option<f64> = None;
+    for y in (top + high * 0.25) as isize..(top + high * 0.75) as isize {
+        for x in (left + wide * 0.2) as isize..(left + wide * 0.8) as isize {
+            let Some(color) = rep.colorAtX_y(x, y) else {
+                continue;
+            };
+            let value = 0.2126 * color.redComponent()
+                + 0.7152 * color.greenComponent()
+                + 0.0722 * color.blueComponent();
+            darkest = Some(darkest.map_or(value, |d| d.min(value)));
+        }
+    }
+    darkest
 }
 
 /// The sidebar's column: the table's scroll view's parent, which holds its ground, the search

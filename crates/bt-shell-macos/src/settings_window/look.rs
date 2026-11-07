@@ -7,9 +7,14 @@
 //! warning and error. The window's appearance is the theme's light or dark, so what AppKit draws
 //! itself (a pop-up, a field, a stepper) stands right on it.
 //!
-//! **No view keeps a colour.** Each colour here is dynamic: it reads the window's palette when it
-//! is drawn ([`ink`]), so a theme that changes is the palette set ([`set`]) and the window drawn
-//! again ([`redraw`]); nothing has to find the labels, boxes and controls it coloured.
+//! **No view keeps a colour, but a button's title.** Each colour here is dynamic: it reads the
+//! window's palette when it is drawn ([`ink`]), so a theme that changes is the palette set
+//! ([`set`]) and the window drawn again ([`redraw`]); nothing has to find the labels, boxes and
+//! controls it coloured. A button is the exception: it reads its title's colour when it is first
+//! drawn on the screen and keeps it — drawing it again does not read it again, nor does a title
+//! given the same colour object — so a window shown before its first palette kept the default
+//! theme's light text on a light button. A button's title is given the palette's colour as it is
+//! ([`fixed`]) and given it again when the palette changes (`ink_button`, `reink_buttons`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -135,6 +140,12 @@ pub(super) fn faded(ink: Ink, alpha: f64) -> Retained<NSColor> {
     let color = unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) };
     INKS.with(|inks| inks.borrow_mut().insert(key, color.clone()));
     color
+}
+
+/// `ink` at `alpha` in the palette as it is now, a plain colour: for a button's title, which keeps
+/// the colour it is first drawn in and is titled again when the palette changes.
+pub(super) fn fixed(ink: Ink, alpha: f64) -> Retained<NSColor> {
+    Tint::of(ink.rgb(&palette()), alpha).color()
 }
 
 /// Marks `view` and everything in it to be drawn again: after a palette change, the colours read

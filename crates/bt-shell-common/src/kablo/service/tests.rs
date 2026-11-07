@@ -73,6 +73,8 @@ struct Fake {
     lives: Mutex<Vec<String>>,
     /// The install is refused ([`Refusal::plain`]): no kablo can be put there now.
     install_refuses: AtomicBool,
+    /// How long the install takes, in milliseconds: a machine too busy to answer at once.
+    install_millis: AtomicU64,
     pane: AtomicBool,
     /// What the pane lookup says of the pane when there is one.
     info: Mutex<PaneInfo>,
@@ -132,6 +134,7 @@ impl Fake {
             log: Mutex::new(Vec::new()),
             lives: Mutex::new(Vec::new()),
             install_refuses: AtomicBool::new(false),
+            install_millis: AtomicU64::new(0),
             pane: AtomicBool::new(true),
             info: Mutex::new(PaneInfo::default()),
             kablo: AtomicBool::new(true),
@@ -336,6 +339,9 @@ impl Backend for Fake {
             .lock()
             .expect("lock")
             .push(format!("install:{}", names(live)));
+        thread::sleep(Duration::from_millis(
+            self.install_millis.load(Ordering::SeqCst),
+        ));
         if self.install_refuses.load(Ordering::SeqCst) {
             return Err(Refusal::plain());
         }
@@ -3510,6 +3516,39 @@ fn an_account_of_this_mac_that_cannot_be_made_is_told_and_leaves_nothing_behind(
     until("the bridge", || world.count("carry") == 1);
 }
 
+/// A launch on a machine too busy to make this Mac's account in a pane's wait: the pane that gave
+/// up is an ordinary one, and the panes right after it are turned away without waiting — but only
+/// while the account is still being made. Once it is there, the next pane is given its terminal
+/// (before, every pane for a minute after the first was an ordinary shell, and the programs the
+/// terminals of a quit kept were shown by none of them).
+#[test]
+fn a_pane_that_gave_up_on_a_slow_account_does_not_turn_away_the_panes_after_it_is_made() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_millis.store(1500, Ordering::SeqCst);
+    let rig = Rig::kept("here-slow", world.clone(), ledger.clone(), END_GRACE);
+
+    let wait = Duration::from_millis(300);
+    assert!(
+        rig.service
+            .open_local(&a_pane(), a_shell(), MAC, wait)
+            .is_err(),
+        "the first pane gives up while the account is being made"
+    );
+    assert!(
+        rig.service
+            .open_local(&a_pane(), a_shell(), MAC, wait)
+            .is_err(),
+        "and the next one is not made to wait for it too"
+    );
+    until("the account", || ledger.known(local::ACCOUNT).is_some());
+    let stream = rig
+        .service
+        .open_local(&a_pane(), a_shell(), MAC, Duration::from_secs(15))
+        .expect("a terminal once the account is there");
+    assert!(stream.silence.is_none());
+}
+
 #[test]
 fn a_terminal_is_this_macs_by_its_account_alone() {
     let shown = |account: &str| Shown {
@@ -3760,9 +3799,11 @@ fn a_pane_that_gave_up_waiting_leaves_no_terminal_behind() {
             .is_some_and(|id| world.bridge().terminated(id) == Some(false))
     });
 
-    // The wait that ran out is not paid again by the next pane: it is an ordinary one at once.
+    // The account was made meanwhile: the next pane is given a terminal at once, on the bridge
+    // that is there, and no wait is paid again
+    // ([`a_pane_that_gave_up_on_a_slow_account_does_not_turn_away_the_panes_after_it_is_made`]).
     let again = Instant::now();
-    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert!(open_local(&rig, &a_pane()).is_ok());
     assert!(again.elapsed() < Duration::from_secs(1));
     assert_eq!(world.count("carry"), 1);
 }
@@ -3963,6 +4004,42 @@ impl Comeback {
         )
         .expect("a second service")
     }
+}
+
+/// A terminal that comes back with a past larger than what the bridge lets wait for slow panes
+/// ([`HIGH_WATER`]): the pane does not read it before it is given its stream, and it is given its
+/// stream only once the server's list says the terminal is still there. Counted with what the
+/// account's panes have not taken, that past stopped the bridge before the list could come, the
+/// pane gave up and was an ordinary shell — and so was every pane after it, the bridge never
+/// moving again. The pane is given its terminal and reads the whole of its past.
+#[test]
+fn a_terminal_with_a_past_larger_than_the_bridge_holds_back_is_shown_again() {
+    let back = Comeback::leaves("local-large-past", b"one\r\n");
+    let id = back.terminal.clone();
+    let line = [b'x'; 1023];
+    for _ in 0..(3 * HIGH_WATER / 1024) {
+        back.world.bridge().write(&id, &line);
+        back.world.bridge().write(&id, b"\n");
+    }
+    back.world.bridge().write(&id, b"last\r\n");
+
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(10))
+        .expect("its terminal, past and all");
+    assert_eq!(stream.pid, crate::kablo::fake::FAKE_PID);
+    let mut mac = Pane::of(stream);
+    // Read to the end of the past, looking only at what came last.
+    let mut read = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    while !read.ends_with(b"last\r\n") {
+        let n = mac.master.read(&mut chunk).expect("the terminal's bytes");
+        assert_ne!(n, 0, "the stream ended after {} bytes", read.len());
+        read.extend_from_slice(&chunk[..n]);
+    }
+    assert!(read.starts_with(b"one\r\n"));
+    assert!(read.len() > 3 * HIGH_WATER, "{}", read.len());
+    second.stop();
 }
 
 #[test]
@@ -4176,10 +4253,13 @@ fn what_a_crash_left_of_this_macs_is_ended_by_the_first_connection_and_not_shown
     second.stop();
 }
 
+/// The launch after a quit that kept the programs: nothing it does ends a terminal the bateri
+/// before left, whether or not a pane of it showed the terminal again. It is told when this Mac's
+/// account is there — and only then, since before it no pane can be given one — and the terminals
+/// no pane shows are still in the ledger, to be shown in panes of their own.
 #[test]
-#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn what_no_pane_of_the_launch_showed_again_is_ended_and_what_one_did_is_not() {
-    let back = Comeback::leaves("local-unclaimed", b"x\r\n");
+fn a_launch_is_told_when_this_macs_account_is_there_and_ends_none_of_what_was_left() {
+    let back = Comeback::leaves("local-unshown", b"x\r\n");
     let abandoned = SessionId::new("b-00000000000000000000000000000002").expect("a name");
     back.world
         .bridge()
@@ -4189,38 +4269,61 @@ fn what_no_pane_of_the_launch_showed_again_is_ended_and_what_one_did_is_not() {
         &abandoned,
         Some(&PaneUuid::parse("7c3a4b5d-6e7f-4809-91a2-b3c4d5e6f708").expect("a pane")),
     );
+    back.world.install_millis.store(400, Ordering::SeqCst);
+    let installs = back.world.count("install");
     let second = back.arrives();
-    let _mac = Pane::of(
-        second
-            .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
-            .expect("its terminal"),
-    );
-    // The launch has a pane for the terminal that was found, and one for another that did not
-    // get its terminal (an ordinary pane for now): both rows stay, the third goes.
-    let waiting = PaneUuid::parse("8d4b5c6e-7f80-4a91-a2b3-c4d5e6f70819").expect("a pane");
-    back.world
-        .bridge()
-        .add("b-00000000000000000000000000000003", MAC);
-    back.ledger.shown(
-        local::ACCOUNT,
-        &SessionId::new("b-00000000000000000000000000000003").expect("a name"),
-        Some(&waiting),
-    );
-    second.end_unclaimed(&[back.pane.clone(), waiting]);
-    until("the unclaimed one ended", || {
-        back.world.bridge().terminated(&abandoned) == Some(false)
+    let (told, heard) = mpsc::channel();
+    second.when_local(move |ready| {
+        let _ = told.send(ready);
     });
-    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
-    assert!(back.ledger.keeps(local::ACCOUNT, &back.terminal));
-    thread::sleep(Duration::from_millis(200));
+    assert!(
+        heard.recv_timeout(Duration::from_millis(150)).is_err(),
+        "not told while the account is being made"
+    );
+    assert_eq!(heard.recv_timeout(Duration::from_secs(15)), Ok(true));
     assert_eq!(
-        back.world
-            .bridge()
-            .terminated(&SessionId::new("b-00000000000000000000000000000003").expect("a name")),
-        None,
-        "a pane that is there and has no terminal yet keeps the one it had"
+        back.world.count("install"),
+        installs + 1,
+        "the account was made for the asker"
+    );
+    // Asked again, it is told at once.
+    let (told, heard) = mpsc::channel();
+    second.when_local(move |ready| {
+        let _ = told.send(ready);
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_millis(500)), Ok(true));
+    // Nothing was ended: both terminals are the ledger's, and neither pane shows them now.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(back.world.bridge().terminated(&abandoned), None);
+    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
+    assert_eq!(
+        back.ledger.unshown_local(&[]),
+        vec![back.terminal.clone(), abandoned]
     );
     second.stop();
+}
+
+/// Where this Mac's account cannot be made, the asker is told so, at once the next time.
+#[test]
+fn a_launch_is_told_when_this_macs_account_cannot_be_made() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_refuses.store(true, Ordering::SeqCst);
+    let rig = Rig::over("local-when-refused", world.clone());
+    let (told, heard) = mpsc::channel();
+    rig.service.when_local(move |ready| {
+        let _ = told.send(ready);
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_secs(15)), Ok(false));
+    let (told, heard) = mpsc::channel();
+    rig.service.when_local(move |ready| {
+        let _ = told.send(ready);
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_millis(500)), Ok(false));
+    assert_eq!(
+        world.count("install"),
+        1,
+        "a refusal is not asked again at once"
+    );
 }
 
 #[test]
