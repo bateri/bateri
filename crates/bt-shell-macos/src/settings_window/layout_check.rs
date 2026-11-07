@@ -450,11 +450,16 @@ impl SettingsWindow {
         waiting.truncate(1);
         let mut waiting_sources = sources_of(&waiting);
         waiting_sources.push("acme/fresh".to_owned());
-        let scenes: [(&str, Vec<String>, Vec<Status>); 4] = [
-            ("all", sources_of(&all), all),
-            ("long", sources_of(&long), long),
-            ("empty", Vec::new(), Vec::new()),
-            ("looking", waiting_sources, waiting),
+        // A list no check could start for: every row says so instead of looking for ever.
+        let unchecked = sources_of(&all);
+        // A scene's name, the list, and the statuses (`None`: no check could start).
+        type Scene = (&'static str, Vec<String>, Option<Vec<Status>>);
+        let scenes: [Scene; 5] = [
+            ("all", sources_of(&all), Some(all)),
+            ("long", sources_of(&long), Some(long)),
+            ("empty", Vec::new(), Some(Vec::new())),
+            ("looking", waiting_sources, Some(waiting)),
+            ("unchecked", unchecked, None),
         ];
         sidebar.selectRowIndexes_byExtendingSelection(
             &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Apps)),
@@ -480,7 +485,7 @@ impl SettingsWindow {
                 self.show_selected();
             }
             for (name, sources, statuses) in &scenes {
-                apps.show(self, sources, statuses, false);
+                apps.show(self, sources, statuses.as_deref(), false);
                 apps.sample("", None, false);
                 let Some(content) = window.contentView() else {
                     continue;
@@ -524,7 +529,8 @@ impl SettingsWindow {
                 }
             }
             // The Add field typed in, refused, and looking.
-            apps.show(self, &scenes[0].1[..1], &scenes[0].2[..1], false);
+            let first = scenes[0].2.as_deref().map(|all| &all[..1]);
+            apps.show(self, &scenes[0].1[..1], first, false);
             for (name, typed, error, looking) in [
                 ("typing", "acme/notes", None, false),
                 ("looking-up", "acme/notes", None, true),

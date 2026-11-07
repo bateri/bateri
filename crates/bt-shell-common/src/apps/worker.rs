@@ -26,16 +26,11 @@ const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// opened offline.
 const RETRY: Duration = Duration::from_secs(5 * 60);
 
-/// Whether a check left something that a later try may mend: an address that did not answer (the
-/// network is down, the host is busy) or a file that arrived wrong. A source that is wrong in
-/// itself (a name, a signature, a key) waits for the person, not for the clock.
+/// Whether a check left something that a later try may mend ([`Failure::mendable`]).
 fn mendable(found: &[Status]) -> bool {
     found.iter().any(|status| {
-        matches!(
-            (&status.state, &status.problem),
-            (State::Error(Failure::Fetch(_) | Failure::Digest), _)
-                | (_, Some(Failure::Fetch(_) | Failure::Digest))
-        )
+        matches!(&status.state, State::Error(failure) if failure.mendable())
+            || status.problem.as_ref().is_some_and(Failure::mendable)
     })
 }
 

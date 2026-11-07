@@ -118,24 +118,45 @@ pub struct Row {
 
 /// The rows of the page: one for each entry of `sources`, in the list's order, each with the
 /// status the last check gave it (`root` is the apps folder, which says what key was approved).
-/// An entry no check has seen yet is a row that is still looking.
-pub fn rows(sources: &[String], statuses: &[Status], root: &Path) -> Vec<Row> {
+/// An entry no check has seen yet is a row that is still looking. `statuses` is `None` when no
+/// check could be started at all: no row would ever stop looking, so each says it was not checked.
+pub fn rows(sources: &[String], statuses: Option<&[Status]>, root: &Path) -> Vec<Row> {
     sources
         .iter()
-        .map(
-            |source| match statuses.iter().find(|status| status.source == *source) {
+        .map(|source| {
+            let unread = |sign, tip| Row {
+                source: source.clone(),
+                name: name_of(source),
+                version: None,
+                sign,
+                tip,
+                review: None,
+            };
+            let Some(statuses) = statuses else {
+                return unread(
+                    Sign::Warn,
+                    Tip::new(
+                        "Not checked",
+                        "bateri could not start checking. It tries again at the next launch.",
+                    ),
+                );
+            };
+            match statuses.iter().find(|status| status.source == *source) {
                 Some(status) => row(status, root),
-                None => Row {
-                    source: source.clone(),
-                    name: name_of(source),
-                    version: None,
-                    sign: Sign::Busy,
-                    tip: Tip::new("Checking", "bateri is looking at it."),
-                    review: None,
-                },
-            },
-        )
+                None => unread(Sign::Busy, Tip::new("Checking", "bateri is looking at it.")),
+            }
+        })
         .collect()
+}
+
+/// When a source that failed is tried again, in the words of a row's second line: soon for what
+/// the clock may mend ([`Failure::mendable`], the worker's short wait), else at the next day's check.
+fn again(failure: &Failure) -> &'static str {
+    if failure.mendable() {
+        "bateri tries again soon."
+    } else {
+        "bateri tries again tomorrow."
+    }
 }
 
 fn row(status: &Status, root: &Path) -> Row {
@@ -143,11 +164,13 @@ fn row(status: &Status, root: &Path) -> Row {
         .name
         .clone()
         .unwrap_or_else(|| name_of(&status.source));
-    let again = "bateri tries again tomorrow.";
     let (version, sign, tip, review) = match &status.state {
         State::Ready { version, newer } => {
             let (sign, tip) = match (&status.problem, newer) {
-                (Some(problem), _) => (Sign::Warn, Tip::new(plain(&problem.to_string()), again)),
+                (Some(problem), _) => (
+                    Sign::Warn,
+                    Tip::new(plain(&problem.to_string()), again(problem)),
+                ),
                 (None, Some(newer)) => (
                     Sign::Warn,
                     Tip::new(
@@ -211,7 +234,7 @@ fn row(status: &Status, root: &Path) -> Row {
         State::Error(failure) => (
             None,
             Sign::Warn,
-            Tip::new(plain(&failure.to_string()), again),
+            Tip::new(plain(&failure.to_string()), again(failure)),
             None,
         ),
     };
@@ -344,7 +367,7 @@ mod tests {
 
     fn one(status: Status) -> Row {
         let list = vec![status.source.clone()];
-        rows(&list, &[status], Path::new("/nonexistent")).remove(0)
+        rows(&list, Some(&[status]), Path::new("/nonexistent")).remove(0)
     }
 
     #[test]
@@ -478,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_is_said_in_curls_words_without_the_curl_and_tried_again_tomorrow() {
+    fn a_failure_is_said_in_curls_words_without_the_curl_and_tried_again_soon() {
         let row = one(status(
             "dev/flaky",
             None,
@@ -491,7 +514,7 @@ mod tests {
         assert_eq!(row.sign, Sign::Warn);
         assert_eq!(
             row.tip.lines(),
-            "Could not resolve host: github.com\nbateri tries again tomorrow."
+            "Could not resolve host: github.com\nbateri tries again soon."
         );
         // Something usable that could not be refreshed stays shown, with the reason.
         let mut kept = status(
@@ -507,15 +530,35 @@ mod tests {
         assert_eq!(row.sign, Sign::Warn);
         assert_eq!(row.version.as_deref(), Some("0.3.1"));
         assert!(row.tip.title.contains("does not match"));
+        assert_eq!(row.tip.more.as_deref(), Some("bateri tries again soon."));
+        // What the clock does not mend waits for the next day's check.
+        let row = one(status("dev/taken", None, State::Error(Failure::NameTaken)));
+        assert_eq!(
+            row.tip.lines(),
+            "another program already has this name\nbateri tries again tomorrow."
+        );
     }
 
     #[test]
     fn a_source_nobody_has_checked_yet_is_a_ring() {
         let list = vec!["acme/fresh".to_owned()];
-        let rows = rows(&list, &[], Path::new("/nonexistent"));
+        let rows = rows(&list, Some(&[]), Path::new("/nonexistent"));
         assert_eq!(rows[0].sign, Sign::Busy);
         assert_eq!(rows[0].name, "fresh");
         assert_eq!(rows[0].tip.title, "Checking");
+        assert!(rows[0].review.is_none());
+    }
+
+    #[test]
+    fn a_list_no_check_could_start_for_is_not_checked_rather_than_looking_for_ever() {
+        let list = vec!["acme/fresh".to_owned()];
+        let rows = rows(&list, None, Path::new("/nonexistent"));
+        assert_eq!(rows[0].sign, Sign::Warn);
+        assert_eq!(rows[0].name, "fresh");
+        assert_eq!(
+            rows[0].tip.lines(),
+            "Not checked\nbateri could not start checking. It tries again at the next launch."
+        );
         assert!(rows[0].review.is_none());
     }
 

@@ -2929,14 +2929,12 @@ impl SettingsWindow {
             keyboard.refresh(settings, status.locked);
         }
         if let Some(apps) = self.ivars().apps.get() {
-            let statuses = app::delegate(self.mtm())
-                .map(|app| app.apps_statuses())
-                .unwrap_or_default();
+            let statuses = app::delegate(self.mtm()).and_then(|app| app.apps_statuses());
             // A list with an entry that was dropped is not the person's whole one, and a write from
             // this page would write it without that entry (and the program it was meant to be
             // would go with it): the page is read-only until the line in the file is mended.
             let locked = status.locked || !settings.apps_sources_whole;
-            apps.show(self, &settings.apps_sources, &statuses, locked);
+            apps.show(self, &settings.apps_sources, statuses.as_deref(), locked);
         }
         if let Some(banner) = self.ivars().banner.get() {
             banner.show(&status.banner);
@@ -2963,7 +2961,7 @@ impl SettingsWindow {
     pub(crate) fn refresh_apps(
         &self,
         sources: &[String],
-        statuses: &[bt_shell_common::apps::Status],
+        statuses: Option<&[bt_shell_common::apps::Status]>,
     ) {
         if let Some(apps) = self.ivars().apps.get() {
             apps.refresh(self, sources, statuses);

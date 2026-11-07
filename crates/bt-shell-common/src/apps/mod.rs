@@ -175,6 +175,15 @@ pub enum Failure {
     Disk(String),
 }
 
+impl Failure {
+    /// Whether a later try may mend it: an address that did not answer (the network is down, the
+    /// host is busy) or a file that arrived wrong. A source that is wrong in itself (a name, a
+    /// signature, a key) waits for the person, not for the clock.
+    pub fn mendable(&self) -> bool {
+        matches!(self, Self::Fetch(_) | Self::Digest)
+    }
+}
+
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

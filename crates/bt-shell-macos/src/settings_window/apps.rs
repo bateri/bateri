@@ -554,18 +554,24 @@ impl Apps {
     }
 
     /// [`Apps::show`] with the lock the last full refresh found: a check ended, nothing else did.
-    pub(super) fn refresh(&self, window: &SettingsWindow, sources: &[String], statuses: &[Status]) {
+    pub(super) fn refresh(
+        &self,
+        window: &SettingsWindow,
+        sources: &[String],
+        statuses: Option<&[Status]>,
+    ) {
         let locked = self.shown.borrow().locked;
         self.show(window, sources, statuses, locked);
     }
 
-    /// Draws the page from the list, the tracker's statuses and the lock. A page that already
-    /// shows it is left as it is (a hover, a spinning ring, a typed word stay).
+    /// Draws the page from the list, the tracker's statuses (`None`: no check could start) and
+    /// the lock. A page that already shows it is left as it is (a hover, a spinning ring, a typed
+    /// word stay).
     pub(super) fn show(
         &self,
         window: &SettingsWindow,
         sources: &[String],
-        statuses: &[Status],
+        statuses: Option<&[Status]>,
         locked: bool,
     ) {
         let root = crate::apps_root().unwrap_or_default();
@@ -778,7 +784,7 @@ impl Apps {
         // A name a source of the list holds already, landed or still waiting for a yes, is not
         // taken by a second: the first would stand red the moment the second was approved.
         let statuses = app::delegate(window.mtm())
-            .map(|app| app.apps_statuses())
+            .and_then(|app| app.apps_statuses())
             .unwrap_or_default();
         let found = found.and_then(|look| {
             if page::name_claimed(&statuses, &look.name, source) {

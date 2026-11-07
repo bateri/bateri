@@ -6150,13 +6150,13 @@ impl AppDelegate {
         self.ivars().settings_window.borrow().clone()
     }
 
-    /// How each source of the list stood at the last check that finished (the Apps page's rows).
-    pub(crate) fn apps_statuses(&self) -> Vec<bt_shell_common::apps::Status> {
+    /// How each source of the list stood at the last check that finished (the Apps page's rows);
+    /// `None` when no check could be started ([`Self::start_apps`] returned early or failed).
+    pub(crate) fn apps_statuses(&self) -> Option<Vec<bt_shell_common::apps::Status>> {
         self.ivars()
             .apps
             .get()
             .map(bt_shell_common::apps::Tracker::statuses)
-            .unwrap_or_default()
     }
 
     /// A check ended: the Apps page, when it is open, shows what it found. Only that page is drawn
@@ -6166,7 +6166,10 @@ impl AppDelegate {
             return;
         };
         if window.is_open() {
-            window.refresh_apps(&self.file_settings().apps_sources, &self.apps_statuses());
+            window.refresh_apps(
+                &self.file_settings().apps_sources,
+                self.apps_statuses().as_deref(),
+            );
         }
     }
 
