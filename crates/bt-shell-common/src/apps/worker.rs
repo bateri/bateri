@@ -5,6 +5,7 @@
 //! computer's own account there, on this thread, which nothing else waits for.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -60,6 +61,10 @@ struct Sources {
 pub struct Tracker {
     commands: Sender<Sources>,
     statuses: Arc<Mutex<Vec<Status>>>,
+    /// A check is asked for or under way.
+    running: Arc<AtomicBool>,
+    /// When the last check ended.
+    checked: Arc<Mutex<Option<SystemTime>>>,
     /// What the worker was last given, so that the same list is not checked again.
     given: Mutex<(Vec<String>, bool)>,
 }
@@ -90,6 +95,10 @@ impl Tracker {
         let (commands, inbox) = mpsc::channel::<Sources>();
         let statuses = Arc::new(Mutex::new(Vec::new()));
         let shared = Arc::clone(&statuses);
+        // The first check begins at once.
+        let running = Arc::new(AtomicBool::new(true));
+        let checked_at = Arc::new(Mutex::new(None));
+        let (busy, ended) = (Arc::clone(&running), Arc::clone(&checked_at));
         let given = Mutex::new((sources.clone(), authoritative));
         let mut current = Sources {
             list: sources,
@@ -106,6 +115,7 @@ impl Tracker {
                         elapsed(at).is_ok_and(|elapsed| elapsed >= wait) || SystemTime::now() < at
                     });
                     if due {
+                        busy.store(true, Ordering::SeqCst);
                         let found = check(
                             &config,
                             &current.list,
@@ -116,6 +126,8 @@ impl Tracker {
                         wait = wait_after(&found, &mut backoff);
                         *lock(&shared) = found;
                         checked = Some(SystemTime::now());
+                        *lock(&ended) = checked;
+                        busy.store(false, Ordering::SeqCst);
                         after();
                     }
                     // Sleeps until the check that is next, or the hour at most (the clock is
@@ -141,6 +153,8 @@ impl Tracker {
         Ok(Self {
             commands,
             statuses,
+            running,
+            checked: checked_at,
             given,
         })
     }
@@ -153,6 +167,7 @@ impl Tracker {
             return;
         }
         *given = (sources.clone(), authoritative);
+        self.running.store(true, Ordering::SeqCst);
         // The worker is gone only when the process is ending.
         let _ = self.commands.send(Sources {
             list: sources,
@@ -163,10 +178,31 @@ impl Tracker {
     /// Checks the list the worker has now, at once: a key was approved, or the person asked.
     pub fn refresh(&self) {
         let (list, authoritative) = lock(&self.given).clone();
+        // Said at once, before the worker wakes: the page shows the ring from the click on.
+        self.running.store(true, Ordering::SeqCst);
         let _ = self.commands.send(Sources {
             list,
             authoritative,
         });
+    }
+
+    /// Whether a check is asked for or under way.
+    pub fn running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// When the last check ended; `None` until the first one has.
+    pub fn checked_at(&self) -> Option<SystemTime> {
+        *lock(&self.checked)
+    }
+
+    /// All the page is drawn from, at once.
+    pub fn tracked(&self) -> super::page::Tracked {
+        super::page::Tracked {
+            statuses: self.statuses(),
+            running: self.running(),
+            checked: self.checked_at(),
+        }
     }
 
     /// How each source stood at the last check that finished; empty until the first one has.

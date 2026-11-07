@@ -680,6 +680,8 @@ fn the_worker_checks_at_start_and_again_when_the_list_changes() {
     // What the application does with a landed program runs after every check, on the worker.
     wait_for("the first check", || checks.load(Ordering::SeqCst) == 1);
     assert!(!tracker.statuses().is_empty());
+    assert!(!tracker.running());
+    assert!(tracker.checked_at().is_some());
     assert!(matches!(
         tracker.statuses()[0].state,
         State::Awaiting { changed: false, .. }
@@ -975,7 +977,7 @@ fn approving_keeps_the_key_and_the_list_the_page_writes_lands_the_program() {
     // The check the list change starts lands it, and the page shows a green dot.
     let statuses = world.check(&[SOURCE]);
     assert_eq!(statuses[0].state, ready("1.0.0"));
-    let rows = page::rows(&list, Some(&statuses), world.root.path());
+    let rows = page::rows(&list, Some(&page::Checks::of(&statuses)), world.root.path());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "demo");
     assert_eq!(rows[0].version.as_deref(), Some("1.0.0"));
@@ -1012,7 +1014,11 @@ fn a_waiting_row_is_reviewed_and_a_changed_key_is_shown_beside_the_one_approved(
     let list = vec![SOURCE.to_owned()];
 
     // A source nobody approved: a warning, and Review with the key that signed.
-    let rows = page::rows(&list, Some(&world.check(&[SOURCE])), world.root.path());
+    let rows = page::rows(
+        &list,
+        Some(&page::Checks::of(&world.check(&[SOURCE]))),
+        world.root.path(),
+    );
     assert_eq!(rows[0].sign, Sign::Warn);
     assert_eq!(rows[0].tip.title, "Waiting for approval");
     let review = rows[0].review.clone().expect("a decision is asked for");
@@ -1023,7 +1029,11 @@ fn a_waiting_row_is_reviewed_and_a_changed_key_is_shown_beside_the_one_approved(
 
     // The author's key changes: red, the approved key beside the new one, updates stopped.
     Release::new("demo", "1.1.0").publish(&world.net, SOURCE, &other);
-    let rows = page::rows(&list, Some(&world.check(&[SOURCE])), world.root.path());
+    let rows = page::rows(
+        &list,
+        Some(&page::Checks::of(&world.check(&[SOURCE]))),
+        world.root.path(),
+    );
     assert_eq!(rows[0].sign, Sign::Bad);
     assert_eq!(
         rows[0].tip.more.as_deref(),
@@ -1034,7 +1044,11 @@ fn a_waiting_row_is_reviewed_and_a_changed_key_is_shown_beside_the_one_approved(
     assert_eq!(review.key, other.key());
     // Trusting the new key is what lets the release land.
     page::approve(world.root.path(), &review).expect("the key is kept");
-    let rows = page::rows(&list, Some(&world.check(&[SOURCE])), world.root.path());
+    let rows = page::rows(
+        &list,
+        Some(&page::Checks::of(&world.check(&[SOURCE]))),
+        world.root.path(),
+    );
     assert_eq!(rows[0].sign, Sign::Good);
     assert_eq!(rows[0].version.as_deref(), Some("1.1.0"));
 }
@@ -1055,7 +1069,7 @@ fn removing_takes_the_row_and_the_folder_away_and_remembers_the_name() {
     let list = page::without(&list, SOURCE);
     assert_eq!(list, ["bateri/textpen"]);
     let statuses = world.check(&[]);
-    let rows = page::rows(&list, Some(&statuses), world.root.path());
+    let rows = page::rows(&list, Some(&page::Checks::of(&statuses)), world.root.path());
     assert!(rows.iter().all(|row| row.source != SOURCE));
     assert!(!world.root.path().join("demo").exists());
     let removed = store::removed(world.root.path(), SystemTime::now());

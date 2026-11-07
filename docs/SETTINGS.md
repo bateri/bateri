@@ -2801,13 +2801,22 @@ time a server of that kind needs it. Old releases on a machine are cleaned the s
 one before it and anything newer than 30 days stay.
 
 **The Apps page** (Settings ▸ Apps) is this list as rows, under Following, and a field under Add. A row has the
-program's name and version, the source it came from, and at the right a mark and two buttons. The mark is all the
-row says of its state: a green dot when the release in use is the newest, a grey dot when the release has no file for
-this computer (it still runs on the servers it has a file for), a turning ring while bateri has not read the source
-yet, and a triangle when something needs you — orange for a release that waits for a newer bateri, for a key not yet
-approved, or for a check that failed (bateri tries again: within the hour when the network did not answer, the next day otherwise), red when the key changed. Hold the pointer on a
-mark and a tip says what it means in one line and what will happen in a second; a screen reader reads the same words.
-A name, a version or a source that does not fit its line fades at the end and is whole in its tip.
+program's name and version, the source it came from, and at the right a mark and a trash can, with a button left of
+the mark when the row has something to do. The mark is all the row says of its state: a green dot when the release in
+use is the newest, a grey dot when the release has no file for this computer (it still runs on the servers it has a
+file for), a turning ring while bateri reads the source, and a triangle when something needs you — orange for a
+release that waits for a newer bateri (with Update bateri, the menu's Check for Updates…, in a bateri that updates
+itself), for a key not yet approved, or for a check that failed, red when the key changed. A check that failed where a
+later try may mend it — the network did not answer, a file arrived wrong, the disk was full — has Try Again, and bateri
+also tries again by itself within the hour; one its author has to fix (a name taken or reserved, a signature or an
+`app.json` that does not hold) has no button and says so. Hold the pointer on a mark for half a second and a tip says
+what it means in one line and what will happen in a second (on a green dot, when bateri last checked); a screen reader
+reads the same words. A name, a version or a source that does not fit its line fades at the end and is whole in its
+tip.
+
+*Check Now*, at the end of the Following title, checks the whole list at once instead of waiting for the day's check;
+while it runs the button is a turning ring. When bateri could not start checking at all, every row is an orange
+triangle and Check Now starts it again.
 
 *Add.* Type `user/repo` or the address of an `app.json` and press Enter or Add. bateri reads the source first, and
 writes nothing: if the program is signed with the key that comes with bateri it is added at once; any other program

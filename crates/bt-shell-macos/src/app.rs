@@ -6150,13 +6150,31 @@ impl AppDelegate {
         self.ivars().settings_window.borrow().clone()
     }
 
-    /// How each source of the list stood at the last check that finished (the Apps page's rows);
-    /// `None` when no check could be started ([`Self::start_apps`] returned early or failed).
-    pub(crate) fn apps_statuses(&self) -> Option<Vec<bt_shell_common::apps::Status>> {
+    /// What the tracker says (the Apps page's rows): how each source stood at the last check
+    /// that finished, whether one runs, when the last ended; `None` when no check could be started
+    /// ([`Self::start_apps`] returned early or failed).
+    pub(crate) fn apps_tracked(&self) -> Option<bt_shell_common::apps::page::Tracked> {
         self.ivars()
             .apps
             .get()
-            .map(bt_shell_common::apps::Tracker::statuses)
+            .map(bt_shell_common::apps::Tracker::tracked)
+    }
+
+    /// Whether this bateri can look for a newer one: Sparkle is in the bundle (`make bundle`),
+    /// as for the menu's "Check for Updates…".
+    pub(crate) fn can_update(&self) -> bool {
+        self.ivars().updater.get().is_some()
+    }
+
+    /// Apps ▸ Update bateri: the menu's "Check for Updates…".
+    pub(crate) fn apps_update_bateri(&self) {
+        if let Some(updater) = self.ivars().updater.get() {
+            // SAFETY: `checkForUpdates:` is `SPUStandardUpdaterController`'s documented,
+            // single-`id`-argument, no-return action; nil is the sender.
+            let () = unsafe {
+                objc2::msg_send![&*updater.controller, checkForUpdates: std::ptr::null::<AnyObject>()]
+            };
+        }
     }
 
     /// A check ended: the Apps page, when it is open, shows what it found. Only that page is drawn
@@ -6168,16 +6186,20 @@ impl AppDelegate {
         if window.is_open() {
             window.refresh_apps(
                 &self.file_settings().apps_sources,
-                self.apps_statuses().as_deref(),
+                self.apps_tracked().as_ref(),
             );
         }
     }
 
-    /// Checks the list again now: a key was approved on the Apps page.
+    /// Checks the list again now: a key was approved on the Apps page, or the person asked
+    /// (Check Now, Try Again). A tracker that never started is started; the page shows the ring
+    /// at once.
     pub(crate) fn apps_check_now(&self) {
-        if let Some(tracker) = self.ivars().apps.get() {
-            tracker.refresh();
+        match self.ivars().apps.get() {
+            Some(tracker) => tracker.refresh(),
+            None => self.start_apps(),
         }
+        self.apps_changed();
     }
 
     /// The settings file was read and is the person's: the programs follow its list (a list the

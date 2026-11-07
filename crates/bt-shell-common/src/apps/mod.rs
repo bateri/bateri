@@ -177,10 +177,11 @@ pub enum Failure {
 
 impl Failure {
     /// Whether a later try may mend it: an address that did not answer (the network is down, the
-    /// host is busy) or a file that arrived wrong. A source that is wrong in itself (a name, a
-    /// signature, a key) waits for the person, not for the clock.
+    /// host is busy), a file that arrived wrong, or a folder that could not be written (a full
+    /// disk). A source that is wrong in itself (a name, a signature, a key) waits for its author
+    /// or the person, not for the clock.
     pub fn mendable(&self) -> bool {
-        matches!(self, Self::Fetch(_) | Self::Digest)
+        matches!(self, Self::Fetch(_) | Self::Digest | Self::Disk(_))
     }
 }
 

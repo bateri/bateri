@@ -114,13 +114,68 @@ pub struct Row {
     pub tip: Tip,
     /// What the Review button opens, when the row asks for a decision.
     pub review: Option<Review>,
+    /// Another button the row has, beside its sign; never with [`Row::review`].
+    pub button: Option<Button>,
+}
+
+/// A row's button other than Review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    /// The source failed where a try may mend it ([`Failure::mendable`]): check the list now.
+    TryAgain,
+    /// A newer release needs a newer bateri: look for one.
+    UpdateBateri,
+}
+
+/// What a tracker says at one moment, owned: what the page is drawn from.
+#[derive(Debug, Clone, Default)]
+pub struct Tracked {
+    /// How each source stood at the last check that finished.
+    pub statuses: Vec<Status>,
+    /// A check is asked for or under way.
+    pub running: bool,
+    /// When the last check ended.
+    pub checked: Option<std::time::SystemTime>,
+}
+
+impl Tracked {
+    /// The rows' view of it, with `when` the words for [`Tracked::checked`].
+    pub fn checks<'a>(&'a self, when: Option<&'a str>) -> Checks<'a> {
+        Checks {
+            statuses: &self.statuses,
+            running: self.running,
+            when,
+        }
+    }
+}
+
+/// What the tracker says of its checks, for the rows.
+#[derive(Debug, Clone, Copy)]
+pub struct Checks<'a> {
+    /// How each source stood at the last check that finished.
+    pub statuses: &'a [Status],
+    /// A check is under way: a row that a try may mend turns while it runs.
+    pub running: bool,
+    /// When the last check ended, in the words of a tip ("today at 12:31").
+    pub when: Option<&'a str>,
+}
+
+impl<'a> Checks<'a> {
+    /// `statuses`, with no check running and no time to say.
+    pub fn of(statuses: &'a [Status]) -> Self {
+        Self {
+            statuses,
+            running: false,
+            when: None,
+        }
+    }
 }
 
 /// The rows of the page: one for each entry of `sources`, in the list's order, each with the
 /// status the last check gave it (`root` is the apps folder, which says what key was approved).
-/// An entry no check has seen yet is a row that is still looking. `statuses` is `None` when no
-/// check could be started at all: no row would ever stop looking, so each says it was not checked.
-pub fn rows(sources: &[String], statuses: Option<&[Status]>, root: &Path) -> Vec<Row> {
+/// An entry no check has seen yet is a row that is still looking. `checks` is `None` when no
+/// check could be started at all: every row says so, and the page's Check Now tries again.
+pub fn rows(sources: &[String], checks: Option<&Checks<'_>>, root: &Path) -> Vec<Row> {
     sources
         .iter()
         .map(|source| {
@@ -131,56 +186,114 @@ pub fn rows(sources: &[String], statuses: Option<&[Status]>, root: &Path) -> Vec
                 sign,
                 tip,
                 review: None,
+                button: None,
             };
-            let Some(statuses) = statuses else {
+            let Some(checks) = checks else {
                 return unread(
                     Sign::Warn,
                     Tip::new(
                         "Not checked",
-                        "bateri could not start checking. It tries again at the next launch.",
+                        // No break inside the button's name.
+                        "bateri could not start checking. Check\u{a0}Now tries again.",
                     ),
                 );
             };
-            match statuses.iter().find(|status| status.source == *source) {
-                Some(status) => row(status, root),
-                None => unread(Sign::Busy, Tip::new("Checking", "bateri is looking at it.")),
+            match checks
+                .statuses
+                .iter()
+                .find(|status| status.source == *source)
+            {
+                Some(status) => row(status, checks, root),
+                None => unread(Sign::Busy, looking()),
             }
         })
         .collect()
 }
 
-/// When a source that failed is tried again, in the words of a row's second line: soon for what
-/// the clock may mend ([`Failure::mendable`], the worker's short wait), else at the next day's check.
-fn again(failure: &Failure) -> &'static str {
-    if failure.mendable() {
-        "bateri tries again soon."
-    } else {
-        "bateri tries again tomorrow."
+/// The words of a row that is being read.
+fn looking() -> Tip {
+    Tip::new("Checking", "bateri is looking at it.")
+}
+
+/// What a row that failed says, under what failed: when it is tried again, for what a try may
+/// mend ([`Failure::mendable`], the worker's short wait); who has to act, for what it cannot.
+fn next(failure: &Failure) -> &'static str {
+    match failure {
+        _ if failure.mendable() => "bateri tries again soon.",
+        Failure::Source => "Fix the address in settings.toml, or remove it.",
+        _ => "Its author has to fix it, or remove it.",
     }
 }
 
-fn row(status: &Status, root: &Path) -> Row {
+/// What failed, as the first line of a tip: curl's words without its lead, an address with no
+/// release said as such, and a capital at the start (`app.json` and bateri keep their own
+/// spelling).
+fn what(failure: &Failure) -> String {
+    if let Failure::Fetch(why) = failure
+        && why.trim_end().ends_with("404")
+    {
+        return "No release has an app.json".to_owned();
+    }
+    capital(plain(&failure.to_string()))
+}
+
+/// `text` with a capital at its start, unless it starts with a name spelled in lower case.
+fn capital(text: String) -> String {
+    if ["app.json", "bateri", "kablo", "pencere"]
+        .iter()
+        .any(|name| text.starts_with(name))
+    {
+        return text;
+    }
+    let mut letters = text.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => text,
+    }
+}
+
+fn row(status: &Status, checks: &Checks<'_>, root: &Path) -> Row {
     let name = status
         .name
         .clone()
         .unwrap_or_else(|| name_of(&status.source));
-    let (version, sign, tip, review) = match &status.state {
+    // A failure a try may mend has Try Again, and turns while a check runs; another says who
+    // has to act.
+    let failed = |failure: &Failure| -> (Sign, Tip, Option<Button>) {
+        if !failure.mendable() {
+            return (Sign::Warn, Tip::new(what(failure), next(failure)), None);
+        }
+        if checks.running {
+            (Sign::Busy, looking(), None)
+        } else {
+            (
+                Sign::Warn,
+                Tip::new(what(failure), next(failure)),
+                Some(Button::TryAgain),
+            )
+        }
+    };
+    let (version, sign, tip, review, button) = match &status.state {
         State::Ready { version, newer } => {
-            let (sign, tip) = match (&status.problem, newer) {
-                (Some(problem), _) => (
-                    Sign::Warn,
-                    Tip::new(plain(&problem.to_string()), again(problem)),
-                ),
+            let (sign, tip, button) = match (&status.problem, newer) {
+                (Some(problem), _) => failed(problem),
                 (None, Some(newer)) => (
                     Sign::Warn,
                     Tip::new(
                         format!("{newer} needs a newer bateri"),
                         &format!("{version} stays until bateri is updated."),
                     ),
+                    Some(Button::UpdateBateri),
                 ),
-                (None, None) => (Sign::Good, Tip::new("Up to date", "")),
+                (None, None) => {
+                    let checked = checks
+                        .when
+                        .map(|when| format!("Checked {when}."))
+                        .unwrap_or_default();
+                    (Sign::Good, Tip::new("Up to date", &checked), None)
+                }
             };
-            (Some(version.to_string()), sign, tip, None)
+            (Some(version.to_string()), sign, tip, None, button)
         }
         State::Awaiting {
             version,
@@ -211,7 +324,7 @@ fn row(status: &Status, root: &Path) -> Row {
                     Tip::new("Waiting for approval", "Review shows who signed it."),
                 )
             };
-            (Some(version.to_string()), sign, tip, Some(review))
+            (Some(version.to_string()), sign, tip, Some(review), None)
         }
         State::WaitsForUpdate { version } => (
             None,
@@ -221,6 +334,7 @@ fn row(status: &Status, root: &Path) -> Row {
                 "It comes when bateri is updated.",
             ),
             None,
+            Some(Button::UpdateBateri),
         ),
         State::NotHere { version } => (
             Some(version.to_string()),
@@ -230,13 +344,12 @@ fn row(status: &Status, root: &Path) -> Row {
                 "It runs on the servers it has a file for.",
             ),
             None,
-        ),
-        State::Error(failure) => (
-            None,
-            Sign::Warn,
-            Tip::new(plain(&failure.to_string()), again(failure)),
             None,
         ),
+        State::Error(failure) => {
+            let (sign, tip, button) = failed(failure);
+            (None, sign, tip, None, button)
+        }
     };
     Row {
         source: status.source.clone(),
@@ -245,6 +358,7 @@ fn row(status: &Status, root: &Path) -> Row {
         sign,
         tip,
         review,
+        button,
     }
 }
 
@@ -280,7 +394,7 @@ pub fn refusal(source: &str, failure: &Failure) -> String {
             format!("No release of {source} has an app.json.")
         }
         other => {
-            let mut text = plain(&other.to_string());
+            let mut text = capital(plain(&other.to_string()));
             text.push('.');
             text
         }
@@ -367,7 +481,13 @@ mod tests {
 
     fn one(status: Status) -> Row {
         let list = vec![status.source.clone()];
-        rows(&list, Some(&[status]), Path::new("/nonexistent")).remove(0)
+        let statuses = [status];
+        rows(
+            &list,
+            Some(&Checks::of(&statuses)),
+            Path::new("/nonexistent"),
+        )
+        .remove(0)
     }
 
     #[test]
@@ -531,18 +651,89 @@ mod tests {
         assert_eq!(row.version.as_deref(), Some("0.3.1"));
         assert!(row.tip.title.contains("does not match"));
         assert_eq!(row.tip.more.as_deref(), Some("bateri tries again soon."));
-        // What the clock does not mend waits for the next day's check.
+        assert_eq!(row.button, Some(Button::TryAgain));
+        // What a try does not mend says who has to act, with a capital, and has no Try Again.
         let row = one(status("dev/taken", None, State::Error(Failure::NameTaken)));
         assert_eq!(
             row.tip.lines(),
-            "another program already has this name\nbateri tries again tomorrow."
+            "Another program already has this name\nIts author has to fix it, or remove it."
         );
+        assert_eq!(row.button, None);
+        // An address with no release says so, not curl's code.
+        let row = one(status(
+            "bateri/textpen",
+            None,
+            State::Error(Failure::Fetch(
+                "curl: (22) The requested URL returned error: 404".to_owned(),
+            )),
+        ));
+        assert_eq!(row.tip.title, "No release has an app.json");
+        assert_eq!(row.button, Some(Button::TryAgain));
+    }
+
+    #[test]
+    fn a_row_a_try_may_mend_turns_while_a_check_runs() {
+        let failed = [status(
+            "dev/flaky",
+            None,
+            State::Error(Failure::Fetch(
+                "curl: (6) Could not resolve host: x".to_owned(),
+            )),
+        )];
+        let list = vec!["dev/flaky".to_owned()];
+        let checks = Checks {
+            statuses: &failed,
+            running: true,
+            when: None,
+        };
+        let row = rows(&list, Some(&checks), Path::new("/nonexistent")).remove(0);
+        assert_eq!(row.sign, Sign::Busy);
+        assert_eq!(row.tip.title, "Checking");
+        assert_eq!(row.button, None);
+    }
+
+    #[test]
+    fn a_row_up_to_date_says_when_it_was_checked_and_one_that_needs_bateri_offers_it() {
+        let ready = [status(
+            "bateri/textpen",
+            Some("textpen"),
+            State::Ready {
+                version: v("1.0.0"),
+                newer: None,
+            },
+        )];
+        let list = vec!["bateri/textpen".to_owned()];
+        let checks = Checks {
+            statuses: &ready,
+            running: false,
+            when: Some("today at 12:31"),
+        };
+        let row = rows(&list, Some(&checks), Path::new("/nonexistent")).remove(0);
+        assert_eq!(row.tip.lines(), "Up to date\nChecked today at 12:31.");
+        assert_eq!(row.button, None);
+        let row = one(status(
+            "mina/sketch",
+            Some("sketch"),
+            State::Ready {
+                version: v("2.1.0"),
+                newer: Some(v("3.0.0")),
+            },
+        ));
+        assert_eq!(row.button, Some(Button::UpdateBateri));
+        let row = one(status(
+            "mina/sketch",
+            Some("sketch"),
+            State::WaitsForUpdate {
+                version: v("3.0.0"),
+            },
+        ));
+        assert_eq!(row.button, Some(Button::UpdateBateri));
     }
 
     #[test]
     fn a_source_nobody_has_checked_yet_is_a_ring() {
         let list = vec!["acme/fresh".to_owned()];
-        let rows = rows(&list, Some(&[]), Path::new("/nonexistent"));
+        let rows = rows(&list, Some(&Checks::of(&[])), Path::new("/nonexistent"));
         assert_eq!(rows[0].sign, Sign::Busy);
         assert_eq!(rows[0].name, "fresh");
         assert_eq!(rows[0].tip.title, "Checking");
@@ -557,8 +748,9 @@ mod tests {
         assert_eq!(rows[0].name, "fresh");
         assert_eq!(
             rows[0].tip.lines(),
-            "Not checked\nbateri could not start checking. It tries again at the next launch."
+            "Not checked\nbateri could not start checking. Check\u{a0}Now tries again."
         );
+        assert_eq!(rows[0].button, None);
         assert!(rows[0].review.is_none());
     }
 

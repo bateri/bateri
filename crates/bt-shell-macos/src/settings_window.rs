@@ -2175,6 +2175,22 @@ define_class!(
             }
         }
 
+        /// Apps: Check Now, or Try Again on a row: the list is checked now.
+        #[unsafe(method(appsCheckNow:))]
+        fn apps_check_now(&self, _sender: Option<&AnyObject>) {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.apps_check_now();
+            }
+        }
+
+        /// Apps: Update bateri on a row.
+        #[unsafe(method(appsUpdateBateri:))]
+        fn apps_update_bateri(&self, _sender: Option<&AnyObject>) {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.apps_update_bateri();
+            }
+        }
+
         /// Apps: the trash can of a row (its tag is the row).
         #[unsafe(method(appsRemove:))]
         fn apps_remove(&self, sender: Option<&AnyObject>) {
@@ -2929,12 +2945,12 @@ impl SettingsWindow {
             keyboard.refresh(settings, status.locked);
         }
         if let Some(apps) = self.ivars().apps.get() {
-            let statuses = app::delegate(self.mtm()).and_then(|app| app.apps_statuses());
+            let tracked = app::delegate(self.mtm()).and_then(|app| app.apps_tracked());
             // A list with an entry that was dropped is not the person's whole one, and a write from
             // this page would write it without that entry (and the program it was meant to be
             // would go with it): the page is read-only until the line in the file is mended.
             let locked = status.locked || !settings.apps_sources_whole;
-            apps.show(self, &settings.apps_sources, statuses.as_deref(), locked);
+            apps.show(self, &settings.apps_sources, tracked.as_ref(), locked);
         }
         if let Some(banner) = self.ivars().banner.get() {
             banner.show(&status.banner);
@@ -2961,10 +2977,10 @@ impl SettingsWindow {
     pub(crate) fn refresh_apps(
         &self,
         sources: &[String],
-        statuses: Option<&[bt_shell_common::apps::Status]>,
+        tracked: Option<&bt_shell_common::apps::page::Tracked>,
     ) {
         if let Some(apps) = self.ivars().apps.get() {
-            apps.refresh(self, sources, statuses);
+            apps.refresh(self, sources, tracked);
         }
     }
 
@@ -3571,14 +3587,11 @@ impl SettingsWindow {
 
     fn number(&self, key: Key, min: f64, max: f64, step: f64, width: f64) -> Number {
         let mtm = self.mtm();
-        let field = NSTextField::new(mtm);
-        field.setAlignment(objc2_app_kit::NSTextAlignment::Right);
         // The field in the theme: the system's bezeled field draws its own grey in a dark
         // appearance whatever colour it is given, so the field is bare and stands in a box of the
         // theme's: a step over the card, framed by its line, its digits in the text colour.
-        field.setBezeled(false);
-        field.setBordered(false);
-        field.setDrawsBackground(false);
+        let field = BoxedField::bare(mtm);
+        field.setAlignment(objc2_app_kit::NSTextAlignment::Right);
         field.setTextColor(Some(&look::ink(Ink::Text)));
         let frame = theme_box(mtm, &field, 6.0);
         width_constraint(&frame, width);
@@ -4295,6 +4308,25 @@ impl SettingsWindow {
                 view.widthAnchor()
                     .constraintEqualToAnchor(&page.widthAnchor())
                     .setActive(true);
+                if spec.items.contains(&pages::Item::Followed)
+                    && let (Some(heading), Some(aside)) = (&title, &aside)
+                {
+                    // Check Now at the end of the title line, over the box's right edge.
+                    let head = apps.head();
+                    view.addSubview(head);
+                    activate(&[
+                        head.trailingAnchor()
+                            .constraintEqualToAnchor_constant(&boxed.trailingAnchor(), -4.0),
+                        head.centerYAnchor()
+                            .constraintEqualToAnchor(&heading.centerYAnchor()),
+                        aside
+                            .trailingAnchor()
+                            .constraintLessThanOrEqualToAnchor_constant(
+                                &head.leadingAnchor(),
+                                -8.0,
+                            ),
+                    ]);
+                }
                 if spec.items.contains(&pages::Item::Add) {
                     // What Add refuses is said under its box.
                     let line = apps.note_line();
@@ -4955,6 +4987,61 @@ const POPUP_PAD: f64 = 5.0;
 /// stands `pad` in from the sides, in the middle of the box's height.
 fn theme_box(mtm: MainThreadMarker, content: &NSView, pad: f64) -> Retained<NSBox> {
     theme_box_sized(mtm, content, pad, FIELD_HEIGHT, 6.0)
+}
+
+define_class!(
+    /// A bare text field (no bezel, border or background) that stands in a [`theme_box`]: the
+    /// box is what the person sees as the field, so the focus ring goes round the box, not round
+    /// the text inside it.
+    // SAFETY: NSTextField is designed for subclassing; Drop is not implemented.
+    #[unsafe(super(NSTextField))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriSettingsBoxedField"]
+    pub(super) struct BoxedField;
+
+    unsafe impl NSObjectProtocol for BoxedField {}
+
+    impl BoxedField {
+        #[unsafe(method(focusRingMaskBounds))]
+        fn focus_ring_mask_bounds(&self) -> NSRect {
+            self.framing().map_or_else(|| self.bounds(), |(rect, _)| rect)
+        }
+
+        #[unsafe(method(drawFocusRingMask))]
+        fn draw_focus_ring_mask(&self) {
+            match self.framing() {
+                Some((rect, radius)) => {
+                    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius)
+                        .fill();
+                }
+                None => NSBezierPath::fillRect(self.bounds()),
+            }
+        }
+    }
+);
+
+impl BoxedField {
+    /// A bare field, to be put in a [`theme_box`].
+    pub(super) fn bare(mtm: MainThreadMarker) -> Retained<NSTextField> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        this.setBezeled(false);
+        this.setBordered(false);
+        this.setDrawsBackground(false);
+        Retained::into_super(this)
+    }
+
+    /// The box the field stands in, in the field's own coordinates, and the box's corner.
+    fn framing(&self) -> Option<(NSRect, f64)> {
+        // SAFETY: a plain getter; the superview is retained for the call.
+        let parent = unsafe { self.superview() }?;
+        let frame = parent.downcast::<NSBox>().ok()?;
+        Some((
+            self.convertRect_fromView(frame.bounds(), Some(&frame)),
+            frame.cornerRadius(),
+        ))
+    }
 }
 
 /// [`theme_box`] `height` points tall with a corner of `radius`.

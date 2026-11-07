@@ -20,35 +20,36 @@
 
 use std::cell::{Cell, RefCell};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
 use bt_core::SettingsEdit;
-use bt_shell_common::apps::page::{self, Review, Row as AppRow, Sign};
-use bt_shell_common::apps::{Config, Curl, Failure, Look, Status};
+use bt_shell_common::apps::page::{self, Button, Review, Row as AppRow, Sign, Tracked};
+use bt_shell_common::apps::{Config, Curl, Failure, Look};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
     NSAccessibility, NSAppearanceCustomization, NSBackingStoreType, NSBezelStyle, NSBezierPath,
-    NSBox, NSBoxType, NSButton, NSButtonType, NSControl, NSControlSize, NSEvent, NSFont,
+    NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControl, NSControlSize, NSEvent, NSFont,
     NSGradient, NSImage, NSImageSymbolConfiguration, NSLayoutAttribute, NSLayoutConstraint,
     NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle, NSModalResponse, NSProgressIndicator,
-    NSProgressIndicatorStyle, NSStackView, NSStringDrawing, NSTextField, NSTitlePosition,
+    NSProgressIndicatorStyle, NSShadow, NSStackView, NSStringDrawing, NSTextField, NSTitlePosition,
     NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSAttributedString, NSMutableAttributedString, NSObjectNSDelayedPerforming, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString, ns_string,
+    NSAttributedString, NSCalendar, NSDate, NSDateFormatter, NSLocale, NSMutableAttributedString,
+    NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 
 use super::look::{self, Ink};
 use super::{
-    Row, SettingsWindow, activate, add_pinned, ink_button, pictures, stack, surface, text_label,
-    theme_box_sized, width_constraint, wrapping_text_label,
+    BoxedField, Row, SettingsWindow, activate, add_pinned, ink_button, pictures, stack, surface,
+    text_label, theme_box_sized, width_constraint, wrapping_text_label,
 };
 use crate::app;
 
@@ -67,6 +68,10 @@ const SHEET_TEXT: f64 = SHEET_WIDTH - 2.0 * SHEET_PAD;
 const KEY_LABEL: f64 = 104.0;
 /// How long the toast after a removal stays.
 const TOAST_SECONDS: f64 = 2.6;
+/// How long the pointer rests on a sign, or on a line cut short, before its words show.
+const TIP_DELAY: f64 = 0.45;
+/// The widest a tip grows before its lines wrap.
+const TIP_WIDTH: f64 = 250.0;
 
 // ─── a line that fades ────────────────────────────────────────────────────────
 
@@ -78,7 +83,8 @@ pub(super) struct FadeIvars {
 
 define_class!(
     /// One line of text drawn to the end of its room: what does not fit is not cut with an
-    /// ellipsis but fades into the card in the last 22 points. The whole text is the tool tip.
+    /// ellipsis but fades into the card in the last 22 points. When it is cut, the pointer
+    /// resting on it shows the whole text in a tip ([`show_tip`]).
     // SAFETY: NSView is designed for subclassing; Drop is not implemented.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
@@ -92,6 +98,23 @@ define_class!(
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            tip_wait(self);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            tip_leave(self);
+        }
+
+        #[unsafe(method(showTip:))]
+        fn show_tip(&self, _sender: Option<&AnyObject>) {
+            if self.measure().width > self.bounds().size.width + 0.5 {
+                show_tip(self, &self.ivars().text, None);
+            }
         }
 
         #[unsafe(method(intrinsicContentSize))]
@@ -145,9 +168,9 @@ impl FadeText {
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.setTranslatesAutoresizingMaskIntoConstraints(false);
         let said = NSString::from_str(text);
-        this.setToolTip(Some(&said));
         this.setAccessibilityElement(true);
         this.setAccessibilityLabel(Some(&said));
+        tip_track(&this);
         // The text gives way before what stands beside it.
         this.setContentCompressionResistancePriority_forOrientation(
             250.0,
@@ -174,12 +197,16 @@ impl FadeText {
 
 pub(super) struct SignIvars {
     sign: Sign,
+    /// The tip's two lines ([`page::Tip`]).
+    title: String,
+    more: Option<String>,
 }
 
 define_class!(
     /// A row's state as a mark: a dot (green when all is well, grey when there is nothing to do
     /// here), a turning ring while the shell looks, a triangle (orange, red when a key changed).
-    /// Its words are its tool tip and its accessibility label.
+    /// Its words are the tip the pointer resting on it shows ([`show_tip`]) and its
+    /// accessibility label.
     // SAFETY: NSView is designed for subclassing; Drop is not implemented.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
@@ -193,6 +220,22 @@ define_class!(
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            tip_wait(self);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            tip_leave(self);
+        }
+
+        #[unsafe(method(showTip:))]
+        fn show_tip(&self, _sender: Option<&AnyObject>) {
+            let ivars = self.ivars();
+            show_tip(self, &ivars.title, ivars.more.as_deref());
         }
 
         #[unsafe(method(drawRect:))]
@@ -240,7 +283,11 @@ fn triangle(color: &objc2_app_kit::NSColor) {
 
 impl SignView {
     fn new(mtm: MainThreadMarker, row: &AppRow) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(SignIvars { sign: row.sign });
+        let this = Self::alloc(mtm).set_ivars(SignIvars {
+            sign: row.sign,
+            title: row.tip.title.clone(),
+            more: row.tip.more.clone(),
+        });
         // SAFETY: `initWithFrame:` is NSView's designated initializer; the ivars are set.
         let this: Retained<Self> = unsafe {
             msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(SIGN, SIGN))]
@@ -250,7 +297,7 @@ impl SignView {
         this.heightAnchor()
             .constraintEqualToConstant(SIGN)
             .setActive(true);
-        this.setToolTip(Some(&NSString::from_str(&row.tip.lines())));
+        tip_track(&this);
         this.setAccessibilityElement(true);
         this.setAccessibilityLabel(Some(&NSString::from_str(&row.tip.spoken())));
         if row.sign == Sign::Busy {
@@ -267,6 +314,160 @@ impl SignView {
         }
         this
     }
+}
+
+// ─── when ─────────────────────────────────────────────────────────────────────
+
+/// When a check ended, in the words of a tip: "today at 12:31", "yesterday at 9:05", or
+/// "on 5 Nov at 12:31". The clock follows the person's 12- or 24-hour setting; the words are
+/// English, as the page is.
+fn when(at: SystemTime) -> Option<String> {
+    let seconds = at.duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
+    let date = NSDate::dateWithTimeIntervalSince1970(seconds);
+    let calendar = NSCalendar::currentCalendar();
+    let clock = NSDateFormatter::new();
+    clock.setLocalizedDateFormatFromTemplate(ns_string!("jmm"));
+    let clock = clock.stringFromDate(&date);
+    let day = if calendar.isDateInToday(&date) {
+        "today".to_owned()
+    } else if calendar.isDateInYesterday(&date) {
+        "yesterday".to_owned()
+    } else {
+        let day = NSDateFormatter::new();
+        day.setLocale(Some(&NSLocale::localeWithLocaleIdentifier(ns_string!(
+            "en_US_POSIX"
+        ))));
+        day.setDateFormat(Some(ns_string!("d MMM")));
+        format!("on {}", day.stringFromDate(&date))
+    };
+    Some(format!("{day} at {clock}"))
+}
+
+// ─── the tip ──────────────────────────────────────────────────────────────────
+
+thread_local! {
+    /// The tip on screen: one for the window.
+    static TIP: RefCell<Option<Retained<NSBox>>> = const { RefCell::new(None) };
+}
+
+/// Lets `view` hear the pointer come and go, for its tip.
+fn tip_track(view: &NSView) {
+    let options = NSTrackingAreaOptions::MouseEnteredAndExited
+        | NSTrackingAreaOptions::ActiveInActiveApp
+        | NSTrackingAreaOptions::InVisibleRect;
+    // SAFETY: the owner is the view, which owns the area and outlives it; no user info.
+    let area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            NSRect::ZERO,
+            options,
+            Some(view),
+            None,
+        )
+    };
+    view.addTrackingArea(&area);
+}
+
+/// The pointer came onto `view`: its `showTip:` is sent after [`TIP_DELAY`], unless it leaves.
+fn tip_wait(view: &NSView) {
+    tip_leave(view);
+    // SAFETY: `showTip:` is the view's own method and takes an object argument, nil here; the
+    // request retains the view until it runs or is cancelled.
+    unsafe { view.performSelector_withObject_afterDelay(sel!(showTip:), None, TIP_DELAY) };
+}
+
+/// The pointer left `view`: a tip on its way does not come, one on screen goes.
+fn tip_leave(view: &NSView) {
+    // SAFETY: the target is the view and the selector its own; the argument is the nil the
+    // request was made with.
+    unsafe {
+        NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(
+            view.as_ref(),
+            sel!(showTip:),
+            None,
+        );
+    }
+    hide_tip();
+}
+
+/// The tip goes, if one is on screen.
+pub(super) fn hide_tip() {
+    if let Some(tip) = TIP.with(|tip| tip.borrow_mut().take()) {
+        tip.removeFromSuperview();
+    }
+}
+
+/// `title`, and `more` under it in the dim colour, in a bubble of the window's colours under
+/// `over`, centred on it and kept inside the window (above it when there is no room below).
+/// AppKit's tool tip is not used: it waits longer and wants the pointer still on a 16-point mark,
+/// so a person passing over a sign saw nothing.
+fn show_tip(over: &NSView, title: &str, more: Option<&str>) {
+    hide_tip();
+    let mtm = over.mtm();
+    let Some(content) = over.window().and_then(|window| window.contentView()) else {
+        return;
+    };
+    let line = |text: &str, ink: Ink, weight: f64| {
+        let label = wrapping_text_label(&NSString::from_str(text), mtm);
+        label.setFont(Some(&NSFont::systemFontOfSize_weight(11.5, weight)));
+        label.setTextColor(Some(&look::ink(ink)));
+        label.setPreferredMaxLayoutWidth(TIP_WIDTH - 16.0);
+        label
+    };
+    let title = line(title, Ink::Text, 0.3);
+    let mut lines: Vec<&NSView> = vec![&title];
+    let more = more
+        .filter(|more| !more.is_empty())
+        .map(|more| line(more, Ink::Dim, 0.0));
+    if let Some(more) = &more {
+        lines.push(more);
+    }
+    let column = stack(
+        mtm,
+        &lines,
+        NSUserInterfaceLayoutOrientation::Vertical,
+        1.0,
+        NSLayoutAttribute::Leading,
+    );
+    let tip = NSBox::new(mtm);
+    tip.setBoxType(NSBoxType::Custom);
+    tip.setTitlePosition(NSTitlePosition::NoTitle);
+    tip.setCornerRadius(6.0);
+    tip.setBorderWidth(0.5);
+    tip.setBorderColor(&look::ink(Ink::Line));
+    tip.setFillColor(&look::ink(Ink::Card));
+    fill(&tip, &column, 8.0, 5.5);
+    let shadow = NSShadow::new();
+    shadow.setShadowBlurRadius(10.0);
+    shadow.setShadowOffset(NSSize::new(0.0, -3.0));
+    shadow.setShadowColor(Some(&NSColor::colorWithWhite_alpha(0.0, 0.22)));
+    tip.setWantsLayer(true);
+    tip.setShadow(Some(&shadow));
+    tip.setAccessibilityElement(false);
+    let size = tip.fittingSize();
+    let mark = content.convertRect_fromView(over.bounds(), Some(over));
+    let room = content.bounds();
+    let x = (mark.origin.x + mark.size.width / 2.0 - size.width / 2.0)
+        .min(room.size.width - size.width - 8.0)
+        .max(8.0);
+    // Under the mark: lower on screen, which is a smaller y unless the view is flipped.
+    let (below, above) = if content.isFlipped() {
+        (
+            mark.origin.y + mark.size.height + 6.0,
+            mark.origin.y - 6.0 - size.height,
+        )
+    } else {
+        (
+            mark.origin.y - 6.0 - size.height,
+            mark.origin.y + mark.size.height + 6.0,
+        )
+    };
+    let fits = |y: f64| y >= 0.0 && y + size.height <= room.size.height;
+    let y = if fits(below) { below } else { above };
+    tip.setTranslatesAutoresizingMaskIntoConstraints(true);
+    tip.setFrame(NSRect::new(NSPoint::new(x, y), size));
+    content.addSubview(&tip);
+    TIP.with(|slot| *slot.borrow_mut() = Some(tip));
 }
 
 // ─── the trash can ────────────────────────────────────────────────────────────
@@ -400,6 +601,13 @@ struct Shown {
 /// The Apps page: the list's stack, the Add field and what stands by it.
 pub(super) struct Apps {
     list: Retained<NSStackView>,
+    /// The end of the Following title: Check Now, or the ring while a check runs.
+    head: Retained<NSStackView>,
+    check: Retained<NSButton>,
+    checking: Retained<NSStackView>,
+    /// Whether this bateri can look for a newer one (Sparkle is in the bundle): the rows'
+    /// Update bateri. `None` asks the app; the layout check says yes.
+    updates: Cell<Option<bool>>,
     field: Retained<NSTextField>,
     add: Retained<NSButton>,
     ring: Retained<NSStackView>,
@@ -419,10 +627,7 @@ impl Apps {
             0.0,
             NSLayoutAttribute::Leading,
         );
-        let field = NSTextField::new(mtm);
-        field.setBezeled(false);
-        field.setBordered(false);
-        field.setDrawsBackground(false);
+        let field = BoxedField::bare(mtm);
         field.setTextColor(Some(&look::ink(Ink::Text)));
         let font = field
             .font()
@@ -476,6 +681,48 @@ impl Apps {
             NSLayoutAttribute::CenterY,
         );
         ring.setHidden(true);
+        // SAFETY: as above.
+        let check = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                ns_string!("Check Now"),
+                Some(window.as_ref()),
+                Some(sel!(appsCheckNow:)),
+                mtm,
+            )
+        };
+        check.setTranslatesAutoresizingMaskIntoConstraints(false);
+        check
+            .heightAnchor()
+            .constraintEqualToConstant(22.0)
+            .setActive(true);
+        ink_button(&check, true);
+        let wheel = NSProgressIndicator::initWithFrame(
+            NSProgressIndicator::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(SIGN, SIGN)),
+        );
+        wheel.setStyle(NSProgressIndicatorStyle::Spinning);
+        wheel.setControlSize(NSControlSize::Small);
+        wheel.setIndeterminate(true);
+        width_constraint(&wheel, SIGN);
+        let words = text_label(ns_string!("Checking"), mtm);
+        words.setTextColor(Some(&look::ink(Ink::Dim)));
+        words.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        let checking = stack(
+            mtm,
+            &[&wheel, &words],
+            NSUserInterfaceLayoutOrientation::Horizontal,
+            6.0,
+            NSLayoutAttribute::CenterY,
+        );
+        checking.setHidden(true);
+        let head = stack(
+            mtm,
+            &[&check, &checking],
+            NSUserInterfaceLayoutOrientation::Horizontal,
+            0.0,
+            NSLayoutAttribute::CenterY,
+        );
+        head.setTranslatesAutoresizingMaskIntoConstraints(false);
         let note = wrapping_text_label(ns_string!(""), mtm);
         note.setTextColor(Some(&look::ink(Ink::Error)));
         note.setFont(Some(&NSFont::systemFontOfSize(11.5)));
@@ -496,6 +743,10 @@ impl Apps {
         note_line.setHidden(true);
         Apps {
             list,
+            head,
+            check,
+            checking,
+            updates: Cell::new(None),
             field,
             add,
             ring,
@@ -503,6 +754,11 @@ impl Apps {
             note_line,
             shown: RefCell::new(Shown::default()),
         }
+    }
+
+    /// The end of the Following group's title line: Check Now, or the ring while a check runs.
+    pub(super) fn head(&self) -> &NSStackView {
+        &self.head
     }
 
     /// The row of the Following group: the list's own stack, as wide as the box.
@@ -558,24 +814,47 @@ impl Apps {
         &self,
         window: &SettingsWindow,
         sources: &[String],
-        statuses: Option<&[Status]>,
+        tracked: Option<&Tracked>,
     ) {
         let locked = self.shown.borrow().locked;
-        self.show(window, sources, statuses, locked);
+        self.show(window, sources, tracked, locked);
     }
 
-    /// Draws the page from the list, the tracker's statuses (`None`: no check could start) and
+    /// Draws the page from the list, what the tracker says (`None`: no check could start) and
     /// the lock. A page that already shows it is left as it is (a hover, a spinning ring, a typed
     /// word stay).
     pub(super) fn show(
         &self,
         window: &SettingsWindow,
         sources: &[String],
-        statuses: Option<&[Status]>,
+        tracked: Option<&Tracked>,
         locked: bool,
     ) {
         let root = crate::apps_root().unwrap_or_default();
-        let rows = page::rows(sources, statuses, &root);
+        let when = tracked.and_then(|tracked| tracked.checked).and_then(when);
+        let checks = tracked.map(|tracked| tracked.checks(when.as_deref()));
+        let rows = page::rows(sources, checks.as_ref(), &root);
+        // Check Now does not write: a locked page has it too. An empty list has nothing to check.
+        let running = tracked.is_some_and(|tracked| tracked.running);
+        self.head.setHidden(sources.is_empty());
+        self.check.setHidden(running);
+        self.checking.setHidden(!running);
+        if let Some(wheel) = self.checking.arrangedSubviews().iter().next()
+            && let Some(wheel) = wheel.downcast_ref::<NSProgressIndicator>()
+        {
+            // SAFETY: plain calls on the spinner this page made.
+            unsafe {
+                if running {
+                    wheel.startAnimation(None);
+                } else {
+                    wheel.stopAnimation(None);
+                }
+            }
+        }
+        let updates = self
+            .updates
+            .get()
+            .unwrap_or_else(|| app::delegate(window.mtm()).is_some_and(|app| app.can_update()));
         {
             let shown = self.shown.borrow();
             if shown.rows == rows
@@ -588,6 +867,7 @@ impl Apps {
             }
         }
         let mtm = window.mtm();
+        hide_tip();
         for view in self.list.arrangedSubviews().iter() {
             self.list.removeArrangedSubview(&view);
             view.removeFromSuperview();
@@ -611,7 +891,7 @@ impl Apps {
                 .setActive(true);
         }
         for (at, row) in rows.iter().enumerate() {
-            let view = app_row(mtm, window, row, at, locked);
+            let view = app_row(mtm, window, row, at, locked, updates);
             self.list.addArrangedSubview(&view);
             view.widthAnchor()
                 .constraintEqualToAnchor(&self.list.widthAnchor())
@@ -629,6 +909,7 @@ impl Apps {
     /// the page again), and a lookup under way is let go: its answer, when it comes, finds the
     /// page not waiting for it.
     pub(super) fn closed(&self) {
+        hide_tip();
         for view in self.list.arrangedSubviews().iter() {
             self.list.removeArrangedSubview(&view);
             view.removeFromSuperview();
@@ -784,7 +1065,8 @@ impl Apps {
         // A name a source of the list holds already, landed or still waiting for a yes, is not
         // taken by a second: the first would stand red the moment the second was approved.
         let statuses = app::delegate(window.mtm())
-            .and_then(|app| app.apps_statuses())
+            .and_then(|app| app.apps_tracked())
+            .map(|tracked| tracked.statuses)
             .unwrap_or_default();
         let found = found.and_then(|look| {
             if page::name_claimed(&statuses, &look.name, source) {
@@ -1087,6 +1369,7 @@ fn app_row(
     row: &AppRow,
     at: usize,
     locked: bool,
+    updates: bool,
 ) -> Retained<NSView> {
     let tag = isize::try_from(at).unwrap_or_default();
     let view = NSView::new(mtm);
@@ -1100,14 +1383,24 @@ fn app_row(
     let sign = SignView::new(mtm, row);
     let trash = TrashButton::new(mtm, &row.name, tag, window);
     trash.setEnabled(!locked);
-    let review = row.review.as_ref().map(|_| {
+    // The row's one button, left of its sign: Review (which writes, so not on a locked page),
+    // Try Again, or Update bateri where this bateri can look for a newer one.
+    let action = match (&row.review, row.button) {
+        (Some(_), _) => Some(("Review", sel!(appsReview:), !locked)),
+        (None, Some(Button::TryAgain)) => Some(("Try Again", sel!(appsCheckNow:), true)),
+        (None, Some(Button::UpdateBateri)) if updates => {
+            Some(("Update bateri", sel!(appsUpdateBateri:), true))
+        }
+        _ => None,
+    };
+    let button = action.map(|(title, action, enabled)| {
         // SAFETY: the target is a weak reference to the window, which lives for the whole
         // process; the selector is its own action.
         let button = unsafe {
             NSButton::buttonWithTitle_target_action(
-                ns_string!("Review"),
+                &NSString::from_str(title),
                 Some(window.as_ref()),
-                Some(sel!(appsReview:)),
+                Some(action),
                 mtm,
             )
         };
@@ -1117,8 +1410,8 @@ fn app_row(
             .heightAnchor()
             .constraintEqualToConstant(BUTTON_HEIGHT)
             .setActive(true);
-        ink_button(&button, !locked);
-        button.setEnabled(!locked);
+        ink_button(&button, enabled);
+        button.setEnabled(enabled);
         button
     });
     add_pinned(&view, &name);
@@ -1162,9 +1455,14 @@ fn app_row(
             .bottomAnchor()
             .constraintEqualToAnchor_constant(&view.bottomAnchor(), -super::ROW_PAD_Y),
     ];
-    // The right side, from the trash can inward; the text ends before the leftmost of it.
-    let mut leftmost = trash.leadingAnchor();
-    if let Some(button) = &review {
+    // The right side, from the trash can inward: the sign by the trash can, so every row's sign
+    // stands in one column, and the button left of it; the text ends before the leftmost.
+    constraints.push(
+        sign.trailingAnchor()
+            .constraintEqualToAnchor_constant(&trash.leadingAnchor(), -8.0),
+    );
+    let mut leftmost = sign.leadingAnchor();
+    if let Some(button) = &button {
         add_pinned(&view, button);
         constraints.push(
             button
@@ -1178,11 +1476,6 @@ fn app_row(
         );
         leftmost = button.leadingAnchor();
     }
-    constraints.push(
-        sign.trailingAnchor()
-            .constraintEqualToAnchor_constant(&leftmost, -8.0),
-    );
-    leftmost = sign.leadingAnchor();
     let reach = |anchor: &objc2_app_kit::NSLayoutXAxisAnchor| {
         anchor.constraintLessThanOrEqualToAnchor_constant(&leftmost, -super::ROW_GAP)
     };
@@ -1640,8 +1933,45 @@ impl Apps {
         self.style_add();
     }
 
+    /// For the layout check: whether rows offer Update bateri, whatever the app has.
+    pub(super) fn sample_updates(&self, updates: bool) {
+        self.updates.set(Some(updates));
+    }
+
     /// For the layout check: the Following box's rows.
     pub(super) fn rows_view(&self) -> &NSStackView {
         &self.list
+    }
+
+    /// For the layout check: the tip of row `at`'s sign, as the pointer resting on it shows it;
+    /// `false` when there is no such row.
+    pub(super) fn sample_tip(&self, at: usize) -> bool {
+        hide_tip();
+        let rows = self.list.arrangedSubviews();
+        let Some(sign) = rows.iter().nth(at).and_then(|row| {
+            row.subviews()
+                .iter()
+                .find_map(|view| view.downcast::<SignView>().ok())
+        }) else {
+            return false;
+        };
+        let ivars = sign.ivars();
+        show_tip(&sign, &ivars.title, ivars.more.as_deref());
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn a_check_is_told_by_its_day_and_its_clock() {
+        let now = super::when(SystemTime::now()).expect("now has words");
+        assert!(now.starts_with("today at "), "{now}");
+        let long_ago = SystemTime::now() - Duration::from_secs(10 * 24 * 60 * 60);
+        let then = super::when(long_ago).expect("ten days ago has words");
+        assert!(then.starts_with("on "), "{then}");
+        assert!(then.contains(" at "), "{then}");
     }
 }

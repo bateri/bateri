@@ -330,6 +330,7 @@ impl SettingsWindow {
         problems: &mut Vec<String>,
     ) {
         use bt_core::pencere::apps::Version;
+        use bt_shell_common::apps::page::Tracked;
         use bt_shell_common::apps::{Failure, State, Status};
 
         let ivars = self.ivars();
@@ -452,15 +453,23 @@ impl SettingsWindow {
         waiting_sources.push("acme/fresh".to_owned());
         // A list no check could start for: every row says so instead of looking for ever.
         let unchecked = sources_of(&all);
-        // A scene's name, the list, and the statuses (`None`: no check could start).
-        type Scene = (&'static str, Vec<String>, Option<Vec<Status>>);
-        let scenes: [Scene; 5] = [
-            ("all", sources_of(&all), Some(all)),
-            ("long", sources_of(&long), Some(long)),
-            ("empty", Vec::new(), Some(Vec::new())),
-            ("looking", waiting_sources, Some(waiting)),
+        // A scene's name, the list, and what the tracker says (`None`: no check could start).
+        type Scene = (&'static str, Vec<String>, Option<Tracked>);
+        let tracked = |statuses: Vec<Status>, running: bool| Tracked {
+            statuses,
+            running,
+            checked: Some(std::time::SystemTime::now()),
+        };
+        let scenes: [Scene; 6] = [
+            ("all", sources_of(&all), Some(tracked(all.clone(), false))),
+            // Check Now pressed: the ring in the title, a row a try may mend turning.
+            ("checking", sources_of(&all), Some(tracked(all, true))),
+            ("long", sources_of(&long), Some(tracked(long, false))),
+            ("empty", Vec::new(), Some(tracked(Vec::new(), false))),
+            ("looking", waiting_sources, Some(tracked(waiting, false))),
             ("unchecked", unchecked, None),
         ];
+        apps.sample_updates(true);
         sidebar.selectRowIndexes_byExtendingSelection(
             &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Apps)),
             false,
@@ -485,7 +494,7 @@ impl SettingsWindow {
                 self.show_selected();
             }
             for (name, sources, statuses) in &scenes {
-                apps.show(self, sources, statuses.as_deref(), false);
+                apps.show(self, sources, statuses.as_ref(), false);
                 apps.sample("", None, false);
                 let Some(content) = window.contentView() else {
                     continue;
@@ -527,10 +536,40 @@ impl SettingsWindow {
                         &dir.join(format!("apps-{name}{suffix}-window.png")),
                     );
                 }
+                // A sign's tip, as the pointer resting on it shows it: inside the window, and
+                // pictured for the first rows that have something to say.
+                let tips: &[usize] = match *name {
+                    "all" => &[0, 2, 3, 6],
+                    "unchecked" => &[0],
+                    _ => &[],
+                };
+                for &at in tips {
+                    if !apps.sample_tip(at) {
+                        problems.push(format!("Apps ({name}): row {at} has no sign to show"));
+                        continue;
+                    }
+                    let room = content.bounds();
+                    let tip = content.subviews().iter().last().map(|tip| tip.frame());
+                    match tip {
+                        Some(tip) if contains(room, tip) => {}
+                        _ => problems
+                            .push(format!("Apps ({name}): row {at}'s tip leaves the window")),
+                    }
+                    if let Some(dir) = shots {
+                        picture(
+                            &content,
+                            &dir.join(format!("apps-{name}-tip-{at}{suffix}-window.png")),
+                        );
+                    }
+                }
+                super::apps::hide_tip();
             }
             // The Add field typed in, refused, and looking.
-            let first = scenes[0].2.as_deref().map(|all| &all[..1]);
-            apps.show(self, &scenes[0].1[..1], first, false);
+            let first = scenes[0].2.as_ref().map(|all| Tracked {
+                statuses: all.statuses[..1].to_vec(),
+                ..all.clone()
+            });
+            apps.show(self, &scenes[0].1[..1], first.as_ref(), false);
             for (name, typed, error, looking) in [
                 ("typing", "acme/notes", None, false),
                 ("looking-up", "acme/notes", None, true),
