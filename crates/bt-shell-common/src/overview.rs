@@ -91,6 +91,7 @@ impl Tab {
     pub fn pane_at(&self, x: f64, y: f64) -> Option<u64> {
         self.panes
             .iter()
+            .filter(|pane| !pane.minimized)
             .find(|pane| {
                 let place = pane.place;
                 x >= place.x
@@ -907,8 +908,12 @@ impl Layout {
     }
 
     /// Where pane `pane` of `tab` is drawn, in the view's points: its place in the tab's picture
-    /// less the thin gap between neighbours ([`crate::tabs::inset_tile`]).
+    /// less the thin gap between neighbours ([`crate::tabs::inset_tile`]). `None` for a pane
+    /// minimized to a capsule, which the picture does not show.
     pub fn pane_rect(&self, index: usize, pane: &CardPane) -> Option<Rect> {
+        if pane.minimized {
+            return None;
+        }
         let picture = self.picture(index)?;
         let tile = crate::tabs::inset_tile(pane.place, picture.width, picture.height, PANE_GAP);
         Some(Rect::new(
@@ -1032,6 +1037,8 @@ mod tests {
 
     fn pane(id: u64, place: Rect, focused: bool) -> CardPane {
         CardPane {
+            minimized: false,
+            floating: false,
             id,
             place,
             kind: Kind::Shell,
@@ -1302,6 +1309,28 @@ mod tests {
     }
 
     #[test]
+    fn a_minimized_pane_is_off_the_picture_and_a_search_still_finds_it() {
+        let flat = pane(1, whole(), true);
+        let mut gone = pane(2, Rect::new(0.2, 0.2, 0.4, 0.4), false);
+        gone.minimized = true;
+        let mut split = tab(1, None);
+        split.panes = vec![flat.clone(), gone.clone()];
+        assert_eq!(
+            split.pane_at(0.3, 0.3),
+            Some(1),
+            "the pane under where the card stood"
+        );
+        let mut overview = Overview::new(vec![split], None);
+        {
+            let layout = overview.layout(width_for(1), 0.6);
+            assert!(layout.pane_rect(0, &flat).is_some());
+            assert!(layout.pane_rect(0, &gone).is_none());
+        }
+        overview.set_query("pane 2");
+        assert!(overview.hit(1).is_some_and(|hit| hit.panes.contains(&2)));
+    }
+
+    #[test]
     fn panes_stand_where_the_split_tree_puts_them_a_gap_apart() {
         let left = pane(1, Rect::new(0.0, 0.0, 0.5, 1.0), true);
         let right = pane(2, Rect::new(0.5, 0.0, 0.5, 1.0), false);
@@ -1367,6 +1396,8 @@ mod tests {
     /// A pane on `host` (`None`: this computer), with a kablo account when it is a server's door.
     fn on(id: u64, host: Option<&str>, account: Option<&str>) -> CardPane {
         CardPane {
+            minimized: false,
+            floating: false,
             host: host.map(str::to_owned),
             account: account.map(str::to_owned),
             ..pane(id, whole(), false)
@@ -1574,6 +1605,8 @@ mod tests {
     /// A pane running `program` in `directory`, on `host`.
     fn running(id: u64, program: &str, directory: &str, host: Option<&str>) -> CardPane {
         CardPane {
+            minimized: false,
+            floating: false,
             name: program.to_owned(),
             directory: Some(directory.to_owned()),
             host: host.map(str::to_owned),

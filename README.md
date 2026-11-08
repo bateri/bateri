@@ -96,7 +96,7 @@ curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
 | Equalize splits / zoom split | ⌃⌘= / ⇧⌘↩ |
 | Float pane / dock pane | ⌥⌘↩ |
 | Move floating pane | ⌃⌥⌘ + arrow |
-| Minimize floating pane (or open the last one minimized) | ⌃⌘M |
+| Minimize floating pane (or open the last one minimized) | ⌥⌘M |
 | Hide / show all floating panes | ⌥⇧⌘↩ |
 | Close pane or tab / close window | ⌘W / ⇧⌘W |
 | Find / next / previous | ⌘F / ⌘G / ⇧⌘G |

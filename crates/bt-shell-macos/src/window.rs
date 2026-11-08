@@ -1244,7 +1244,7 @@ define_class!(
             self.selected_tab().float_or_dock();
         }
 
-        /// Window ▸ Minimize Floating Pane (⌃⌘M): the focused floating pane's card becomes a
+        /// Window ▸ Minimize Floating Pane (⌥⌘M): the focused floating pane's card becomes a
         /// capsule; with the keyboard in the flat area the last capsule opens again.
         #[unsafe(method(minimizeFloatingPane:))]
         fn minimize_floating_pane_action(&self, _sender: Option<&AnyObject>) {

@@ -2231,6 +2231,11 @@ pub struct CardPane {
     /// The kablo account of the server the pane is a door to ([`crate::ssh_wrap::host_key`]),
     /// `None` for a pane on this computer and for a plain ssh pane (no load is measured there).
     pub account: Option<String>,
+    /// Its floating card is minimized to a capsule: a picture of the tab leaves it out, as the
+    /// window does, and a search of the big view still finds it.
+    pub minimized: bool,
+    /// It stands in a floating card: a picture of the tab sets it off from what is under it.
+    pub floating: bool,
 }
 
 impl CardPane {
@@ -4901,6 +4906,8 @@ mod tests {
 
     fn pane_on_the_map(id: u64, place: Rect, indicator: Option<Indicator>) -> CardPane {
         CardPane {
+            minimized: false,
+            floating: false,
             id,
             place,
             kind: Kind::Shell,
@@ -5062,6 +5069,8 @@ mod tests {
     fn a_pane_on_the_map_says_what_it_is_doing() {
         let state = |indicator, exit| {
             CardPane {
+                minimized: false,
+                floating: false,
                 indicator,
                 exit,
                 ..pane_on_the_map(1, Rect::new(0.0, 0.0, 1.0, 1.0), None)

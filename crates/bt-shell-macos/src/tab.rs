@@ -1044,7 +1044,7 @@ impl TerminalTab {
         self.ivars().container.floating(self.focused_pane().id())
     }
 
-    /// Whether ⌃⌘M has something to do: the focused pane floats (its card goes), or — from the
+    /// Whether ⌥⌘M has something to do: the focused pane floats (its card goes), or — from the
     /// flat area — a capsule is there to open.
     pub(crate) fn can_minimize_floating(&self) -> bool {
         let layers = self.ivars().container.layers();
@@ -1062,7 +1062,7 @@ impl TerminalTab {
         !layers.cards.is_empty() && layers.cards.iter().all(|card| card.minimized)
     }
 
-    /// ⌃⌘M: the focused floating pane's card becomes a capsule and the keyboard goes back to the
+    /// ⌥⌘M: the focused floating pane's card becomes a capsule and the keyboard goes back to the
     /// pane that had it before; from a flat pane the capsule minimized last opens and takes the
     /// keyboard. A beep when there is nothing to do.
     pub(crate) fn minimize_floating(&self) {
@@ -1088,7 +1088,7 @@ impl TerminalTab {
     /// `bateri minimize p9`: the card holding floating pane `pane` becomes a capsule, or opens
     /// again where it was when it is one — a toggle, like `zoom`. Opening gives the card no
     /// keyboard (`focus pane` does that); minimizing the card the keyboard is in sends it back,
-    /// as ⌃⌘M does. `false` when `pane` does not float.
+    /// as ⌥⌘M does. `false` when `pane` does not float.
     pub(crate) fn minimize_pane(&self, pane: u64) -> bool {
         let mut layers = self.ivars().container.layers();
         let focus = self.focused_pane().id();
@@ -2114,7 +2114,12 @@ impl TerminalTab {
             opened_by: std::iter::once(pane.clone())
                 .chain(self.panes())
                 .find_map(|pane| pane.opener()),
-            panes: self.card_panes(),
+            // The map is the window's picture, and a capsule is not on it.
+            panes: self
+                .card_panes()
+                .into_iter()
+                .filter(|pane| !pane.minimized)
+                .collect(),
             aspect: {
                 let area = self.container().bounds().size;
                 area.height / area.width
@@ -2290,8 +2295,8 @@ impl TerminalTab {
         let panes = self.panes();
         let (hidden, away) = (self.hidden(), self.away());
         let focused = self.focused_pane().id();
-        self.container()
-            .layers()
+        let layers = self.container().layers();
+        layers
             .fractions()
             .into_iter()
             .filter_map(|(id, place)| {
@@ -2310,6 +2315,8 @@ impl TerminalTab {
                     .flatten();
                 Some(CardPane {
                     id,
+                    minimized: layers.is_minimized(id),
+                    floating: layers.floating(id),
                     place,
                     kind: ended.unwrap_or_else(|| pane.program_kind()),
                     face: ended
@@ -2732,7 +2739,7 @@ mod tests {
             let at = source.find(name).expect(name);
             &source[at..at + source[at..].find("\n    }\n").expect("its end")]
         };
-        // ⌃⌘M and ⌥⇧⌘↩ are the model's rules, nothing is decided here...
+        // ⌥⌘M and ⌥⇧⌘↩ are the model's rules, nothing is decided here...
         assert!(body("pub(crate) fn minimize_floating(").contains("layers.minimize_key(focus)"));
         assert!(body("pub(crate) fn toggle_floating_panes(").contains("layers.hide_key(focus)"));
         // ...and a rule that does nothing is a beep.
@@ -2766,7 +2773,7 @@ mod tests {
             let at = source.find(name).expect(name);
             &source[at..at + source[at..].find("\n    }\n").expect("its end")]
         };
-        // ⌃⌘M, ⌥⇧⌘↩ and `bateri minimize` ask the handover before the views move, and hand the
+        // ⌥⌘M, ⌥⇧⌘↩ and `bateri minimize` ask the handover before the views move, and hand the
         // keyboard over through it: a tab in the background does not take the window's.
         let apply = body("fn apply_cards(");
         let asked = apply.find("self.handover(from)").expect(apply);

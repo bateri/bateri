@@ -41,6 +41,38 @@ pub const KEY_STEP: f64 = 0.04;
 /// The tolerance of the geometry's comparisons.
 const EPSILON: f64 = 1e-9;
 
+/// One coordinate of the walk that finds a new card a free spot ([`Layers::clear_spot`]): it moves
+/// by `step` and turns back at either end of its room.
+struct Bounce {
+    at: f64,
+    step: f64,
+    low: f64,
+    high: f64,
+}
+
+impl Bounce {
+    fn new(at: f64, step: f64, low: f64, high: f64) -> Self {
+        Self {
+            at,
+            step,
+            low,
+            high: high.max(low),
+        }
+    }
+
+    fn advance(&mut self) {
+        if !(self.low..=self.high).contains(&(self.at + self.step)) {
+            self.step = -self.step;
+        }
+        self.at = (self.at + self.step).clamp(self.low, self.high);
+    }
+
+    /// How many steps take it there and back, whatever end it starts from.
+    fn round_trip(&self) -> usize {
+        (2.0 * (self.high - self.low) / self.step).ceil() as usize + 2
+    }
+}
+
 /// One press of a card's move or resize key in `direction`, in points, in a tab of `bounds`
 /// ([`KEY_STEP`] of the length it runs along).
 pub fn key_step(direction: Direction, bounds: Rect) -> f64 {
@@ -716,6 +748,13 @@ impl Layers {
         out
     }
 
+    /// Whether `pane` is in a card minimized to a capsule: it still runs, but no picture of the
+    /// tab shows it, since the window does not.
+    pub fn is_minimized(&self, pane: u64) -> bool {
+        self.card_of(pane)
+            .is_some_and(|index| self.cards[index].minimized)
+    }
+
     /// The index of the card holding `pane`.
     pub fn card_of(&self, pane: u64) -> Option<usize> {
         self.cards
@@ -798,8 +837,58 @@ impl Layers {
         let area = Area::opening()
             .wished(at, size, ground.least(&Tree::Leaf(pane)))
             .inside(ground.margins);
+        let area = if at.is_none() {
+            self.clear_spot(area, ground)
+        } else {
+            area
+        };
         self.cards.push(Card::of(pane, area));
         true
+    }
+
+    /// Where a new card meant for `wanted` goes so that it does not cover an open card and hide
+    /// which is which: `wanted` itself while no open card stands there, else the first free spot
+    /// a header's height at a time, right and down, each way turning back at the end of its room.
+    /// The two ways turn at different moments, so even a card as tall as most of the tab finds
+    /// spots: its height runs out in a step or two while its width goes on. A minimized card
+    /// holds no spot. `wanted` again when every spot is taken: the new card is the front one.
+    fn clear_spot(&self, wanted: Area, ground: &Ground<'_>) -> Area {
+        let head = ground.card.head_px() / ground.scale;
+        if head <= 0.0 || ground.bounds.width <= 0.0 || ground.bounds.height <= 0.0 {
+            return wanted;
+        }
+        let (step_x, step_y) = (head / ground.bounds.width, head / ground.bounds.height);
+        let taken = |spot: Area| {
+            self.cards
+                .iter()
+                .filter(|card| !card.minimized)
+                .any(|card| {
+                    (card.area.x - spot.x).abs() < step_x / 2.0
+                        && (card.area.y - spot.y).abs() < step_y / 2.0
+                })
+        };
+        let margins = ground.margins;
+        let mut x = Bounce::new(
+            wanted.x,
+            step_x,
+            margins.left,
+            1.0 - margins.right - wanted.width,
+        );
+        let mut y = Bounce::new(
+            wanted.y,
+            step_y,
+            margins.top,
+            1.0 - margins.bottom - wanted.height,
+        );
+        for _ in 0..x.round_trip().saturating_mul(y.round_trip()) {
+            let spot = Area::new(x.at, y.at, wanted.width, wanted.height);
+            if !taken(spot) {
+                return spot;
+            }
+            x.advance();
+            y.advance();
+        }
+        wanted
     }
 
     /// Floats flat pane `pane` as a card of its own, in front, at `area`. The flat area's only
@@ -833,6 +922,11 @@ impl Layers {
         let area = base
             .wished(at, size, ground.least(&Tree::Leaf(pane)))
             .inside(ground.margins);
+        let area = if at.is_none() {
+            self.clear_spot(area, ground)
+        } else {
+            area
+        };
         self.float(pane, area)
     }
 
@@ -994,7 +1088,7 @@ impl Layers {
         true
     }
 
-    /// ⌃⌘M with the keyboard in `focus`: in a floating pane its card is minimized and the
+    /// ⌥⌘M with the keyboard in `focus`: in a floating pane its card is minimized and the
     /// keyboard goes back; in the flat area the card minimized last is opened and takes the
     /// keyboard. `None` when there is nothing to do (no minimized card).
     pub fn minimize_key(&mut self, focus: u64) -> Option<Focus> {
@@ -1358,6 +1452,104 @@ mod tests {
         let (_, inside) = all.iter().find(|(id, _)| *id == 7).unwrap();
         assert!(near(inside.x, 0.2) && near(inside.y, 0.2));
         assert!(near(inside.width, 0.4) && near(inside.height, 0.4));
+    }
+
+    /// A tab whose cards have a header 34 points tall: a new card's steps are that long.
+    fn headed(min: &dyn Fn(u64) -> Size) -> Ground<'_> {
+        Ground {
+            card: Spacing::DIVIDED.with_head(34.0, 1.0),
+            ..ground(min)
+        }
+    }
+
+    fn corners(layers: &Layers) -> Vec<(f64, f64)> {
+        layers
+            .cards
+            .iter()
+            .map(|card| (card.area.x, card.area.y))
+            .collect()
+    }
+
+    #[test]
+    fn a_new_card_steps_aside_from_the_card_where_it_would_open() {
+        let g = headed(&small);
+        let mut layers = with_cards(vec![]);
+        for pane in 10..13 {
+            assert!(layers.open(pane, None, None, &g));
+        }
+        let at = corners(&layers);
+        let base = Area::opening();
+        assert!(near(at[0].0, base.x) && near(at[0].1, base.y));
+        assert!(near(at[1].0, base.x + 34.0 / 1000.0));
+        assert!(near(at[1].1, base.y + 34.0 / 600.0));
+        assert!(near(at[2].0, base.x + 68.0 / 1000.0));
+    }
+
+    #[test]
+    fn a_card_that_floats_from_the_same_place_steps_aside_too() {
+        let g = headed(&small);
+        let mut layers = with_cards(vec![]);
+        assert!(layers.float_out(2, None, None, &g));
+        layers.flat = pair();
+        assert!(layers.float_out(2, None, None, &g));
+        let at = corners(&layers);
+        assert!(!near(at[0].0, at[1].0));
+    }
+
+    #[test]
+    fn a_tall_card_turns_back_at_the_edges_and_every_card_gets_its_own_spot() {
+        let g = headed(&small);
+        let mut layers = with_cards(vec![]);
+        let size = Some((0.4, 0.8));
+        for pane in 10..24 {
+            assert!(layers.open(pane, None, size, &g));
+        }
+        for card in &layers.cards {
+            assert!(card.area.x >= -1e-9 && card.area.x + card.area.width <= 1.0 + 1e-9);
+            assert!(card.area.y >= -1e-9 && card.area.y + card.area.height <= 1.0 + 1e-9);
+            assert!(near(card.area.width, 0.4) && near(card.area.height, 0.8));
+        }
+        let at = corners(&layers);
+        for (index, one) in at.iter().enumerate() {
+            for other in &at[index + 1..] {
+                assert!(!(near(one.0, other.0) && near(one.1, other.1)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_card_with_nowhere_to_go_opens_where_it_was_meant_to() {
+        let g = headed(&small);
+        let whole = Area::new(0.0, 0.0, 1.0, 1.0);
+        let mut layers = with_cards(vec![Card::of(7, whole)]);
+        assert!(layers.open(10, None, Some((1.0, 1.0)), &g));
+        let at = corners(&layers);
+        assert!(near(at[1].0, 0.0) && near(at[1].1, 0.0));
+    }
+
+    #[test]
+    fn a_card_told_where_to_stand_stands_there_and_a_capsule_holds_no_spot() {
+        let g = headed(&small);
+        let base = Area::opening();
+        let mut layers = with_cards(vec![Card::of(7, base)]);
+        assert!(layers.open(10, Some((base.x, base.y)), None, &g));
+        assert!(near(corners(&layers)[1].0, base.x));
+
+        let mut gone = Card::of(7, base);
+        gone.minimized = true;
+        let mut layers = with_cards(vec![gone]);
+        assert!(layers.open(10, None, None, &g));
+        assert!(near(corners(&layers)[1].0, base.x));
+    }
+
+    #[test]
+    fn only_the_panes_of_a_minimized_card_count_as_minimized() {
+        let mut gone = card(8);
+        gone.minimized = true;
+        let layers = with_cards(vec![card(7), gone]);
+        assert!(layers.is_minimized(8));
+        assert!(!layers.is_minimized(7));
+        assert!(!layers.is_minimized(1));
     }
 
     fn card(pane: u64) -> Card {

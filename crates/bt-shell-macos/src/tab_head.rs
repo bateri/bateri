@@ -215,7 +215,7 @@ mod tests {
         let command =
             bt_shell_common::shortcuts::by_name("minimize_floating_pane").expect("in the table");
         assert_eq!(Tool::Minimize.command(), Some(command.name));
-        assert_eq!(command.defaults, ["ctrl+cmd+m"]);
+        assert_eq!(command.defaults, ["option+cmd+m"]);
     }
 }
 

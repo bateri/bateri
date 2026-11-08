@@ -52,7 +52,7 @@ pub(crate) struct CapsuleIvars {
     look: RefCell<Option<HeadLook>>,
     palette: Cell<Option<Palette>>,
     place: Cell<CapsulePlace>,
-    /// The newest capsule is the one ⌃⌘M opens: its tip names the key.
+    /// The newest capsule is the one ⌥⌘M opens: its tip names the key.
     newest: Cell<bool>,
     /// The pointer is on the pill.
     hot: Cell<bool>,

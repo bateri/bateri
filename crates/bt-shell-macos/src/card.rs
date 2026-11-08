@@ -1114,6 +1114,35 @@ pub(crate) fn draw_footing(rect: NSRect, footing: Footing) {
     rounded(grown(rect, width), radius + width).fill();
 }
 
+/// `footing` for a card drawn `shrink` times its size in a small picture of its tab, `corner` being
+/// its corner there, in the view being drawn in, whichever way up that is. Straight in the view
+/// and with no faded tail: the step the tail hides shows only along a long edge at full size.
+pub(crate) fn draw_small_footing(rect: NSRect, footing: Footing, shrink: f64, corner: f64) {
+    NSGraphicsContext::saveGraphicsState_class();
+    if let Some(context) = NSGraphicsContext::currentContext() {
+        let view_down = if context.isFlipped() { 1.0 } else { -1.0 };
+        let context = context.CGContext();
+        let down =
+            CGContext::convert_size_to_device_space(Some(&context), NSSize::new(0.0, view_down))
+                .height
+                .signum();
+        let tone = srgb(footing.shadow.0, footing.shadow.1).CGColor();
+        CGContext::set_shadow_with_color(
+            Some(&context),
+            NSSize::new(0.0, down * footing.offset * shrink),
+            footing.blur * shrink,
+            Some(&tone),
+        );
+    }
+    srgb([0, 0, 0], 1.0).setFill();
+    rounded(rect, corner).fill();
+    NSGraphicsContext::restoreGraphicsState_class();
+    let (width, tone, alpha) = footing.cut;
+    let width = width * shrink;
+    srgb(tone, alpha).setFill();
+    rounded(grown(rect, width), corner + width).fill();
+}
+
 /// The corner radius of the fill that casts a card's shadow: the card's, less the spread it is
 /// inset by. Never negative — the card's corner is smaller than the spread on the releases before
 /// macOS 26 — because the rings round their corners by this radius plus their distance, and a

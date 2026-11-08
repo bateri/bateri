@@ -194,6 +194,8 @@ pub(crate) struct OverviewIvars {
     link: RefCell<Option<Retained<CADisplayLink>>>,
     /// The pictures' outline ([`edge_of`]).
     edge: Cell<Tint>,
+    /// The theme is a dark one: which footing a floating card stands on in a picture.
+    dark: Cell<bool>,
 }
 
 /// A press on a terminal's tile: a release without a drag opens the terminal, a drag carries it
@@ -488,6 +490,7 @@ impl OverviewView {
             motion: RefCell::new(None),
             link: RefCell::new(None),
             edge: Cell::new(edge_of(theme)),
+            dark: Cell::new(theme.is_dark()),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -605,7 +608,7 @@ impl OverviewView {
         let id = tab.id;
         let pane = layout
             .in_picture(index, x, y)
-            .filter(|_| tab.panes.len() > 1)
+            .filter(|_| tab.panes.iter().filter(|pane| !pane.minimized).count() > 1)
             .and_then(|(fx, fy)| tab.pane_at(fx, fy));
         let before = (state.selected(), state.pointed());
         state.point(id, pane);
@@ -1087,6 +1090,7 @@ impl OverviewView {
         iv.look.set(colours(&theme));
         iv.row_look.set(selected_row(&theme));
         iv.edge.set(edge_of(&theme));
+        iv.dark.set(theme.is_dark());
         let (tabs, labels) = window.overview_facts();
         iv.icons.replace(
             labels
@@ -1355,6 +1359,7 @@ impl OverviewView {
         self.ivars().look.set(colours(theme));
         self.ivars().row_look.set(selected_row(theme));
         self.ivars().edge.set(edge_of(theme));
+        self.ivars().dark.set(theme.is_dark());
         self.ivars()
             .field
             .setTextColor(Some(&colours(theme).text.color()));
@@ -1826,8 +1831,8 @@ impl OverviewView {
     }
 
     /// The hairline round a picture at `rect` ([`edge_of`]): one pixel of the display, inside the
-    /// picture's rounded edge.
-    fn paint_edge(&self, rect: NSRect) {
+    /// picture's rounded edge of `radius`.
+    fn paint_edge(&self, rect: NSRect, radius: f64) {
         let line = 1.0
             / self
                 .window()
@@ -1838,8 +1843,8 @@ impl OverviewView {
                 NSPoint::new(rect.origin.x + inset, rect.origin.y + inset),
                 NSSize::new(rect.size.width - line, rect.size.height - line),
             ),
-            RADIUS - inset,
-            RADIUS - inset,
+            radius - inset,
+            radius - inset,
         );
         path.setLineWidth(line);
         self.ivars().edge.get().color().setStroke();
@@ -2094,7 +2099,7 @@ impl OverviewView {
             NSBezierPath::fillRect(at(picture));
         }
         NSGraphicsContext::restoreGraphicsState_class();
-        self.paint_edge(at(picture));
+        self.paint_edge(at(picture), RADIUS);
         let row = at(name_row);
         let slot = (row.origin.y, row.size.height);
         let left = row.origin.x + 2.0;
@@ -2198,11 +2203,21 @@ impl OverviewView {
             .addClip();
         look.band.color().setFill();
         NSBezierPath::fillRect(at(picture));
+        // A floating card keeps its shadow, edge and corner here, at the size of the picture.
+        let shrink = picture.width / self.bounds().size.width.max(1.0);
+        let corner = card::corner_pt() * shrink;
         for pane in &tab.panes {
             let Some(rect) = layout.pane_rect(index, pane) else {
                 continue;
             };
             let rect = at(rect);
+            if pane.floating {
+                let footing = card::footing(iv.dark.get(), pane.focused);
+                card::draw_small_footing(rect, footing, shrink, corner);
+                NSGraphicsContext::saveGraphicsState_class();
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, corner, corner)
+                    .addClip();
+            }
             if let Some(shot) = shots.get(&(tab.id, pane.id)) {
                 draw_image(shot, rect);
             } else {
@@ -2231,9 +2246,13 @@ impl OverviewView {
                 look.accent.color().setStroke();
                 path.stroke();
             }
+            if pane.floating {
+                NSGraphicsContext::restoreGraphicsState_class();
+                self.paint_edge(rect, corner);
+            }
         }
         NSGraphicsContext::restoreGraphicsState_class();
-        self.paint_edge(at(picture));
+        self.paint_edge(at(picture), RADIUS);
         // The name row: the tab's icon and name from the left, its key at the right and, while it
         // is the selected one, what ↵ does just left of the key — a place of its own, not after
         // the name, so it stands still whatever the name's length. A name longer than its room

@@ -329,7 +329,7 @@ pub const COMMANDS: &[Command] = &[
     command(
         "minimize_floating_pane",
         "minimizeFloatingPane",
-        &["ctrl+cmd+m"],
+        &["option+cmd+m"],
     ),
     command(
         "toggle_floating_panes",
@@ -529,7 +529,7 @@ mod tests {
             ("equalizeSplits", "=", "ck"),
             ("toggleSplitZoom", "\r", "cs"),
             ("toggleFloatPane", "\r", "co"),
-            ("minimizeFloatingPane", "m", "ck"),
+            ("minimizeFloatingPane", "m", "co"),
             ("toggleFloatingPanes", "\r", "cos"),
             ("movePaneToPreviousTab", "{", "co"),
             ("movePaneToNextTab", "}", "co"),
