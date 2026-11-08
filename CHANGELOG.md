@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-09
+
 ### Added
 
 - **Floating panes.** A pane can float over its tab's splits as a card of its own: Float Pane in the Window menu (⌥⌘↩) lifts the focused pane out of the splits and, on a floating one, docks it into the splits where its middle falls, or beside the focused split pane when there is no room there; New Floating Pane opens a new one. A new card that would land right over an open one steps aside, so every header stays in sight. A floating pane has its own place and size. Drag its header to move it, an edge or a corner to resize it, click it to bring it to the front; ⌃⌥⌘ + arrow moves it and ⌃⌘ + arrow resizes it. The splits always keep at least one pane, so the last pane of the splits cannot float. A floating pane is a card in both split styles, a tab restores its cards after a restart, and the pane bar of a floating pane has Dock and Minimize tools where a split pane has Float.
@@ -36,7 +38,6 @@ of every installed copy. A version without a section is not released.
 - **Programs a ⌘Q kept running are no longer ended by the next launch.** When the launch after a quit could not bring back the saved windows, it opened an empty window and ended every program the quit had kept. Now each of those programs comes back in a tab of its own. If a tab comes back as a plain shell because its program could not be reached in time, the program opens in a new tab next to it.
 - **Tabs come back with their programs after a quit when one of them had a lot of output waiting.** A terminal with a large scrollback could hold up the others while the windows were restored, and every tab came back as a plain shell with its program still running out of sight.
 - A window of more than about forty tabs can open another, and all of them come back after a quit. Past that number a new tab did not open, and at the next launch the tabs past it were left out with "Too many open files".
-
 - Open settings.toml in the Settings window no longer looks disabled the first time the window opens in a light theme, and the text of the window's buttons follows a change from one light theme to another.
 - **A program's native page follows your font's options.** Text a page sets in the terminal's font, such as an editor's lines, was drawn with the font's defaults, so Hide Secrets showed an API key in full there and Ligatures off or an alternate letter did not apply. It is now drawn as the terminal draws it, and switching an option changes the open page at once.
 
