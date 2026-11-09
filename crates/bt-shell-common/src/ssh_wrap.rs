@@ -3132,8 +3132,9 @@ mod remote_shells {
         let base = std::fs::canonicalize(&root.0).expect("root");
         let sh = Path::new("/bin/sh");
         let shell = Path::new("/usr/bin/bash");
-        let on = Settings {
-            agents_claude_last_reply: true,
+        let on = Settings::default();
+        let off = Settings {
+            agents_claude_integration: false,
             ..Settings::default()
         };
         let hook = super::reply::REPLIERS[0].hook;
@@ -3150,7 +3151,7 @@ mod remote_shells {
         // (what is wanted, whether the hook is there afterwards)
         let cases = [
             (Wants::of(&on, true), true),
-            (Wants::of(&Settings::default(), true), false),
+            (Wants::of(&off, true), false),
             // The hook calls the command: without the command there is no hook.
             (Wants::of(&on, false), false),
             (Wants::from(true), false),
@@ -4200,7 +4201,7 @@ mod remote_shells {
         let home = std::fs::canonicalize(&root.0).expect("root").join("home");
         std::fs::create_dir_all(&home).expect("home");
         let on = Settings {
-            agents_claude_last_reply: true,
+            agents_claude_integration: true,
             ..Settings::default()
         };
         assert!(

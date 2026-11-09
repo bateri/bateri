@@ -31,8 +31,8 @@ use crate::tabs;
 /// The example's width, in points; its height follows from what it says.
 pub(super) const SAMPLE_WIDTH: f64 = 276.0;
 /// The room above the title and below the place, and at the row's right.
-const PAD_TOP: f64 = 9.0;
-const PAD_BOTTOM: f64 = 10.0;
+const PAD_TOP: f64 = 12.0;
+const PAD_BOTTOM: f64 = 8.0;
 /// The title's line, and the type of the lines under it: the status, the reply and the place.
 const TITLE_ROW: f64 = 18.0;
 const TITLE_TEXT: f64 = 13.0;
@@ -157,7 +157,7 @@ fn reply_lines() -> usize {
     tabs::ask_lines(Some(line_width(REPLY)), text_box().1)
 }
 
-/// The example's height: the title, the status, the new line with the wash round it, the place.
+/// The example's height: the title, the new line with the wash round it, the status, the place.
 fn height() -> f64 {
     PAD_TOP
         + TITLE_ROW
@@ -219,8 +219,6 @@ fn paint_sample(bounds: NSRect, kind: Kind) {
         1.0,
     );
     at += TITLE_ROW;
-    write(STATUS, row(at, 1.0), LINE_TEXT, palette.dim, 1.0);
-    at += tabs::ASK_ROW;
     // The new line, on a wash of the accent that reaches past its text.
     let lines = reply_lines() as f64;
     rounded(
@@ -244,6 +242,8 @@ fn paint_sample(bounds: NSRect, kind: Kind) {
         REPLY_INK,
     );
     at += lines * tabs::ASK_ROW + WASH_PAD;
+    write(STATUS, row(at, 1.0), LINE_TEXT, palette.dim, 1.0);
+    at += tabs::ASK_ROW;
     write(
         PLACE,
         NSRect::new(NSPoint::new(x, at), NSSize::new(room, tabs::PLACE_ROW)),

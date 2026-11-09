@@ -658,7 +658,7 @@ impl SettingsWindow {
                 let settings = Settings {
                     tab_position: position,
                     tab_details: details,
-                    agents_claude_last_reply: on,
+                    agents_claude_integration: on,
                     ..Settings::default()
                 };
                 self.refresh(&settings, resolved, &FileState::Missing, &[], themes);
@@ -677,7 +677,7 @@ impl SettingsWindow {
                 let case = format!("{position:?} and {details:?}, switch {on}");
                 let said = pages::agent_where(&settings);
                 let shown = line.open.isHidden();
-                if controls.claude_last_reply.is_on() != on {
+                if controls.claude_integration.is_on() != on {
                     say(format!(
                         "the switch does not show the file's value ({case})"
                     ));

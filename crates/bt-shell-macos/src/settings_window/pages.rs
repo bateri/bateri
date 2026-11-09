@@ -208,7 +208,7 @@ const SERVERS: &[Group] = &[
 const AGENTS: &[Group] = &[group(
     None,
     &[
-        row(Key::ClaudeLastReply),
+        row(Key::ClaudeIntegration),
         Item::AgentAbout,
         Item::AgentWhere,
     ],
@@ -289,7 +289,7 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::PreviewLimit => "At most",
         Key::DownloadConflict => "If the name exists",
         Key::DownloadNotify => "Notify when done",
-        Key::ClaudeLastReply => "Claude Code",
+        Key::ClaudeIntegration => "Claude Code",
     }
 }
 
@@ -297,13 +297,13 @@ pub(super) fn label(key: Key) -> &'static str {
 /// agent's row of the Agents page ([`reply::REPLIERS`]).
 pub(super) fn lead(key: Key) -> Option<Kind> {
     match key {
-        Key::ClaudeLastReply => reply::REPLIERS.first().map(|agent| agent.kind),
+        Key::ClaudeIntegration => reply::REPLIERS.first().map(|agent| agent.kind),
         _ => None,
     }
 }
 
 /// What the Agents switch does: the sentence under the switch, over the example.
-pub(super) const AGENT_ABOUT: &str = "When Claude Code finishes a turn, its reply appears in its row, between the status and the folder. Sessions already running show it after a restart.";
+pub(super) const AGENT_ABOUT: &str = "When Claude Code finishes a turn, its reply appears in its row, right under its title. Sessions already running show it after a restart.";
 
 /// Where the reply shows now, and whether the way to change that is worth a button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

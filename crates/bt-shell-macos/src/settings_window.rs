@@ -145,6 +145,12 @@ const ROW_GAP: f64 = 14.0;
 /// The room between a row's picture (the Agents page's tile) and its name.
 const LEAD_GAP: f64 = 10.0;
 const ROW_MIN_HEIGHT: f64 = 40.0;
+/// The Agents page's example stands this much further from the sentence over it than a row puts
+/// a part under its text: as far as it stands from the line under it.
+const SAMPLE_ABOVE: f64 = 14.0;
+/// The line under that example is as tall as what it holds, so that its text starts at the same
+/// distance from the example with one line as with two.
+const AGENT_WHERE_MIN_HEIGHT: f64 = 32.0;
 /// The text of a row — its name and description — stands in what is left of the row's width
 /// beside its control; never narrower than this, whatever the control. Wrapped text is given its
 /// width up front: the window's width is fixed, so it is a number and not a layout pass.
@@ -323,7 +329,7 @@ enum Key {
     PythonEnv,
     NodeVersion,
     CommandLevel,
-    ClaudeLastReply,
+    ClaudeIntegration,
 }
 
 impl Key {
@@ -385,7 +391,7 @@ impl Key {
         Key::PythonEnv,
         Key::NodeVersion,
         Key::CommandLevel,
-        Key::ClaudeLastReply,
+        Key::ClaudeIntegration,
     ];
 
     fn tag(self) -> NSInteger {
@@ -457,7 +463,7 @@ impl Key {
             Key::PythonEnv => "shell.python_env",
             Key::NodeVersion => "shell.node_version",
             Key::CommandLevel => "commands.level",
-            Key::ClaudeLastReply => "agents.claude_last_reply",
+            Key::ClaudeIntegration => "agents.claude_integration",
         }
     }
 }
@@ -956,7 +962,7 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
             Some("In the warning color when the project asks for another (.nvmrc).")
         }
         Key::Ports => Some("Click to list them, \u{2318}-click to open one."),
-        Key::ClaudeLastReply => Some("Show its last reply"),
+        Key::ClaudeIntegration => Some("Show its last reply"),
         Key::CommandLevel => Some(command_level_note(settings.commands_level)),
         Key::RemoteIntegration => {
             Some("Not on servers marked Production, unless the Shell menu turns it on.")
@@ -1774,7 +1780,7 @@ struct Controls {
     ports: Retained<ThemeSwitch>,
     python_env: Retained<ThemeSwitch>,
     node_version: Retained<ThemeSwitch>,
-    claude_last_reply: Retained<ThemeSwitch>,
+    claude_integration: Retained<ThemeSwitch>,
     /// The Agents page's line on where the reply shows, with the button beside it.
     agent_where: Option<AgentWhere>,
     dim_splits: Retained<ThemeSwitch>,
@@ -1805,6 +1811,8 @@ struct Row {
     /// The row goes on from the one above (the Agents page's explanation under its switch): no
     /// hairline between them.
     joined: bool,
+    /// How tall the row is at the least ([`ROW_MIN_HEIGHT`] unless the row says otherwise).
+    min_height: Retained<NSLayoutConstraint>,
 }
 
 impl Row {
@@ -2229,7 +2237,7 @@ define_class!(
                 Some(Key::Ports) => Some(SettingsEdit::ShellPorts(on)),
                 Some(Key::PythonEnv) => Some(SettingsEdit::ShellPythonEnv(on)),
                 Some(Key::NodeVersion) => Some(SettingsEdit::ShellNodeVersion(on)),
-                Some(Key::ClaudeLastReply) => Some(SettingsEdit::AgentsClaudeLastReply(on)),
+                Some(Key::ClaudeIntegration) => Some(SettingsEdit::AgentsClaudeIntegration(on)),
                 Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
                 Some(Key::FocusFrame) => Some(SettingsEdit::FocusFrame(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
@@ -2770,7 +2778,7 @@ impl SettingsWindow {
         set_switch(&c.ports, settings.shell_ports);
         set_switch(&c.python_env, settings.shell_python_env);
         set_switch(&c.node_version, settings.shell_node_version);
-        set_switch(&c.claude_last_reply, settings.agents_claude_last_reply);
+        set_switch(&c.claude_integration, settings.agents_claude_integration);
         set_switch(&c.dim_splits, settings.dim_unfocused_splits);
         set_switch(&c.focus_frame, settings.focus_frame);
         set_switch(&c.resize_in_steps, settings.resize_in_steps);
@@ -3909,7 +3917,7 @@ impl SettingsWindow {
         let ports = self.switch(Key::Ports);
         let python_env = self.switch(Key::PythonEnv);
         let node_version = self.switch(Key::NodeVersion);
-        let claude_last_reply = self.switch(Key::ClaudeLastReply);
+        let claude_integration = self.switch(Key::ClaudeIntegration);
         let command_level = self.popup::<CommandLevel>(Key::CommandLevel);
 
         let theme_mode = self.theme_mode();
@@ -4059,7 +4067,7 @@ impl SettingsWindow {
             ports,
             python_env,
             node_version,
-            claude_last_reply,
+            claude_integration,
             agent_where: None,
             dim_splits,
             focus_frame,
@@ -4111,12 +4119,29 @@ impl SettingsWindow {
                         pages::Item::AgentAbout => {
                             // A fixed explanation with the example under it, as wide as the row.
                             let sample = agent_sample::Sample::new(mtm, reply::REPLIERS[0].kind);
+                            let shelf = NSView::new(mtm);
+                            add_pinned(&shelf, &sample);
+                            activate(&[
+                                sample.topAnchor().constraintEqualToAnchor_constant(
+                                    &shelf.topAnchor(),
+                                    SAMPLE_ABOVE,
+                                ),
+                                sample
+                                    .bottomAnchor()
+                                    .constraintEqualToAnchor(&shelf.bottomAnchor()),
+                                sample
+                                    .leadingAnchor()
+                                    .constraintEqualToAnchor(&shelf.leadingAnchor()),
+                                sample
+                                    .trailingAnchor()
+                                    .constraintEqualToAnchor(&shelf.trailingAnchor()),
+                            ]);
                             let mut row = build_row(
                                 mtm,
                                 None,
                                 "",
                                 Parts {
-                                    view: Retained::into_super(sample),
+                                    view: shelf,
                                     controls: Vec::new(),
                                     dim: Vec::new(),
                                 },
@@ -4145,6 +4170,7 @@ impl SettingsWindow {
                                 None,
                             );
                             row.joined = true;
+                            row.min_height.setConstant(AGENT_WHERE_MIN_HEIGHT);
                             agent_where = Some(AgentWhere {
                                 row: rows.len(),
                                 open,
@@ -4558,7 +4584,7 @@ impl Controls {
             Key::Ports => Parts::of(&self.ports),
             Key::PythonEnv => Parts::of(&self.python_env),
             Key::NodeVersion => Parts::of(&self.node_version),
-            Key::ClaudeLastReply => Parts::of(&self.claude_last_reply),
+            Key::ClaudeIntegration => Parts::of(&self.claude_integration),
             Key::DimSplits => Parts::of(&self.dim_splits),
             Key::FocusFrame => Parts::of(&self.focus_frame),
             Key::ResizeInSteps => Parts::of(&self.resize_in_steps),
@@ -4712,7 +4738,7 @@ fn build_row(
         .heightAnchor()
         .constraintGreaterThanOrEqualToConstant(ROW_MIN_HEIGHT);
     let mut constraints = vec![
-        min_height,
+        min_height.clone(),
         separator
             .leadingAnchor()
             .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_PAD_X),
@@ -4786,6 +4812,7 @@ fn build_row(
         note,
         hidden: Cell::new(false),
         joined: false,
+        min_height,
     };
     row.set_note(None, None, None, true);
     row
@@ -5519,7 +5546,7 @@ mod tests {
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
-                    [agents]\nclaude_last_reply = []\n\
+                    [agents]\nclaude_integration = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
                     [commands]\nlevel = []\n\
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
@@ -5585,7 +5612,7 @@ mod tests {
                 Key::Ports => SettingsEdit::ShellPorts(false),
                 Key::PythonEnv => SettingsEdit::ShellPythonEnv(false),
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
-                Key::ClaudeLastReply => SettingsEdit::AgentsClaudeLastReply(true),
+                Key::ClaudeIntegration => SettingsEdit::AgentsClaudeIntegration(true),
                 Key::CommandLevel => SettingsEdit::CommandLevel(CommandLevel::Off),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
                 Key::FocusFrame => SettingsEdit::FocusFrame(true),
@@ -6209,7 +6236,7 @@ mod tests {
         assert_eq!(page_of(Key::CommandLevel), Category::Shell);
         assert_eq!(page_of(Key::StatsInterval), Category::Servers);
         assert_eq!(page_of(Key::DownloadNotify), Category::Servers);
-        assert_eq!(page_of(Key::ClaudeLastReply), Category::Agents);
+        assert_eq!(page_of(Key::ClaudeIntegration), Category::Agents);
     }
 
     /// The Agents page is the table's: the row is named as the table names its agent, and wears
@@ -6217,15 +6244,18 @@ mod tests {
     /// one group, after the switch.
     #[test]
     fn the_agents_page_is_the_agent_tables_one_switch_with_its_explanation() {
-        assert_eq!(pages::label(Key::ClaudeLastReply), reply::REPLIERS[0].name);
         assert_eq!(
-            pages::lead(Key::ClaudeLastReply),
+            pages::label(Key::ClaudeIntegration),
+            reply::REPLIERS[0].name
+        );
+        assert_eq!(
+            pages::lead(Key::ClaudeIntegration),
             Some(reply::REPLIERS[0].kind)
         );
         assert!(
             Key::ALL
                 .into_iter()
-                .filter(|key| *key != Key::ClaudeLastReply)
+                .filter(|key| *key != Key::ClaudeIntegration)
                 .all(|key| pages::lead(key).is_none())
         );
         let groups = pages::groups(Category::Agents);
@@ -6233,19 +6263,19 @@ mod tests {
         assert_eq!(
             groups[0].items,
             [
-                pages::Item::Key(Key::ClaudeLastReply),
+                pages::Item::Key(Key::ClaudeIntegration),
                 pages::Item::AgentAbout,
                 pages::Item::AgentWhere,
             ]
         );
         assert_eq!(Category::Agents.title(), "Agents");
-        assert_eq!(Key::ClaudeLastReply.path(), "agents.claude_last_reply");
+        assert_eq!(Key::ClaudeIntegration.path(), "agents.claude_integration");
         let resolved = Resolved {
             reduce: false,
             scrollbar: ScrollbarMode::Auto,
         };
         assert_eq!(
-            row_description(Key::ClaudeLastReply, &Settings::default(), resolved),
+            row_description(Key::ClaudeIntegration, &Settings::default(), resolved),
             Some("Show its last reply")
         );
     }
@@ -6364,7 +6394,7 @@ mod tests {
             }
         }
         let on = Settings {
-            agents_claude_last_reply: true,
+            agents_claude_integration: true,
             ..Settings::default()
         };
         assert_eq!(

@@ -510,8 +510,9 @@ node_version = true
 level = "own"
 
 [agents]
-# true | false. Shows the last thing Claude Code said under its tab, between its
-# status and its folder, in the side column's Activity and in the tab list
+# true | false. bateri's integration with Claude Code: it shows the last thing
+# Claude Code said right under its tab's title, above its status and its folder,
+# in the side column's Activity and in the tab list
 # (where [appearance] tab_details shows details). It is told by a hook that
 # only the Claude Code sessions started from a bateri terminal after the change
 # get, for that session alone: nothing is written to Claude Code's own files.
@@ -520,7 +521,7 @@ level = "own"
 # A `claude` function of your own, an alias that names the program by its path,
 # a --settings you pass yourself and a Claude Code started from inside another
 # one are left exactly as they are.
-claude_last_reply = false
+claude_integration = true
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a

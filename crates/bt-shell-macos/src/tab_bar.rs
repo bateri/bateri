@@ -5847,9 +5847,9 @@ pub(crate) struct AgentLine {
 }
 
 impl AgentLine {
-    /// What the row says under its status, above where it stands: the question while the agent
-    /// asks (it is what waits for the user), else its last reply. Never both: the row does not
-    /// grow by two texts and the place stays at its foot.
+    /// What the row says right under its title, above its status and where it stands: the
+    /// question while the agent asks (it is what waits for the user), else its last reply. Never
+    /// both: the row does not grow by two texts and the place stays at its foot.
     pub(crate) fn said(&self) -> Option<&str> {
         self.asks.as_deref().or(self.reply.as_deref())
     }

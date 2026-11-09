@@ -25,7 +25,7 @@ pub struct Replier {
     /// agent does not wait for it (`async`) and a failure is its own business, so the turn is
     /// never held or marked by it.
     pub hook: &'static str,
-    /// Whether the user asked for it ([`Settings::agents_claude_last_reply`] for Claude Code).
+    /// Whether the user asked for it ([`Settings::agents_claude_integration`] for Claude Code).
     pub wanted: fn(&Settings) -> bool,
 }
 
@@ -38,7 +38,7 @@ pub const REPLIERS: [Replier; 1] = [Replier {
     kind: Kind::Agent(Agent::ClaudeCode),
     file: "claude.json",
     hook: CLAUDE_HOOK,
-    wanted: |settings| settings.agents_claude_last_reply,
+    wanted: |settings| settings.agents_claude_integration,
 }];
 
 /// The row of the agent a pane runs, if it is one that says what it last answered.
@@ -58,11 +58,11 @@ mod tests {
 
     #[test]
     fn only_an_agent_in_the_table_that_was_asked_for_shows_its_reply() {
-        let off = Settings::default();
-        let on = Settings {
-            agents_claude_last_reply: true,
+        let off = Settings {
+            agents_claude_integration: false,
             ..Settings::default()
         };
+        let on = Settings::default();
         let claude = Kind::Agent(Agent::ClaudeCode);
         assert!(!shows_reply(&off, claude));
         assert!(shows_reply(&on, claude));

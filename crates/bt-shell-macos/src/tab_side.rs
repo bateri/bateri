@@ -1425,7 +1425,9 @@ impl AgentRows {
             // A plain row: its band is the chip's, the details stand under it.
             if let Some(line) = lines.first() {
                 let room = (width - x - tabs::ROW_END).max(0.0);
-                self.draw_details(line, x, tabs::TAB_HEIGHT - 5.0, room, palette);
+                let base = tabs::TAB_HEIGHT - 5.0;
+                let said = self.draw_said(line, x, base, room, palette);
+                self.draw_place(line, x, base + said, room, palette);
             }
             return;
         }
@@ -1506,14 +1508,16 @@ impl AgentRows {
                 AgentTone::Asking => palette.warning,
                 AgentTone::Failed => palette.error,
             };
+            let tops = line_tops(top, self.said_height(line, room));
+            self.draw_said(line, x, tops.said, room, palette);
             draw_line(
                 &line.status,
-                NSRect::new(NSPoint::new(x, top + 23.0), NSSize::new(room, 16.0)),
+                NSRect::new(NSPoint::new(x, tops.status), NSSize::new(room, STATUS_ROW)),
                 DETAIL_TEXT,
                 false,
                 tone,
             );
-            self.draw_details(line, x, top + tabs::AGENT_ROW - 5.0, room, palette);
+            self.draw_place(line, x, tops.place, room, palette);
             if let Some(hint) = hint {
                 draw_line(
                     &hint,
@@ -1534,59 +1538,91 @@ impl AgentRows {
 }
 
 impl AgentRows {
-    /// A line's details from `base` down: what it says — the question it asks, in the title's
-    /// ink and cut at [`tabs::ASK_LINES`] lines, else its last reply, in [`REPLY_INK`] of it and
-    /// ending in `…` where the last line does not hold the rest — and under it, always at the
-    /// row's foot, where it stands, in the dim ink.
-    fn draw_details(&self, line: &AgentLine, x: f64, base: f64, room: f64, palette: Palette) {
+    /// How tall what the line says is, with the row's details on; nothing without them.
+    fn said_height(&self, line: &AgentLine, room: f64) -> f64 {
+        if !self.ivars().details.get() {
+            return 0.0;
+        }
+        let width = line.said().map(Self::ask_width);
+        tabs::ask_lines(width, room) as f64 * tabs::ASK_ROW
+    }
+
+    /// What the line says, from `top` down: the question it asks, in the title's ink and cut at
+    /// [`tabs::ASK_LINES`] lines, else its last reply, in [`REPLY_INK`] of it and ending in `…`
+    /// where the last line does not hold the rest. Gives back how tall it is.
+    fn draw_said(&self, line: &AgentLine, x: f64, top: f64, room: f64, palette: Palette) -> f64 {
+        let height = self.said_height(line, room);
+        let Some(said) = line.said().filter(|_| height > 0.0) else {
+            return 0.0;
+        };
+        let asking = line.asks.is_some();
+        let (_, attributes) = line_type_faded(
+            DETAIL_TEXT,
+            false,
+            palette.title,
+            if asking { 1.0 } else { REPLY_INK },
+            NSLineBreakMode::ByWordWrapping,
+        );
+        let rect = NSRect::new(NSPoint::new(x, top), NSSize::new(room, height));
+        if asking {
+            // SAFETY: the dictionary holds a font, a colour and a paragraph style under
+            // their keys; the text wraps in the box and what is past its foot is not drawn.
+            unsafe {
+                NSString::from_str(said).drawInRect_withAttributes(rect, Some(&attributes));
+            }
+        } else {
+            // SAFETY: as above; the options are AppKit's own, and the view is flipped, so
+            // the rectangle's origin is the text's top left.
+            unsafe {
+                NSString::from_str(said).drawWithRect_options_attributes_context(
+                    rect,
+                    NSStringDrawingOptions::UsesLineFragmentOrigin
+                        | NSStringDrawingOptions::TruncatesLastVisibleLine,
+                    Some(&attributes),
+                    None,
+                );
+            }
+        }
+        height
+    }
+
+    /// Where the line stands, in the dim ink, always at the row's foot; only with the details on.
+    fn draw_place(&self, line: &AgentLine, x: f64, top: f64, room: f64, palette: Palette) {
         if !self.ivars().details.get() {
             return;
-        }
-        let mut at = base;
-        if let Some(said) = line.said() {
-            let lines = tabs::ask_lines(Some(Self::ask_width(said)), room);
-            let asking = line.asks.is_some();
-            let (_, attributes) = line_type_faded(
-                DETAIL_TEXT,
-                false,
-                palette.title,
-                if asking { 1.0 } else { REPLY_INK },
-                NSLineBreakMode::ByWordWrapping,
-            );
-            let rect = NSRect::new(
-                NSPoint::new(x, at),
-                NSSize::new(room, lines as f64 * tabs::ASK_ROW),
-            );
-            if asking {
-                // SAFETY: the dictionary holds a font, a colour and a paragraph style under
-                // their keys; the text wraps in the box and what is past its foot is not drawn.
-                unsafe {
-                    NSString::from_str(said).drawInRect_withAttributes(rect, Some(&attributes));
-                }
-            } else {
-                // SAFETY: as above; the options are AppKit's own, and the view is flipped, so
-                // the rectangle's origin is the text's top left.
-                unsafe {
-                    NSString::from_str(said).drawWithRect_options_attributes_context(
-                        rect,
-                        NSStringDrawingOptions::UsesLineFragmentOrigin
-                            | NSStringDrawingOptions::TruncatesLastVisibleLine,
-                        Some(&attributes),
-                        None,
-                    );
-                }
-            }
-            at += lines as f64 * tabs::ASK_ROW;
         }
         if let Some(place) = &line.place {
             draw_line(
                 place,
-                NSRect::new(NSPoint::new(x, at), NSSize::new(room, tabs::PLACE_ROW)),
+                NSRect::new(NSPoint::new(x, top), NSSize::new(room, tabs::PLACE_ROW)),
                 DETAIL_TEXT,
                 false,
                 palette.dim,
             );
         }
+    }
+}
+
+/// Where the parts of an Activity line start, top-down in the view.
+#[derive(Debug, PartialEq)]
+struct LineTops {
+    said: f64,
+    status: f64,
+    place: f64,
+}
+
+/// How far under the top of an Activity line its title ends, and how tall its status is.
+const UNDER_TITLE: f64 = 23.0;
+const STATUS_ROW: f64 = 16.0;
+
+/// An Activity line that starts at `top`, under its title: what it says (`said` points tall, none
+/// when it says nothing), then its status, then where it stands.
+fn line_tops(top: f64, said: f64) -> LineTops {
+    let first = top + UNDER_TITLE;
+    LineTops {
+        said: first,
+        status: first + said,
+        place: first + said + STATUS_ROW,
     }
 }
 
@@ -1744,6 +1780,19 @@ mod tests {
             side_entries(&[heading(0), heading(2)], 2, None, 0),
             [HEAD, TAB, TAB, HEAD]
         );
+    }
+
+    #[test]
+    fn an_activity_line_says_its_reply_under_its_title_and_its_status_under_that() {
+        let said = 2.0 * tabs::ASK_ROW;
+        let tops = line_tops(100.0, said);
+        assert_eq!(tops.said, 100.0 + UNDER_TITLE);
+        assert_eq!(tops.status, tops.said + said);
+        assert_eq!(tops.place, tops.status + STATUS_ROW);
+        // A line that says nothing keeps its status where it always was.
+        let quiet = line_tops(100.0, 0.0);
+        assert_eq!(quiet.status, 100.0 + UNDER_TITLE);
+        assert_eq!(quiet.place, 100.0 + tabs::AGENT_ROW - 5.0);
     }
 
     fn agent(asks: Option<&str>, reply: Option<&str>, place: Option<&str>) -> AgentLine {

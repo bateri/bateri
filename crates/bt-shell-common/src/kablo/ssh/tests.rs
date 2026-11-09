@@ -629,32 +629,35 @@ fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
     );
     // An agent's hook comes with the setting and goes with it, on the next call.
     let hook = shell.join("agents/claude.json");
-    assert!(!hook.exists(), "the setting is off by default");
+    assert_eq!(
+        std::fs::read_to_string(&hook).expect("the setting is on by default"),
+        crate::program::reply::REPLIERS[0].hook
+    );
     backend.settings = Box::new(|| Settings {
-        agents_claude_last_reply: true,
+        agents_claude_integration: false,
         ..Settings::default()
     });
+    backend.files(&host, &installed);
+    assert!(!hook.exists(), "the hook stayed after the setting went off");
+    backend.settings = Box::new(Settings::default);
     backend.files(&host, &installed);
     assert_eq!(
         std::fs::read_to_string(&hook).expect("the hook"),
         crate::program::reply::REPLIERS[0].hook
     );
-    backend.settings = Box::new(Settings::default);
-    backend.files(&host, &installed);
-    assert!(!hook.exists(), "the hook stayed after the setting went off");
     // What a reach believes is done for other wants goes when the files are written under these:
-    // turned on again, the reach writes them instead of finding them done. The belief that holds
+    // turned off again, the reach writes them instead of finding them done. The belief that holds
     // stays.
     use crate::ssh_wrap::Wants;
-    let on = Wants::of(
+    let off = Wants::of(
         &Settings {
-            agents_claude_last_reply: true,
+            agents_claude_integration: false,
             ..Settings::default()
         },
         true,
     );
-    let off = Wants::of(&Settings::default(), true);
-    let (before, now) = (format!("u@h:22#{on:?}"), format!("u@h:22#{off:?}"));
+    let on = Wants::of(&Settings::default(), true);
+    let (before, now) = (format!("u@h:22#{off:?}"), format!("u@h:22#{on:?}"));
     let other = "u@elsewhere:22#anything".to_owned();
     for belief in [&before, &now, &other] {
         backend.filed.lock().expect("lock").insert(belief.clone());
