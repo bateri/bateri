@@ -17,6 +17,12 @@ from the [latest release](https://github.com/bateri/bateri/releases/latest),
 open it and drag **bateri** into **Applications**. The app is signed with a
 Developer ID and notarized by Apple, so it opens without a warning.
 
+Or install it with [Homebrew](https://brew.sh):
+
+```sh
+brew install bateri/tap/bateri
+```
+
 ## Features
 
 - **Command blocks.** Each prompt and its output form a block, marked in the
