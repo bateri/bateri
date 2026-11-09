@@ -68,6 +68,7 @@ use objc2_foundation::{
 use crate::app;
 use crate::child;
 use crate::font_options::FontOption;
+use crate::program::reply;
 use crate::remote_files::Sweep;
 use crate::settings::{self, FileState};
 use crate::upload::format_bytes;
@@ -77,6 +78,7 @@ use pictures::{Palette, Picture, PictureChoice};
 use switch::ThemeSwitch;
 use theme_gallery::ThemeGallery;
 
+mod agent_sample;
 mod font_options;
 mod keyboard;
 mod layout_check;
@@ -140,6 +142,8 @@ const TITLE_SPACING: f64 = 7.0;
 const ROW_PAD_X: f64 = 12.0;
 const ROW_PAD_Y: f64 = 9.0;
 const ROW_GAP: f64 = 14.0;
+/// The room between a row's picture (the Agents page's tile) and its name.
+const LEAD_GAP: f64 = 10.0;
 const ROW_MIN_HEIGHT: f64 = 40.0;
 /// The text of a row — its name and description — stands in what is left of the row's width
 /// beside its control; never narrower than this, whatever the control. Wrapped text is given its
@@ -199,10 +203,11 @@ enum Category {
     Shell,
     Keyboard,
     Servers,
+    Agents,
 }
 
 impl Category {
-    const ALL: [Category; 9] = [
+    const ALL: [Category; 10] = [
         Category::General,
         Category::Appearance,
         Category::Font,
@@ -212,6 +217,7 @@ impl Category {
         Category::Shell,
         Category::Keyboard,
         Category::Servers,
+        Category::Agents,
     ];
 
     /// The page's stack in `panes`: the pages that have rows, in order; the Keyboard page is a
@@ -237,6 +243,7 @@ impl Category {
             Category::Shell => "Shell",
             Category::Keyboard => "Keyboard",
             Category::Servers => "Servers",
+            Category::Agents => "Agents",
         }
     }
 
@@ -252,6 +259,7 @@ impl Category {
             Category::Shell => "terminal",
             Category::Keyboard => "keyboard",
             Category::Servers => "network",
+            Category::Agents => "sparkles",
         }
     }
 }
@@ -315,11 +323,12 @@ enum Key {
     PythonEnv,
     NodeVersion,
     CommandLevel,
+    ClaudeLastReply,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 56] = [
+    const ALL: [Key; 57] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -376,6 +385,7 @@ impl Key {
         Key::PythonEnv,
         Key::NodeVersion,
         Key::CommandLevel,
+        Key::ClaudeLastReply,
     ];
 
     fn tag(self) -> NSInteger {
@@ -447,6 +457,7 @@ impl Key {
             Key::PythonEnv => "shell.python_env",
             Key::NodeVersion => "shell.node_version",
             Key::CommandLevel => "commands.level",
+            Key::ClaudeLastReply => "agents.claude_last_reply",
         }
     }
 }
@@ -945,6 +956,7 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
             Some("In the warning color when the project asks for another (.nvmrc).")
         }
         Key::Ports => Some("Click to list them, \u{2318}-click to open one."),
+        Key::ClaudeLastReply => Some("Show its last reply"),
         Key::CommandLevel => Some(command_level_note(settings.commands_level)),
         Key::RemoteIntegration => {
             Some("Not on servers marked Production, unless the Shell menu turns it on.")
@@ -1689,6 +1701,14 @@ impl Sticky {
     }
 }
 
+/// The line of the Agents page that says where the reply shows ([`pages::agent_where`]), and the
+/// button beside it that opens Tabs and Panes.
+struct AgentWhere {
+    /// The line's place among [`Controls::rows`].
+    row: usize,
+    open: Retained<NSButton>,
+}
+
 /// The window's controls — what `refresh` writes and the actions read.
 struct Controls {
     confirm_close: Retained<NSPopUpButton>,
@@ -1754,6 +1774,9 @@ struct Controls {
     ports: Retained<ThemeSwitch>,
     python_env: Retained<ThemeSwitch>,
     node_version: Retained<ThemeSwitch>,
+    claude_last_reply: Retained<ThemeSwitch>,
+    /// The Agents page's line on where the reply shows, with the button beside it.
+    agent_where: Option<AgentWhere>,
     dim_splits: Retained<ThemeSwitch>,
     focus_frame: Retained<ThemeSwitch>,
     resize_in_steps: Retained<ThemeSwitch>,
@@ -1766,7 +1789,7 @@ struct Controls {
 
 /// A row of a group's box: the name, its controls and the note under the name.
 struct Row {
-    /// `None` for the one row that is not a setting ("In use").
+    /// `None` for a row that is not a setting ("In use", the Agents page's explanation).
     key: Option<Key>,
     view: Retained<NSView>,
     /// The hairline above the row; the group's first shown row has none.
@@ -1779,6 +1802,9 @@ struct Row {
     /// (it leaves no gap).
     note: Retained<NSTextField>,
     hidden: Cell<bool>,
+    /// The row goes on from the one above (the Agents page's explanation under its switch): no
+    /// hairline between them.
+    joined: bool,
 }
 
 impl Row {
@@ -2203,6 +2229,7 @@ define_class!(
                 Some(Key::Ports) => Some(SettingsEdit::ShellPorts(on)),
                 Some(Key::PythonEnv) => Some(SettingsEdit::ShellPythonEnv(on)),
                 Some(Key::NodeVersion) => Some(SettingsEdit::ShellNodeVersion(on)),
+                Some(Key::ClaudeLastReply) => Some(SettingsEdit::AgentsClaudeLastReply(on)),
                 Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
                 Some(Key::FocusFrame) => Some(SettingsEdit::FocusFrame(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
@@ -2450,6 +2477,13 @@ define_class!(
                 // before a preview lands); the folder appears with the first one.
                 None => crate::preview::beep(),
             }
+        }
+
+        /// The Agents page's Open Tabs and Panes: the page Details under a tab is on, with its
+        /// row lit.
+        #[unsafe(method(showTabsPage:))]
+        fn show_tabs_page(&self, _sender: Option<&AnyObject>) {
+            self.open_row(Category::Tabs, Some(Key::TabDetails));
         }
 
         /// Clear Now: the preview cache's single sweep method;
@@ -2736,6 +2770,7 @@ impl SettingsWindow {
         set_switch(&c.ports, settings.shell_ports);
         set_switch(&c.python_env, settings.shell_python_env);
         set_switch(&c.node_version, settings.shell_node_version);
+        set_switch(&c.claude_last_reply, settings.agents_claude_last_reply);
         set_switch(&c.dim_splits, settings.dim_unfocused_splits);
         set_switch(&c.focus_frame, settings.focus_frame);
         set_switch(&c.resize_in_steps, settings.resize_in_steps);
@@ -2768,6 +2803,13 @@ impl SettingsWindow {
             .replace((files.preview_dir.clone(), files.download_dir.clone()));
 
         let status = status(state, write);
+        // The Agents page's line on where the reply shows follows Tab Details and the tabs'
+        // position; its button is a way to the page they are on, so the lock leaves it alone.
+        if let Some(line) = &c.agent_where {
+            let said = pages::agent_where(settings);
+            c.rows[line.row].set_note(None, None, Some(said.text), true);
+            line.open.setHidden(!said.button);
+        }
         // The font's options: the selected font's own list, shown as the file chooses.
         let options = crate::font_options::options(settings.font.family.as_deref());
         for row in &c.rows {
@@ -2799,7 +2841,7 @@ impl SettingsWindow {
             let rows = &c.rows[group.rows.clone()];
             let mut first = true;
             for row in rows.iter().filter(|row| !row.hidden.get()) {
-                row.separator.setHidden(first);
+                row.separator.setHidden(first || row.joined);
                 first = false;
             }
             group.view.setHidden(first);
@@ -3867,6 +3909,7 @@ impl SettingsWindow {
         let ports = self.switch(Key::Ports);
         let python_env = self.switch(Key::PythonEnv);
         let node_version = self.switch(Key::NodeVersion);
+        let claude_last_reply = self.switch(Key::ClaudeLastReply);
         let command_level = self.popup::<CommandLevel>(Key::CommandLevel);
 
         let theme_mode = self.theme_mode();
@@ -4016,6 +4059,8 @@ impl SettingsWindow {
             ports,
             python_env,
             node_version,
+            claude_last_reply,
+            agent_where: None,
             dim_splits,
             focus_frame,
             resize_in_steps,
@@ -4026,6 +4071,7 @@ impl SettingsWindow {
         let mut panes = Vec::new();
         let mut rows = Vec::new();
         let mut groups = Vec::new();
+        let mut agent_where = None;
         let specimens = specimen::Specimens::new(mtm);
         for category in Category::ALL {
             if category.grid().is_none() {
@@ -4047,9 +4093,63 @@ impl SettingsWindow {
                     let row = match *item {
                         pages::Item::Key(key) => {
                             let parts = controls.parts(mtm, key);
+                            // A picture before the name: the program the row is about.
+                            let lead = pages::lead(key).map(|kind| {
+                                Retained::into_super(agent_sample::Tile::new(mtm, kind))
+                            });
                             // A row whose control is a list of switches or of pictures has the width
                             // to itself.
-                            build_row(mtm, Some(key), pages::label(key), parts, pages::below(key))
+                            build_row(
+                                mtm,
+                                Some(key),
+                                pages::label(key),
+                                parts,
+                                pages::below(key),
+                                lead,
+                            )
+                        }
+                        pages::Item::AgentAbout => {
+                            // A fixed explanation with the example under it, as wide as the row.
+                            let sample = agent_sample::Sample::new(mtm, reply::REPLIERS[0].kind);
+                            let mut row = build_row(
+                                mtm,
+                                None,
+                                "",
+                                Parts {
+                                    view: Retained::into_super(sample),
+                                    controls: Vec::new(),
+                                    dim: Vec::new(),
+                                },
+                                true,
+                                None,
+                            );
+                            row.set_note(None, None, Some(pages::AGENT_ABOUT), true);
+                            row.joined = true;
+                            row
+                        }
+                        pages::Item::AgentWhere => {
+                            // The button opens a page; the lock and a dependency never reach it
+                            // (it is in no row's `controls`).
+                            let open =
+                                self.button("Open Tabs and Panes", None, sel!(showTabsPage:));
+                            let mut row = build_row(
+                                mtm,
+                                None,
+                                "",
+                                Parts {
+                                    view: Retained::into_super(Retained::into_super(open.clone())),
+                                    controls: Vec::new(),
+                                    dim: Vec::new(),
+                                },
+                                false,
+                                None,
+                            );
+                            row.joined = true;
+                            agent_where = Some(AgentWhere {
+                                row: rows.len(),
+                                open,
+                            });
+                            row
                         }
                         pages::Item::Usage => build_row(
                             mtm,
@@ -4068,6 +4168,7 @@ impl SettingsWindow {
                                 dim: Vec::new(),
                             },
                             false,
+                            None,
                         ),
                     };
                     inner.addArrangedSubview(&row.view);
@@ -4094,6 +4195,7 @@ impl SettingsWindow {
         }
         controls.rows = rows;
         controls.groups = groups;
+        controls.agent_where = agent_where;
         let _ = self.ivars().specimens.set(specimens);
         (panes, controls)
     }
@@ -4456,6 +4558,7 @@ impl Controls {
             Key::Ports => Parts::of(&self.ports),
             Key::PythonEnv => Parts::of(&self.python_env),
             Key::NodeVersion => Parts::of(&self.node_version),
+            Key::ClaudeLastReply => Parts::of(&self.claude_last_reply),
             Key::DimSplits => Parts::of(&self.dim_splits),
             Key::FocusFrame => Parts::of(&self.focus_frame),
             Key::ResizeInSteps => Parts::of(&self.resize_in_steps),
@@ -4564,6 +4667,7 @@ fn build_row(
     label: &str,
     parts: Parts,
     below: bool,
+    lead: Option<Retained<NSView>>,
 ) -> Row {
     let view = NSView::new(mtm);
     let name = text_label(&NSString::from_str(label), mtm);
@@ -4577,18 +4681,28 @@ fn build_row(
     } else {
         parts.view.fittingSize().width
     };
+    // What a picture before the name takes from the text's width.
+    let lead_room = lead
+        .as_ref()
+        .map_or(0.0, |lead| lead.fittingSize().width + LEAD_GAP);
     note.setPreferredMaxLayoutWidth(if below {
-        ROW_WIDTH
+        ROW_WIDTH - lead_room
     } else {
-        (ROW_WIDTH - ROW_GAP - side).max(MIN_TEXT_WIDTH)
+        (ROW_WIDTH - ROW_GAP - side - lead_room).max(MIN_TEXT_WIDTH)
     });
-    let text = stack(
+    let words = stack(
         mtm,
         &[&name, &note],
         NSUserInterfaceLayoutOrientation::Vertical,
         2.0,
         NSLayoutAttribute::Leading,
     );
+    // The text side of the row: the name and the note, after the picture if the row has one. It
+    // stays one view in the row, so the row's parts are the same three whatever it holds.
+    let text: Retained<NSView> = match &lead {
+        Some(lead) => hstack(mtm, &[lead, &words], LEAD_GAP),
+        None => Retained::into_super(words),
+    };
     // The rule between two rows, in the theme's separator: a pane's split line.
     let separator = surface(mtm, Ink::Line);
     add_pinned(&view, &separator);
@@ -4671,6 +4785,7 @@ fn build_row(
         dim: parts.dim,
         note,
         hidden: Cell::new(false),
+        joined: false,
     };
     row.set_note(None, None, None, true);
     row
@@ -4982,7 +5097,7 @@ fn activate(constraints: &[Retained<NSLayoutConstraint>]) {
     }
 }
 
-/// What a row of the sidebar is: a page, or the gap that sets Servers apart.
+/// What a row of the sidebar is: a page, or the gap that sets Servers (and Agents after it) apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SideItem {
     Page(Category),
@@ -4991,7 +5106,7 @@ enum SideItem {
 
 impl SideItem {
     /// The sidebar's rows, top to bottom: the pages in order, a gap before Servers.
-    const ALL: [SideItem; 10] = [
+    const ALL: [SideItem; 11] = [
         SideItem::Page(Category::General),
         SideItem::Page(Category::Appearance),
         SideItem::Page(Category::Font),
@@ -5002,6 +5117,7 @@ impl SideItem {
         SideItem::Page(Category::Keyboard),
         SideItem::Gap,
         SideItem::Page(Category::Servers),
+        SideItem::Page(Category::Agents),
     ];
 
     /// The table row of `category`.
@@ -5403,6 +5519,7 @@ mod tests {
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
+                    [agents]\nclaude_last_reply = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
                     [commands]\nlevel = []\n\
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
@@ -5468,6 +5585,7 @@ mod tests {
                 Key::Ports => SettingsEdit::ShellPorts(false),
                 Key::PythonEnv => SettingsEdit::ShellPythonEnv(false),
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
+                Key::ClaudeLastReply => SettingsEdit::AgentsClaudeLastReply(true),
                 Key::CommandLevel => SettingsEdit::CommandLevel(CommandLevel::Off),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
                 Key::FocusFrame => SettingsEdit::FocusFrame(true),
@@ -6051,6 +6169,7 @@ mod tests {
     fn every_key_has_exactly_one_place_on_the_pages() {
         let mut keys = Vec::new();
         let mut usage = 0;
+        let (mut about, mut place) = (0, 0);
         for category in Category::ALL {
             for group in pages::groups(category) {
                 assert!(!group.items.is_empty(), "{category:?} has an empty group");
@@ -6058,12 +6177,14 @@ mod tests {
                     match item {
                         pages::Item::Key(key) => keys.push(*key),
                         pages::Item::Usage => usage += 1,
+                        pages::Item::AgentAbout => about += 1,
+                        pages::Item::AgentWhere => place += 1,
                     }
                 }
             }
         }
         assert!(pages::groups(Category::Keyboard).is_empty());
-        assert_eq!(usage, 1);
+        assert_eq!((usage, about, place), (1, 1, 1));
         keys.sort_by_key(|key| key.tag());
         assert_eq!(keys, Key::ALL);
         // Each key sits on the page its topic belongs to.
@@ -6088,6 +6209,45 @@ mod tests {
         assert_eq!(page_of(Key::CommandLevel), Category::Shell);
         assert_eq!(page_of(Key::StatsInterval), Category::Servers);
         assert_eq!(page_of(Key::DownloadNotify), Category::Servers);
+        assert_eq!(page_of(Key::ClaudeLastReply), Category::Agents);
+    }
+
+    /// The Agents page is the table's: the row is named as the table names its agent, and wears
+    /// that agent's tile; the explanation and the line on where it shows stand under it, in the
+    /// one group, after the switch.
+    #[test]
+    fn the_agents_page_is_the_agent_tables_one_switch_with_its_explanation() {
+        assert_eq!(pages::label(Key::ClaudeLastReply), reply::REPLIERS[0].name);
+        assert_eq!(
+            pages::lead(Key::ClaudeLastReply),
+            Some(reply::REPLIERS[0].kind)
+        );
+        assert!(
+            Key::ALL
+                .into_iter()
+                .filter(|key| *key != Key::ClaudeLastReply)
+                .all(|key| pages::lead(key).is_none())
+        );
+        let groups = pages::groups(Category::Agents);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].items,
+            [
+                pages::Item::Key(Key::ClaudeLastReply),
+                pages::Item::AgentAbout,
+                pages::Item::AgentWhere,
+            ]
+        );
+        assert_eq!(Category::Agents.title(), "Agents");
+        assert_eq!(Key::ClaudeLastReply.path(), "agents.claude_last_reply");
+        let resolved = Resolved {
+            reduce: false,
+            scrollbar: ScrollbarMode::Auto,
+        };
+        assert_eq!(
+            row_description(Key::ClaudeLastReply, &Settings::default(), resolved),
+            Some("Show its last reply")
+        );
     }
 
     /// Every row has a name that is a name — none ends in the old colon — except the options' row,
@@ -6113,7 +6273,7 @@ mod tests {
         );
     }
 
-    /// The sidebar lists the nine pages in their order with a gap before Servers, and every
+    /// The sidebar lists the ten pages in their order with a gap before Servers, and every
     /// page that has rows has a stack of its own.
     #[test]
     fn the_sidebar_lists_every_page_with_a_gap_before_servers() {
@@ -6130,6 +6290,7 @@ mod tests {
             .position(|item| *item == SideItem::Gap)
             .expect("a gap");
         assert_eq!(SideItem::ALL[gap + 1], SideItem::Page(Category::Servers));
+        assert_eq!(SideItem::ALL[gap + 2], SideItem::Page(Category::Agents));
         for (row, item) in SideItem::ALL.iter().enumerate() {
             assert_eq!(SideItem::at(row as NSInteger), Some(*item));
             if let SideItem::Page(category) = item {
@@ -6150,8 +6311,65 @@ mod tests {
                 Some(5),
                 Some(6),
                 None,
-                Some(7)
+                Some(7),
+                Some(8)
             ]
+        );
+    }
+
+    /// The Agents page's line on where the reply shows follows Details under a tab and the tabs'
+    /// position, the one thing on the page that does: four sentences, a button to the page those
+    /// are on in each but the one that says all is well, and never a word of the switch itself.
+    #[test]
+    fn the_agents_page_says_where_the_reply_shows_from_tab_details_and_position() {
+        let with = |position, details| Settings {
+            tab_position: position,
+            tab_details: details,
+            ..Settings::default()
+        };
+        let said = |position, details| pages::agent_where(&with(position, details));
+        let side = TabPosition::Side;
+        let smart = said(side, TabDetails::Smart);
+        assert!(
+            smart
+                .text
+                .starts_with("Shows in Activity. To see it in the tab list too")
+        );
+        assert!(smart.button);
+        let always = said(side, TabDetails::Always);
+        assert_eq!(always.text, "Shows in Activity and in the tab list.");
+        assert!(!always.button);
+        let off = said(side, TabDetails::Off);
+        assert_eq!(off.text, "Details under a tab is Off, so it shows nowhere.");
+        assert!(off.button);
+        // Tabs on top show nothing whatever Details says, and the sentence says so first.
+        for details in [TabDetails::Smart, TabDetails::Always, TabDetails::Off] {
+            let top = said(TabPosition::Top, details);
+            assert_eq!(
+                top.text,
+                "Tabs are on top. It shows only with tabs in the side column."
+            );
+            assert!(top.button, "{details:?}");
+        }
+        // Four different sentences, and the switch is not one of the things they lean on.
+        let texts = [
+            smart.text,
+            always.text,
+            off.text,
+            said(TabPosition::Top, TabDetails::Smart).text,
+        ];
+        for (i, a) in texts.iter().enumerate() {
+            for b in &texts[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        let on = Settings {
+            agents_claude_last_reply: true,
+            ..Settings::default()
+        };
+        assert_eq!(
+            pages::agent_where(&on),
+            pages::agent_where(&Settings::default())
         );
     }
 

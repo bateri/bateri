@@ -14,9 +14,9 @@ use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 
-use bt_core::{CursorBlink, Settings, Theme};
+use bt_core::{CursorBlink, Settings, TabDetails, TabPosition, Theme};
 use bt_gpu::ScrollbarMode;
-use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSBitmapImageFileType, NSBitmapImageRep, NSView, NSWindow,
 };
@@ -261,6 +261,7 @@ impl SettingsWindow {
         }
         self.blink_problems(&themes, resolved, shots, &mut problems);
         self.drag_problems(shots, &mut problems);
+        self.agents_problems(&themes, resolved, shots, &mut problems);
         if let Some(dir) = shots {
             // The Keyboard page is a list of its own, not a grid: its picture only.
             sidebar.selectRowIndexes_byExtendingSelection(
@@ -608,6 +609,113 @@ impl SettingsWindow {
         self.show_specimen();
         self.cancel_blink();
         specimens.stop_blink();
+    }
+
+    /// The Agents page keeps still when its switch turns — the explanation and the example stand
+    /// where they stood — and its line on where the reply shows follows Details under a tab and
+    /// the tabs' position, with the button hidden where all is well and a click that opens Tabs
+    /// and Panes where those are.
+    fn agents_problems(
+        &self,
+        themes: &ThemeLists<'_>,
+        resolved: Resolved,
+        shots: Option<&Path>,
+        problems: &mut Vec<String>,
+    ) {
+        let ivars = self.ivars();
+        let (Some(window), Some(sidebar), Some(controls), Some(scroll)) = (
+            ivars.window.get(),
+            ivars.sidebar.get(),
+            ivars.controls.get(),
+            ivars.pane_scroll.get(),
+        ) else {
+            return;
+        };
+        let mut say = |what: String| problems.push(format!("Agents: {what}"));
+        let Some(line) = controls.agent_where.as_ref() else {
+            say("the page has no line on where the reply shows".to_owned());
+            return;
+        };
+        let spec = &pages::groups(Category::Agents)[0];
+        let Some(group) = controls
+            .groups
+            .iter()
+            .find(|group| std::ptr::eq(group.spec, spec))
+        else {
+            say("the page has no group".to_owned());
+            return;
+        };
+        let rows = &controls.rows[group.rows.clone()];
+        let cases = [
+            (TabPosition::Top, TabDetails::Smart),
+            (TabPosition::Side, TabDetails::Smart),
+            (TabPosition::Side, TabDetails::Always),
+            (TabPosition::Side, TabDetails::Off),
+        ];
+        for (position, details) in cases {
+            let mut frames = Vec::new();
+            for on in [false, true] {
+                let settings = Settings {
+                    tab_position: position,
+                    tab_details: details,
+                    agents_claude_last_reply: on,
+                    ..Settings::default()
+                };
+                self.refresh(&settings, resolved, &FileState::Missing, &[], themes);
+                sidebar.selectRowIndexes_byExtendingSelection(
+                    &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::Agents)),
+                    false,
+                );
+                self.show_selected();
+                let Some(content) = window.contentView() else {
+                    return;
+                };
+                content.layoutSubtreeIfNeeded();
+                let Some(document) = scroll.documentView() else {
+                    return;
+                };
+                let case = format!("{position:?} and {details:?}, switch {on}");
+                let said = pages::agent_where(&settings);
+                let shown = line.open.isHidden();
+                if controls.claude_last_reply.is_on() != on {
+                    say(format!(
+                        "the switch does not show the file's value ({case})"
+                    ));
+                }
+                if line.open.isHidden() == said.button {
+                    say(format!(
+                        "the button is {} where it should be {} ({case})",
+                        if shown { "hidden" } else { "shown" },
+                        if said.button { "shown" } else { "hidden" },
+                    ));
+                }
+                if controls.rows[line.row].note.stringValue().to_string() != said.text {
+                    say(format!("the line does not say what it should ({case})"));
+                }
+                frames.push(
+                    rows.iter()
+                        .map(|row| in_document(&row.view, &document))
+                        .collect::<Vec<_>>(),
+                );
+                if on && let Some(dir) = shots {
+                    let name = format!("agents-{position:?}-{details:?}-window.png").to_lowercase();
+                    picture(&content, &dir.join(name));
+                }
+            }
+            if frames[0] != frames[1] {
+                say(format!(
+                    "a row moved when the switch turned ({position:?} and {details:?})"
+                ));
+            }
+        }
+        // The button is a way to Tabs and Panes: it is wired, and the way leads there.
+        if line.open.action() != Some(sel!(showTabsPage:)) || line.open.target().is_none() {
+            say("the button is not wired to the Tabs and Panes page".to_owned());
+        }
+        self.open_row(Category::Tabs, Some(Key::TabDetails));
+        if sidebar.selectedRow() != SideItem::row_of(Category::Tabs) as isize {
+            say("the way to Tabs and Panes does not open it".to_owned());
+        }
     }
 
     /// With the file's blink on, the Cursor example's caret is turned by the window's clock: half

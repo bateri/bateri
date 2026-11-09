@@ -7,16 +7,23 @@
 //! another setting is dimmed and says why ([`dependency`]); only a row that has no meaning at all
 //! goes away (Light and Dark while the theme is a theme of its own).
 
-use bt_core::{CursorBlink, RemoteStatsMode, Settings, ShellIntegration, TabPosition};
+use bt_core::{CursorBlink, RemoteStatsMode, Settings, ShellIntegration, TabDetails, TabPosition};
 
 use super::{Category, Key};
+use crate::program::identity::Kind;
+use crate::program::reply;
 
-/// What a group holds: a settings key's row, or the one row that is not a setting.
+/// What a group holds: a settings key's row, or one of the rows that are not a setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Item {
     Key(Key),
     /// "In use": the preview folder's size, with Clear Now. Measured, never written.
     Usage,
+    /// What the Agents switch does, and an example of the row it adds a line to. Fixed.
+    AgentAbout,
+    /// Where on the screen the line shows: it follows Tab Details and the tabs' position, with
+    /// the button that opens the page those are on.
+    AgentWhere,
 }
 
 /// A titled run of rows in one rounded box. A group without a title is a page's first.
@@ -195,6 +202,18 @@ const SERVERS: &[Group] = &[
     ),
 ];
 
+/// The Agents page: the switch of each agent, then what it does and where it shows. The two rows
+/// under the switch are no rows of their own to the eye — they read as the switch's own
+/// explanation, so they have no rule above them.
+const AGENTS: &[Group] = &[group(
+    None,
+    &[
+        row(Key::ClaudeLastReply),
+        Item::AgentAbout,
+        Item::AgentWhere,
+    ],
+)];
+
 /// A page's groups, top to bottom. Keyboard is a table of its own and has none.
 pub(super) fn groups(category: Category) -> &'static [Group] {
     match category {
@@ -207,6 +226,7 @@ pub(super) fn groups(category: Category) -> &'static [Group] {
         Category::Shell => SHELL,
         Category::Keyboard => &[],
         Category::Servers => SERVERS,
+        Category::Agents => AGENTS,
     }
 }
 
@@ -269,6 +289,53 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::PreviewLimit => "At most",
         Key::DownloadConflict => "If the name exists",
         Key::DownloadNotify => "Notify when done",
+        Key::ClaudeLastReply => "Claude Code",
+    }
+}
+
+/// The program whose tile stands before the row's name, when the row is about one program: the
+/// agent's row of the Agents page ([`reply::REPLIERS`]).
+pub(super) fn lead(key: Key) -> Option<Kind> {
+    match key {
+        Key::ClaudeLastReply => reply::REPLIERS.first().map(|agent| agent.kind),
+        _ => None,
+    }
+}
+
+/// What the Agents switch does: the sentence under the switch, over the example.
+pub(super) const AGENT_ABOUT: &str = "When Claude Code finishes a turn, its reply appears in its row, between the status and the folder. Sessions already running show it after a restart.";
+
+/// Where the reply shows now, and whether the way to change that is worth a button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AgentWhere {
+    pub(super) text: &'static str,
+    /// The answer lies in Tabs and Panes, and a click there can change it.
+    pub(super) button: bool,
+}
+
+/// The reply shows in the side column only, in Activity and — with Details under a tab on Always —
+/// in the tab list; Off shows it nowhere. The one thing on the Agents page that leans on other
+/// settings, so nothing else on the page moves with the switch.
+pub(super) fn agent_where(settings: &Settings) -> AgentWhere {
+    if settings.tab_position == TabPosition::Top {
+        return AgentWhere {
+            text: "Tabs are on top. It shows only with tabs in the side column.",
+            button: true,
+        };
+    }
+    match settings.tab_details {
+        TabDetails::Off => AgentWhere {
+            text: "Details under a tab is Off, so it shows nowhere.",
+            button: true,
+        },
+        TabDetails::Always => AgentWhere {
+            text: "Shows in Activity and in the tab list.",
+            button: false,
+        },
+        TabDetails::Smart => AgentWhere {
+            text: "Shows in Activity. To see it in the tab list too, set Details under a tab to Always.",
+            button: true,
+        },
     }
 }
 

@@ -1754,7 +1754,7 @@ fn draw_face(rect: NSRect, radius: f64, fill: u32, palette: Palette) {
 
 /// The program's mark in `rect` (a square): its path data scaled into it and filled or stroked as
 /// its source has it, or the one mark that exists only as a picture, tinted.
-fn draw_mark(kind: ProgramKind, rect: NSRect, ink: &NSColor) {
+pub(crate) fn draw_mark(kind: ProgramKind, rect: NSRect, ink: &NSColor) {
     match icon::of(kind).art {
         icon::Art::Path(shape) => {
             let Ok(segments) = shape.segments() else {
