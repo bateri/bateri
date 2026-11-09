@@ -1,5 +1,5 @@
 //! The remote host's load for the ssh status bar: what the samples mean
-//! and when they are taken — both pure, so `make linux` runs them too.
+//! and when they are taken — both pure.
 //!
 //! - **[`Sampler`]** turns the helper's raw readings
 //!   ([`crate::remote_files::LoadSample`]) into the value the context row

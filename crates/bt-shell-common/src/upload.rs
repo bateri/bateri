@@ -1490,7 +1490,7 @@ const LOCAL_TAR_FLAGS: [&str; 7] = [
 /// The local `tar c`'s flags up to `-C` on Linux, where `/usr/bin/tar` is GNU
 /// tar: it has no `--no-mac-metadata` (there is no Mac metadata to drop) and its
 /// default `gnu` format writes `@LongLink` records, so the format is pinned to
-/// pax — the family [`TarWatcher`] reads. Found by `make linux`.
+/// pax — the family [`TarWatcher`] reads. Found on Linux.
 #[cfg(not(target_os = "macos"))]
 const LOCAL_TAR_FLAGS: [&str; 7] = [
     "-c",

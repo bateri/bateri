@@ -33,7 +33,7 @@
 //! checked and is taken for a few instructions, so the write of one file does not make the
 //! read of another wait ([`Shared`]). Counting the folder and dropping the oldest files is
 //! the one thing done a store at a time, behind a lock of its own that no read takes.
-//! Platform-free: the tests run in a temporary folder here and on `make linux`.
+//! Platform-free: the tests run in a temporary folder.
 
 use std::collections::HashMap;
 use std::fs;

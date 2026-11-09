@@ -13,7 +13,7 @@ endif
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test demopen test-heavy test-view test-one gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle fonts-sums package install dev release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test demopen test-heavy test-view test-one gate gate-push hooks linux-server shader smoke terminfo test-race scan throughput bundle fonts-sums package install dev release publish ship release-gate sparkle dmgbuild
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -31,7 +31,7 @@ check:
 # losing one only drops the debugger's line info for a crate not rebuilt since.
 # The rest of a replaced build stays too: every toolchain upgrade, fork `rev`,
 # dependency change or feature set leaves its libraries, test binaries and
-# incremental caches beside the current ones, here and in `make linux`'s
+# incremental caches beside the current ones, here and in `make linux-server`'s
 # target/linux. They grew the target to 137 GB for a 5 MB app. A file nothing
 # has read for three days (access time) is one no current build uses; a build
 # that does need it again only recompiles it. Read, not written: a library that
@@ -809,7 +809,7 @@ release-gate: kablo-published
 		| awk 'NF { p = 1 } p' | awk '{ l[NR] = $$0 } END { n = NR; while (n > 0 && l[n] ~ /^[[:space:]]*$$/) n--; for (i = 1; i <= n; i++) print l[i] }' > $(NOTES); \
 	grep -q '[^[:space:]]' $(NOTES) || { echo "release: CHANGELOG.md has no '## [$(VERSION)]' section or it is empty (turn Unreleased into the version)"; exit 1; }
 
-release: release-gate linux package
+release: release-gate package
 	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "release: the package is not notarized, it does not enter the release"; exit 1; }
 	@spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
@@ -952,87 +952,36 @@ dev: kablo-rev
 terminfo:
 	$(call not_yet,assets/terminfo comes with a shell/TERM set)
 
-# Linux gate for bt-core, bt-atlas, bt-gpu and bt-shell-common: `clippy -D warnings` and `test`, in Docker,
-# in the image from `tools/linux/Dockerfile`, with `--locked` (a run that would
-# change Cargo.lock fails red, it does not silently resolve new versions).
-# The rule "bt-core is platformless, the gate is compiling for Linux" is
-# this command.
-# OUTSIDE `make check`, because it needs Docker and its first run builds the
-# image and compiles the whole graph for Linux. Two runs share it: `linux`, the
-# whole of it, in the release; `linux-server`, what runs on a server, before a
-# push that touched it (`make gate-push`).
-# The scope grows over time — today bt-core, bt-atlas's FreeType/
-# fontconfig/harfrust backend, bt-gpu (Vulkan; `wgsl_pipelines_build` and the
-# offscreen pixel tests run on lavapipe) and bt-shell-common (`jobs`'s
-# `/proc` body and the real-PTY test, `child`'s `$SHELL -l` arm and the real
-# zsh tests). As it grows the `-p`
-# list and the image recipe change together.
-# Order:
-# 1. Version: RED (exit 1) if the local `rustc`'s major.minor is not the same
-#    as the image tag's — two compilers' clippy are two separate gates. This is
-#    not a "could not run": the fix is updating the Dockerfile's `FROM` line.
-# 2. If Docker is missing or the daemon does not answer, it prints "SKIPPED"
-#    to stdout and exits 78; make returns that as 2 — as in `make smoke`, the
-#    distinguishing signal is the stdout text, not the exit code. In
-#    verification `[~]` is written only in this arm.
-# 3. It builds the image (layer-cached) and runs in the container: the repo is
-#    bound to `/w`, outputs go to `target/linux` (so they do not mix with the
-#    macOS build; `/target/` is already in .gitignore), crate downloads in a
-#    named volume.
+# What bateri runs on a server, which is Linux far more often than not: the line the window
+# sends another machine's shell (`agent::relay`), the agent's one-line command and the remote
+# shells' integration (`ssh_wrap::remote_shells`), kablo's install steps and the step that writes
+# a program on a server (`apps::upload`), in a Linux shell with Linux's tools. (The `bateri`
+# command itself is kablo's: its tests are in kablo's repository, `make e2e` and `make linux`
+# there.) `make gate-push` runs it when their files changed. The app ships for macOS, so nothing
+# else of it is tested on Linux.
+#
+# In Docker, in the image from `tools/linux/Dockerfile`, with `--locked` (a run that would change
+# Cargo.lock fails red, it does not silently resolve new versions): the repo is bound to `/w`,
+# outputs go to `target/linux` (so they do not mix with the macOS build), crate downloads in a
+# named volume. OUTSIDE `make check`, because it needs Docker. If Docker is missing or the daemon
+# does not answer, it prints "SKIPPED" to stdout and exits 78; make returns that as 2 — as in
+# `make smoke`, the distinguishing signal is the stdout text, not the exit code.
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
-LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-shell-common
 # In a linked worktree `.git` is a file naming the main repository's git directory by its
 # absolute path, which the container does not have: the tests that read the repository would
 # find none. The common git directory is mounted read-only at that same path; in the main
 # checkout it is `.git` itself and nothing more is mounted.
 LINUX_GIT_COMMON = $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
 LINUX_GIT_MOUNT = $(if $(filter-out $(CURDIR)/.git,$(LINUX_GIT_COMMON)),-v "$(LINUX_GIT_COMMON)":"$(LINUX_GIT_COMMON)":ro)
-
-# The full gate: every Linux crate's clippy and every test but those `NOT_HEAVY` names. The
-# release runs it, once a version: bateri ships for macOS today, and the gate keeps the crates
-# that are to run on Linux one day from drifting until then.
-#
-# LINUX_TODO are tests that hold on macOS and have not held on Linux since before 0.23, left out
-# so that a macOS release is not stopped by them: they are to be made to hold when a Linux shell
-# is written. Most measure how much a tty keeps from a program that does not read, which they
-# take from macOS's queue; two read a page's macOS rules (⌃-click is a right press, ⌘ makes the
-# hand). `make test` runs them all on macOS.
-LINUX_TODO = --skip a_page_that_says_more_than_its_program_reads \
-	--skip a_page_that_says_more_than_the_bound \
-	--skip a_paste_into_a_program_that_does_not_read \
-	--skip a_streamed_session_whose_stream_is_closed_under_a_write \
-	--skip what_a_shell_the_pane_learns_nothing_from_can_read_after_a_kill \
-	--skip what_the_page_said_is_thrown_away_when_the_program_is_killed_from_outside \
-	--skip what_the_page_said_never_reaches_what_reads_the_tty \
-	--skip a_control_click_is_sent_as_the_left_button_and_is_a_right_press_to_the_page \
-	--skip a_modifier_pressed_elsewhere_is_told_before_the_pointer_comes_over_the_editor
-linux: LINUX_CMD = cargo build -p bt-core --example demopen --locked && \
-	cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
-	cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY) $(LINUX_TODO)
-linux: linux-run
-
-# What bateri runs on a server, which is Linux far more often than not: the line the window
-# sends another machine's shell (`agent::relay`), the agent's one-line command and the remote
-# shells' integration (`ssh_wrap::remote_shells`), kablo's install steps and the step that writes
-# a program on a server (`apps::upload`), in a Linux shell with Linux's tools. (The `bateri`
-# command itself is kablo's: its tests are in kablo's repository, `make e2e` and `make linux`
-# there.) `make gate-push` runs it when their files changed. The same test binaries as `linux` (`--lib`), so neither builds the other's again.
 SERVER_TESTS = agent::relay:: ssh_wrap::remote_shells:: kablo::install:: apps::upload::
-linux-server: LINUX_CMD = cargo test $(LINUX_CRATES) --lib --locked -- --include-ignored \
-	$(NOT_HEAVY) $(SERVER_TESTS)
-linux-server: linux-run
 
-linux-run:
-	@yerel=$$(rustc --version | sed -n 's/^rustc \([0-9]*\.[0-9]*\).*/\1/p'); \
-	if [ -z "$(LINUX_RUST)" ]; then \
-		echo "linux: could not read the rust version from the FROM line of $(LINUX_DOCKERFILE)"; exit 1; fi; \
-	if [ "$$yerel" != "$(LINUX_RUST)" ]; then \
-		echo "linux: local rustc $$yerel, image rust:$(LINUX_RUST) — the versions do not match; bring the FROM line of $(LINUX_DOCKERFILE) to the local version"; exit 1; fi
+linux-server:
 	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
-		echo "SKIPPED: Docker is missing or the daemon does not answer — make linux could not run"; exit 78; fi
+		echo "SKIPPED: Docker is missing or the daemon does not answer — make linux-server could not run"; exit 78; fi
 	docker build -q -t $(LINUX_IMAGE) -f $(LINUX_DOCKERFILE) tools/linux
 	docker run --rm -v "$(CURDIR)":/w $(LINUX_GIT_MOUNT) -v bateri-linux-cargo:/usr/local/cargo/registry \
 		-v bateri-linux-cargo-git:/usr/local/cargo/git \
-		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '$(LINUX_CMD)'
+		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) \
+		sh -c 'cargo test -p bt-shell-common --lib --locked -- --include-ignored $(NOT_HEAVY) $(SERVER_TESTS)'

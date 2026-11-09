@@ -2967,7 +2967,7 @@ pub(crate) mod tests {
     }
 
     /// The master's `tcgetattr` gives the program's modes — on
-    /// macOS and on Linux (`make linux`): a password prompt's (canonical, no
+    /// macOS and on Linux: a password prompt's (canonical, no
     /// echo) and a logged-in session's (neither).
     #[test]
     fn the_master_reads_the_programs_terminal_modes() {

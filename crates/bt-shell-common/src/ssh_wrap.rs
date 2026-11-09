@@ -2659,7 +2659,7 @@ mod tests {
 /// The bootstrap on real shells: what sshd does with the wrapped
 /// call — `"$SHELL" -c '<remote command>'` — in a real PTY, with a temporary
 /// home. Each login shell that is not installed here is `SKIPPED` (macOS has
-/// no fish or BusyBox; `make linux`'s image has all five).
+/// no fish or BusyBox; `make linux-server`'s image has all five).
 #[cfg(test)]
 mod remote_shells {
     use std::collections::HashMap;

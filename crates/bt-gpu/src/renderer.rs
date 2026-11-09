@@ -1088,8 +1088,7 @@ impl Gpu {
     ///
     /// The backend is **pinned per target**, not wgpu's `PRIMARY`: Metal on
     /// macOS (the product target; a wider mask would change which adapters
-    /// are enumerated there), Vulkan on Linux — where `make linux` runs
-    /// the pixel tests on lavapipe.
+    /// are enumerated there), Vulkan on Linux.
     pub(crate) fn new() -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: BACKENDS,

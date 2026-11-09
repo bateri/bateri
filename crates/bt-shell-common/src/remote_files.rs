@@ -1616,8 +1616,8 @@ mod tests {
         );
     }
 
-    /// [`PROC_AWK`] in this machine's `awk` (BSD here, `mawk`/`gawk` under
-    /// `make linux`) over hand-made `/proc/[pid]/stat` files: the fields are
+    /// [`PROC_AWK`] in this machine's `awk` (BSD here, `mawk`/`gawk` on
+    /// Linux) over hand-made `/proc/[pid]/stat` files: the fields are
     /// `proc(5)`'s (`ppid` 4, `utime` 14, `stime` 15, `starttime` 22), `comm`
     /// is cut at the **last** `)` with its spaces and parentheses, a zombie
     /// and a short line are skipped, a file that vanished does not stop the

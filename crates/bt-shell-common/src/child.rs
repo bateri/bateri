@@ -1573,8 +1573,7 @@ pub(crate) mod tests {
                         ("HOME".to_owned(), home.display().to_string()),
                         ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
                         // zsh counts a multibyte character as a single
-                        // character only in a UTF-8 locale (installed in
-                        // `make linux`'s image too: `tools/linux/Dockerfile`).
+                        // character only in a UTF-8 locale.
                         ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
                     ]),
                     cols,
@@ -1748,8 +1747,7 @@ pub(crate) mod tests {
         //    fixed, the user's history is written into the app's bundle, their own file
         //    freezes and no warning appears anywhere. This is the only place the test sees it
         //    — the defect really happened in the first draft and left its trace as
-        //    `assets/shell/zsh/.zsh_history`. Debian's system zshrc sets no history,
-        //    so `make linux`'s image appends macOS's lines (`tools/linux/Dockerfile`).
+        //    `assets/shell/zsh/.zsh_history`.
         let root = TempRoot::new("shell-wrapper");
         let home = root.0.join("home");
         let cfg = home.join("cfg");

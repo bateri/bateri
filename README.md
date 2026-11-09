@@ -305,8 +305,7 @@ documents; code, identifiers, UI strings and settings are in English.
 | `bateri` | The binary and app bundle |
 
 Dependencies only point downward; `bt-core`, `bt-atlas`, `bt-gpu` and
-`bt-shell-common` have no AppKit dependencies and are also built and tested on
-Linux (`make linux`).
+`bt-shell-common` have no AppKit dependencies.
 
 ## Releasing
 

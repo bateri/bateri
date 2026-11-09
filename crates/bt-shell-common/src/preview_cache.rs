@@ -3,8 +3,7 @@
 //! user changed and the sweep that carries out [`plan_sweep`]'s answer.
 //!
 //! The rules are `remote_files`' (pure, tested there); this is their I/O —
-//! platform-free, so the sweep's own tests run in a temporary folder here and on
-//! `make linux`. Every function blocks on the disk and runs **off the main
+//! platform-free, so the sweep's own tests run in a temporary folder. Every function blocks on the disk and runs **off the main
 //! thread**: the helper's worker, the stream thread or the sweep's own thread.
 //!
 //! **One writer at a time:** the index is read and rewritten by the preview's

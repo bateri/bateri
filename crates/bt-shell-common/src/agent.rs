@@ -1,5 +1,5 @@
 //! What an agent on a server asks of bateri with `bateri split`, `tab`, `ls`, `close` and `notify`,
-//! and what is decided about it — the half that needs no AppKit, so `make linux` runs its tests.
+//! and what is decided about it — the half that needs no AppKit.
 //!
 //! **Who does what.** The terminal itself is the server's: the `bateri` command (kablo's) on the server starts it
 //! with `kablo new`, numbers it (`p9`) and answers `wait`, `capture` and `send` without this computer.

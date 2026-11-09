@@ -817,7 +817,7 @@ mod tests {
     }
 
     /// `bt_ports` end to end on this machine: macOS has no `/proc` and
-    /// answers `BT-NOPROC`; `make linux` reads a real one. The root is this
+    /// answers `BT-NOPROC`; a Linux server reads a real one. The root is this
     /// test's own process — a shell's tree includes the shell — and its
     /// listening socket must come back with its port and binding; a
     /// connected socket and a gone root list nothing.
@@ -849,7 +849,7 @@ mod tests {
     }
 
     /// `bt_load` end to end on this machine: macOS has no
-    /// `/proc` and answers `BT-NOPROC`, `make linux` reads a real one. The
+    /// `/proc` and answers `BT-NOPROC`, a Linux server reads a real one. The
     /// branch is the file, not the target: what decides is what the script sees.
     #[test]
     fn a_load_sample_answers_through_a_local_shell() {

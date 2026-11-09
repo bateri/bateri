@@ -1,6 +1,6 @@
 //! What the server's card says: the card that opens from `rasp` in the dock of a pane that
 //! shows a terminal the server keeps. Only the words and the numbers, so the platform shells
-//! draw one card and `make linux` runs its tests.
+//! draw one card.
 //!
 //! The card has two parts, and what is in them is **the server's, not the pane's**: the load (one
 //! measuring for the server however many panes show it, [`super::remote_stats::Account`]) and the

@@ -872,7 +872,7 @@ fn resample(
 }
 
 /// Sample characters and family names for the platformless tests, measured
-/// on the `make linux` image's fonts (`fonts-dejavu-core`).
+/// on `fonts-dejavu-core`.
 #[cfg(any(test, feature = "fixture"))]
 pub mod fixture {
     #[cfg(test)]

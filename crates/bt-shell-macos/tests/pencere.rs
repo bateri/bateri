@@ -39,7 +39,7 @@
 //! Its own `main` (`harness = false`): AppKit, the main queue and `WKWebView` want the main
 //! thread. Without a window server session (an ssh login) it says so and passes, as the embed
 //! test does. It is a heavy test — a real shell, a real web view, tens of seconds — and runs
-//! only when `BT_HEAVY` is set (`make test-heavy`, `make test-all`); `make check` passes it
+//! only when `BT_HEAVY` is set (`make test-view`); `make check` passes it
 //! by, as `#[ignore]` does a heavy test that has the harness.
 
 use std::cell::{Cell, RefCell};
