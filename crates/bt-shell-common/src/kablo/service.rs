@@ -1102,10 +1102,6 @@ impl Drop for Bridge {
 /// terminal there fall back to a plain `ssh`.
 const GIVE_UP_AFTER: u32 = 3;
 
-/// How many bridges in a row may end for a kablo that cannot be run before it is no longer written
-/// again at every dial.
-const MISSED_REPAIRS: u32 = 3;
-
 /// A server the service has a client for.
 struct Account {
     server: KabloHost,
@@ -1119,9 +1115,9 @@ struct Account {
     /// A thread is starting a bridge.
     dialing: bool,
     /// How many bridges in a row ended because the kablo could not be run ([`Cause::Missing`]),
-    /// until one speaks. The first is mended by the next dial (`stale`); a second is a
-    /// server that cannot keep kablo, and the panes that wait for a new terminal there do not wait
-    /// for it ([`Core::gives_up`]).
+    /// until a connection comes up; what a login file prints on the way is not one. The first is
+    /// mended by the next dial (`stale`); a second is a server that cannot keep kablo for now,
+    /// and the panes that wait for a new terminal there do not wait for it ([`Core::gives_up`]).
     missed: u32,
     /// Bytes queued for the holders of this account's terminals.
     queued: Arc<AtomicUsize>,
@@ -2093,9 +2089,6 @@ impl Core {
                     && let Some(client) = self.hub.client_mut(&account)
                 {
                     client.push(&bytes, now);
-                    if let Some(entry) = self.accounts.get_mut(&account) {
-                        entry.missed = 0;
-                    }
                 }
             }
             Msg::BridgeEof {
@@ -2355,6 +2348,9 @@ impl Core {
                         match *event {
                             // A connection that came up is asked for its terminals.
                             Event::Linked => {
+                                if let Some(entry) = self.accounts.get_mut(&account) {
+                                    entry.missed = 0;
+                                }
                                 self.fresh.insert(account.clone());
                                 self.relist.insert(account);
                             }
@@ -3209,9 +3205,9 @@ impl Core {
             };
             entry.dialing = true;
             let (server, installed) = (entry.server.clone(), entry.installed.clone());
-            // A kablo that could not be run is written again twice at most: past that the server
-            // cannot keep it, and every dial would only do the same look again.
-            let stale = entry.stale && entry.missed < MISSED_REPAIRS;
+            // A kablo that could not be run is written again at every dial, for as long as it
+            // takes: the dial after the server has room again is the one that brings it back.
+            let stale = entry.stale;
             let shared = Arc::clone(&self.shared);
             let started = thread::Builder::new()
                 .name("ssh-hold dials".into())
@@ -3339,7 +3335,8 @@ impl Core {
         }
         let given_up = self.hub.give_up_new(account);
         for terminal in &given_up {
-            // The row `started` wrote for a terminal that was never made.
+            // The row `started` wrote for this pane. If the request had reached the server the
+            // terminal may be there, on no row: the pane is a plain `ssh` by now.
             self.shared.ledger.gone(account, terminal);
         }
         // A row that was the account's only one took the account with it.
@@ -3365,7 +3362,7 @@ impl Core {
         if !matches!(client.link(), Link::Retrying { .. }) {
             return false;
         }
-        entry.missed >= 2 || (entry.missed != 1 && client.unreached() >= GIVE_UP_AFTER)
+        entry.missed >= 2 || (entry.missed == 0 && client.unreached() >= GIVE_UP_AFTER)
     }
 
     /// A holder asked for a terminal. Which pane it is in and whether the call
@@ -3947,6 +3944,10 @@ impl Core {
         let numbered = self.hub.version_of(hold) >= wire::NAMED;
         if self.gives_up(&server.key) {
             self.hub.refuse(hold, true, "");
+            // Being asked is a reason to look again: a server that is back serves the next one.
+            if let Some(client) = self.hub.client_mut(&server.key) {
+                client.retry_now(Instant::now());
+            }
             return;
         }
         if let Some(entry) = self.accounts.get(&server.key) {

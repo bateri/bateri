@@ -98,6 +98,8 @@ struct Fake {
     /// While set, no bridge can be started: the network is down (`ConnectionRefused`),
     /// or the server wants a login nobody has saved (`PermissionDenied`).
     carry_error: Mutex<Option<io::ErrorKind>>,
+    /// A bridge says what a login file prints and ends before any kablo has spoken.
+    carry_noise: AtomicBool,
     /// Why a bridge's stream ends by itself, as its process says.
     eof_cause: Arc<Mutex<Cause>>,
     /// What the panes were told about their connection, in order.
@@ -155,6 +157,7 @@ impl Fake {
             refresh_fails: AtomicBool::new(false),
             refresh_mends: AtomicBool::new(false),
             carry_fails: AtomicU32::new(0),
+            carry_noise: AtomicBool::new(false),
             carried: Mutex::new(Vec::new()),
             carry_error: Mutex::new(None),
             eof_cause: Arc::new(Mutex::new(Cause::Dropped)),
@@ -413,6 +416,15 @@ impl Backend for Fake {
             .is_ok()
         {
             return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "down"));
+        }
+        if self.carry_noise.load(Ordering::SeqCst) {
+            let cause = Arc::clone(&self.eof_cause);
+            return Ok(Carried {
+                reader: Box::new(io::Cursor::new(b"welcome\n".to_vec())),
+                writer: Box::new(io::sink()),
+                close: Box::new(|| {}),
+                ended: Box::new(move || *cause.lock().expect("lock")),
+            });
         }
         let closed = Arc::new(AtomicBool::new(false));
         // A new connection to the server: what the old one had in flight is lost.
@@ -1402,6 +1414,7 @@ fn a_new_terminal_does_not_wait_for_a_kablo_that_cannot_be_written() {
     );
 
     // Another one, asked now, is told at once, not at the next failed attempt.
+    let dials = rig.world.count("carry");
     let asked_at = Instant::now();
     let mut later = Holder::new(&rig.socket(), "b-3");
     assert_eq!(later.outcome(), Outcome::FallBack);
@@ -1409,6 +1422,17 @@ fn a_new_terminal_does_not_wait_for_a_kablo_that_cannot_be_written() {
         asked_at.elapsed() < Duration::from_millis(1000),
         "{:?}",
         asked_at.elapsed()
+    );
+
+    // Being asked is a reason to look again, without waiting for the next attempt: a server that
+    // is back serves the `ssh` after this one.
+    let looked_by = Instant::now() + Duration::from_millis(800);
+    while rig.world.count("carry") == dials && Instant::now() < looked_by {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        rig.world.count("carry") > dials,
+        "the server was not looked at"
     );
 
     // The pane that had a terminal waits for it, as it always did, and has it back when the
@@ -1432,6 +1456,69 @@ fn a_new_terminal_does_not_wait_for_a_kablo_that_cannot_be_written() {
             .bridge()
             .has(&SessionId::new("b-2").expect("a name"))
     );
+}
+
+/// What a login file prints is not kablo speaking: a server that prints a welcome and then cannot
+/// run kablo lets a new terminal go like one that prints nothing.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_login_that_prints_something_does_not_keep_a_new_terminal_waiting_for_a_missing_kablo() {
+    let rig = Rig::new("missing-noise");
+    let pane = pane_named(&rig.world);
+    let kept = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || kept.shown.bytes() == b"one");
+
+    rig.world.refresh_fails.store(true, Ordering::SeqCst);
+    rig.world.carry_noise.store(true, Ordering::SeqCst);
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Missing;
+    rig.world.break_connection();
+    until("the loss told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+    });
+
+    let numbered = rig.world.count("number");
+    let mut asked = Holder::new(&rig.socket(), "b-2");
+    until("the new terminal was numbered", || {
+        rig.world.count("number") == numbered + 1
+    });
+    rig.service.retry_account("u@rasp:22");
+    assert_eq!(asked.outcome(), Outcome::FallBack);
+}
+
+/// However long a server could not keep kablo, it is written there at the dial after it can: the
+/// pane that waits for its terminal has it back, nobody has to restart anything.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_server_that_could_not_keep_kablo_for_long_gets_it_when_it_can() {
+    let rig = Rig::new("missing-long");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+
+    rig.world.refresh_fails.store(true, Ordering::SeqCst);
+    rig.world.carry_fails_with(Some(io::ErrorKind::NotFound));
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Missing;
+    rig.world.break_connection();
+    until("the loss told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+    });
+    until("written at every dial", || {
+        rig.service.retry_account("u@rasp:22");
+        rig.world.count("refresh") >= 5
+    });
+
+    rig.world.refresh_fails.store(false, Ordering::SeqCst);
+    rig.world.refresh_mends.store(true, Ordering::SeqCst);
+    until("the pane back", || {
+        rig.service.retry_account("u@rasp:22");
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    rig.world.bridge().write(&terminal, b"two");
+    until("the bytes go on", || holder.shown.bytes() == b"onetwo");
 }
 
 /// A server that cannot be reached three times in a row is one a new terminal does not wait
