@@ -64,6 +64,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_core::CommandLevel;
 use bt_core::PaneUuid;
+use bt_core::{HostMark, host_mark};
 use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
 use bt_shell_common::agent::listing::{self, Card, Node, Pane, Scene, Tab, Window};
@@ -276,7 +277,13 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         Answer::Ssh(name) => reach::ssh(app, letter, &server, from.as_deref(), name),
         Answer::PlaceOn(place) => reach::place_on(letter, server, from, place),
         Answer::Relay(relay) => reach::relay(app, letter, &server, from.as_deref(), relay),
-        Answer::Package(package) => reach::package(letter, &server, package),
+        Answer::Package(package) => {
+            // The settings' word on the server, told to it in an offer: this computer is never
+            // one.
+            let production = !local::is_account(&server.account)
+                && host_mark(&app.settings().remote_hosts, &server.host) == HostMark::Production;
+            reach::package(letter, &server, production, package);
+        }
     }
     world.finish();
 }

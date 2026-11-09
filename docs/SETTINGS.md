@@ -2808,25 +2808,31 @@ time a terminal on a server shows its prompt, a card in the top right corner of 
 aren't on dev-1* and lists the programs you follow, whose key you approved, that the server does not have and that their
 author built for that server's kind of computer. Install (⌘Return, Shell ▸ Install Programs Here) brings the ones left
 checked, one after the other, each with a ring, a dot or a triangle and the reason when it failed; the card goes by
-itself when all are in, and stays with Try Again and Close when some are not. Not Here (⌘Escape, Shell ▸ Don't Install
+itself when all are in, and stays with Try Again and Close when some are not. The ones you unchecked are told to that
+server as not wanted there (`bateri package not-here`) before the rest comes; once it has been told, it does not ask about
+them again. Not Here (⌘Escape, Shell ▸ Don't Install
 Programs Here) tells that server none of them is wanted (`bateri package not-here`), and it does not ask about those
 again. The card takes no key, so you keep typing; it is over the first pane of that server that has a prompt, once for a
 server while bateri runs; it never comes on a server marked Production, one without shell integration, or this computer,
 and ⌘Return and ⌘Escape do nothing without a card.
 
 **`bateri package`**, in a terminal on a machine that has kablo and bateri's shell integration: `list` (what the machine
-has, what stopped for a key, whether it updates on its own, and what it was told is not wanted), `install SOURCE`, `update [NAME]`, `remove NAME`, `auto on|off` (whether this machine
+has, what stopped for a key, whether it updates on its own, and what it was told is not wanted), `install SOURCE`, `update [NAME [--trust KEY]]`, `remove NAME`, `auto on|off` (whether this machine
 updates its programs on its own; on by default) and `not-here [NAME]…` (the programs this machine is not to be asked
 about). `install`, `update` and the daily look need a bateri that is connected, and are not allowed on a machine whose
 administrator forbade forwarding (`/etc/kablo/no-forwarding`). An unknown key is asked about at a terminal
-(`Signed with ed25519:… Trust it? [y/N]`), and refused where nobody can be asked.
+(`Signed with ed25519:… Trust it? [y/N]`), and refused where nobody can be asked, unless `--trust KEY` names that very key
+(`install` and `update NAME` alike).
 
 **Updates are the machine's.** While you are connected to a machine that has a program, its kablo asks bateri once a
 day, and at once at Check Now, whether there is a newer release, and takes it without a question; the release in use
 stays until the new one is whole, and a program that is running keeps running. A release signed with a different key
 than the one approved stops that program on that machine: the version there keeps running, one notification says so
 (*textpen stopped updating on dev-1*), and `bateri package update textpen` shows both keys and asks. `auto off` stops
-the updates of a machine; `bateri package update` there still looks when you ask.
+the updates of a machine; `bateri package update` there still looks when you ask. A server you marked Production (and
+turned shell integration on for by hand) starts with `auto off`: bateri says so when the first program is installed
+there, and `bateri package auto on` turns updating on; it stays on while the machine keeps a program (a machine left with
+none and installed to again starts over).
 
 **The Apps page** (Settings ▸ Apps) is this list as rows, under Following, and a field under Add. A row has the
 program's name and version, the source it came from, and at the right a mark and a trash can, with a button left of

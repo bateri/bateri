@@ -12,7 +12,8 @@
 //!
 //! *Install* has the server's own kablo bring each program that is checked, one after the other
 //! (`bateri package install`, run on the server's account over the connection bateri keeps to
-//! it), and says each as it goes; a card that did not bring them all stays, with *Try Again*.
+//! it), says each as it goes, and first tells the server the rows left unchecked are not wanted
+//! (`bateri package not-here`); a card that did not bring them all stays, with *Try Again*.
 //! *Not Here* writes the names into the server's `not-here` and goes: that server does not ask
 //! about them again. ⌘Return and ⌘Escape are those two buttons, from the Shell menu, and only
 //! while a card asks (the menu greys them otherwise).
@@ -317,20 +318,28 @@ pub(super) fn act(mtm: MainThreadMarker, account: &str, act: Act) {
             redraw(mtm, account);
         }
         Act::Install => {
-            let first = with(|cards| cards.open.get_mut(account).and_then(|o| o.card.begin()));
+            // The boxes left unchecked are said to the server before the first program comes, so
+            // that it does not ask about them again; begin takes those rows off the card.
+            let (first, declined) = with(|cards| match cards.open.get_mut(account) {
+                Some(open) => {
+                    let declined = open.card.declined_words();
+                    (open.card.begin(), declined)
+                }
+                None => (None, None),
+            });
             if first.is_some() {
                 with(|cards| cards.answered.insert(account.to_owned()));
             }
             redraw(mtm, account);
             if let Some(line) = first {
-                bring(mtm, account, line);
+                bring(mtm, account, line, declined);
             }
         }
         Act::Retry => {
             let first = with(|cards| cards.open.get_mut(account).and_then(|o| o.card.retry()));
             redraw(mtm, account);
             if let Some(line) = first {
-                bring(mtm, account, line);
+                bring(mtm, account, line, None);
             }
         }
         Act::NotHere => {
@@ -367,8 +376,10 @@ pub(super) fn act(mtm: MainThreadMarker, account: &str, act: Act) {
 }
 
 /// Has the server bring line `line` of the card of `account`; what came of it is
-/// [`finished`].
-fn bring(mtm: MainThreadMarker, account: &str, line: usize) {
+/// [`finished`]. `before` is a command to run on the server first (the programs that were not
+/// wanted): the one that writes `not-here` and the one that installs do not run at once, for both
+/// write notes in the same folder.
+fn bring(mtm: MainThreadMarker, account: &str, line: usize, before: Option<Vec<String>>) {
     let Some((host, ssh, words)) = with(|cards| {
         let open = cards.open.get(account)?;
         Some((
@@ -384,6 +395,13 @@ fn bring(mtm: MainThreadMarker, account: &str, line: usize) {
     let spawned = thread::Builder::new()
         .name("bateri programs".into())
         .spawn(move || {
+            if let Some(before) = before
+                && let Err(why) = on_server(&ssh, &host, &before)
+            {
+                eprintln!(
+                    "bateri: could not tell {host} which programs are not wanted there: {why}"
+                );
+            }
             let outcome = on_server(&ssh, &host, &words);
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
@@ -414,7 +432,7 @@ fn finished(mtm: MainThreadMarker, account: &str, line: usize, outcome: Result<(
     };
     redraw(mtm, account);
     match (next, stage) {
-        (Some(line), _) => bring(mtm, account, line),
+        (Some(line), _) => bring(mtm, account, line, None),
         (None, Stage::Done) => {
             // Ready: it says so for a moment and goes.
             let account = account.to_owned();

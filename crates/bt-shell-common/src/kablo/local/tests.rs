@@ -3365,6 +3365,7 @@ mod packages {
                         account: letter.account.clone(),
                         host: letter.host.clone(),
                         local: super::is_account(&letter.account),
+                        production: false,
                     };
                     let reply = match (Request::parse(&text), served.get()) {
                         (Ok(Request::Package(package)), Some(served)) => answerer.answer(

@@ -7,8 +7,9 @@
 //! that their author has built for the server's kind of computer, are the rows. Only a program
 //! that landed is a row, and a program lands with its key approved, so the card never asks the
 //! person about a key. *Install* has the server's own kablo bring them
-//! (`bateri package install`, run on the server's account, as the person would type it); *Not
-//! Here* writes the names into the server's `not-here`, so that it does not ask again.
+//! (`bateri package install`, run on the server's account, as the person would type it) and
+//! writes the rows left unchecked into the server's `not-here`; *Not Here* writes all the names
+//! there, so that it does not ask again.
 
 use std::fs;
 use std::path::Path;
@@ -273,6 +274,25 @@ impl Card {
         self.lines.get(i).map(|line| line.row.words.as_slice())
     }
 
+    /// *Install*: the words that tell the server the rows whose boxes the person unchecked are not
+    /// wanted there (`package not-here NAME…`), so that it does not ask about them again; `None`
+    /// when every box is checked. Read before [`Card::begin`], which takes those rows off the
+    /// card.
+    pub fn declined_words(&self) -> Option<Vec<String>> {
+        let names: Vec<&str> = self
+            .lines
+            .iter()
+            .filter(|line| !line.on)
+            .map(|line| line.row.name.as_str())
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        let mut words = vec!["package".to_owned(), "not-here".to_owned()];
+        words.extend(names.into_iter().map(str::to_owned));
+        Some(words)
+    }
+
     /// *Not Here*: the words that tell the server none of the rows the card lists is wanted
     /// (`package not-here NAME…`).
     pub fn not_here_words(&self) -> Vec<String> {
@@ -462,5 +482,26 @@ mod tests {
             ]),
             Some(2)
         );
+    }
+
+    #[test]
+    fn the_rows_left_unchecked_are_what_install_tells_the_server_it_need_not_have() {
+        let mut card = Card::new("dev-1", rows(&["textpen", "notes", "pickpen"])).expect("a card");
+        // Every box checked: there is nothing to say.
+        assert_eq!(card.declined_words(), None);
+        card.toggle(1);
+        card.toggle(2);
+        assert_eq!(
+            card.declined_words(),
+            Some(vec![
+                "package".to_owned(),
+                "not-here".to_owned(),
+                "notes".to_owned(),
+                "pickpen".to_owned()
+            ])
+        );
+        // The checked one is what is brought; the others have left the card.
+        assert_eq!(card.begin(), Some(0));
+        assert_eq!(card.declined_words(), None);
     }
 }

@@ -94,6 +94,15 @@ fn server(account: &str) -> Who {
         account: account.to_owned(),
         host: "dev-1".to_owned(),
         local: false,
+        production: false,
+    }
+}
+
+/// A server the settings keep as Production.
+fn production_server(account: &str) -> Who {
+    Who {
+        production: true,
+        ..server(account)
     }
 }
 
@@ -102,6 +111,7 @@ fn this_computer() -> Who {
         account: "local".to_owned(),
         host: String::new(),
         local: true,
+        production: false,
     }
 }
 
@@ -167,6 +177,24 @@ fn a_release_is_offered_with_what_the_machine_needs_to_judge_it_and_not_when_it_
     let two = offered(world.ask(&answerer, &server("u@h:22"), offer(SOURCE, Some("1.0.0"))));
     let manifest = apps::verify(two.manifest.as_bytes(), two.signature.as_bytes()).expect("holds");
     assert_eq!(manifest.version.to_string(), "1.1.0");
+}
+
+#[test]
+fn an_offer_says_whether_the_server_is_kept_as_production_and_this_computer_never_is() {
+    let world = World::new("production");
+    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &Author::new(1));
+    let answerer = world.answerer();
+
+    let says = |who: &Who| offered(world.ask(&answerer, who, offer(SOURCE, None))).production;
+    assert!(!says(&server("u@h:22")));
+    assert!(says(&production_server("u@prod:22")));
+    // The word is the machine's own, not what the sources' cache held for the machine before.
+    assert!(!says(&server("u@h:22")));
+    // This computer is not a server, whatever its settings entry would say.
+    assert!(!says(&Who {
+        production: true,
+        ..this_computer()
+    }));
 }
 
 #[test]

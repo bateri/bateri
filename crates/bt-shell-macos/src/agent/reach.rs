@@ -236,12 +236,14 @@ fn placed(
 /// `package`: a machine asks the app about its programs. The answer goes to the internet and, for
 /// a `fetch`, writes the file on the machine, so it runs on a thread of its own and the letter is
 /// answered from there ([`bt_shell_common::apps::Answerer`]). The machine is the account the
-/// letter came from, never what the program said of itself.
-pub(super) fn package(letter: Letter, server: &Server, package: Package) {
+/// letter came from, never what the program said of itself. `production` is whether the settings
+/// keep that server as a Production one, which the offer tells it.
+pub(super) fn package(letter: Letter, server: &Server, production: bool, package: Package) {
     let who = Who {
         account: server.account.clone(),
         host: server.host.clone(),
         local: local::is_account(&server.account),
+        production,
     };
     let machine = Machine {
         backend: hold_service::backend(),
