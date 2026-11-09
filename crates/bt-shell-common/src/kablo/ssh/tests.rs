@@ -114,7 +114,7 @@ impl World {
             notes: None,
             filed: Default::default(),
             streams: Default::default(),
-            apps: None,
+            watches: None,
         }
     }
 
@@ -1110,40 +1110,23 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
     );
 }
 
-/// The programs the person follows are put on a server when its install is done, on a thread of
-/// their own: the install's call returns without them, and what the visit did is the machine's
-/// report. (The visit's own steps are tested where they are written, [`crate::apps::distribute`];
-/// here the release has no signed `app.json`, so the report is the one problem it names.)
+/// A server has its programs watched when kablo is kept on it, its `bateri` command is wanted and
+/// its shells get the integration (which puts the programs' folder on `PATH`); this Mac needs no
+/// integration of a server's kind, only the command. A build without watches (the timed run)
+/// starts none.
 #[test]
-#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn setting_a_server_up_has_the_apps_distributor_visit_it_and_a_build_without_one_visits_nobody() {
-    use crate::apps::{Curl, Distributor, store};
-
-    let world = stand_in("apps-visit", 0);
-    let root = world._root.0.join("apps");
-    std::fs::create_dir_all(root.join("demo/1.0.0")).expect("a landed release");
-    std::fs::write(root.join("demo/1.0.0/app.json"), "{}").expect("a manifest");
-    store::follow(&root, "demo", "https://example.test/demo/app.json").expect("followed");
-    let distributor = Arc::new(Distributor::new(root, Arc::new(Curl)));
-
+fn a_server_has_its_programs_watched_where_the_command_and_the_integration_are_wanted() {
+    let world = stand_in("apps-watch", 0);
     let mut backend = world.backend(Some(world.package()));
     let host = backend.route(&["rasp".into()]).expect("kablo");
-    let argv = backend.master(&host).expect("plan").expect("step");
-    assert_eq!(run_argv(&argv), 0);
-    backend.install(&host, &[]).expect("installed");
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(distributor.reports().is_empty(), "no distributor, no visit");
+    assert!(backend.watch_wanted(&host));
 
-    // A server whose shells get no integration is not visited: the programs would be nowhere on
-    // its `PATH`.
-    backend.apps = Some(Arc::clone(&distributor));
+    // A server whose shells get no integration has the programs nowhere on its `PATH`.
     backend.settings = Box::new(|| Settings {
         remote_integration: false,
         ..Settings::default()
     });
-    backend.install(&host, &[]).expect("found");
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(distributor.reports().is_empty(), "no integration, no visit");
+    assert!(!backend.watch_wanted(&host));
 
     // Nor one whose `bateri` command is off: nothing of ours is put there.
     backend.settings = Box::new(|| Settings {
@@ -1155,26 +1138,11 @@ fn setting_a_server_up_has_the_apps_distributor_visit_it_and_a_build_without_one
         }],
         ..Settings::default()
     });
-    backend.install(&host, &[]).expect("found");
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(distributor.reports().is_empty(), "commands off, no visit");
+    assert!(!backend.watch_wanted(&host));
 
+    // Where kablo is not kept there is nothing to watch with.
     backend.settings = Box::new(Settings::default);
-    backend.install(&host, &[]).expect("found");
-    let until = Instant::now() + Duration::from_secs(20);
-    while distributor.reports().is_empty() {
-        assert!(Instant::now() < until, "the visit never reported");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let reports = distributor.reports();
-    assert_eq!(reports[0].machine, "u@h:22");
-    let summary = reports[0].result.as_ref().expect("the server answered");
-    assert_eq!(summary.problems.len(), 1, "{summary:?}");
-    // The look went to the server over the same master as the install.
-    let looked: Vec<String> = world
-        .calls()
-        .into_iter()
-        .filter(|call| call.contains("bateri/apps"))
-        .collect();
-    assert!(!looked.is_empty(), "{:?}", world.calls());
+    let mut without = world.backend(None);
+    without.settings = Box::new(Settings::default);
+    assert!(!without.watch_wanted(&host));
 }

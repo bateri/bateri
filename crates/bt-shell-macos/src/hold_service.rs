@@ -721,7 +721,7 @@ pub(crate) fn serve(
         mail: Some(Box::new(crate::agent::letter)),
         notes: Some(Box::new(crate::agent::notes)),
         // A run that keeps no masters (the timed one) keeps the person's folder out of it.
-        apps: masters_kept.then(crate::apps_distributor).flatten(),
+        watches: masters_kept.then(crate::apps_watches),
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
         let _ = SERVICE.set(service);

@@ -7,6 +7,7 @@
 //! the tests invent, because they have to say what no real program says (a release that needs more
 //! than this bateri has, another author's key).
 
+mod answering;
 mod support;
 
 use std::fs;
@@ -20,10 +21,8 @@ use bt_core::pencere::apps;
 use bt_core::pencere::{Digest, SUPPORTED_VERSIONS, offered_views};
 use bt_shell_common::apps::page::{self, AddRefused, Review, Sign};
 use bt_shell_common::apps::{
-    Config, Curl, Distributor, Failure, Fetch, Program, State, Status, Tracker, check,
-    fetch_target, look, store,
+    Config, Curl, Failure, Fetch, Program, State, Status, Tracker, check, fetch_target, look, store,
 };
-use bt_shell_common::kablo::local::LocalChannel;
 use support::{Author, Net, OTHER_TARGET, Release, TARGET, Temp, v};
 
 const SOURCE: &str = "https://apps.example.test/demo/app.json";
@@ -389,7 +388,7 @@ fn a_name_another_source_has_is_not_taken_a_second_time() {
 // ---- what the list says --------------------------------------------------------------------------
 
 #[test]
-fn a_program_that_leaves_the_list_is_deleted_and_its_name_remembered() {
+fn a_program_that_leaves_the_list_is_deleted() {
     let world = World::new("leaves");
     let author = Author::new(1);
     world.approve("demo", &author);
@@ -399,15 +398,11 @@ fn a_program_that_leaves_the_list_is_deleted_and_its_name_remembered() {
 
     assert!(world.check(&[]).is_empty());
     assert!(!world.root.path().join("demo").exists());
-    let removed = store::removed(world.root.path(), SystemTime::now());
-    assert_eq!(removed.len(), 1);
-    assert_eq!(removed[0].name, "demo");
 
     // Added again, it is followed again — and it asks for its key again, which went with it.
     assert!(matches!(world.one(SOURCE).state, State::Awaiting { .. }));
     world.approve("demo", &author);
     assert_eq!(world.one(SOURCE).state, ready("1.0.0"));
-    assert!(store::removed(world.root.path(), SystemTime::now()).is_empty());
 }
 
 #[test]
@@ -427,16 +422,8 @@ fn a_program_that_changes_its_name_at_the_same_address_leaves_the_old_name_behin
     let found = world.one(SOURCE);
     assert_eq!(found.name.as_deref(), Some("renamed"));
     assert_eq!(found.state, ready("2.0.0"));
-    // The old name's folder is gone and the name is on the removed list; the new one follows.
+    // The old name's folder is gone; the new one follows.
     assert!(!world.root.path().join("demo").exists());
-    let removed = store::removed(world.root.path(), SystemTime::now());
-    assert_eq!(
-        removed
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>(),
-        ["demo"]
-    );
     assert_eq!(
         store::followed_names(world.root.path()),
         [("renamed".to_owned(), SOURCE.to_owned())]
@@ -453,24 +440,6 @@ fn a_list_that_may_not_be_the_persons_deletes_nothing() {
     // The settings file could not be read: the list is the defaults.
     assert!(world.check_as(world.config(), &[], false).is_empty());
     assert_eq!(world.versions("demo"), ["1.0.0"]);
-    assert!(store::removed(world.root.path(), SystemTime::now()).is_empty());
-}
-
-#[test]
-fn the_names_taken_off_the_list_are_remembered_for_thirty_days() {
-    let world = World::new("thirty");
-    let root = world.root.path();
-    let now = SystemTime::now();
-    for name in ["old", "new"] {
-        fs::create_dir_all(root.join(name)).expect("a folder");
-    }
-    store::remove(root, "old", now - Duration::from_secs(31 * 24 * 60 * 60)).expect("removed");
-    store::remove(root, "new", now - Duration::from_secs(29 * 24 * 60 * 60)).expect("removed");
-    let names: Vec<String> = store::removed(root, now)
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect();
-    assert_eq!(names, ["new"]);
 }
 
 #[test]
@@ -704,93 +673,7 @@ fn the_worker_checks_at_start_and_again_when_the_list_changes() {
     });
 }
 
-// ---- the programs go to machines -----------------------------------------------------------------
-
-/// The apps folder of a machine whose home is `home`, as the machine's shells find it.
-fn machine_apps(home: &Path) -> std::path::PathBuf {
-    home.join(".local/share/bateri/apps")
-}
-
-/// What the command `name` of a machine says when it is run: the shell's `PATH` is not at stake
-/// here, the link is.
-fn runs(home: &Path, name: &str) -> String {
-    let output = std::process::Command::new(machine_apps(home).join("bin").join(name))
-        .output()
-        .expect("the command runs");
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
-}
-
-#[test]
-fn a_machine_of_another_kind_gets_its_own_file_and_follows_the_releases_and_the_removal() {
-    let world = World::new("distribute");
-    let author = Author::new(1);
-    world.approve("demo", &author);
-    Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &author);
-    assert_eq!(world.one(SOURCE).state, ready("1.0.0"));
-    let folder = world.root.path().join("demo/1.0.0");
-    assert!(
-        !folder.join(OTHER_TARGET).exists(),
-        "only this computer's file came down"
-    );
-
-    let distributor = Distributor::new(
-        world.root.path().to_owned(),
-        Arc::clone(&world.net) as Arc<dyn Fetch>,
-    );
-    let server = Temp::new("server-home");
-    let channel = LocalChannel::new(server.path().to_owned());
-    let mac = Temp::new("mac-home");
-    let this_mac = LocalChannel::new(mac.path().to_owned());
-    let now = SystemTime::now();
-    let later = |hours: u64| now + Duration::from_secs(hours * 60 * 60);
-
-    // The server is of another kind: its file is fetched when it is wanted, and runs there.
-    distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, now);
-    let reports = distributor.reports();
-    let summary = reports[0].result.as_ref().expect("the machine answered");
-    assert_eq!(summary.shipped, [("demo".to_owned(), v("1.0.0"))]);
-    assert_eq!(summary.problems, Vec::<String>::new());
-    assert_eq!(runs(server.path(), "demo"), "demo 1.0.0");
-    assert!(
-        folder.join(OTHER_TARGET).is_file(),
-        "fetched for the machine"
-    );
-    assert_eq!(
-        fs::read(machine_apps(server.path()).join("demo/1.0.0/app.json")).expect("app.json"),
-        fs::read(folder.join("app.json")).expect("the computer's")
-    );
-    // This computer's own account has the file that came down with the release: nothing more is asked.
-    let asked = world.net.asked().len();
-    distributor.sync_unless_recent("this computer", TARGET, &this_mac, now);
-    assert_eq!(runs(mac.path(), "demo"), "demo 1.0.0");
-    assert_eq!(world.net.asked().len(), asked);
-
-    // A newer release goes to both, and the one before stays on the machines.
-    Release::new("demo", "1.1.0").publish(&world.net, SOURCE, &author);
-    assert_eq!(world.one(SOURCE).state, ready("1.1.0"));
-    distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, later(1));
-    distributor.sync_unless_recent("this computer", TARGET, &this_mac, later(1));
-    for home in [server.path(), mac.path()] {
-        assert_eq!(runs(home, "demo"), "demo 1.1.0");
-        assert!(machine_apps(home).join("demo/1.0.0/demo").is_file());
-    }
-
-    // Taken off the list: the computer deletes it, and the machines do at their next visit.
-    store::remove(world.root.path(), "demo", later(2)).expect("removed");
-    distributor.sync_unless_recent("rasp", OTHER_TARGET, &channel, later(2));
-    let reports = distributor.reports();
-    let summary = reports
-        .iter()
-        .find(|report| report.machine == "rasp")
-        .and_then(|report| report.result.as_ref().ok())
-        .expect("the machine answered");
-    assert_eq!(summary.removed, ["demo"]);
-    assert!(!machine_apps(server.path()).join("demo").exists());
-    assert!(!machine_apps(server.path()).join("bin/demo").exists());
-    // This computer's own account loses it the same way.
-    distributor.sync_unless_recent("this computer", TARGET, &this_mac, later(2));
-    assert!(!machine_apps(mac.path()).join("demo").exists());
-}
+// ---- the file of a machine ------------------------------------------------------------------------
 
 #[test]
 fn a_file_for_a_machine_is_fetched_only_from_a_release_that_still_holds() {
@@ -1054,7 +937,7 @@ fn a_waiting_row_is_reviewed_and_a_changed_key_is_shown_beside_the_one_approved(
 }
 
 #[test]
-fn removing_takes_the_row_and_the_folder_away_and_remembers_the_name() {
+fn removing_takes_the_row_and_the_folder_away() {
     let world = World::new("remove");
     let author = Author::new(1);
     world.approve("demo", &author);
@@ -1072,9 +955,6 @@ fn removing_takes_the_row_and_the_folder_away_and_remembers_the_name() {
     let rows = page::rows(&list, Some(&page::Checks::of(&statuses)), world.root.path());
     assert!(rows.iter().all(|row| row.source != SOURCE));
     assert!(!world.root.path().join("demo").exists());
-    let removed = store::removed(world.root.path(), SystemTime::now());
-    assert_eq!(removed.len(), 1);
-    assert_eq!(removed[0].name, "demo");
 }
 
 #[test]

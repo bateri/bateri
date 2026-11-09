@@ -6111,12 +6111,12 @@ impl AppDelegate {
         );
         let sources = self.settings().apps_sources.clone();
         let persons = persons && self.settings().apps_sources_whole;
-        // What landed goes to this computer's own account too (where its shells look for the
-        // programs), once the check that brought it has ended, on the worker's thread. The
-        // servers are visited when a connection to one is set up ([`SshBackend::install`]).
+        // What landed is asked of this computer's own kablo too, once the check that brought it
+        // has ended, on the worker's thread: the programs on a machine are kablo's, and this
+        // computer is a machine ([`bt_shell_common::apps::followed`]). The servers ask for theirs
+        // when a connection to one is up ([`bt_shell_common::apps::Watches`]).
         let after: bt_shell_common::apps::After = {
-            let distributor = crate::apps_distributor();
-            let target = bt_shell_common::apps::this_target();
+            let root = config.root.clone();
             Box::new(move || {
                 // The Apps page shows what the check found, from the main thread.
                 DispatchQueue::main().exec_async(|| {
@@ -6126,15 +6126,11 @@ impl AppDelegate {
                         delegate.apps_changed();
                     }
                 });
-                let (Some(distributor), Some(target)) = (&distributor, target) else {
-                    return;
-                };
-                distributor.sync_unless_recent(
-                    &bt_shell_common::kablo::local::host().key,
-                    target,
-                    &bt_shell_common::kablo::local::LocalChannel::new(home.clone()),
-                    std::time::SystemTime::now(),
-                );
+                if let Some(backend) = crate::hold_service::backend() {
+                    for (name, why) in bt_shell_common::apps::followed::install(&backend, &root) {
+                        eprintln!("bateri: could not install {name} on this computer: {why}");
+                    }
+                }
             })
         };
         match bt_shell_common::apps::Tracker::start(config, sources, persons, after) {
@@ -6199,6 +6195,12 @@ impl AppDelegate {
             Some(tracker) => tracker.refresh(),
             None => self.start_apps(),
         }
+        // The machines the person is connected to ask again too: what was read of the sources is
+        // forgotten, and each `watch` is ended and started, which asks at once.
+        if let Some(answerer) = crate::apps_answerer() {
+            answerer.forget();
+        }
+        crate::apps_watches().ask_now();
         self.apps_changed();
     }
 

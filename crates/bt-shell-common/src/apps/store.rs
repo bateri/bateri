@@ -2,7 +2,6 @@
 //!
 //! ```text
 //! <root>/                          ~/Library/Application Support/bateri/apps
-//!   removed                        "<unix seconds> <name>" lines: the names taken off the list, for 30 days
 //!   <name>/
 //!     source                       the address of the app.json this name follows (one line)
 //!     key                          the key its releases are signed with, once approved (one line)
@@ -26,8 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bt_core::pencere::apps::Version;
 
-/// How long a release that is not the newest two stays, and how long the name of a program
-/// taken off the list is remembered.
+/// How long a release that is not the newest two stays.
 pub const KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The folder of a program.
@@ -188,73 +186,7 @@ pub fn prune(root: &Path, name: &str, now: SystemTime) {
     }
 }
 
-/// A name that was taken off the list, and when.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Removed {
-    /// The program's name.
-    pub name: String,
-    /// When it was taken off, as seconds since the Unix epoch.
-    pub at: u64,
-}
-
-fn seconds(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
-fn removed_path(root: &Path) -> PathBuf {
-    root.join("removed")
-}
-
-/// The names taken off the list in the last [`KEEP`], oldest first. A machine that connects
-/// later deletes these from itself ([`remove`] is what writes them).
-pub fn removed(root: &Path, now: SystemTime) -> Vec<Removed> {
-    let Ok(text) = fs::read_to_string(removed_path(root)) else {
-        return Vec::new();
-    };
-    let oldest = seconds(now).saturating_sub(KEEP.as_secs());
-    let mut found: Vec<Removed> = text
-        .lines()
-        .filter_map(|line| {
-            let (at, name) = line.split_once(' ')?;
-            Some(Removed {
-                name: name.trim().to_owned(),
-                at: at.parse().ok()?,
-            })
-        })
-        .filter(|entry| entry.at >= oldest && !entry.name.is_empty())
-        .collect();
-    found.sort_by(|a, b| (a.at, &a.name).cmp(&(b.at, &b.name)));
-    found
-}
-
-fn write_removed(root: &Path, entries: &[Removed]) -> io::Result<()> {
-    let text: String = entries
-        .iter()
-        .map(|entry| format!("{} {}\n", entry.at, entry.name))
-        .collect();
-    write_atomically(&removed_path(root), text.as_bytes())
-}
-
-/// Takes `name` off this machine: its folder is deleted at once and the name is remembered.
-pub fn remove(root: &Path, name: &str, now: SystemTime) -> io::Result<()> {
-    fs::remove_dir_all(app_dir(root, name))?;
-    let mut entries = removed(root, now);
-    entries.retain(|entry| entry.name != name);
-    entries.push(Removed {
-        name: name.to_owned(),
-        at: seconds(now),
-    });
-    write_removed(root, &entries)
-}
-
-/// A name that is followed again is no longer one that was taken off.
-pub fn forget_removal(root: &Path, name: &str, now: SystemTime) {
-    let entries = removed(root, now);
-    if entries.iter().any(|entry| entry.name == name) {
-        let kept: Vec<Removed> = entries
-            .into_iter()
-            .filter(|entry| entry.name != name)
-            .collect();
-        let _ = write_removed(root, &kept);
-    }
+/// Takes `name` off this folder: its folder is deleted at once.
+pub fn remove(root: &Path, name: &str) -> io::Result<()> {
+    fs::remove_dir_all(app_dir(root, name))
 }

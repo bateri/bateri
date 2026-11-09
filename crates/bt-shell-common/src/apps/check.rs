@@ -2,7 +2,7 @@
 //! puts a map of addresses where the network is and a temporary folder where the computer's is.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -41,7 +41,7 @@ pub fn check(
         .map(|source| app_source_address(source))
         .collect();
     if authoritative {
-        take_off_unlisted(&config.root, &addresses, now);
+        take_off_unlisted(&config.root, &addresses);
     }
     let cx = Cx { config, fetch, now };
     let mut taken: Vec<String> = Vec::new();
@@ -111,11 +111,97 @@ pub fn look(config: &Config, source: &str, fetch: &dyn Fetch) -> Result<Look, Fa
     })
 }
 
+/// The release of one source as a machine is offered it (`package offer`): what [`check`] would
+/// land for this bateri, without landing it. Nothing is written.
+#[derive(Debug, Clone)]
+pub struct Chosen {
+    pub manifest: Manifest,
+    /// The `app.json`, as it was signed.
+    pub bytes: Vec<u8>,
+    /// Its signature.
+    pub signature: Vec<u8>,
+    /// The newest version the source lists: the one `manifest` is when this bateri opens it, and
+    /// newer than it when an earlier release was chosen.
+    pub latest: Version,
+}
+
+/// The release at `address` that this bateri opens ([`Manifest::select`]): the newest one, or the
+/// one before it that its `previous` lists. The key is not judged here: whether it is one the
+/// machine trusts is the machine's to say.
+pub fn choose(config: &Config, address: &str, fetch: &dyn Fetch) -> Result<Chosen, Failure> {
+    let cx = Cx {
+        config,
+        fetch,
+        now: SystemTime::now(),
+    };
+    let release = cx.read(address)?;
+    if RESERVED_NAMES.contains(&release.manifest.name.as_str()) {
+        return Err(Failure::Reserved);
+    }
+    let latest = release.manifest.version;
+    let earlier = match release.manifest.select(&config.protocols, &config.views) {
+        Selection::Current => None,
+        Selection::Previous(entry) => Some(cx.earlier(address, &release, entry)?),
+        Selection::Unsupported { version, .. } => return Err(Failure::Unsupported(version)),
+    };
+    let chosen = earlier.unwrap_or(release);
+    Ok(Chosen {
+        manifest: chosen.manifest,
+        bytes: chosen.bytes,
+        signature: chosen.signature,
+        latest,
+    })
+}
+
+/// The program file of `chosen` for `target`, its sum checked against the signed one, with the
+/// sum. A program the person follows and that has landed here is read from its folder
+/// ([`fetch_target`], which keeps the file there for the next machine that asks); any other is
+/// downloaded to a folder of its own that is gone when this returns, so that nothing is kept of a
+/// program nobody follows.
+pub fn program_file(
+    config: &Config,
+    address: &str,
+    chosen: &Chosen,
+    target: &str,
+    fetch: &dyn Fetch,
+) -> Result<(Vec<u8>, String), Failure> {
+    let manifest = &chosen.manifest;
+    let (name, version) = (manifest.name.as_str(), manifest.version);
+    let Some(file) = manifest.files.get(target) else {
+        return Err(Failure::NoFile(target.to_owned()));
+    };
+    let root = &config.root;
+    let landed = store::followed(root, name).as_deref() == Some(address)
+        && store::release_dir(root, name, version)
+            .join("app.json")
+            .is_file();
+    if landed {
+        let program = fetch_target(root, name, version, target, fetch)?
+            .ok_or_else(|| Failure::NoFile(target.to_owned()))?;
+        let bytes = fs::read(&program.path).map_err(disk)?;
+        return Ok((bytes, program.sha256));
+    }
+    if !reachable(address, &file.url) {
+        return Err(Failure::Unreachable);
+    }
+    let folder = std::env::temp_dir().join(format!("bateri-program-{}", store::unique()));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .map_err(disk)?;
+    let to = folder.join("program");
+    let result = download_program(fetch, file, &to)
+        .and_then(|()| fs::read(&to).map_err(disk))
+        .map(|bytes| (bytes, file.sha256.clone()));
+    let _ = fs::remove_dir_all(&folder);
+    result
+}
+
 /// Deletes the programs that follow an address the list does not have any more.
-fn take_off_unlisted(root: &Path, listed: &[Option<String>], now: SystemTime) {
+fn take_off_unlisted(root: &Path, listed: &[Option<String>]) {
     for (name, address) in store::followed_names(root) {
         if !listed.iter().flatten().any(|listed| *listed == address)
-            && let Err(e) = store::remove(root, &name, now)
+            && let Err(e) = store::remove(root, &name)
         {
             eprintln!("bateri: could not remove the program {name}: {e}");
         }
@@ -326,15 +412,12 @@ impl Cx<'_> {
         if store::approved_key(root, name).is_none() {
             store::approve(root, name, &manifest.key).map_err(disk)?;
         }
-        store::forget_removal(root, name, self.now);
         store::prune(root, name, self.now);
-        // A program that was at this address under another name is gone from it: its folder goes,
-        // and its name is one that was taken off, so the servers drop it too. Otherwise the old
-        // name would stay on the machines, on `PATH`, for as long as the address is listed.
+        // A program that was at this address under another name is gone from it: its folder goes.
         for (old, address) in store::followed_names(root) {
             if address == source
                 && old != name
-                && let Err(e) = store::remove(root, &old, self.now)
+                && let Err(e) = store::remove(root, &old)
             {
                 eprintln!("bateri: could not remove the program {old}: {e}");
             }

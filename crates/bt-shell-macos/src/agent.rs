@@ -276,6 +276,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         Answer::Ssh(name) => reach::ssh(app, letter, &server, from.as_deref(), name),
         Answer::PlaceOn(place) => reach::place_on(letter, server, from, place),
         Answer::Relay(relay) => reach::relay(app, letter, &server, from.as_deref(), relay),
+        Answer::Package(package) => reach::package(letter, &server, package),
     }
     world.finish();
 }

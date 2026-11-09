@@ -503,6 +503,8 @@ struct StandIn {
     level: Mutex<Option<bt_core::CommandLevel>>,
     /// Whether each call to reach `prod` could ask for a password.
     asked: Mutex<Vec<bool>>,
+    /// What the app does with what a program says to it (`kablo bateri …`): `Some` takes mail.
+    mailer: Option<Arc<dyn Fn(crate::kablo::service::Letter) + Send + Sync>>,
 }
 
 impl Backend for RealMac {
@@ -570,6 +572,16 @@ impl Backend for RealMac {
 
     fn serving(&self, streams: crate::kablo::service::Streams) {
         let _ = self.streams.set(streams);
+    }
+
+    fn takes_mail(&self) -> bool {
+        self.stand_in.mailer.is_some()
+    }
+
+    fn mail(&self, letter: crate::kablo::service::Letter) {
+        if let Some(mailer) = &self.stand_in.mailer {
+            mailer(letter);
+        }
     }
 
     // This Mac's connection needs no ssh to be there: the account's key is all the service asks.
@@ -1826,6 +1838,22 @@ impl Here {
 
     /// As [`Here::new`], where the person logs in with `shell`.
     fn logging_in_with(name: &str, shell: Option<PathBuf>) -> Option<Here> {
+        Here::with(name, shell, None)
+    }
+
+    /// As [`Here::new`], where the app takes what the programs say to it and `mailer` answers.
+    fn mailing(
+        name: &str,
+        mailer: Arc<dyn Fn(crate::kablo::service::Letter) + Send + Sync>,
+    ) -> Option<Here> {
+        Here::with(name, None, Some(mailer))
+    }
+
+    fn with(
+        name: &str,
+        shell: Option<PathBuf>,
+        mailer: Option<Arc<dyn Fn(crate::kablo::service::Letter) + Send + Sync>>,
+    ) -> Option<Here> {
         let Some(bundle) = release() else {
             eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
             return None;
@@ -1846,6 +1874,7 @@ impl Here {
             streams: Default::default(),
             stand_in: StandIn {
                 shell,
+                mailer,
                 ..StandIn::default()
             },
         });
@@ -3229,4 +3258,190 @@ fn a_program_whose_marks_went_with_its_relay_is_a_command_once_the_owner_says_so
     assert_eq!(session.pane_title().whole(), "api");
     drop(session);
     service.stop();
+}
+
+// ─── programs over a real kablo ──────────────────────────────────────────
+
+mod packages {
+    use super::*;
+    use crate::agent::LOCAL_SERVER;
+    use crate::agent::message::{Failure as Said, Kind, Reply, Request};
+    use crate::agent::relay;
+    use crate::apps::package::Who;
+    use crate::apps::upload::{Through, WAIT};
+    use crate::apps::{Answerer, Config, Curl, Watches};
+    use crate::kablo::served::Served;
+    use crate::kablo::service::{Gone, Letter};
+    use crate::ssh_route::Ask;
+    use bt_core::pencere::Digest;
+    use ed25519_dalek::{Signer, SigningKey};
+    use std::sync::OnceLock;
+
+    fn base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    /// A release of `demo` signed with an invented key, below `dir`, as the files a `file:` source
+    /// is: its address and the key it is signed with.
+    fn publish(dir: &Path, version: &str) -> (String, String) {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let target = crate::apps::this_target().expect("a target");
+        std::fs::create_dir_all(dir).expect("a folder");
+        let body = format!("#!/bin/sh\necho demo-ran {version}\n");
+        let program = dir.join(format!("demo-{version}"));
+        std::fs::write(&program, &body).expect("a program");
+        let sum = Digest::of(body.as_bytes()).to_string();
+        let public = format!("ed25519:{}", base64(key.verifying_key().as_bytes()));
+        let json = format!(
+            r#"{{"name":"demo","version":"{version}","protocol":[1],"views":[{{"kind":"lua","versions":["0.1"]}}],"key":"{public}","files":{{"{target}":{{"url":"file://{}","sha256":"{sum}"}}}},"previous":[]}}"#,
+            program.display()
+        );
+        let manifest = dir.join("app.json");
+        std::fs::write(&manifest, &json).expect("an app.json");
+        let signature = format!(
+            "ed25519:{}\n",
+            base64(&key.sign(json.as_bytes()).to_bytes())
+        );
+        std::fs::write(dir.join("app.json.sig"), signature).expect("a signature");
+        (format!("file://{}", manifest.display()), public)
+    }
+
+    /// `bateri` with `words`, run on this computer's account over the real kablo.
+    fn bateri(served: &Served, words: &[&str]) -> crate::agent::message::Relayed {
+        let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+        relay::run_for(
+            served,
+            LOCAL_SERVER,
+            &words,
+            &Gone::new(),
+            Duration::from_secs(60),
+        )
+        .expect("the command ran")
+    }
+
+    fn runs(home: &Path) -> String {
+        let output = Command::new(home.join(".local/share/bateri/apps/bin/demo"))
+            .output()
+            .expect("the program runs");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_real_kablo_installs_and_updates_a_program_by_asking_the_app_that_answers_over_the_mail() {
+        let answerer = Arc::new(
+            crate::apps::Config::for_this_machine(
+                TempRoot::new("packages-app-folder").0.join("apps"),
+            )
+            .map(|config: Config| Answerer::new(config, Arc::new(Curl)))
+            .expect("a target"),
+        );
+        let served: Arc<OnceLock<Served>> = Arc::default();
+        // The app's side of the mail: what `kablo bateri package …` says is answered as the app
+        // does, for this computer's own account, and a file is written over the real connection.
+        let mailer: Arc<dyn Fn(Letter) + Send + Sync> = {
+            let (answerer, served) = (Arc::clone(&answerer), Arc::clone(&served));
+            Arc::new(move |letter: Letter| {
+                let (answerer, served) = (Arc::clone(&answerer), Arc::clone(&served));
+                thread::spawn(move || {
+                    let text = String::from_utf8_lossy(&letter.bytes).into_owned();
+                    let who = Who {
+                        account: letter.account.clone(),
+                        local: super::is_account(&letter.account),
+                    };
+                    let reply = match (Request::parse(&text), served.get()) {
+                        (Ok(Request::Package(package)), Some(served)) => answerer.answer(
+                            &who,
+                            package,
+                            &Through {
+                                served: served.clone(),
+                                wait: WAIT,
+                            },
+                        ),
+                        (Ok(other), _) => Reply::Failed(Said::new(
+                            Kind::Failed,
+                            format!("not for here: {other:?}"),
+                        )),
+                        (Err(failure), _) => Reply::Failed(failure),
+                    };
+                    letter.answer(reply.encode().into_bytes());
+                });
+            })
+        };
+        let Some(here) = Here::mailing("packages", mailer) else {
+            return;
+        };
+        let _ = served.set(here.served());
+        let home = here.ground.home.clone();
+        ensure_here(
+            &LocalChannel::new(home.clone()),
+            &release().expect("a release"),
+            true,
+        )
+        .expect("kablo and its command");
+        let dir = here.ground.root.join("source");
+        let (source, key) = publish(&dir, "1.0.0");
+        let served = here.served();
+
+        // Nothing is on the machine; a key nobody approved is not taken without being asked, and
+        // there is no one to ask here.
+        let said = bateri(&served, &["package", "install", &source]);
+        assert_eq!(said.status, 77, "{said:?}");
+        assert!(!home.join(".local/share/bateri/apps/bin/demo").exists());
+
+        // Approved by name, it is asked for, judged, fetched over the connection and put in use.
+        let said = bateri(&served, &["package", "install", &source, "--trust", &key]);
+        assert_eq!(said.status, 0, "{said:?}");
+        assert_eq!(runs(&home), "demo-ran 1.0.0");
+        let listed = bateri(&served, &["package", "list"]);
+        assert!(listed.stdout.contains("demo"), "{listed:?}");
+        assert!(listed.stdout.contains("1.0.0"), "{listed:?}");
+        // Asked again, nothing is brought.
+        let said = bateri(&served, &["package", "install", &source]);
+        assert_eq!(said.status, 0, "{said:?}");
+
+        // A watch tells the app what the machine has, and a newer release is taken when Check Now
+        // has it ask at once.
+        let watches = Arc::new(Watches::new());
+        let backend = here.service.backend();
+        {
+            let watches = Arc::clone(&watches);
+            thread::spawn(move || {
+                watches.keep(ACCOUNT, &|| {
+                    let words = ["package".to_owned(), "watch".to_owned()];
+                    backend.command(
+                        &super::host(),
+                        relay::start(true, "", &words),
+                        Ask::Never,
+                        WAIT,
+                    )
+                });
+            });
+        }
+        waits_for("the machine's state", || {
+            answerer
+                .machine(ACCOUNT)
+                .is_some_and(|machine| machine.installed == ["demo"])
+        });
+        publish(&dir, "1.1.0");
+        answerer.forget();
+        waits_for("the watch to be endable", || watches.ask_now() >= 1);
+        waits_for("the newer release", || runs(&home) == "demo-ran 1.1.0");
+    }
 }

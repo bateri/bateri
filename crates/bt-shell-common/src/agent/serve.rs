@@ -42,6 +42,7 @@
 //! level the server carries, never in a sheet.
 
 use bt_core::CommandLevel;
+use kablo_bateri::package::Package;
 use kablo_proto::v1::{State, Status};
 
 use super::level::{self, Act, Panes, Verdict, Why};
@@ -157,6 +158,10 @@ pub enum Answer {
     /// — on a thread of its own — and answers how it ended ([`super::relay`]). The level has been
     /// judged.
     Relay(Relay),
+    /// `package`: a machine asks the app about its programs. It goes to the internet and to the
+    /// machine, so the shell answers on a thread of its own ([`crate::apps::package`]). The level
+    /// has been judged: it is not `off`.
+    Package(Package),
 }
 
 fn waiting_reply(anchor: &Anchor) -> Reply {
@@ -224,6 +229,7 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
             Ok(()) => Answer::Relay(relay),
             Err(failure) => Answer::Reply(Reply::Failed(failure)),
         },
+        Ok(Request::Package(package)) => Answer::Package(package),
     }
 }
 
@@ -548,6 +554,40 @@ mod tests {
             host: String::new(),
             argv: Vec::new(),
             level: CommandLevel::Own,
+        }
+    }
+
+    /// A machine's questions about its programs go to the shell to be answered on a thread of its
+    /// own (they go to the internet and to the machine), at any level but `off`, and the app
+    /// refuses them all when the server's commands are `off` like everything else.
+    #[test]
+    fn a_question_about_programs_is_the_shells_to_answer_unless_the_level_is_off() {
+        let ask = "bateri 2\npackage offer\nsource bateri/textpen\ntarget aarch64-apple-darwin\n";
+        for level in [CommandLevel::Own, CommandLevel::Screen, CommandLevel::Full] {
+            let mut server = server();
+            server.level = level;
+            match serve(&server, None, ask, &mut Pretend::default()) {
+                Answer::Package(Package::Offer(offer)) => {
+                    assert_eq!(offer.source, "bateri/textpen");
+                }
+                other => panic!("{level:?}: not a question about programs: {other:?}"),
+            }
+        }
+        let mut off = server();
+        off.level = CommandLevel::Off;
+        match serve(&off, None, ask, &mut Pretend::default()) {
+            Answer::Reply(Reply::Failed(failure)) => assert_eq!(failure.kind, Kind::Refused),
+            other => panic!("off: not refused: {other:?}"),
+        }
+        // A question that is not one is a mistake in it, answered as the others are.
+        match serve(
+            &server(),
+            None,
+            "bateri 2\npackage offer\nsource bateri/textpen\n",
+            &mut Pretend::default(),
+        ) {
+            Answer::Reply(Reply::Failed(failure)) => assert_eq!(failure.kind, Kind::Usage),
+            other => panic!("not a mistake: {other:?}"),
         }
     }
 

@@ -130,11 +130,11 @@ pub struct SshBackend {
     pub filed: Mutex<std::collections::HashSet<String>>,
     /// What asks the service for programs and connections on a server ([`Backend::serving`]).
     pub streams: std::sync::OnceLock<Streams>,
-    /// What puts the programs of the apps folder ([`crate::apps`]) on a server: `Some` sends them
-    /// once a connection's install is done, on a thread of its own, so the pane never waits for
-    /// them ([`SshBackend::install`]). `None`: none are sent (the timed run keeps the person's
-    /// folder out of it).
-    pub apps: Option<Arc<crate::apps::Distributor>>,
+    /// The `kablo bateri package watch` of each machine a connection is up to
+    /// ([`SshBackend::watch_packages`]): `Some` starts one when the connection comes up, on a
+    /// thread of its own, so nothing waits for it. `None`: none is started (the timed run keeps the
+    /// person's folder out of it).
+    pub watches: Option<Arc<crate::apps::Watches>>,
 }
 
 impl SshBackend {
@@ -318,6 +318,78 @@ impl SshBackend {
         Ok(installed)
     }
 
+    /// What a program on the server left for the app while no connection was up
+    /// ([`Backend::reachable`]).
+    fn read_notes(&self, account: &str, server: &KabloHost) {
+        let Some(news) = &self.notes else {
+            return;
+        };
+        // A server's script leaves notes; this Mac has no such script.
+        if local::is_account(&server.key) {
+            return;
+        }
+        // Only a server kablo is kept on has been written to by the command.
+        if self.bundle.is_none() {
+            return;
+        }
+        let target = self.target(server);
+        let channel = SshChannel {
+            argv: ssh_argv_for(&target, &self.route_of(&target)),
+            limit: install::NOTES_LIMIT,
+        };
+        let Ok(reply) = channel.run(crate::agent::notes::READ, &[]) else {
+            return;
+        };
+        if reply.status != Some(0) {
+            return;
+        }
+        let notes = crate::agent::notes::parse(reply.out.as_bytes());
+        if notes.is_empty() {
+            return;
+        }
+        news(
+            crate::agent::serve::Server {
+                account: account.to_owned(),
+                host: server.host.clone(),
+                argv: server.argv.clone(),
+                level: (self.settings)().commands_for(&server.host),
+            },
+            notes,
+        );
+    }
+
+    /// Whether a machine has the programs watched: kablo is kept on it, the `bateri` command is
+    /// wanted there (`commands = "off"` puts nothing of ours), and, for a server, its shells get
+    /// bateri's integration ([`Settings::integration_for`]), which is what puts the programs'
+    /// folder on `PATH`.
+    fn watch_wanted(&self, server: &KabloHost) -> bool {
+        self.bundle.is_some()
+            && self.agent_wanted(server)
+            && (local::is_account(&server.key) || (self.settings)().integration_for(&server.host))
+    }
+
+    /// Starts `kablo bateri package watch` on the machine the connection is up to and waits for it
+    /// as long as it lives, so that the programs of the machine are looked at: when the person is
+    /// connected, and only then ([`SshBackend::watch_wanted`]).
+    fn watch_packages(&self, server: &KabloHost) {
+        let Some(watches) = &self.watches else {
+            return;
+        };
+        if !self.watch_wanted(server) {
+            return;
+        }
+        let here = local::is_account(&server.key);
+        let words = ["package".to_owned(), "watch".to_owned()];
+        watches.keep(&server.key, &|| {
+            self.command(
+                server,
+                crate::agent::relay::start(here, &server.host, &words),
+                Ask::Never,
+                crate::apps::upload::WAIT,
+            )
+        });
+    }
+
     fn remember(&self, fact: Fact, server: &KabloHost) {
         let _ = ssh_wrap::record(
             &self.state_path,
@@ -394,24 +466,6 @@ impl Backend for SshBackend {
                     // server run an earlier one, and are renewed before a bridge
                     // exists to be left behind.
                     renew(&channel.argv, &installed, live);
-                }
-                // The programs the person follows go to the server beside kablo: on a thread of
-                // their own (the pane waits for this call, not for them), and only where both
-                // hold: the `bateri` command is wanted there (`commands = "off"` puts nothing of
-                // ours), and the server's shells get bateri's integration
-                // ([`Settings::integration_for`]), which is what puts the programs' folder on
-                // `PATH`.
-                if let Some(apps) = self.apps.as_ref().filter(|_| {
-                    self.agent_wanted(server) && (self.settings)().integration_for(&server.host)
-                }) {
-                    apps.sync_in_background(
-                        server.key.clone(),
-                        installed.target.triple(),
-                        SshChannel {
-                            argv: channel.argv.clone(),
-                            limit: crate::apps::distribute::LIMIT,
-                        },
-                    );
                 }
                 Ok(installed)
             }
@@ -701,41 +755,9 @@ impl Backend for SshBackend {
     }
 
     fn reachable(&self, account: &str, server: &KabloHost) {
-        let Some(news) = &self.notes else {
-            return;
-        };
-        // A server's script leaves notes; this Mac has no such script.
-        if local::is_account(&server.key) {
-            return;
-        }
-        // Only a server kablo is kept on has been written to by the command.
-        if self.bundle.is_none() {
-            return;
-        }
-        let target = self.target(server);
-        let channel = SshChannel {
-            argv: ssh_argv_for(&target, &self.route_of(&target)),
-            limit: install::NOTES_LIMIT,
-        };
-        let Ok(reply) = channel.run(crate::agent::notes::READ, &[]) else {
-            return;
-        };
-        if reply.status != Some(0) {
-            return;
-        }
-        let notes = crate::agent::notes::parse(reply.out.as_bytes());
-        if notes.is_empty() {
-            return;
-        }
-        news(
-            crate::agent::serve::Server {
-                account: account.to_owned(),
-                host: server.host.clone(),
-                argv: server.argv.clone(),
-                level: (self.settings)().commands_for(&server.host),
-            },
-            notes,
-        );
+        self.read_notes(account, server);
+        // Last, for it lasts as long as the connection does.
+        self.watch_packages(server);
     }
 
     fn records(

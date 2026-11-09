@@ -1205,6 +1205,14 @@ impl Apps {
                     .is_ok()
                 {
                     self.toast(window, &format!("{name} removed."));
+                    // The program is kablo's on this computer: it is asked to take it off (a
+                    // server's copy is not touched: it is that machine's).
+                    let name = name.to_string();
+                    std::thread::spawn(move || {
+                        if let Some(backend) = crate::hold_service::backend() {
+                            let _ = bt_shell_common::apps::followed::remove(&backend, &name);
+                        }
+                    });
                 }
             }
             _ => {}

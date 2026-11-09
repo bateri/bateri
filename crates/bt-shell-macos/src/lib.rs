@@ -177,23 +177,31 @@ pub(crate) fn apps_root() -> Option<std::path::PathBuf> {
     Some(apps_path(&child::home()?, profile().as_deref()))
 }
 
-/// What puts the programs of [`apps_path`]'s folder on the machines bateri sets up: one for the
-/// process, since it remembers which machine it is visiting and when it was last (this computer's own
-/// account is one of them: [`app::AppDelegate::start_apps`]). `None` without a home directory.
-pub(crate) fn apps_distributor() -> Option<std::sync::Arc<bt_shell_common::apps::Distributor>> {
-    static DISTRIBUTOR: std::sync::OnceLock<
-        Option<std::sync::Arc<bt_shell_common::apps::Distributor>>,
-    > = std::sync::OnceLock::new();
-    DISTRIBUTOR
+/// What answers the machines that ask about programs (`package`): one for the process, since it
+/// remembers what it read of the sources lately and how often each machine made it go out. `None`
+/// without a home directory, or where this machine has no target name.
+pub(crate) fn apps_answerer() -> Option<std::sync::Arc<bt_shell_common::apps::Answerer>> {
+    static ANSWERER: std::sync::OnceLock<Option<std::sync::Arc<bt_shell_common::apps::Answerer>>> =
+        std::sync::OnceLock::new();
+    ANSWERER
         .get_or_init(|| {
-            let home = child::home()?;
-            Some(std::sync::Arc::new(
-                bt_shell_common::apps::Distributor::new(
-                    apps_path(&home, profile().as_deref()),
-                    std::sync::Arc::new(bt_shell_common::apps::Curl),
-                ),
-            ))
+            let config = bt_shell_common::apps::Config::for_this_machine(apps_root()?)?;
+            Some(std::sync::Arc::new(bt_shell_common::apps::Answerer::new(
+                config,
+                std::sync::Arc::new(bt_shell_common::apps::Curl),
+            )))
         })
+        .clone()
+}
+
+/// The `kablo bateri package watch` of each machine a connection is up to: one set for the
+/// process, shared by the connections that start them and by Check Now, which ends them to have
+/// them ask again.
+pub(crate) fn apps_watches() -> std::sync::Arc<bt_shell_common::apps::Watches> {
+    static WATCHES: std::sync::OnceLock<std::sync::Arc<bt_shell_common::apps::Watches>> =
+        std::sync::OnceLock::new();
+    WATCHES
+        .get_or_init(|| std::sync::Arc::new(bt_shell_common::apps::Watches::new()))
         .clone()
 }
 

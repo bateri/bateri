@@ -118,6 +118,13 @@ fn login_line(missing: &str, flag: &str, words: &[String]) -> String {
     format!("exec sh -c {} sh{hex}", quote(&search))
 }
 
+/// The program that starts `bateri` with `words` on the account of the machine `server` (this
+/// computer's own when `here`), for a job the app starts itself.
+pub fn start(here: bool, server: &str, words: &[String]) -> Command {
+    let server = if here { LOCAL_SERVER } else { server };
+    command(&not_set_up(server), hex_flag(server), words)
+}
+
 /// The program to run on the other machine, as its `argv`: a `sh` that hands over to the login
 /// shell, which reads [`login_line`]. The program is not run by a shell that reads it as one line:
 /// the words reach the `sh` as they are.
@@ -250,12 +257,23 @@ pub fn run(
     words: &[String],
     gone: &Gone,
 ) -> Result<Relayed, String> {
+    run_for(served, server, words, gone, OPEN_WAIT)
+}
+
+/// [`run`], with `wait` for how long the server may take to start the command.
+pub fn run_for(
+    served: &Served,
+    server: &str,
+    words: &[String],
+    gone: &Gone,
+    wait: Duration,
+) -> Result<Relayed, String> {
     let job = words.first().map_or("a command", String::as_str);
     let started = served.run(
         command(&not_set_up(server), hex_flag(server), words),
         // The connection is made (and asked for) by whoever found the server.
         Ask::Never,
-        OPEN_WAIT,
+        wait,
     )?;
     let RemoteCommand {
         stdin,

@@ -15,10 +15,16 @@
 //! 3. **Landing.** The program's file for this machine's target is downloaded, its SHA-256 sum
 //!    checked against the signed one, and the release put in its folder whole ([`store`]).
 //!
-//! A program that leaves the list is deleted from this computer at once and its name remembered for 30
-//! days ([`store::removed`]); the check that deletes it is also the one that **cannot be wrong
-//! about the list** (`authoritative`): a settings file that could not be read at launch is
-//! the defaults, and the defaults are not what the person wrote.
+//! A program that leaves the list is deleted from this folder at once; the check that deletes it
+//! is also the one that **cannot be wrong about the list** (`authoritative`): a settings file
+//! that could not be read at launch is the defaults, and the defaults are not what the person
+//! wrote.
+//!
+//! **This folder is bateri's own, not the machines'.** The programs on a machine (this computer
+//! included) are in `~/.local/share/bateri/apps` and kablo is the only one that writes there: it
+//! asks, and the app answers ([`package`]), going to the internet only when asked and only for
+//! what the rules there allow. [`watch`] keeps a `kablo bateri package watch` running on each
+//! machine the person is connected to, and [`upload`] is how the bytes of a program reach one.
 //!
 //! **Nothing here blocks the window.** [`Tracker`] runs on a thread of its own, the shell asks it
 //! for [`Status`]es when it draws something, and every failure is a [`Failure`] in a status, never
@@ -28,10 +34,13 @@
 //! are [`check`]. The shell gives the folder (`~/Library/Application Support/bateri/apps`).
 
 mod check;
-pub mod distribute;
 pub mod fetch;
+pub mod followed;
+pub mod package;
 pub mod page;
 pub mod store;
+pub mod upload;
+pub mod watch;
 mod worker;
 
 use std::fmt;
@@ -40,18 +49,20 @@ use std::path::PathBuf;
 use bt_core::pencere::apps::{self, Version};
 use bt_core::pencere::{Offer, SUPPORTED_VERSIONS, offered_views};
 
-pub use check::{Look, Program, check, fetch_target, look};
-pub use distribute::Distributor;
+pub use check::{Chosen, Look, Program, check, choose, fetch_target, look, program_file};
 pub use fetch::{Curl, Fetch};
+pub use package::Answerer;
+pub use watch::Watches;
 pub use worker::{After, Tracker};
 
 /// The public key the programs bateri itself publishes are signed with (`ed25519:` and base64),
-/// which comes in the application: a release signed with it is taken without asking.
+/// which comes in the application: a release signed with it is taken without asking. It is
+/// kablo's list of the keys a machine trusts ([`kablo_bateri::keys`]): the machine is what trusts
+/// it, and the Apps page only reads it.
 ///
-/// The public half of the key its owner made once (the secret half is theirs alone: no program
-/// makes it, and the tests here sign with keys they invent). It is `Option` so that a build with no
-/// key to name — a fork — has textpen wait for approval like any other program.
-pub const BATERI_KEY: Option<&str> = Some("ed25519:59e8IXkv6FP4tD4uJ/fvw9/pSV+1YgEpXtXQzWLwOpU=");
+/// It is `Option` so that a build with no key to name — a fork — has textpen wait for approval
+/// like any other program.
+pub const BATERI_KEY: Option<&str> = Some(kablo_bateri::keys::BATERI);
 
 /// Names a program may not have: the commands bateri and its servers already have.
 pub const RESERVED_NAMES: &[&str] = &["bateri", "kablo", "pencere"];
@@ -173,6 +184,10 @@ pub enum Failure {
     Digest,
     /// The folder could not be written.
     Disk(String),
+    /// The newest release needs a bateri that opens `version`, and an earlier one is not listed.
+    Unsupported(Version),
+    /// The release has no file for this kind of machine.
+    NoFile(String),
 }
 
 impl Failure {
@@ -200,6 +215,11 @@ impl fmt::Display for Failure {
                 f.write_str("a release on the network may not point at a file on this computer")
             }
             Self::Digest => f.write_str("the file does not match the sum its app.json signs"),
+            Self::Unsupported(version) => write!(
+                f,
+                "{version} needs a newer bateri to open it, and no earlier release is listed"
+            ),
+            Self::NoFile(target) => write!(f, "the release has no file for {target}"),
         }
     }
 }

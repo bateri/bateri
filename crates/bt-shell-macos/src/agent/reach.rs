@@ -17,16 +17,23 @@
 //! letter, which is `Send`, is answered from there (the conversation waits for the app's answer for
 //! as long as it takes); the pane is made on the main queue, where the windows are.
 
+use std::io;
+use std::sync::Arc;
 use std::thread;
 
 use bt_core::CommandLevel;
 use bt_shell_common::agent::LOCAL_SERVER;
 use bt_shell_common::agent::level::{self, Why};
-use bt_shell_common::agent::message::{Failure, Kind, Place, Reach, Relay, Reply};
+use bt_shell_common::agent::message::{Failure, Kind, Package, Place, Reach, Relay, Reply};
 use bt_shell_common::agent::relay as run;
 use bt_shell_common::agent::serve::{self, Server};
+use bt_shell_common::apps::followed;
+use bt_shell_common::apps::package::Who;
+use bt_shell_common::apps::upload::{self, Through};
+use bt_shell_common::kablo::install::{Channel, Reply as InstallReply};
 use bt_shell_common::kablo::local;
-use bt_shell_common::kablo::service::{Letter, Reached};
+use bt_shell_common::kablo::served::Served;
+use bt_shell_common::kablo::service::{Backend, Letter, Reached};
 use bt_shell_common::ssh_wrap::KabloHost;
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
@@ -223,4 +230,79 @@ fn placed(
     let reply = serve::place_on(server, &target, from, place, &mut world);
     letter.answer(reply.encode().into_bytes());
     world.finish();
+}
+
+/// `package`: a machine asks the app about its programs. The answer goes to the internet and, for
+/// a `fetch`, writes the file on the machine, so it runs on a thread of its own and the letter is
+/// answered from there ([`bt_shell_common::apps::Answerer`]). The machine is the account the
+/// letter came from, never what the program said of itself.
+pub(super) fn package(letter: Letter, server: &Server, package: Package) {
+    let who = Who {
+        account: server.account.clone(),
+        local: local::is_account(&server.account),
+    };
+    let machine = Machine {
+        backend: hold_service::backend(),
+        who: who.clone(),
+        host: server.host.clone(),
+    };
+    let started = thread::Builder::new()
+        .name("bateri package".into())
+        .spawn(move || {
+            let state_of_this_computer = who.local && matches!(package, Package::State(_));
+            let reply = match crate::apps_answerer() {
+                Some(answerer) => answerer.answer(&who, package, &machine),
+                None => Reply::Failed(Failure::new(
+                    Kind::Failed,
+                    "this bateri does not follow programs",
+                )),
+            };
+            letter.answer(reply.encode().into_bytes());
+            // This computer's kablo has started its watch: the programs the person follows are
+            // asked for, if they are not here yet.
+            if state_of_this_computer
+                && let (Some(backend), Some(root)) = (&machine.backend, crate::apps_root())
+            {
+                for (name, why) in followed::install(backend, &root) {
+                    eprintln!("bateri: could not install {name} on this computer: {why}");
+                }
+            }
+        });
+    if let Err(error) = started {
+        eprintln!("bateri: no thread to answer about programs: {error}");
+    }
+}
+
+/// The machine a `fetch` writes its file on: found when it is first needed, over the connection
+/// bateri keeps to it.
+struct Machine {
+    backend: Option<Arc<dyn Backend>>,
+    who: Who,
+    host: String,
+}
+
+impl Channel for Machine {
+    fn run(&self, script: &str, input: &[u8]) -> io::Result<InstallReply> {
+        let backend = self
+            .backend
+            .clone()
+            .ok_or_else(|| io::Error::other("this bateri keeps no connection to servers"))?;
+        let server = if self.who.local {
+            local::host()
+        } else {
+            backend
+                .reach(
+                    std::slice::from_ref(&self.host),
+                    Ask::Never,
+                    &hold_service::terminals_of,
+                )
+                .map_err(io::Error::other)?
+                .server
+        };
+        Through {
+            served: Served::new(backend, server),
+            wait: upload::WAIT,
+        }
+        .run(script, input)
+    }
 }
