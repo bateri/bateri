@@ -225,11 +225,9 @@ NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
 
 # The libraries' heavy tests: those whose path holds one of AREA's words
 # (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test
-# binaries as `test`, the ignored tests taken. Four at a time: each starts real processes, and
-# a fork beside another test holds that test's descriptors until its `exec`.
-HEAVY_THREADS = 4
+# binaries as `test`, the ignored tests taken.
 test-heavy: demopen
-	$(TEST_ENV) RUST_TEST_THREADS=$(HEAVY_THREADS) $(CARGO) test --workspace --lib --no-fail-fast -- --ignored $(NOT_HEAVY) $(AREA)
+	$(TEST_ENV) $(CARGO) test --workspace --lib --no-fail-fast -- --ignored $(NOT_HEAVY) $(AREA)
 
 # The program the end-to-end tests of a pane run in it (`crates/bt-core/examples/demopen.rs`,
 # written with pencere's library of the program's side). `cargo test --workspace --all-targets`
