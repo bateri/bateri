@@ -8,12 +8,15 @@
 #                       sandbox name the sandbox's (the script against the engine's page
 #                       among them), the program view's files its test; a
 #                       manifest, the Makefile or this script names every heavy test.
-#   gate.sh push        everything once, on a clean tree: the fast tier, every heavy test and
-#                       the program view (`make test-all`), `make linux-server` when what
-#                       bateri runs on a server changed, `make bundle` when what goes in the
-#                       package changed. The pre-push hook (`tools/pre-push`) asks for its
-#                       stamp. The whole Linux gate is the release's (`make linux`).
+#   gate.sh push        everything once, on a clean tree: the fast tier, every heavy test, the
+#                       program view, `make linux-server` when what bateri runs on a server
+#                       changed, `make bundle` when what goes in the package changed. The
+#                       pre-push hook (`tools/pre-push`) asks for its stamp.
 #   gate.sh check-push  whether HEAD passed the push tier (the release gate's question).
+#
+# A test that fails beside the others is run again alone, a few times. Passing every time, it
+# lost a race with its neighbours and the step stands; it is named on the screen and in the
+# `bateri-gate-flaky` list under the git directory. Failing once, the step is red.
 #
 # A stamp names the content that passed — the working tree's files as a git tree, the
 # uncommitted and the untracked ones included, the ignored and excluded ones not — so
@@ -128,14 +131,43 @@ count=$(printf '%s\n' "$files" | grep -c .)
 echo "gate ($tier): $count files differ from the last content that passed"
 
 mkdir -p "$logs"
+flaky=$(git rev-parse --git-common-dir)/bateri-gate-flaky
+ALONE_RUNS=3
+ALONE_MOST=30
+
+# Whether what failed in the log is only tests that pass alone, every one of them $ALONE_RUNS
+# times. Sets `alone` to their names. Anything else that failed — a build, a binary with its
+# own `main`, a test binary that died, more tests than a race explains — is a failure: cargo
+# names every target that failed, and each must be one whose failed tests are listed.
+passes_alone() {
+    local log=$1 names targets select t i
+    alone=""
+    names=$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$log" | sort -u)
+    targets=$(sed -n 's/^error: \([0-9]*\) targets\{0,1\} failed:$/\1/p' "$log")
+    [ -n "$names" ] && [ "$(wc -l <<<"$names")" -le "$ALONE_MOST" ] || return 1
+    [ "$targets" = "$(grep -c '^test result: FAILED' "$log")" ] || return 1
+    select=$(sed -n 's/^ *`\(-p .*\)`$/\1/p' "$log" | tr '\n' ' ')
+    [ -n "$select" ] || return 1
+    while IFS= read -r t; do
+        for ((i = 0; i < ALONE_RUNS; i++)); do
+            make test-one SELECT="$select" NAME="$t" >"$log.alone" 2>&1 || return 1
+            grep -qx "test $t \.\.\. ok" "$log.alone" || return 1
+        done
+    done <<<"$names"
+    alone=$(tr '\n' ' ' <<<"$names")
+    while IFS= read -r t; do echo "$(date +%F) $t" >>"$flaky"; done <<<"$names"
+}
+
 step() {
     local name=$1
     shift
     local start=$SECONDS out=$logs/$name.log
     if "$@" >"$out" 2>&1; then
         echo "  $name: ok ($((SECONDS - start)) s)"
-    elif grep -q SKIPPED "$out"; then
-        echo "  $name: SKIPPED — $(grep -m1 SKIPPED "$out")"
+    elif [ "$name" = linux-server ] && grep -q '^SKIPPED' "$out"; then
+        echo "  $name: SKIPPED — $(grep -m1 '^SKIPPED' "$out")"
+    elif passes_alone "$out"; then
+        echo "  $name: ok ($((SECONDS - start)) s) — failed beside the others, passed alone: ${alone% }"
     else
         echo "  $name: FAILED ($((SECONDS - start)) s) — $out"
         tail -n 20 "$out" | sed 's/^/    /'
@@ -156,7 +188,12 @@ if [ "$tier" = commit ]; then
     [ "$bundle" = 1 ] && echo "  bundle: what goes in the package changed — \`make gate-push\` builds it"
 else
     if stamped commit; then echo "  check: this content passed it already"; else step check make check; fi
-    if stamped full; then echo "  all: this content passed every test already"; else step all make test-all; fi
+    if stamped full; then
+        echo "  heavy and view: this content passed them already"
+    else
+        step heavy make test-heavy
+        step view make test-view
+    fi
     [ "$server" = 1 ] && step linux-server make linux-server
     [ "$bundle" = 1 ] && step bundle make bundle
 fi

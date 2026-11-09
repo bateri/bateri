@@ -844,8 +844,10 @@ pub(super) mod tests {
         }
 
         fn flush(&self) {
+            // The bound is only for a module that never comes: it is back in milliseconds, but
+            // nine tests compiling a module each on a loaded machine stalled past ten seconds.
             assert!(
-                self.handle.page().module().flush(Duration::from_secs(10)),
+                self.handle.page().module().flush(Duration::from_secs(60)),
                 "the module did not come to what it was told"
             );
         }

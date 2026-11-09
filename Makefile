@@ -13,7 +13,7 @@ endif
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle fonts-sums package install dev release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test demopen test-heavy test-view test-one gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle fonts-sums package install dev release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -193,10 +193,24 @@ clippy:
 # kablo's gate: the owner of the code owns its tests. Here only the workspace's own.
 # This is the fast tier: the heavy tests — those that start a real shell, program, ssh or
 # kablo, or wait seconds on a clock — are `#[ignore = "heavy: …"]`, and the program view's
-# test (its own `main`) runs only with `BT_HEAVY`. `test-heavy`, `test-view` and `test-all`
-# run them; which of them a change needs, `make gate` and `make gate-push` decide.
+# test (its own `main`) runs only with `BT_HEAVY`. `test-heavy` and `test-view` run them; which
+# of them a change needs, `make gate` and `make gate-push` decide.
+# `--no-fail-fast`: a test binary that fails does not hide the ones after it.
 test:
-	$(CARGO) test --workspace --all-targets
+	$(TEST_ENV) $(CARGO) test --workspace --all-targets --no-fail-fast
+
+# What every test runs in, whoever started it. The tests start real shells, and what the
+# terminal around them set leaks into those: bateri's own commands on `PATH` and `TERM_PROGRAM`
+# (the remote shells' and `child`'s tests), and a missing `LANG` makes zsh count bytes (the
+# session's tests). So nothing is inherited but what a build and a test cannot do without (the
+# tests that start a program behind `login` need `USER`); the path is the compiler's and the
+# system's, not the person's. `KABLO_DIST` is given whole:
+# from where the tests run a relative one finds nothing and the real-kablo tests skip.
+TEST_PATH = $(patsubst %/,%,$(dir $(shell which cargo))):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+TEST_ENV = env -i HOME="$(HOME)" USER="$(shell id -un)" LOGNAME="$(shell id -un)" \
+	LANG=en_US.UTF-8 PATH="$(TEST_PATH)" \
+	KABLO_DIST="$(abspath $(KABLO_DIST))" \
+	$(if $(CARGO_TARGET_DIR),CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)")
 
 # The tests `#[ignore]`d for something else than being heavy, by their paths: the race tier
 # (`make test-race`), the font inventories (`make scan`, `raster_digest`), the frame-loop
@@ -211,31 +225,32 @@ NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
 
 # The libraries' heavy tests: those whose path holds one of AREA's words
 # (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test
-# binaries as `test`, the ignored tests taken.
+# binaries as `test`, the ignored tests taken. Four at a time: each starts real processes, and
+# a fork beside another test holds that test's descriptors until its `exec`.
+HEAVY_THREADS = 4
 test-heavy: demopen
-	$(CARGO) test --workspace --lib -- --ignored $(NOT_HEAVY) $(AREA)
+	$(TEST_ENV) RUST_TEST_THREADS=$(HEAVY_THREADS) $(CARGO) test --workspace --lib --no-fail-fast -- --ignored $(NOT_HEAVY) $(AREA)
 
 # The program the end-to-end tests of a pane run in it (`crates/bt-core/examples/demopen.rs`,
 # written with pencere's library of the program's side). `cargo test --workspace --all-targets`
 # builds it as a test target, not where the tests look for it, and `--lib` not at all, so the
-# heavy tier and `test-all` build it first. A test that
-# finds it missing fails, it does not skip.
+# heavy tier builds it first. A test that finds it missing fails, it does not skip.
 demopen:
 	$(CARGO) build -p bt-core --example demopen
 
 # The program view's test, end to end in a real web view (tens of seconds, one at a time).
 test-view:
-	BT_HEAVY=1 $(CARGO) test --workspace --test pencere
+	$(TEST_ENV) BT_HEAVY=1 $(CARGO) test --workspace --test pencere
 
-# Every test but those `NOT_HEAVY` names: the fast tier and the heavy one together, the push
-# tier's run.
-test-all: demopen
-	BT_HEAVY=1 $(CARGO) test --workspace --all-targets -- --include-ignored $(NOT_HEAVY)
+# One test, by its whole name, alone in its binary: what `tools/gate.sh` asks of a test that
+# failed beside the others. `SELECT` is the targets cargo said failed.
+test-one:
+	$(TEST_ENV) $(CARGO) test $(SELECT) -- --include-ignored --exact $(NAME) --test-threads=1
 
 # What a change needs, picked by the files it touched (`tools/gate.sh` says how): `gate` for
 # a commit — the fast tier and the touched areas' heavy tests; `gate-push` before a push —
-# everything once, `make linux` and `make bundle` when their inputs changed. Each stamps the
-# tree that passed; the pre-push hook asks for `gate-push`'s, `make hooks` puts it in place.
+# everything once, `make linux-server` and `make bundle` when their inputs changed. Each stamps
+# the tree that passed; the pre-push hook asks for `gate-push`'s, `make hooks` puts it in place.
 gate:
 	@tools/gate.sh commit
 
@@ -342,8 +357,8 @@ shader:
 # flaky tests of code the change had not touched. When TSan nightly arrives, the
 # third line goes HERE.
 test-race:
-	$(CARGO) test --workspace -- --ignored race_
-	$(CARGO) test --workspace -- --ignored --test-threads=1 race_
+	$(TEST_ENV) $(CARGO) test --workspace -- --ignored race_
+	$(TEST_ENV) $(CARGO) test --workspace -- --ignored --test-threads=1 race_
 
 # Inventory of the fallback-glyph gate: passes every character in the
 # symbol and emoji blocks through the atlas's own gate and prints, per block

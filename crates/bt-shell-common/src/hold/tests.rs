@@ -439,12 +439,18 @@ fn the_pipe_reads_what_waits_in_its_terminal_and_nothing_more_before_it_answers(
         Some(ToApp::Input(b"words".to_vec()))
     );
 
-    // The terminal hung up: there is nobody to answer for.
+    // The terminal hung up: there is nobody to answer for. The hang-up comes when the last copy
+    // of the writing end goes, and a child another test is forking holds one until its `exec`.
     drop(typed);
-    assert!(matches!(
-        pass_on_what_waits(&config, &mut pipe_end, &mut buffer),
-        Err(Passing::Gone)
-    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let gone = loop {
+        let passed = pass_on_what_waits(&config, &mut pipe_end, &mut buffer);
+        if passed.is_err() || Instant::now() >= deadline {
+            break passed;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(matches!(gone, Err(Passing::Gone)));
 }
 
 #[test]
