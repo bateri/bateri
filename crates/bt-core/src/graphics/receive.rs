@@ -21,6 +21,7 @@ use miniz_oxide::inflate::{TINFLStatus, decompress_to_vec_zlib_with_limit};
 use super::apc::Apc;
 use super::command::{self, Action, Command, Format, Medium};
 use super::features;
+use super::palette::Indexed;
 use super::place::{Motion, Spec};
 use super::source;
 use super::{
@@ -62,6 +63,9 @@ pub(crate) struct Decoded {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) pixels: Vec<u8>,
+    /// What a palette image sent: its indices. Its `pixels` are blank until
+    /// they are made from the palette the terminal has.
+    pub(crate) indexed: Option<Indexed>,
 }
 
 /// How big a decoded image may come out, by what it is decoded for.
@@ -599,7 +603,14 @@ fn raw_size(command: &Command, per_pixel: usize, room: Room) -> Result<usize, Er
     if width == 0 || height == 0 {
         return Err(Error::invalid("the image has no dimensions (s= and v=)"));
     }
-    check_dimensions(width, height, room)?;
+    // What the image takes once it is kept: its RGBA, and the indices a palette
+    // image keeps as well.
+    let kept = 4 + if command.format.is_indexed() {
+        per_pixel
+    } else {
+        0
+    };
+    check_dimensions(width, height, kept, room)?;
     // Both sides are bounded by the dimension limit, so this cannot overflow
     // a 64-bit `usize`; a 32-bit one answers "too large" instead.
     (width as usize)
@@ -608,13 +619,13 @@ fn raw_size(command: &Command, per_pixel: usize, room: Room) -> Result<usize, Er
         .ok_or_else(|| Error::too_big("the image is too large"))
 }
 
-/// An image past the side limit or past what `room` has for it is refused
-/// before any pixel is allocated.
-fn check_dimensions(width: u32, height: u32, room: Room) -> Result<(), Error> {
+/// An image past the side limit or past what `room` has for it, at `per_pixel`
+/// bytes a pixel once it is kept, is refused before any pixel is allocated.
+fn check_dimensions(width: u32, height: u32, per_pixel: usize, room: Room) -> Result<(), Error> {
     if width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(Error::too_big("the image is too large"));
     }
-    let stored = (u64::from(width) * u64::from(height)).saturating_mul(4);
+    let stored = (u64::from(width) * u64::from(height)).saturating_mul(per_pixel as u64);
     if stored > room.bytes() as u64 {
         return Err(room.refusal());
     }
@@ -634,6 +645,17 @@ fn decode_raw(command: &Command, bytes: Vec<u8>, expected: usize) -> Result<Deco
             bytes.len()
         )));
     }
+    if command.format.is_indexed() {
+        // The palette is the terminal's and is not known here: the indices are
+        // kept, and the pixels come from them where the palette is.
+        let blank = (command.width as usize).saturating_mul(command.height as usize) * 4;
+        return Ok(Decoded {
+            width: command.width,
+            height: command.height,
+            pixels: vec![0; blank],
+            indexed: Some(Indexed::new(bytes, command.format == Format::IndexedAlpha)),
+        });
+    }
     let pixels = match command.format {
         Format::Rgb => {
             let mut pixels = Vec::with_capacity(bytes.len() / 3 * 4);
@@ -649,6 +671,7 @@ fn decode_raw(command: &Command, bytes: Vec<u8>, expected: usize) -> Result<Deco
         width: command.width,
         height: command.height,
         pixels,
+        indexed: None,
     })
 }
 
@@ -665,7 +688,7 @@ fn decode_png(bytes: &[u8], room: Room) -> Result<Decoded, Error> {
     // inflated or a buffer allocated for them.
     let mut reader = decoder.read_info().map_err(corrupt)?;
     let (width, height) = reader.info().size();
-    check_dimensions(width, height, room)?;
+    check_dimensions(width, height, 4, room)?;
     let size = reader
         .output_buffer_size()
         .filter(|&size| size <= room.bytes())
@@ -704,5 +727,6 @@ fn decode_png(bytes: &[u8], room: Room) -> Result<Decoded, Error> {
         width: frame.width,
         height: frame.height,
         pixels,
+        indexed: None,
     })
 }

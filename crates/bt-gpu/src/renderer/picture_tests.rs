@@ -373,6 +373,26 @@ fn the_pixels_of_a_drawn_picture_are_let_go_and_its_texture_draws_it_again() {
 }
 
 #[test]
+fn a_texture_that_holds_the_only_copy_of_its_pixels_outlives_a_motion_that_cuts_it_out() {
+    let r = renderer();
+    const EDGE: usize = 16;
+    let mut frame = frame_of((CELL, CELL), (2, 2), vec![solid(1, RED, (0, 0), (8, 8), 0)]);
+    let first = render_offscreen(&r, EDGE, ACCENT, &frame);
+    frame.release_pictures(|picture| r.has_picture_texture(picture));
+    // The same list, as a motion frame draws it, with the picture carried out
+    // of every row on screen and then back.
+    let here = frame.pictures(PictureSurface::Grid)[0].clone();
+    assert!(here.pixels.is_empty(), "the pixels were let go");
+    let mut away = here.clone();
+    away.row = 6;
+    frame.put_pictures(Pictures::new(vec![away], Vec::new()));
+    render_offscreen(&r, EDGE, ACCENT, &frame);
+    assert_eq!(cached(&r), 1, "its pixels are only in the texture now");
+    frame.put_pictures(Pictures::new(vec![here], Vec::new()));
+    assert_eq!(render_offscreen(&r, EDGE, ACCENT, &frame), first);
+}
+
+#[test]
 fn a_picture_the_device_cannot_hold_is_left_out_not_failed() {
     let r = renderer();
     const EDGE: usize = 16;

@@ -4400,7 +4400,8 @@ impl Frame {
     /// edit of an image on screen copy all of it. A motion frame draws the same
     /// list again and finds each texture by its key; a picture with no texture
     /// (cut out of every row on screen) keeps its pixels for the motion that
-    /// brings it in.
+    /// brings it in, and a texture that holds the only copy of the pixels stays
+    /// while a motion cuts its picture out.
     pub(crate) fn release_pictures(&mut self, drawn: impl Fn(&Picture) -> bool) {
         self.pictures.release_pixels(drawn);
     }

@@ -7384,6 +7384,8 @@ impl Session {
         // channel above it, in the fill-local rows its cells use.
         pictures.clear();
         let channel_rows = i32::from(channel);
+        // The images drawn from the palette take this frame's colours first.
+        self.adapter.0.graphics.follow_palette(&term, &theme);
         // The frame of an animated image is chosen by the time the frame is
         // made, and the time to the next one is a clock like the counter's.
         let picture_clock = self.adapter.0.graphics.pictures(
@@ -8782,7 +8784,15 @@ impl Session {
             }
         }
         let at_prompt = lock(&self.shell).at_prompt();
-        let bytes = |mode| input::key_event(event, mode, at_prompt);
+        // The mode the key was encoded in: a release is only ever told to a
+        // program that asked for event types, so a press is only remembered for
+        // one that did. Nothing is remembered, and no lock taken when the key
+        // comes up, for a program that did not.
+        let mut mode_seen = TermMode::empty();
+        let bytes = |mode: TermMode| {
+            mode_seen = mode;
+            input::key_event(event, mode, at_prompt)
+        };
         let by_itself = released
             || matches!(
                 event.key,
@@ -8793,7 +8803,7 @@ impl Session {
         } else {
             self.send_input(bytes).is_some()
         };
-        if told && !released {
+        if told && !released && mode_seen.contains(TermMode::REPORT_EVENT_TYPES) {
             let mut pressed = lock(&self.pressed);
             if !pressed.contains(&event.id) {
                 pressed.push(event.id);
@@ -8818,7 +8828,9 @@ impl Session {
         if bytes.is_empty() {
             return false;
         }
-        self.send(Msg::Input(bytes.into()));
+        // In the order of the presses it follows: what is held is held in front
+        // of it too.
+        self.send_or_hold(bytes);
         true
     }
 
@@ -25379,6 +25391,41 @@ mod tests {
             text: (!text.is_empty()).then(|| text.to_owned()),
             legacy: Some(crate::KeyInput::Bytes(Cow::Owned(text.as_bytes().to_vec()))),
         }
+    }
+
+    #[test]
+    fn a_press_is_remembered_only_for_a_program_that_asked_to_hear_the_release() {
+        let a = |phase| key_event(1, phase, Keycap::Char('a'), Mods::NONE, "a");
+        let (plain, _wake) = dump_session(40, "printf '\\033[>1u'", |mode| {
+            mode.contains(TermMode::DISAMBIGUATE_ESC_CODES)
+        });
+        plain.write_key_event(&a(KeyPhase::Press));
+        assert!(
+            lock(&plain.pressed).is_empty(),
+            "nobody will hear it come up"
+        );
+        let (events, _wake) = dump_session(40, "printf '\\033[>3u'", |mode| {
+            mode.contains(TermMode::REPORT_EVENT_TYPES)
+        });
+        events.write_key_event(&a(KeyPhase::Press));
+        assert_eq!(*lock(&events.pressed), [1]);
+    }
+
+    #[test]
+    fn a_release_waits_behind_the_press_that_is_held() {
+        let (session, _wake) = dump_session(40, "stty -isig -icrnl; printf '\\033[>27u'", |mode| {
+            mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+        });
+        // The first input is going: typing is held until it is.
+        *lock(&session.held_input) = Some(Vec::new());
+        let a = |phase| key_event(1, phase, Keycap::Char('a'), Mods::NONE, "a");
+        session.write_key_event(&a(KeyPhase::Press));
+        session.write_key_event(&a(KeyPhase::Release));
+        assert_eq!(
+            lock(&session.held_input).as_deref(),
+            Some(&b"\x1b[97;;97u\x1b[97;1:3u"[..]),
+            "the release is not ahead of its press"
+        );
     }
 
     #[test]

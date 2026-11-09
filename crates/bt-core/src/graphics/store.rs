@@ -35,6 +35,7 @@ use super::canvas::Rect;
 use super::command::{Action, Command, Scope};
 use super::edits::Edits;
 use super::follow::{self, Seen};
+use super::palette::{Indexed, Palette};
 use super::place::{self, Motion, Parent, Picture, Placement, Screen, Spec};
 use super::placeholder::{self, Marks, Run, Virtual};
 use super::receive::Decoded;
@@ -99,6 +100,10 @@ pub(crate) struct Image {
     pub(crate) edits: Arc<Edits>,
     /// Whether the terminal plays the frames by itself and how far it is.
     pub(crate) animation: Animation,
+    /// What a palette image (`f=8`, `f=16`) is drawn from: the frame is made
+    /// from it for each palette. Such an image has the one frame, and no
+    /// frame is added to it or laid on it.
+    pub(crate) indexed: Option<Indexed>,
 }
 
 impl Image {
@@ -116,7 +121,16 @@ impl Image {
     }
 
     fn bytes(&self) -> usize {
-        self.frames.iter().map(|frame| frame.pixels.len()).sum()
+        let indices = self
+            .indexed
+            .as_ref()
+            .map_or(0, |indexed| indexed.data.len());
+        indices
+            + self
+                .frames
+                .iter()
+                .map(|frame| frame.pixels.len())
+                .sum::<usize>()
     }
 
     /// The frame on show.
@@ -966,6 +980,10 @@ pub(crate) struct Images {
     main: Store,
     alt: Store,
     generation: u64,
+    /// The palette the images drawn from it were last made for, and its number.
+    palette: Option<(Palette, u64)>,
+    /// See [`Images::holds_indexed`].
+    indexed: bool,
 }
 
 impl Images {
@@ -974,6 +992,8 @@ impl Images {
             main: Store::new(quota),
             alt: Store::new(quota),
             generation: 0,
+            palette: None,
+            indexed: false,
         }
     }
 
@@ -999,6 +1019,8 @@ impl Images {
         motion: Motion,
     ) -> Reply {
         let generation = self.next_stamp();
+        // A hint: the next look at the palette finds what there is.
+        self.indexed |= decoded.indexed.is_some();
         let store = self.screen(screen.alt);
         let mut echo: Echo = command.echo;
         if echo.id == 0 && echo.number != 0 {
@@ -1018,6 +1040,7 @@ impl Images {
             revision: generation,
             edits: Arc::new(Edits::from(generation)),
             animation: Animation::default(),
+            indexed: decoded.indexed,
         };
         match store.insert(image) {
             Ok(()) => {
@@ -1139,6 +1162,56 @@ impl Images {
     pub(crate) fn shows(&self, alt: bool) -> bool {
         let store = if alt { &self.alt } else { &self.main };
         !store.placements.is_empty() || !store.virtuals.is_empty()
+    }
+
+    /// Whether an image may be drawn from the palette: true from the first one
+    /// that is stored until a look finds none ([`Images::repaint`]), so that a
+    /// frame with no such image asks no more than this.
+    pub(crate) fn holds_indexed(&self) -> bool {
+        self.indexed
+    }
+
+    /// Makes the pixels of the palette images from `palette`: those that have
+    /// none yet and, when it is not the palette they were made from, all of
+    /// them. What is drawn changes then, so each is a new picture.
+    pub(crate) fn repaint(&mut self, palette: Palette) {
+        let any = [&self.main, &self.alt]
+            .iter()
+            .any(|store| store.images.iter().any(|image| image.indexed.is_some()));
+        self.indexed = any;
+        if !any {
+            return;
+        }
+        let number = match &self.palette {
+            Some((kept, number)) if *kept == palette => *number,
+            _ => {
+                let number = self.next_stamp();
+                self.palette = Some((palette, number));
+                number
+            }
+        };
+        let Some((palette, _)) = &self.palette else {
+            return;
+        };
+        let mut counter = self.generation;
+        for store in [&mut self.main, &mut self.alt] {
+            for image in &mut store.images {
+                let Some(indexed) = &mut image.indexed else {
+                    continue;
+                };
+                if indexed.painted == number {
+                    continue;
+                }
+                indexed.painted = number;
+                let pixels = palette.paint(indexed);
+                if let Some(frame) = image.frames.first_mut() {
+                    frame.pixels = Arc::new(pixels);
+                }
+                counter += 1;
+                image.changed(counter, None);
+            }
+        }
+        self.generation = counter;
     }
 
     /// Whether the screen has a virtual placement: no cell of its grid is

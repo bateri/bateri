@@ -804,6 +804,7 @@ fn decoded(bytes: usize) -> Decoded {
         width: 1,
         height: (bytes / 4) as u32,
         pixels: vec![0; bytes],
+        indexed: None,
     }
 }
 
@@ -2820,6 +2821,194 @@ mod screenful {
                 (0, 0, 10, 40, [10, 0, 10, 40])
             ]
         );
+    }
+
+    // ─── palette images ──────────────────────────────────────────────────
+
+    use crate::Theme;
+
+    /// The pixels on show of image `id` on the main screen, and their revision.
+    fn shown_of(screen: &Screenful, id: u32) -> (Vec<u8>, u64) {
+        screen.sink.hub.with_images(|images| {
+            images.main().get(id).map_or((Vec::new(), 0), |image| {
+                let frame = image.shown().expect("a frame");
+                (frame.pixels.as_ref().clone(), image.revision)
+            })
+        })
+    }
+
+    fn follow(screen: &Screenful, theme: &Theme) {
+        screen.sink.hub.follow_palette(&screen.term, theme);
+    }
+
+    fn opaque(theme: &Theme, index: usize) -> [u8; 4] {
+        let color = theme.default(index);
+        [color.r, color.g, color.b, 255]
+    }
+
+    #[test]
+    fn an_indexed_image_is_drawn_in_the_colours_of_the_theme_and_made_again_when_it_changes() {
+        let mut screen = Screenful::new(20, 10, 100);
+        let theme = Theme::BATERI;
+        screen.feed(&wire("a=T,f=8,s=3,v=1,i=1,C=1", &[1, 249, 248]));
+        let (blank, first) = shown_of(&screen, 1);
+        assert_eq!(blank, [0; 12], "nothing is made until a frame asks");
+        follow(&screen, &theme);
+        let (pixels, revision) = shown_of(&screen, 1);
+        let expected: Vec<u8> =
+            [opaque(&theme, 1), opaque(&theme, 256), opaque(&theme, 257)].concat();
+        assert_eq!(
+            pixels, expected,
+            "the table, the foreground, the background"
+        );
+        assert_ne!(revision, first);
+        // The same palette is not made again.
+        follow(&screen, &theme);
+        assert_eq!(shown_of(&screen, 1).1, revision);
+        // Another theme is: the picture that is drawn changes with it.
+        let mut light = theme;
+        (light.ansi[1], light.foreground, light.background) = (0x112233, 0x445566, 0xeeeeee);
+        follow(&screen, &light);
+        let (pixels, changed) = shown_of(&screen, 1);
+        assert_eq!(
+            pixels,
+            [
+                [0x11, 0x22, 0x33, 255],
+                [0x44, 0x55, 0x66, 255],
+                [0xee, 0xee, 0xee, 255]
+            ]
+            .concat()
+        );
+        assert_ne!(changed, revision);
+        let pictures = screen.screen_pictures();
+        assert_eq!(pictures.grid()[0].image, changed);
+        assert_eq!(pictures.grid()[0].pixels.as_slice(), pixels.as_slice());
+    }
+
+    #[test]
+    fn a_colour_a_program_set_is_the_colour_of_its_index() {
+        let mut screen = Screenful::new(20, 10, 100);
+        let theme = Theme::BATERI;
+        screen.feed(&wire("a=t,f=8,s=2,v=1,i=1", &[1, 2]));
+        follow(&screen, &theme);
+        screen.feed(b"\x1b]4;1;rgb:ff/00/00\x1b\\");
+        follow(&screen, &theme);
+        assert_eq!(
+            shown_of(&screen, 1).0,
+            [[255, 0, 0, 255], opaque(&theme, 2)].concat()
+        );
+        // Taken back, it is the theme's again.
+        screen.feed(b"\x1b]104;1\x1b\\");
+        follow(&screen, &theme);
+        assert_eq!(
+            shown_of(&screen, 1).0,
+            [opaque(&theme, 1), opaque(&theme, 2)].concat()
+        );
+    }
+
+    #[test]
+    fn an_opacity_follows_the_index_in_the_two_byte_format() {
+        let mut screen = Screenful::new(20, 10, 100);
+        let theme = Theme::BATERI;
+        screen.feed(&wire("a=t,f=16,s=2,v=1,i=1", &[1, 0, 1, 128]));
+        follow(&screen, &theme);
+        let color = opaque(&theme, 1);
+        assert_eq!(
+            shown_of(&screen, 1).0,
+            [
+                [color[0], color[1], color[2], 0],
+                [color[0], color[1], color[2], 128]
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn a_frame_that_has_no_palette_image_does_nothing_for_a_palette_that_changed() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=1"));
+        let before = shown_of(&screen, 1);
+        assert!(!screen.sink.hub.with_images(|images| images.holds_indexed()));
+        let mut other = Theme::BATERI;
+        other.foreground = 0x010203;
+        follow(&screen, &other);
+        assert_eq!(shown_of(&screen, 1), before);
+        screen.feed(&wire("a=t,f=8,s=1,v=1,i=2", &[0]));
+        assert!(screen.sink.hub.with_images(|images| images.holds_indexed()));
+    }
+
+    #[test]
+    fn an_indexed_image_counts_its_indices_with_its_pixels_and_asks_for_exact_data() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(&wire("a=t,f=8,s=4,v=4,i=1", &[0; 16]));
+        screen.feed(&wire("a=t,f=16,s=4,v=4,i=2", &[0; 32]));
+        assert_eq!(
+            screen.sink.hub.with_images(|images| images.main().bytes()),
+            (16 + 64) + (32 + 64)
+        );
+        screen.told();
+        screen.feed(&wire("a=t,f=16,s=2,v=1,i=3", &[0; 3]));
+        let told = String::from_utf8_lossy(&screen.told()).into_owned();
+        assert!(told.contains("insufficient image data"), "{told:?}");
+        screen.feed(&wire("a=t,f=8,s=2,v=1,i=3", &[0; 3]));
+        let told = String::from_utf8_lossy(&screen.told()).into_owned();
+        assert!(told.contains("too much image data"), "{told:?}");
+        assert_eq!(stored(&screen), [1, 2]);
+    }
+
+    #[test]
+    fn a_palette_image_is_refused_for_what_it_takes_once_kept_before_any_pixel_is_made() {
+        let mut screen = Screenful::new(20, 10, 100);
+        // 9000 × 9000 pixels: 4 bytes each fit the quota, 5 and 6 do not.
+        for (format, answer) in [("8", "ENOSPC"), ("16", "ENOSPC"), ("32", "ENODATA")] {
+            screen.feed(&wire(&format!("a=t,f={format},s=9000,v=9000,i=1"), &[]));
+            let told = String::from_utf8_lossy(&screen.told()).into_owned();
+            assert!(told.contains(answer), "f={format}: {told:?}");
+        }
+    }
+
+    #[test]
+    fn frames_and_composition_are_refused_for_a_palette_image() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(&wire("a=t,f=8,s=1,v=1,i=1", &[0]));
+        screen.feed(&wire("a=t,f=32,s=1,v=1,i=2", &[0; 4]));
+        screen.told();
+        for (control, payload) in [
+            // A frame of a palette image, and a palette frame of another.
+            ("a=f,i=1,s=1,v=1", vec![0; 4]),
+            ("a=f,i=1,f=8,s=1,v=1", vec![0]),
+            ("a=f,i=2,f=8,s=1,v=1", vec![0]),
+            ("a=f,i=2,f=16,s=1,v=1", vec![0, 0]),
+            ("a=c,i=1,r=1,c=1", vec![]),
+        ] {
+            screen.feed(&wire(control, &payload));
+            let told = String::from_utf8_lossy(&screen.told()).into_owned();
+            assert!(told.contains("EINVAL"), "{control}: {told:?}");
+        }
+        assert_eq!(
+            screen
+                .sink
+                .hub
+                .with_images(|images| images.main().get(1).map(|image| image.frames.len())),
+            Some(1)
+        );
+        assert_eq!(
+            screen
+                .sink
+                .hub
+                .with_images(|images| images.main().get(2).map(|image| image.frames.len())),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_query_with_a_palette_format_is_answered_ok_and_nothing_is_stored() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(&wire("i=31,a=q,f=8,s=1,v=1", &[0]));
+        screen.feed(&wire("i=32,a=q,f=16,s=1,v=1", &[0, 0]));
+        let told = String::from_utf8_lossy(&screen.told()).into_owned();
+        assert_eq!(told, "\x1b_Gi=31;OK\x1b\\\x1b_Gi=32;OK\x1b\\");
+        assert!(stored(&screen).is_empty());
     }
 }
 

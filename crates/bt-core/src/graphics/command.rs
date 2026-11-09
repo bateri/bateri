@@ -40,6 +40,10 @@ pub(crate) enum Format {
     Rgba,
     /// `100`: a PNG file.
     Png,
+    /// `8`: a byte a pixel, an index into the terminal's palette.
+    Indexed,
+    /// `16`: a palette index and an opacity a pixel.
+    IndexedAlpha,
 }
 
 impl Format {
@@ -47,10 +51,17 @@ impl Format {
     /// not a function of the dimensions.
     pub(crate) fn bytes_per_pixel(self) -> Option<usize> {
         match self {
+            Self::Indexed => Some(1),
+            Self::IndexedAlpha => Some(2),
             Self::Rgb => Some(3),
             Self::Rgba => Some(4),
             Self::Png => None,
         }
+    }
+
+    /// Whether the pixels are palette indices.
+    pub(crate) fn is_indexed(self) -> bool {
+        matches!(self, Self::Indexed | Self::IndexedAlpha)
     }
 }
 
@@ -243,6 +254,8 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
             }
             b'f' => {
                 command.format = match number(value)? {
+                    8 => Format::Indexed,
+                    16 => Format::IndexedAlpha,
                     24 => Format::Rgb,
                     32 => Format::Rgba,
                     100 => Format::Png,
@@ -384,6 +397,21 @@ mod tests {
         assert_eq!(command.format, Format::Rgba);
         assert_eq!(command.medium, Medium::Direct);
         assert!(!command.zlib && !command.more);
+    }
+
+    #[test]
+    fn the_indexed_formats_are_a_byte_and_two_bytes_a_pixel() {
+        for (control, format, bytes) in [
+            ("a=t,f=8,s=2,v=2", Format::Indexed, 1),
+            ("a=t,f=16,s=2,v=2", Format::IndexedAlpha, 2),
+        ] {
+            let command = parsed(control);
+            assert_eq!(command.format, format);
+            assert!(command.format.is_indexed());
+            assert_eq!(command.format.bytes_per_pixel(), Some(bytes));
+        }
+        assert!(!parsed("a=t,f=24").format.is_indexed());
+        assert_eq!(failed("a=t,f=9").1.code(), "EINVAL");
     }
 
     #[test]

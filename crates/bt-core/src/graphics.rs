@@ -59,6 +59,12 @@
 //! hands over a [`Picture`] for each stretch of them, so that text moves the
 //! image.
 //!
+//! **A placement that hangs on another** (`P=`) has no line of its own: where
+//! it is comes from its parent when the frame is drawn, and it ends with the
+//! parent. **An image drawn from the palette** (`f=8`, `f=16`) keeps its
+//! indices, and the pixels that are drawn are made again for each palette the
+//! terminal has ([`palette`]).
+//!
 //! Nothing here draws. The store holds decoded pixels and placements per
 //! screen ([`Images`]); the frame hands them over as [`Picture`]s.
 
@@ -68,6 +74,7 @@ mod command;
 mod edits;
 mod features;
 mod follow;
+mod palette;
 mod place;
 mod placeholder;
 mod receive;
@@ -833,6 +840,17 @@ impl Hub {
     /// The size of a stored image on either screen.
     pub(crate) fn stored_size(&self, echo: Echo) -> Option<(u32, u32)> {
         lock(&self.images).size_of(echo)
+    }
+
+    /// Makes the images that are drawn from the palette (`f=8`, `f=16`) in the
+    /// colours the terminal has now: what a program set (`OSC 4`) or else the
+    /// theme's. A frame does it before it asks for the pictures; nothing is
+    /// looked at while there is no such image.
+    pub(crate) fn follow_palette<T>(&self, term: &Term<T>, theme: &crate::Theme) {
+        let mut images = lock(&self.images);
+        if images.holds_indexed() {
+            images.repaint(palette::Palette::of(term.colors(), theme));
+        }
     }
 
     /// Fills `out` with the pictures of the placements the frame draws: those

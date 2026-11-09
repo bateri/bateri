@@ -49,6 +49,11 @@ impl Store {
         }
     }
 
+    /// An image that is drawn from the palette has one frame and keeps it.
+    fn not_for_palette_images(what: &str) -> Error {
+        Error::invalid(format!("{what} is not supported for indexed color images"))
+    }
+
     pub(super) fn missing_image(echo: Echo) -> Error {
         Error::missing(format!(
             "the image with id {} and number {} does not exist",
@@ -107,6 +112,9 @@ impl Store {
             .images
             .get(at)
             .ok_or_else(|| Self::missing_image(echo))?;
+        if command.format.is_indexed() || image.indexed.is_some() {
+            return Err(Self::not_for_palette_images("animation"));
+        }
         let (size, generation, id) = ((image.width, image.height), image.generation, image.id);
         let rect = Rect {
             x: command.x,
@@ -206,6 +214,9 @@ impl Store {
             .images
             .get_mut(at)
             .ok_or_else(|| Self::missing_image(echo))?;
+        if image.indexed.is_some() {
+            return Err(Self::not_for_palette_images("composition"));
+        }
         let size = (image.width, image.height);
         let count = image.frames.len();
         let frame_of = |number: u32, what: &str| {

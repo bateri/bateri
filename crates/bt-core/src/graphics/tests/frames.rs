@@ -646,6 +646,7 @@ fn a_frame_that_cannot_fit_even_alone_is_refused_and_the_image_keeps_the_ones_it
         width: 1,
         height: 15,
         pixels: vec![0; 60],
+        indexed: None,
     };
     let reply = images.frame(&screen, &parsed("a=f,i=1,s=1,v=15"), big);
     assert!(
@@ -671,6 +672,7 @@ fn an_image_keeps_no_more_frames_than_the_limit() {
             width: 1,
             height: 1,
             pixels: vec![0; 4],
+            indexed: None,
         },
         Motion::NONE,
     );
@@ -678,6 +680,7 @@ fn an_image_keeps_no_more_frames_than_the_limit() {
         width: 1,
         height: 1,
         pixels: vec![0; 4],
+        indexed: None,
     };
     let command = parsed("a=f,i=1,s=1,v=1");
     for _ in 1..IMAGE_LIMIT {
@@ -725,7 +728,7 @@ fn a_feature_query_answers_with_the_keys_that_work() {
 #[test]
 fn a_key_with_its_default_or_one_that_is_not_understood_is_left_out() {
     let mut rig = Rig::new();
-    // `X=0`, `r=0` and `f=32` are the defaults; `f=8` is not done yet.
+    // `X=0`, `r=0` and `f=32` are the defaults; a frame has no palette format.
     assert_eq!(
         features(&mut rig, "a=q,i=31,e=f,X=0,r=0,f=32,s=2,f=8"),
         "\x1b_Gi=31,e=f,s=2;OK\x1b\\"
@@ -743,6 +746,20 @@ fn a_key_with_its_default_or_one_that_is_not_understood_is_left_out() {
         features(&mut rig, "a=q,i=31,e=T,U=0"),
         "\x1b_Gi=31,e=T;OK\x1b\\"
     );
+}
+
+#[test]
+fn the_palette_formats_are_claimed_for_an_image_and_not_for_a_frame() {
+    let mut rig = Rig::new();
+    for (control, answer) in [
+        ("a=q,i=31,e=t,f=8", "\x1b_Gi=31,e=t,f=8;OK\x1b\\"),
+        ("a=q,i=31,e=q,f=16", "\x1b_Gi=31,e=q,f=16;OK\x1b\\"),
+        ("a=q,i=31,e=T,f=8,C=1", "\x1b_Gi=31,e=T,f=8,C=1;OK\x1b\\"),
+        ("a=q,i=31,e=f,f=16", "\x1b_Gi=31,e=f;OK\x1b\\"),
+        ("a=q,i=31,e=t,f=9", "\x1b_Gi=31,e=t;OK\x1b\\"),
+    ] {
+        assert_eq!(features(&mut rig, control), answer, "{control}");
+    }
 }
 
 #[test]

@@ -875,6 +875,19 @@ impl ImageCache {
         self.textures.retain(|_, texture| texture.seen);
     }
 
+    /// The plan leaves the picture out for now (it is cut out of every row on
+    /// screen) but the list still holds it: when it has let its pixels go, the
+    /// texture is their only copy and stays for the motion that brings the
+    /// picture back. One that still holds its pixels needs no texture until
+    /// then.
+    fn keep(&mut self, picture: &Picture) {
+        if picture.pixels.is_empty()
+            && let Some(texture) = self.textures.get_mut(&picture.key)
+        {
+            texture.seen = true;
+        }
+    }
+
     /// Makes sure the picture has its texture, holding the pixels the picture
     /// names, and marks it wanted. `false`: it cannot be drawn
     /// ([`Gpu::picture_texture`]; or its texture is behind and the picture has
@@ -2958,6 +2971,7 @@ impl Renderer {
                 continue;
             }
             let Some(quad) = frame.picture_quad(surface, picture) else {
+                images.keep(picture);
                 continue;
             };
             if !images.ensure(self.gpu, picture) {
@@ -2987,7 +3001,11 @@ impl Renderer {
         let mut out = Vec::new();
         for picture in frame.pictures(PictureSurface::Grid) {
             let quads = frame.picture_padding(viewport_px, picture);
-            if quads.is_empty() || !images.ensure(self.gpu, picture) {
+            if quads.is_empty() {
+                images.keep(picture);
+                continue;
+            }
+            if !images.ensure(self.gpu, picture) {
                 continue;
             }
             out.extend(

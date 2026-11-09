@@ -42,6 +42,10 @@ const TRANSMIT: Table = &[
     (b'O', Values::Number),
 ];
 
+/// The formats a still image may be sent in besides [`TRANSMIT`]'s: the palette
+/// ones (`f=8`, `f=16`), which a frame does not have.
+const INDEXED: Table = &[(b'f', Values::Only(&["8", "16"]))];
+
 /// The keys of a placement (`T`, `p`).
 const PLACE: Table = &[
     (b'p', Values::Number),
@@ -116,8 +120,8 @@ const DELETE: Table = &[
 /// terminal does not do.
 fn tables(action: u8) -> Option<&'static [Table]> {
     Some(match action {
-        b't' | b'q' => &[TRANSMIT],
-        b'T' => &[TRANSMIT, PLACE],
+        b't' | b'q' => &[TRANSMIT, INDEXED],
+        b'T' => &[TRANSMIT, INDEXED, PLACE],
         b'p' => &[PLACE],
         b'f' => &[TRANSMIT, FRAME],
         b'a' => &[ANIMATE],
