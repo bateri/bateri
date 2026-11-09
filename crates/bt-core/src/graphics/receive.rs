@@ -20,6 +20,7 @@ use miniz_oxide::inflate::{TINFLStatus, decompress_to_vec_zlib_with_limit};
 
 use super::apc::Apc;
 use super::command::{self, Action, Command, Format, Medium};
+use super::features;
 use super::place::{Motion, Spec};
 use super::source;
 use super::{
@@ -159,6 +160,14 @@ impl Receiver {
         remote: &dyn Fn() -> bool,
         mut out: impl FnMut(Outcome),
     ) {
+        // A feature query is answered where it is and touches nothing: not a
+        // transmission in progress, not the clock it is waiting by.
+        if !apc.garbled
+            && let Some(reply) = features::answer(&apc.control)
+        {
+            out(Outcome::Query(reply));
+            return;
+        }
         if let Some(open) = &self.open
             && now.saturating_duration_since(open.since) > OPEN_TIMEOUT
         {
@@ -195,7 +204,32 @@ impl Receiver {
                 let motion = Self::motion(&command, size, env);
                 out(Outcome::Pending(Pending::Put { command, motion }));
             }
-            Action::Transmit | Action::TransmitAndPut | Action::Query => {
+            Action::Compose => out(Outcome::Pending(Pending::Compose(command))),
+            // There is no reply to take back from the terminal for these yet:
+            // an animation is only stored, never run.
+            Action::Animate => out(failure(
+                false,
+                command.echo,
+                Error::invalid("animation control is not supported"),
+            )),
+            Action::Transmit | Action::TransmitAndPut | Action::Query | Action::Frame => {
+                let mut command = command;
+                // A frame that names no size has the image's: it is the whole
+                // of it. (Where the image is not known the decoding says the
+                // size is missing.)
+                if command.action == Action::Frame
+                    && command.format != Format::Png
+                    && (command.width == 0 || command.height == 0)
+                    && let Some((width, height)) =
+                        self.size_of(command.echo).or_else(|| stored(command.echo))
+                {
+                    if command.width == 0 {
+                        command.width = width;
+                    }
+                    if command.height == 0 {
+                        command.height = height;
+                    }
+                }
                 // A name is whole in its command: `m=` chunks pixels.
                 let (query, echo, last) = (
                     command.action == Action::Query,
@@ -378,6 +412,11 @@ impl Receiver {
     /// How a transmission moves the cursor, and the size it makes known. The
     /// size is read from the head of the text, nothing is decoded.
     fn placing(&mut self, command: &Command, text: &[u8], env: Env) -> Motion {
+        // A frame is a rectangle of an image already sent: it moves nothing
+        // and is not the image's size.
+        if command.action == Action::Frame {
+            return Motion::NONE;
+        }
         let size = sniff(command, text);
         if let Some(size) = size {
             self.remember(command.echo, size);

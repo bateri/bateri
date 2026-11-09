@@ -21,6 +21,14 @@ pub(crate) enum Action {
     Delete,
     /// `q`: answer as if the image were stored, then store nothing.
     Query,
+    /// `f`: a frame of an animation, made of the payload's pixels laid on a
+    /// canvas (`r=`, `c=`, `x=`, `y=`, `X=`, `Y=`, `z=`).
+    Frame,
+    /// `a`: set the gaps, the current frame and the run state of an animation.
+    Animate,
+    /// `c`: lay a rectangle of one frame on another (`r=`, `c=`, `x=`, `y=`,
+    /// `w=`, `h=`, `X=`, `Y=`, `C=`).
+    Compose,
 }
 
 /// How the pixels are laid out in the payload (`f=`).
@@ -84,7 +92,7 @@ pub(crate) enum Scope {
     Row,
     /// `z`: the placements with the z-index `z=`.
     Z,
-    /// `f`: animation frames, which are not supported: nothing matches.
+    /// `f`: the frame `r=` of the image `i=`, or the first one.
     Frames,
 }
 
@@ -130,8 +138,13 @@ pub(crate) struct Command {
     pub(crate) rows: u32,
     /// `z=`: which layer the placement is drawn in.
     pub(crate) z: i32,
-    /// `C=1`: placing leaves the cursor where it is.
+    /// `C=1`: placing leaves the cursor where it is; for `a=c`, overwriting
+    /// instead of blending.
     pub(crate) still: bool,
+    /// `U=` and `P=`/`Q=` as written: the ways of placing an image that this
+    /// terminal does not do yet, which [`parse`] refuses.
+    pub(crate) unicode: bool,
+    pub(crate) relative: bool,
 }
 
 impl Command {
@@ -140,14 +153,15 @@ impl Command {
     /// but the three keys a chunk carries — `m`, `q`, and a transmission's
     /// action, which kitty's own client writes on every chunk when it is not
     /// the default one (`kitten icat` sends `a=T,q=2,m=1` after its first
-    /// chunk). A command with keys of its own (a size, an id, a format) is
-    /// one of its own whatever its action.
+    /// chunk, and the protocol asks for `a=f` on the chunks of a frame). A
+    /// command with keys of its own (a size, an id, a format) is one of its
+    /// own whatever its action.
     pub(crate) fn is_chunk(&self) -> bool {
         !self.explicit_action
             || (self.chunk_keys_only
                 && matches!(
                     self.action,
-                    Action::Transmit | Action::TransmitAndPut | Action::Query
+                    Action::Transmit | Action::TransmitAndPut | Action::Query | Action::Frame
                 ))
     }
 
@@ -185,7 +199,10 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
         rows: 0,
         z: 0,
         still: false,
+        unicode: false,
+        relative: false,
     };
+    let mut feature = false;
     if echo.id != 0 && echo.number != 0 {
         return Err(Error::invalid(
             "an image id and an image number were both given",
@@ -204,9 +221,9 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
                     b'p' => Action::Put,
                     b'd' => Action::Delete,
                     b'q' => Action::Query,
-                    b'f' | b'a' | b'c' => {
-                        return Err(Error::invalid("animation is not supported"));
-                    }
+                    b'f' => Action::Frame,
+                    b'a' => Action::Animate,
+                    b'c' => Action::Compose,
                     _ => return Err(Error::invalid("unknown action")),
                 };
             }
@@ -270,17 +287,23 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
             b'r' => command.rows = number(value)?,
             b'z' => command.z = signed(value)?,
             b'C' => command.still = number(value)? == 1,
-            // Two ways of placing an image that this terminal does not do:
-            // refusing is better than drawing it in the wrong place.
-            b'U' if number(value)? != 0 => {
-                return Err(Error::invalid("unicode placeholders are not supported"));
-            }
-            b'P' | b'Q' if number(value)? != 0 => {
-                return Err(Error::invalid("relative placement is not supported"));
-            }
+            b'U' => command.unicode = number(value)? != 0,
+            b'P' | b'Q' => command.relative |= number(value)? != 0,
+            b'e' => feature = true,
             // `i`, `I`, `p` and `q` are the echo's; the rest is not read.
             _ => {}
         }
+    }
+    // Two ways of placing an image that this terminal does not do: refusing
+    // is better than drawing it in the wrong place.
+    if command.unicode {
+        return Err(Error::invalid("unicode placeholders are not supported"));
+    }
+    if command.relative {
+        return Err(Error::invalid("relative placement is not supported"));
+    }
+    if feature && command.action != Action::Query {
+        return Err(Error::invalid("the e key asks a query about a feature"));
     }
     Ok(command)
 }
@@ -445,12 +468,44 @@ mod tests {
     }
 
     #[test]
-    fn animation_is_refused_by_name() {
-        for action in ["f", "a", "c"] {
-            let (_, error) = failed(&format!("a={action},i=1"));
-            assert_eq!(error.code(), "EINVAL");
-            assert!(error.message().contains("animation"));
-        }
+    fn the_animation_actions_are_read_with_their_keys() {
+        let frame = parsed("a=f,i=1,r=2,c=3,x=4,y=5,s=6,v=7,z=-1,X=1,Y=4278190335");
+        assert_eq!(frame.action, Action::Frame);
+        assert_eq!((frame.rows, frame.columns), (2, 3));
+        assert_eq!((frame.x, frame.y, frame.width, frame.height), (4, 5, 6, 7));
+        assert_eq!((frame.z, frame.cell_x, frame.cell_y), (-1, 1, 0xff00_00ff));
+        assert_eq!(parsed("a=a,i=1,s=3").action, Action::Animate);
+        let compose = parsed("a=c,i=1,r=7,c=9,w=23,h=27,X=4,Y=8,x=1,y=3,C=1");
+        assert_eq!(compose.action, Action::Compose);
+        assert_eq!((compose.rows, compose.columns), (7, 9));
+        assert_eq!((compose.w, compose.h), (23, 27));
+        assert_eq!(
+            (compose.cell_x, compose.cell_y, compose.x, compose.y),
+            (4, 8, 1, 3)
+        );
+        assert!(compose.still);
+    }
+
+    #[test]
+    fn the_chunks_of_a_frame_name_only_its_action_m_and_q() {
+        assert!(parsed("a=f,m=1").is_chunk());
+        assert!(parsed("a=f,m=0,q=2").is_chunk());
+        assert!(
+            !parsed("a=f,i=1,m=1").is_chunk(),
+            "an id is a command's own"
+        );
+        assert!(
+            !parsed("a=c,m=1").is_chunk(),
+            "only a transmission has chunks"
+        );
+    }
+
+    #[test]
+    fn the_e_key_is_for_a_query() {
+        let (echo, error) = failed("a=t,i=2,e=f");
+        assert_eq!(echo.id, 2);
+        assert_eq!(error.code(), "EINVAL");
+        assert!(error.message().contains("query"));
     }
 
     #[test]

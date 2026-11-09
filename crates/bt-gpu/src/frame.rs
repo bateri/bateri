@@ -4394,6 +4394,16 @@ impl Frame {
         self.pictures = pictures;
     }
 
+    /// Lets go of the pixels of the pictures `drawn` says have a texture, and
+    /// keeps where they go: the pictures are shared with the store, and held
+    /// until the next content frame they would make the next edit of an image
+    /// on screen copy all of it. A motion frame draws the same list again and
+    /// finds each texture by its name; a picture with no texture (cut out of
+    /// every row on screen) keeps its pixels for the motion that brings it in.
+    pub(crate) fn release_pictures(&mut self, drawn: impl Fn(u64) -> bool) {
+        self.pictures.release_pixels(|picture| drawn(picture.image));
+    }
+
     /// The pictures that touch a surface's rows, in drawing order (by layer,
     /// then by age). Their rows are the surface's own.
     pub(crate) fn pictures(&self, surface: PictureSurface) -> &[Picture] {

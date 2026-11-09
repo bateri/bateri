@@ -14,7 +14,15 @@
 //! repeated. What walks the lot (a store, a delete, every frame) looks through
 //! each list once, not once for every entry of the other.
 //!
+//! **An image is its frames.** The first is the one that was transmitted and
+//! the rest are what `a=f` and `a=c` made; each is kept whole — straight RGBA,
+//! the size of the image — so that the one on show, an edit of it and a frame
+//! composed on another are all the same kind of buffer ([`frames`]). Every one
+//! counts against the quota, and an image keeps at most [`IMAGE_LIMIT`] of them.
+//!
 //! [`QUOTA_BYTES`]: super::QUOTA_BYTES
+
+mod frames;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -32,6 +40,18 @@ use super::{Echo, Error, IMAGE_LIMIT, PLACEMENT_LIMIT, Reply};
 /// here, far from the small ids programs choose themselves.
 const AUTO_ID_BASE: u32 = 0x8000_0000;
 
+/// The gap a frame is given when its command names none, milliseconds.
+pub(super) const DEFAULT_GAP: u32 = 40;
+
+/// One frame of an image: all of it, as straight RGBA.
+pub(crate) struct Frame {
+    /// RGBA, `width * height * 4` bytes, shared with whoever draws it.
+    pub(crate) pixels: Arc<Vec<u8>>,
+    /// The milliseconds the frame stays before the next one, when the
+    /// animation runs; 0 for a frame that is passed over.
+    pub(crate) gap: u32,
+}
+
 /// One stored image.
 pub(crate) struct Image {
     /// The id programs address it by; 0 for an anonymous one.
@@ -40,16 +60,30 @@ pub(crate) struct Image {
     pub(crate) number: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    /// RGBA, shared with whoever draws it.
-    pub(crate) pixels: Arc<Vec<u8>>,
+    /// The frames, the transmitted image first; never none.
+    pub(crate) frames: Vec<Frame>,
+    /// The index of the frame on show.
+    pub(crate) current: usize,
     /// Counts the images stored on this session, so a re-sent id is told
-    /// apart from the image it replaced. Placements name their image by it.
+    /// apart from the image it replaced. Placements name their image by it, and
+    /// it stays the image's for as long as the image is stored.
     pub(crate) generation: u64,
+    /// Names the pixels on show: it is the generation when the image is stored
+    /// and a number nothing else has had each time those pixels change (an
+    /// edit of the frame on show, another frame shown). A texture cached under
+    /// it never shows stale pixels, and nothing that places the image notices
+    /// the change.
+    pub(crate) revision: u64,
 }
 
 impl Image {
     fn bytes(&self) -> usize {
-        self.pixels.len()
+        self.frames.iter().map(|frame| frame.pixels.len()).sum()
+    }
+
+    /// The frame on show.
+    pub(crate) fn shown(&self) -> Option<&Frame> {
+        self.frames.get(self.current).or(self.frames.first())
     }
 }
 
@@ -241,7 +275,11 @@ impl Store {
     /// matches; the image goes with its last placement when the command is
     /// in upper case, and an anonymous image (nothing can address it again)
     /// goes either way. Images the command does not name stay.
-    fn delete(&mut self, command: &Command, screen: &Screen) {
+    fn delete(&mut self, command: &Command, screen: &Screen, stamp: u64) {
+        if command.scope == Scope::Frames {
+            self.delete_frames(command, stamp);
+            return;
+        }
         let cell = screen.cell;
         let echo = command.echo;
         let (line, col) = (
@@ -282,6 +320,7 @@ impl Store {
                     Scope::Column => placement.holds_column(col, cell),
                     Scope::Row => placement.holds_line(line, cell),
                     Scope::Z => placement.spec.z == command.z,
+                    // Done above: it ends no placement.
                     Scope::Frames => false,
                 };
                 if hit {
@@ -363,6 +402,9 @@ impl Store {
             let Some(image) = images.get(&placement.image) else {
                 continue;
             };
+            let Some(shown) = image.shown() else {
+                continue;
+            };
             let spec = &placement.spec;
             let (width, height) = spec.dest_px(cell);
             let (x_offset, y_offset) = spec.offset_in(cell);
@@ -378,9 +420,9 @@ impl Store {
                 height,
                 source: spec.source,
                 z: spec.z,
-                image: image.generation,
+                image: image.revision,
                 size: (image.width, image.height),
-                pixels: Arc::clone(&image.pixels),
+                pixels: Arc::clone(&shown.pixels),
             });
         }
     }
@@ -467,6 +509,13 @@ impl Images {
         if alt { &mut self.alt } else { &mut self.main }
     }
 
+    /// A number no image has been stored under and no pixels have been named
+    /// by: the next generation, and the next revision.
+    fn next_stamp(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
+    }
+
     /// Stores a transmitted image on `screen` and answers the command; `a=T`
     /// shows it at the cursor too. An image sent by number gets an id of the
     /// terminal's choosing, and the answer says which.
@@ -477,8 +526,7 @@ impl Images {
         decoded: Decoded,
         motion: Motion,
     ) -> Reply {
-        self.generation += 1;
-        let generation = self.generation;
+        let generation = self.next_stamp();
         let store = self.screen(screen.alt);
         let mut echo: Echo = command.echo;
         if echo.id == 0 && echo.number != 0 {
@@ -489,8 +537,13 @@ impl Images {
             number: echo.number,
             width: decoded.width,
             height: decoded.height,
-            pixels: Arc::new(decoded.pixels),
+            frames: vec![Frame {
+                pixels: Arc::new(decoded.pixels),
+                gap: 0,
+            }],
+            current: 0,
             generation,
+            revision: generation,
         };
         match store.insert(image) {
             Ok(()) => {
@@ -523,7 +576,8 @@ impl Images {
     }
 
     pub(crate) fn delete(&mut self, screen: &Screen, command: &Command) {
-        self.screen(screen.alt).delete(command, screen);
+        let stamp = self.next_stamp();
+        self.screen(screen.alt).delete(command, screen, stamp);
     }
 
     /// The screen was cleared; see [`Store::clear_placements`].

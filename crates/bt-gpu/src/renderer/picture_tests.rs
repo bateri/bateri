@@ -341,6 +341,36 @@ fn a_texture_lives_as_long_as_its_picture_shows() {
 }
 
 #[test]
+fn the_pixels_of_a_drawn_picture_are_let_go_and_its_texture_draws_it_again() {
+    let r = renderer();
+    const EDGE: usize = 16;
+    let mut frame = frame_of(
+        (CELL, CELL),
+        (2, 2),
+        vec![
+            solid(1, RED, (0, 0), (8, 8), 0),
+            // Cut out of every row on screen: no texture, so no release.
+            solid(2, GREEN, (0, 8), (8, 8), 0),
+        ],
+    );
+    let first = render_offscreen(&r, EDGE, ACCENT, &frame);
+    frame.release_pictures(|key| r.has_picture_texture(key));
+    let held: Vec<usize> = frame
+        .pictures(PictureSurface::Grid)
+        .iter()
+        .map(|picture| picture.pixels.len())
+        .collect();
+    assert_eq!(held, [0, 4]);
+    assert_eq!(
+        frame.pictures(PictureSurface::Grid)[0].source,
+        [0, 0, 1, 1],
+        "where it goes is kept"
+    );
+    // A motion frame draws the list as it is, from the textures it has.
+    assert_eq!(render_offscreen(&r, EDGE, ACCENT, &frame), first);
+}
+
+#[test]
 fn a_picture_the_device_cannot_hold_is_left_out_not_failed() {
     let r = renderer();
     const EDGE: usize = 16;

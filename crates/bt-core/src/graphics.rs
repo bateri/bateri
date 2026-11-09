@@ -57,7 +57,9 @@
 //! screen ([`Images`]); the frame hands them over as [`Picture`]s.
 
 mod apc;
+mod canvas;
 mod command;
+mod features;
 mod follow;
 mod place;
 mod receive;
@@ -249,6 +251,9 @@ impl Error {
 pub(crate) struct Reply {
     echo: Echo,
     result: Result<(), Error>,
+    /// Keys of the answer after the addressing ones, each as `k=v`: the frame
+    /// a frame command named, what a feature query understood.
+    keys: Vec<String>,
 }
 
 impl Reply {
@@ -256,6 +261,7 @@ impl Reply {
         Self {
             echo,
             result: Ok(()),
+            keys: Vec::new(),
         }
     }
 
@@ -263,6 +269,21 @@ impl Reply {
         Self {
             echo,
             result: Err(error),
+            keys: Vec::new(),
+        }
+    }
+
+    /// This answer with `keys` after the addressing ones.
+    fn with_keys(mut self, keys: Vec<String>) -> Self {
+        self.keys = keys;
+        self
+    }
+
+    /// An answer to a frame command, which says which frame it asked for.
+    fn of_frame(self, command: &Command) -> Self {
+        match command.rows {
+            0 => self,
+            frame => self.with_keys(vec![format!("r={frame}")]),
         }
     }
 
@@ -291,6 +312,7 @@ impl Reply {
         if echo.placement != 0 {
             keys.push(format!("p={}", echo.placement));
         }
+        keys.extend(self.keys.iter().cloned());
         let body = match &self.result {
             Ok(()) => "OK".to_owned(),
             Err(error) => format!("{}:{}", error.code, error.message),
@@ -318,6 +340,11 @@ pub(crate) enum Pending {
         decoded: Decoded,
         motion: Motion,
     },
+    /// Lay a decoded rectangle on a frame of a stored image, or make a frame of
+    /// it (`a=f`). It moves nothing: a frame is not shown by itself.
+    Frame { command: Command, decoded: Decoded },
+    /// Lay a rectangle of one frame on another (`a=c`).
+    Compose(Command),
     /// Show a stored image (`a=p`).
     Put { command: Command, motion: Motion },
     /// Remove placements and, for the upper-case forms, image data.
@@ -337,7 +364,7 @@ impl Pending {
             | Self::Store { motion, .. }
             | Self::Put { motion, .. }
             | Self::Reply { motion, .. } => *motion,
-            Self::Delete(_) => Motion::NONE,
+            Self::Delete(_) | Self::Frame { .. } | Self::Compose(_) => Motion::NONE,
         }
     }
 
@@ -657,13 +684,18 @@ impl Hub {
                 reply: Reply::ok(echo),
                 motion,
             },
+            Ok(decoded) if command.action == Action::Frame => Pending::Frame { command, decoded },
             Ok(decoded) => Pending::Store {
                 command,
                 decoded,
                 motion,
             },
             Err(error) => Pending::Reply {
-                reply: Reply::failed(echo, error),
+                reply: if command.action == Action::Frame {
+                    Reply::failed(echo, error).of_frame(&command)
+                } else {
+                    Reply::failed(echo, error)
+                },
                 motion,
             },
         }
@@ -695,6 +727,10 @@ impl Hub {
             } => lock(&self.images)
                 .store(screen, &command, decoded, motion)
                 .encode(),
+            Pending::Frame { command, decoded } => {
+                lock(&self.images).frame(screen, &command, decoded).encode()
+            }
+            Pending::Compose(command) => lock(&self.images).compose(screen, &command).encode(),
             Pending::Put { command, motion } => {
                 lock(&self.images).put(screen, &command, motion).encode()
             }

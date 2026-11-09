@@ -14,6 +14,8 @@ use super::command::Command;
 use super::store::Images;
 use super::*;
 
+mod frames;
+
 /// What the parser knows of an 80-column terminal with 10 × 20 pixel cells.
 const ENV: Env = Env {
     cell: (10, 20),
@@ -324,7 +326,8 @@ impl Rig {
             images
                 .main()
                 .get(id)
-                .map(|image| image.pixels.as_ref().clone())
+                .and_then(|image| image.shown())
+                .map(|frame| frame.pixels.as_ref().clone())
         })
     }
 }
@@ -652,7 +655,7 @@ fn every_way_a_payload_can_be_wrong_is_an_answer_and_nothing_is_stored() {
         ("a=t,f=100,i=1".into(), Vec::new(), "EINVAL"),
         ("a=t,t=f,i=1".into(), b"/tmp/x".to_vec(), "EINVAL"),
         ("a=t,f=7,i=1".into(), pixels.clone(), "EINVAL"),
-        ("a=f,i=1".into(), pixels.clone(), "EINVAL"),
+        ("a=a,i=1".into(), pixels.clone(), "EINVAL"),
         ("a=z,i=1".into(), pixels.clone(), "EINVAL"),
     ];
     for (control, payload, code) in cases {
@@ -910,8 +913,12 @@ fn each_screen_has_its_own_store_and_the_alternate_one_goes_when_it_is_left() {
         assert_eq!(images.main().ids(), [1]);
         assert_eq!(images.alt().ids(), [1, 2]);
         assert_eq!(
-            images.main().get(1).expect("kept").pixels.as_ref(),
-            &vec![1; 4]
+            images
+                .main()
+                .get(1)
+                .and_then(|image| image.shown())
+                .map(|frame| frame.pixels.as_ref()),
+            Some(&vec![1; 4])
         );
     });
     rig.hub.drop_alt();

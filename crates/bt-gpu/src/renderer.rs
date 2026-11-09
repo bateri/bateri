@@ -831,19 +831,19 @@ struct ImageTexture {
     seen: bool,
 }
 
-/// The textures of the pictures the plans draw, by the picture's generation
+/// The textures of the pictures the plans draw, by the picture's name
 /// ([`Picture::image`]).
 ///
 /// A texture is made the first time a plan draws its picture and **dropped by
 /// the first plan that does not**: the store keeps the pixels as long as the
-/// program may place them again, the GPU keeps them only while they show. A
-/// picture scrolled out and back in is uploaded again, which is a copy the
-/// size of the image, not a frame-time problem; the alternative, an age or a
-/// byte budget, would leave megabytes on a pane that went idle after a
-/// `clear`, and an idle pane draws no frame to let them go.
+/// program may place them again, the GPU keeps them only while they show. A picture scrolled out and back in is uploaded again, which is a
+/// copy the size of the image, not a frame-time problem; the alternative, an
+/// age or a byte budget, would leave megabytes on a pane that went idle after
+/// a `clear`, and an idle pane draws no frame to let them go.
 ///
-/// The generation is the key because it changes whenever the program sends an
-/// id again: a texture cached under it never shows stale pixels.
+/// The name is the key because it changes whenever the pixels do — the
+/// program sends an id again, or edits the frame on show: a texture cached
+/// under it never shows stale pixels.
 #[derive(Default)]
 struct ImageCache {
     textures: HashMap<u64, ImageTexture>,
@@ -2910,6 +2910,12 @@ impl Renderer {
             );
         }
         out
+    }
+
+    /// Whether the picture named `key` ([`Picture::image`]) has a texture here:
+    /// what is drawn from it needs no pixels from the frame.
+    pub(crate) fn has_picture_texture(&self, key: u64) -> bool {
+        self.state.borrow().images.textures.contains_key(&key)
     }
 
     /// Draws the frame into `target` and **submits** it: one render pass, the

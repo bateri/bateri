@@ -282,8 +282,10 @@ pub struct Picture {
     /// negatives between the backgrounds and the text, 0 and above over the
     /// text.
     pub z: i32,
-    /// Names the stored image: it changes when an id is sent again, so a
-    /// texture cached under it never shows stale pixels.
+    /// Names the pixels on show: it changes when an id is sent again and
+    /// whenever the pixels of the image change (a frame edited or shown), so a
+    /// texture cached under it never shows stale pixels. What places the image
+    /// is not named by it and does not change with it.
     pub image: u64,
     /// The image's size in pixels.
     pub size: (u32, u32),
@@ -349,6 +351,18 @@ impl Pictures {
     pub fn clear(&mut self) {
         self.grid.clear();
         self.band.clear();
+    }
+
+    /// Lets go of the pixels of the pictures `drawn` says are on the GPU, and
+    /// keeps where they go. The pictures of a frame are shared with the store
+    /// until they are drawn; held after that, they would make the next edit of
+    /// an image on screen copy all of it.
+    pub fn release_pixels(&mut self, drawn: impl Fn(&Picture) -> bool) {
+        for picture in self.grid.iter_mut().chain(self.band.iter_mut()) {
+            if drawn(picture) {
+                picture.pixels = Arc::default();
+            }
+        }
     }
 }
 
