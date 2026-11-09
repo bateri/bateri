@@ -284,7 +284,7 @@ pub(super) fn package(letter: Letter, server: &Server, production: bool, package
             if state_of_this_computer
                 && let (Some(backend), Some(root)) = (&machine.backend, crate::apps_root())
             {
-                for (name, why) in followed::install_missing(backend, &root, &here) {
+                for (name, why) in followed::install_missing(backend, &root, Some(&here)) {
                     eprintln!("bateri: could not install {name} on this computer: {why}");
                 }
             }

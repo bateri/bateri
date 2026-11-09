@@ -2799,8 +2799,9 @@ only for this computer; a server's must be a public `https` address; only bytes 
 over; at most a hundred trips in ten minutes for one machine).
 
 **This computer** is brought what you follow without a question: bateri has this computer's kablo install each program
-(`bateri package install`, with the key you approved), and newer releases arrive the same way while bateri runs and at
-Check Now. A program with no file for this computer's kind (the grey dot) stays out.
+it does not have yet (`bateri package install`, with the key you approved). Newer releases of a program it has are the
+machine's own updating, as on every machine: they arrive while bateri runs and at Check Now, unless `bateri package auto
+off` turned that off here. A program with no file for this computer's kind (the grey dot) stays out.
 
 **A server gets a program only when you ask it to**, in either of two ways. In a terminal on it, `bateri package
 install textpen` (or `user/repo`, or the address of an `app.json`; a name is one bateri follows). Or the card: the first

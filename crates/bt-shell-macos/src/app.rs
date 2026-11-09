@@ -6143,7 +6143,8 @@ impl AppDelegate {
         // What landed is asked of this computer's own kablo too, once the check that brought it
         // has ended, on the worker's thread: the programs on a machine are kablo's, and this
         // computer is a machine ([`bt_shell_common::apps::followed`]). The servers ask for theirs
-        // when a connection to one is up ([`bt_shell_common::apps::Watches`]).
+        // when a connection to one is up ([`bt_shell_common::apps::Watches`]), and this computer's
+        // own watch does the same when it says what it has.
         let after: bt_shell_common::apps::After = {
             let root = config.root.clone();
             Box::new(move || {
@@ -6156,7 +6157,20 @@ impl AppDelegate {
                     }
                 });
                 if let Some(backend) = crate::hold_service::backend() {
-                    for (name, why) in bt_shell_common::apps::followed::install(&backend, &root) {
+                    // Only what this computer lacks of what it said it has in its last `package
+                    // state`: a program that is here is left to the machine's own updating, which
+                    // the person may have turned off, and a computer that has not said yet is asked
+                    // for nothing, because its state comes and asks for the same.
+                    let here = crate::apps_answerer()
+                        .and_then(|answerer| {
+                            answerer.machine(bt_shell_common::kablo::local::ACCOUNT)
+                        })
+                        .map(|machine| machine.installed);
+                    for (name, why) in bt_shell_common::apps::followed::install_missing(
+                        &backend,
+                        &root,
+                        here.as_deref(),
+                    ) {
                         eprintln!("bateri: could not install {name} on this computer: {why}");
                     }
                 }
