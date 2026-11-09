@@ -172,6 +172,11 @@ pub enum Cause {
     /// The far end speaks no protocol version this build speaks, or no kablo
     /// at all: retrying cannot change it.
     Incompatible,
+    /// The kablo the account names could not be run: its file is not there any more (a
+    /// folder removed on the server, or while this application was closed) or the far shell
+    /// could not run it (status 127 or 126). Tried again like [`Cause::Dropped`], and the owner
+    /// writes kablo there again before the next attempt.
+    Missing,
 }
 
 /// Where the connection to the server stands.
@@ -584,6 +589,10 @@ pub struct Client {
     link: Link,
     /// Attempts in a row that failed; the next retry waits `retry_delay` of it.
     failures: u32,
+    /// Attempts in a row that did not get as far as a connection: a dial that failed, a transport
+    /// that never finished the handshake. A live connection that was lost is not one, and a
+    /// connection that is live again ends the count.
+    unreached: u32,
     /// When the handshake of the live connection finished.
     linked_at: Option<Instant>,
     /// Bytes of the handshake that have not made it whole.
@@ -621,6 +630,7 @@ impl Client {
                 attempt: 0,
             },
             failures: 0,
+            unreached: 0,
             linked_at: None,
             handshake: Vec::new(),
             decoder: IncomingDecoder::new(),
@@ -687,6 +697,11 @@ impl Client {
     /// is lost and the next step follows from `cause`. Terminals that were
     /// attached wait to be attached again.
     pub fn lost(&mut self, now: Instant, cause: Cause) {
+        self.unreached = if matches!(self.link, Link::Live) {
+            0
+        } else {
+            self.unreached.saturating_add(1)
+        };
         if let (Link::Live, Some(since)) = (self.link, self.linked_at)
             && now.saturating_duration_since(since) >= STABLE
         {
@@ -710,7 +725,7 @@ impl Client {
         self.link = match cause {
             Cause::LoginNeeded => Link::NeedsLogin,
             Cause::Refused | Cause::Incompatible => Link::Over(cause),
-            Cause::Dropped | Cause::Protocol => {
+            Cause::Dropped | Cause::Protocol | Cause::Missing => {
                 let attempt = self.failures;
                 self.failures = self.failures.saturating_add(1);
                 Link::Retrying {
@@ -1175,6 +1190,21 @@ impl Client {
         }
     }
 
+    /// How many attempts in a row did not get as far as a connection (see [`Client::lost`]): the
+    /// server is not coming, as far as this client could tell.
+    pub fn unreached(&self) -> u32 {
+        self.unreached
+    }
+
+    /// Whether the terminal was asked for ([`Client::new_terminal`]) and the server has not said
+    /// it made it. It may have: a request that went out on a connection that broke is not known
+    /// to have been taken.
+    pub fn is_creating(&self, id: &SessionId) -> bool {
+        self.terminals
+            .get(id)
+            .is_some_and(|t| t.phase == Phase::Creating)
+    }
+
     /// Whether output of the terminal is flowing.
     pub fn is_attached(&self, id: &SessionId) -> bool {
         self.terminals
@@ -1239,6 +1269,7 @@ impl Client {
                 self.handshake.clear();
                 self.link = Link::Live;
                 self.linked_at = Some(now);
+                self.unreached = 0;
                 self.events.push_back(Event::Linked);
                 self.streams.begin();
                 if self.mail.offered() {

@@ -1179,6 +1179,38 @@ pub(crate) fn end_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Whether `child` has ended, without reaping it: `None` while it runs (or when it could not be
+/// asked), `Some(Some(code))` for one that exited with `code`, `Some(None)` for one a signal ended. A child that is not reaped keeps its pid, so what it led can still be ended by
+/// [`end_group`], which is the point of not waiting for it with [`std::process::Child::try_wait`].
+pub(crate) fn ended_with(child: &std::process::Child) -> Option<Option<i32>> {
+    /// `CLD_EXITED`: the child called `exit`.
+    const CLD_EXITED: libc::c_int = 1;
+    let pid = libc::id_t::try_from(child.id()).ok()?;
+    // SAFETY: an all-zero `siginfo_t` is a valid value for `waitid` to fill in.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: asks about our own child with `WNOWAIT`; it stays a zombie and is reaped later.
+    let asked = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &raw mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if asked != 0 {
+        return None;
+    }
+    // SAFETY: `waitid` filled the fields it reports for a child that ended.
+    #[cfg(target_os = "linux")]
+    let (who, status) = unsafe { (info.si_pid(), info.si_status()) };
+    #[cfg(not(target_os = "linux"))]
+    let (who, status) = (info.si_pid, info.si_status);
+    if who == 0 {
+        return None;
+    }
+    Some((info.si_code == CLD_EXITED).then_some(status))
+}
+
 /// Blocks until `pid`, the process started at `start`
 /// ([`jobs::start_time`]), exits — the recognized program's end, so its bar
 /// goes even while the command runs on (`python3; make`). Returns at once

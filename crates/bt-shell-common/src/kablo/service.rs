@@ -358,8 +358,9 @@ pub struct Carried {
     /// Why the stream ended, asked once when it has ended by itself:
     /// [`Cause::Dropped`] when nothing says more, [`Cause::LoginNeeded`] when
     /// the process was refused a login nobody could answer, [`Cause::Refused`]
-    /// when the server's key is not the one that was trusted. It runs on the
-    /// reader's thread, which may wait for what the process left to say.
+    /// when the server's key is not the one that was trusted, [`Cause::Missing`]
+    /// when the far shell could not run kablo. It runs on the reader's thread,
+    /// which may wait for what the process left to say.
     pub ended: Box<dyn FnOnce() -> Cause + Send>,
 }
 
@@ -728,11 +729,16 @@ impl Drop for Letter {
     }
 }
 
-/// Why a bridge could not be started, as far as the error says: a login the
-/// bridge cannot answer is [`io::ErrorKind::PermissionDenied`].
+/// Why a bridge could not be started, as far as the error says: a login the bridge cannot
+/// answer is [`io::ErrorKind::PermissionDenied`], and a program that is not there is
+/// [`io::ErrorKind::NotFound`], which is this Mac's kablo with its file removed. (A bridge over
+/// ssh starts `ssh`; the far shell's own 127 is read from its status, [`ssh::why_it_ended`]. An
+/// `ssh` that is not there ends here too: writing kablo again does not help, and costs one more
+/// try before the panes that wait are let go.)
 fn cause_of(error: &io::Error) -> Cause {
     match error.kind() {
         io::ErrorKind::PermissionDenied => Cause::LoginNeeded,
+        io::ErrorKind::NotFound => Cause::Missing,
         _ => Cause::Dropped,
     }
 }
@@ -1092,6 +1098,14 @@ impl Drop for Bridge {
     }
 }
 
+/// How many attempts in a row to reach a server may fail before the panes that wait for a new
+/// terminal there fall back to a plain `ssh`.
+const GIVE_UP_AFTER: u32 = 3;
+
+/// How many bridges in a row may end for a kablo that cannot be run before it is no longer written
+/// again at every dial.
+const MISSED_REPAIRS: u32 = 3;
+
 /// A server the service has a client for.
 struct Account {
     server: KabloHost,
@@ -1104,6 +1118,11 @@ struct Account {
     bridge: Option<Bridge>,
     /// A thread is starting a bridge.
     dialing: bool,
+    /// How many bridges in a row ended because the kablo could not be run ([`Cause::Missing`]),
+    /// until one speaks. The first is mended by the next dial (`stale`); a second is a
+    /// server that cannot keep kablo, and the panes that wait for a new terminal there do not wait
+    /// for it ([`Core::gives_up`]).
+    missed: u32,
     /// Bytes queued for the holders of this account's terminals.
     queued: Arc<AtomicUsize>,
     /// The terminals the ledger has marked to end were asked to, on the connection
@@ -1116,6 +1135,15 @@ struct Account {
     /// Held while the files are written ([`Core::rewrite`]), so that writes made one after the
     /// other end in the order they were asked for: the last one reads the setting last.
     writing: Arc<Mutex<()>>,
+}
+
+impl Account {
+    /// The bridge ended because the kablo could not be run: the next dial writes it again
+    /// ([`Backend::refresh`]) before it starts a bridge.
+    fn missing(&mut self) {
+        self.missed = self.missed.saturating_add(1);
+        self.stale = true;
+    }
 }
 
 /// What one account's server keeps that no pane of this Mac shows, in the roster's two halves.
@@ -2065,6 +2093,9 @@ impl Core {
                     && let Some(client) = self.hub.client_mut(&account)
                 {
                     client.push(&bytes, now);
+                    if let Some(entry) = self.accounts.get_mut(&account) {
+                        entry.missed = 0;
+                    }
                 }
             }
             Msg::BridgeEof {
@@ -2292,9 +2323,10 @@ impl Core {
                                 self.found(&account, list);
                                 self.listed_for_surveys(&account, list);
                             }
-                            Event::Lost { .. } => {
+                            Event::Lost { cause } => {
                                 self.lost_for_surveys(&account);
                                 self.answer_pictures(&account, None, None);
+                                self.lost(&account, *cause);
                             }
                             Event::Screen {
                                 terminal,
@@ -3177,7 +3209,9 @@ impl Core {
             };
             entry.dialing = true;
             let (server, installed) = (entry.server.clone(), entry.installed.clone());
-            let stale = entry.stale;
+            // A kablo that could not be run is written again twice at most: past that the server
+            // cannot keep it, and every dial would only do the same look again.
+            let stale = entry.stale && entry.missed < MISSED_REPAIRS;
             let shared = Arc::clone(&self.shared);
             let started = thread::Builder::new()
                 .name("ssh-hold dials".into())
@@ -3279,6 +3313,59 @@ impl Core {
                 }
             }
         }
+    }
+
+    /// A connection was lost, for whatever reason it was (the client says so once, whichever of
+    /// the ways it came to know): a kablo that could not be run is to be written again before the
+    /// next dial, and the panes that wait for a new terminal are let go if the server is not
+    /// coming.
+    fn lost(&mut self, account: &str, cause: Cause) {
+        if let Some(entry) = self.accounts.get_mut(account) {
+            if cause == Cause::Missing {
+                entry.missing();
+            } else {
+                entry.missed = 0;
+            }
+        }
+        self.give_up_if_hopeless(account);
+    }
+
+    /// The panes that wait for a new terminal of an account that cannot be reached, or whose
+    /// kablo cannot be written again, are let fall back to a plain `ssh`, which says what is the
+    /// matter itself: a pane that waits and is told nothing is the worse of the two.
+    fn give_up_if_hopeless(&mut self, account: &str) {
+        if !self.gives_up(account) {
+            return;
+        }
+        let given_up = self.hub.give_up_new(account);
+        for terminal in &given_up {
+            // The row `started` wrote for a terminal that was never made.
+            self.shared.ledger.gone(account, terminal);
+        }
+        // A row that was the account's only one took the account with it.
+        if !given_up.is_empty()
+            && let Some(entry) = self.accounts.get(account)
+        {
+            self.shared.ledger.remember(&entry.server, &entry.installed);
+        }
+    }
+
+    /// Whether a new terminal on `account` is not worth waiting for: the account waits for its
+    /// next attempt, and the last [`GIVE_UP_AFTER`] attempts to reach it in a row failed
+    /// ([`Client::unreached`]; a live connection that was lost is not one), or the kablo could not
+    /// be run twice, which is the dial that wrote it again and still nothing to run
+    /// ([`Account::missed`]). A first [`Cause::Missing`] is not hopeless: the next dial is the
+    /// one that mends it. An account that is waiting for a login is waiting for the person, who
+    /// is not hurried, and one that is connecting is about to be there.
+    fn gives_up(&self, account: &str) -> bool {
+        let (Some(entry), Some(client)) = (self.accounts.get(account), self.hub.client(account))
+        else {
+            return false;
+        };
+        if !matches!(client.link(), Link::Retrying { .. }) {
+            return false;
+        }
+        entry.missed >= 2 || (entry.missed != 1 && client.unreached() >= GIVE_UP_AFTER)
     }
 
     /// A holder asked for a terminal. Which pane it is in and whether the call
@@ -3790,6 +3877,7 @@ impl Core {
                 generation: 0,
                 bridge: None,
                 dialing: false,
+                missed: 0,
                 queued: Arc::new(AtomicUsize::new(0)),
                 purged: false,
                 files,
@@ -3811,6 +3899,10 @@ impl Core {
         spec: NewSession,
         name: Option<SessionId>,
     ) -> Result<(), Declined> {
+        // The server may have been given up on while its counter was being asked.
+        if self.gives_up(account) {
+            return Err(Declined::Refused);
+        }
         self.hub.start(hold, account, spec, name)?;
         if let Some((_, terminal)) = self.hub.terminal_of(hold) {
             let terminal = terminal.clone();
@@ -3853,6 +3945,10 @@ impl Core {
     /// is not waited for at all: it keeps the name it made).
     fn prepare(&mut self, hold: HoldId, server: KabloHost, pane: PaneInfo) {
         let numbered = self.hub.version_of(hold) >= wire::NAMED;
+        if self.gives_up(&server.key) {
+            self.hub.refuse(hold, true, "");
+            return;
+        }
         if let Some(entry) = self.accounts.get(&server.key) {
             let spec = new_session(&self.shared, &pane);
             let account = entry.server.key.clone();

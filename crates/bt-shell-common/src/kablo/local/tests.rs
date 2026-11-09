@@ -62,6 +62,24 @@ fn a_step_here_is_sh_in_the_home_directory() {
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
 }
 
+/// A kablo whose file is not there cannot be started, and says so as a program that is not
+/// found: the service reads that as a kablo to write again ([`crate::kablo::Cause::Missing`]),
+/// not as a network to wait out.
+#[test]
+fn a_bridge_here_whose_kablo_is_not_there_is_a_program_not_found() {
+    let ground = Ground::new("no-file");
+    let installed = Installed {
+        target: kablo_proto::install::Target::LinuxX86_64,
+        version: "0.2.0".into(),
+        path: ".local/share/kablo/0.2.0/kablo".into(),
+        fresh: false,
+    };
+    let error = carry(&ground.home, &installed)
+        .err()
+        .expect("nothing to start");
+    assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+}
+
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_bridge_here_is_the_installed_kablo_run_as_attach_and_ending_it_ends_only_it() {
@@ -531,6 +549,11 @@ impl Backend for RealMac {
 
     fn version(&self) -> Option<String> {
         Some(self.bundle.version().to_owned())
+    }
+
+    /// The same look as the first one: kablo is written where it is not.
+    fn refresh(&self, _: &KabloHost, _: &[SessionId]) -> Option<Installed> {
+        ensure_here(&LocalChannel::new(self.home.clone()), &self.bundle, true).ok()
     }
 
     fn carry(&self, _: &KabloHost, installed: &Installed) -> io::Result<Carried> {
@@ -1954,6 +1977,87 @@ fn a_program_over_a_real_kablo_is_given_its_input_and_gives_its_output_errors_an
     assert_eq!(out, "out-first\ntyped\nout-last\n");
     assert_eq!(errors.join().expect("errors"), "err-first\nerr-last\n");
     assert_eq!(end.wait(), Ok(Exit::Code(5)));
+}
+
+/// The pid of the bridge (`kablo attach`) a service keeps from below `home`, if it has one.
+fn bridge_pid(home: &Path) -> Option<u32> {
+    let listing = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .ok()?;
+    let home = home.to_string_lossy().into_owned();
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .find_map(|line| {
+            let (pid, command) = line.trim_start().split_once(' ')?;
+            let command = command.trim_start();
+            (command.starts_with(&home) && command.ends_with(" attach"))
+                .then(|| pid.parse().ok())
+                .flatten()
+        })
+}
+
+/// What a program says over the connection to this Mac's kablo: `Err` is why there is none.
+fn says_over(here: &Here, word: &str) -> Result<String, String> {
+    let crate::kablo::remote::RemoteCommand {
+        stdin,
+        mut stdout,
+        end,
+        ..
+    } = here.run(&["sh", "-c", &format!("echo {word}")])?;
+    drop(stdin);
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).map_err(|e| e.to_string())?;
+    let _ = end.wait();
+    Ok(out)
+}
+
+/// The folder of kablo is removed while the connection is up and the bridge goes: the file is not
+/// there to start, the next dial writes kablo again, a bridge is made from it, and the terminal
+/// that ran from the removed file is still there. The service is the real one, over a real kablo.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_kablo_removed_while_the_connection_is_up_is_written_again_and_the_terminal_lives() {
+    let Some(here) = Here::new("removed") else {
+        return;
+    };
+    let kablo = here
+        .ground
+        .kept
+        .clone()
+        .expect("the kablo the terminal runs from");
+    let home = here.ground.home.clone();
+    assert_eq!(says_over(&here, "before").as_deref(), Ok("before\n"));
+    let bridge = {
+        let mut found = None;
+        waits_for("the bridge", || {
+            found = bridge_pid(&home);
+            found.is_some()
+        });
+        found.expect("the bridge")
+    };
+
+    std::fs::remove_dir_all(kablo.parent().expect("a version folder")).expect("removed");
+    // SAFETY: a signal to the bridge of this test's own service, found by its home.
+    unsafe { libc::kill(bridge as libc::pid_t, libc::SIGKILL) };
+
+    waits_for("kablo written again", || kablo.exists());
+    waits_for("a bridge from it", || {
+        bridge_pid(&home).is_some_and(|pid| pid != bridge)
+    });
+    waits_for("the connection back", || {
+        says_over(&here, "after").as_deref() == Ok("after\n")
+    });
+    // The terminal that ran from the removed file went on, and is the account's still.
+    let listed = Command::new(&kablo)
+        .arg("list")
+        .env(sockdir_variable(), &here.ground.sockets)
+        .stdin(Stdio::null())
+        .output()
+        .expect("kablo");
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let id = here.ground.made.first().expect("a terminal");
+    assert!(listed.contains(id.as_str()), "{listed}");
 }
 
 #[test]

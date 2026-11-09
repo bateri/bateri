@@ -576,6 +576,10 @@ impl Backend for SshBackend {
             crate::program::end_group(&mut child);
             return Err(io::Error::other("the bridge has no pipes"));
         };
+        // The ssh is held by `close` and by `ended`, whichever comes first: the bridge's
+        // end is read from the ssh's status, and the group it leads is ended only while the
+        // ssh is not reaped yet ([`crate::program::end_group`]).
+        let child = Arc::new(Mutex::new(Some(child)));
         // What ssh says when it is refused is the only way to tell a login that
         // nobody answered from a network that is down: both end the stream.
         let said = Arc::new(Mutex::new(String::new()));
@@ -590,13 +594,23 @@ impl Backend for SshBackend {
             reader: Box::new(stdout),
             writer: Box::new(stdin),
             // The ssh with its proxy: a bridge that never opened is ended at every attempt.
-            close: Box::new(move || crate::program::end_group(&mut child)),
+            close: Box::new({
+                let child = Arc::clone(&child);
+                move || {
+                    if let Some(mut ssh) = child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        crate::program::end_group(&mut ssh);
+                    }
+                }
+            }),
             ended: Box::new(move || {
+                // The ssh first: what it led goes with it, and with that whatever held its
+                // stderr, which the words are read from.
+                let status = exit_status_of(&child);
                 if let Some(reading) = reading {
                     let _ = reading.join();
                 }
                 let said = said.lock().unwrap_or_else(|e| e.into_inner());
-                why_it_ended(&said)
+                why_it_ended(&said, status)
             }),
         })
     }
@@ -843,19 +857,52 @@ fn read_said(mut stderr: impl Read, said: &Mutex<String>) {
     }
 }
 
-/// Why a bridge whose ssh ended by itself ended, from what ssh said. A key that
-/// is not the trusted one is a connection that stops and asks nothing; a
-/// refused login that a password could have opened is the user's to give; the
-/// rest is the network and is tried again.
-pub fn why_it_ended(said: &str) -> Cause {
+/// Why a bridge whose ssh ended by itself ended, from what ssh said and the status it ended
+/// with (`None`: it was let go of, or ended by a signal, or did not end in time to be asked).
+/// A key that is not the trusted one is a connection that stops and asks nothing; a refused
+/// login that a password could have opened is the user's to give; a status of the far shell that
+/// says it could not run the command (127 not found, 126 not executable) is a kablo that is not
+/// there; the rest is the network and is tried again. The status, not the words: shells write
+/// "not found" in their own ways, and ssh's own failures are 255.
+pub fn why_it_ended(said: &str, status: Option<i32>) -> Cause {
     if said.contains("Host key verification failed")
         || said.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
     {
         Cause::Refused
     } else if ssh_route::password_refused(said) {
         Cause::LoginNeeded
+    } else if matches!(status, Some(126 | 127)) {
+        Cause::Missing
     } else {
         Cause::Dropped
+    }
+}
+
+/// How long a bridge's ssh, whose stream has ended, is given to end too before its status is
+/// given up on.
+const EXIT_WAIT: Duration = Duration::from_secs(2);
+
+/// The exit status of the bridge's ssh, which is asked about here until it has ended or
+/// [`EXIT_WAIT`] is over. An ssh that has ended is not reaped before what it led is ended
+/// ([`crate::program::end_group`] signals the group by the pid, which only a child not reaped
+/// still owns), and it is reaped by that. `None` when `close` ended it first, when it did not end
+/// in time (left to `close`), or when a signal ended it.
+fn exit_status_of(child: &Mutex<Option<std::process::Child>>) -> Option<i32> {
+    let until = std::time::Instant::now() + EXIT_WAIT;
+    loop {
+        {
+            let mut slot = child.lock().unwrap_or_else(|e| e.into_inner());
+            let ssh = slot.as_mut()?;
+            if let Some(code) = crate::program::ended_with(ssh) {
+                crate::program::end_group(ssh);
+                *slot = None;
+                return code;
+            }
+        }
+        if std::time::Instant::now() >= until {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 

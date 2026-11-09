@@ -89,6 +89,8 @@ struct Fake {
     fresh: AtomicBool,
     /// The server cannot be renewed now ([`Backend::refresh`] has no answer).
     refresh_fails: AtomicBool,
+    /// A renewal that is done mends what kept a bridge from starting ([`Fake::carry_fails_with`]).
+    refresh_mends: AtomicBool,
     /// Bridges that fail to start before one does.
     carry_fails: AtomicU32,
     /// The bridges started, each with the flag that ends it.
@@ -123,6 +125,8 @@ struct Fake {
     records: Mutex<Vec<(crate::agent::Terminal, crate::agent::notes::Record)>>,
     /// How long reading the records takes.
     records_take: Mutex<Duration>,
+    /// How long the counter of the server takes to answer.
+    number_takes: Mutex<Duration>,
     /// The server makes the folder for a program's files ([`Backend::stage_folder`]).
     stages: AtomicBool,
     /// What was asked of the folder, in order: `stage:N` for a step that began when the look for
@@ -149,6 +153,7 @@ impl Fake {
             master: Mutex::new(None),
             fresh: AtomicBool::new(false),
             refresh_fails: AtomicBool::new(false),
+            refresh_mends: AtomicBool::new(false),
             carry_fails: AtomicU32::new(0),
             carried: Mutex::new(Vec::new()),
             carry_error: Mutex::new(None),
@@ -165,6 +170,7 @@ impl Fake {
             past: AtomicBool::new(true),
             records: Mutex::new(Vec::new()),
             records_take: Mutex::new(Duration::ZERO),
+            number_takes: Mutex::new(Duration::ZERO),
             stages: AtomicBool::new(true),
             staged: Mutex::new(Vec::new()),
         })
@@ -384,6 +390,9 @@ impl Backend for Fake {
         if self.refresh_fails.load(Ordering::SeqCst) {
             return None;
         }
+        if self.refresh_mends.load(Ordering::SeqCst) {
+            *self.carry_error.lock().expect("lock") = None;
+        }
         self.bridge().replace_relays(Age::Current);
         Some(Installed {
             target: kablo_proto::install::Target::LinuxX86_64,
@@ -480,6 +489,7 @@ impl Backend for Fake {
 
     fn number(&self, _: &KabloHost) -> Option<u64> {
         self.note("number");
+        thread::sleep(*self.number_takes.lock().expect("lock"));
         match self.next_number.load(Ordering::SeqCst) {
             0 => None,
             _ => Some(self.next_number.fetch_add(1, Ordering::SeqCst)),
@@ -1277,6 +1287,420 @@ fn a_holder_asking_for_a_terminal_again_gets_it_and_an_unknown_account_is_refuse
     assert_eq!(lost.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
     rig.world.bridge().exit(&terminal, Exit::Code(0));
     assert_eq!(again.outcome(), Outcome::Exit(0));
+}
+
+/// A bridge that ends because the far shell could not run kablo (its folder was removed on the
+/// server): the next dial writes kablo again before it starts a bridge, and the pane is back. A
+/// bridge that ends for the network does not.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_bridge_that_ends_for_a_missing_kablo_has_it_written_again_before_the_next_dial() {
+    let rig = Rig::new("missing-kablo");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    assert_eq!(
+        rig.world.count("refresh"),
+        0,
+        "an account that is up is not looked at"
+    );
+
+    // The network: the same dial, no renewal.
+    rig.world.break_connection();
+    until("the network's loss told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+    });
+    rig.service.retry_account("u@rasp:22");
+    until("the pane back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    assert_eq!(
+        rig.world.count("refresh"),
+        0,
+        "a network is not a missing kablo"
+    );
+
+    // The far shell could not run kablo: it is written again first, and the pane is back.
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Missing;
+    rig.world.break_connection();
+    until("the loss told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+    });
+    rig.service.retry_account("u@rasp:22");
+    until("kablo written again", || rig.world.count("refresh") == 1);
+    until("the pane back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    rig.world.bridge().write(&terminal, b"two");
+    until("the bytes go on", || holder.shown.bytes() == b"onetwo");
+
+    // Mended: the next loss is the network's again.
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Dropped;
+    rig.world.break_connection();
+    rig.service.retry_account("u@rasp:22");
+    thread::sleep(Duration::from_millis(1500));
+    assert_eq!(rig.world.count("refresh"), 1, "not written over and over");
+}
+
+/// A pane that asks for a new terminal on a server whose kablo cannot be written is not left
+/// waiting: after the dial that wrote it again and found nothing to run it falls back to a plain
+/// `ssh`, which says why; the terminal is never made and the ledger has no row for it, and the
+/// pane that waits for the terminal it had goes on waiting.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_new_terminal_does_not_wait_for_a_kablo_that_cannot_be_written() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "unwritable",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = pane_named(&rig.world);
+    let kept = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || kept.shown.bytes() == b"one");
+
+    // The folder is gone, and nothing can write it again.
+    rig.world.refresh_fails.store(true, Ordering::SeqCst);
+    rig.world.carry_fails_with(Some(io::ErrorKind::NotFound));
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Missing;
+    rig.world.break_connection();
+    until("the loss told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+    });
+
+    // A new terminal waits for the dial that is to mend it.
+    let numbered = rig.world.count("number");
+    let mut asked = Holder::new(&rig.socket(), "b-2");
+    until("the new terminal was numbered", || {
+        rig.world.count("number") == numbered + 1
+    });
+    assert!(
+        asked
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
+        "the first miss is mended by the next dial"
+    );
+
+    // That dial writes nothing (refused), runs into the same, and the pane is let go.
+    rig.service.retry_account("u@rasp:22");
+    assert_eq!(asked.outcome(), Outcome::FallBack);
+    assert!(rig.world.count("refresh") >= 1);
+    assert!(
+        !rig.world
+            .bridge()
+            .has(&SessionId::new("b-2").expect("a name"))
+    );
+    assert_eq!(
+        ledger.terminals_of("u@rasp:22"),
+        std::slice::from_ref(&terminal)
+    );
+
+    // Another one, asked now, is told at once, not at the next failed attempt.
+    let asked_at = Instant::now();
+    let mut later = Holder::new(&rig.socket(), "b-3");
+    assert_eq!(later.outcome(), Outcome::FallBack);
+    assert!(
+        asked_at.elapsed() < Duration::from_millis(1000),
+        "{:?}",
+        asked_at.elapsed()
+    );
+
+    // The pane that had a terminal waits for it, as it always did, and has it back when the
+    // server can be reached.
+    assert!(
+        kept.handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
+        "a terminal that exists is waited for"
+    );
+    rig.world.refresh_fails.store(false, Ordering::SeqCst);
+    rig.world.carry_fails_with(None);
+    rig.service.retry_account("u@rasp:22");
+    until("the pane back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    rig.world.bridge().write(&terminal, b"two");
+    until("the bytes go on", || kept.shown.bytes() == b"onetwo");
+    assert!(
+        !rig.world
+            .bridge()
+            .has(&SessionId::new("b-2").expect("a name"))
+    );
+}
+
+/// A server that cannot be reached three times in a row is one a new terminal does not wait
+/// for, and one that is only taken up again (a pane that comes back after bateri was
+/// restarted) does: the network may come back, and the terminal is there.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_new_terminal_gives_up_after_three_attempts_and_a_terminal_that_exists_does_not() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept("three-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    first.service.stop();
+    drop(first);
+
+    // The pane comes back after a restart, with the server out of reach.
+    world.carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let attempts = world.count("carry");
+    let again = Rig::kept("three-2", world.clone(), ledger.clone(), END_GRACE);
+    let resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    let numbered = world.count("number");
+    let mut asked = Holder::new(&again.socket(), "b-2");
+    until("the new terminal was numbered", || {
+        world.count("number") == numbered + 1
+    });
+
+    // Two failed attempts are not three.
+    until("two attempts", || world.count("carry") >= attempts + 2);
+    assert!(
+        asked
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
+        "waiting still"
+    );
+    // The third.
+    again.service.retry_account("u@rasp:22");
+    until("a third attempt", || world.count("carry") >= attempts + 3);
+    assert_eq!(asked.outcome(), Outcome::FallBack);
+    assert!(!world.bridge().has(&SessionId::new("b-2").expect("a name")));
+    assert_eq!(
+        ledger.terminals_of("u@rasp:22"),
+        std::slice::from_ref(&terminal)
+    );
+    let asked_at = Instant::now();
+    let mut later = Holder::new(&again.socket(), "b-4");
+    assert_eq!(later.outcome(), Outcome::FallBack);
+    assert!(
+        asked_at.elapsed() < Duration::from_millis(2000),
+        "told at once, not at the next attempt: {:?}",
+        asked_at.elapsed()
+    );
+
+    // The terminal that exists is waited for and is shown when the network is back.
+    assert!(
+        resumed
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
+        "waiting still"
+    );
+    world.carry_fails_with(None);
+    again.service.retry_account("u@rasp:22");
+    world.bridge().write(&terminal, b"def");
+    until("the pane is back", || resumed.shown.bytes() == b"def");
+    assert!(!world.bridge().has(&SessionId::new("b-2").expect("a name")));
+}
+
+/// A kablo that went missing, was written again and ran is a server that is well: when it goes
+/// missing again, a new terminal waits for the repair as it did the first time, and is not let
+/// go for the sake of the first one.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_kablo_that_goes_missing_again_after_it_was_mended_is_mended_again() {
+    let rig = Rig::new("missing-twice");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Missing;
+
+    for round in 1..=2 {
+        rig.world.break_connection();
+        until("the loss told", || {
+            rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+        });
+        let mut asked = None;
+        if round == 2 {
+            let numbered = rig.world.count("number");
+            asked = Some(Holder::new(&rig.socket(), "b-2"));
+            until("the new terminal was numbered", || {
+                rig.world.count("number") == numbered + 1
+            });
+        }
+        rig.service.retry_account("u@rasp:22");
+        until("kablo written again", || {
+            rig.world.count("refresh") == round
+        });
+        until("the pane back", || {
+            rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+        });
+        rig.world.bridge().write(&terminal, b"+");
+        until("the bytes go on", || {
+            holder.shown.bytes().len() == 3 + round
+        });
+        if asked.is_some() {
+            until("the new terminal exists", || {
+                rig.world
+                    .bridge()
+                    .has(&SessionId::new("b-2").expect("a name"))
+            });
+        }
+    }
+}
+
+/// The counter of a server is being asked when the server is given up on: the terminal that was
+/// to be made on it is not made after that, the pane is let go at once and not at the next
+/// attempt.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_new_terminal_whose_server_is_given_up_on_while_it_is_numbered_is_let_go() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept("numbered-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    first.service.stop();
+    drop(first);
+
+    world.carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let again = Rig::kept("numbered-2", world.clone(), ledger.clone(), END_GRACE);
+    let _resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    let attempts = world.count("carry");
+    *world.number_takes.lock().expect("lock") = Duration::from_millis(2500);
+    let numbered = world.count("number");
+    let mut asked = Holder::new(&again.socket(), "b-2");
+    until("the counter is being asked", || {
+        world.count("number") == numbered + 1
+    });
+
+    // While it is, the attempts that do not reach the server are three.
+    again.service.retry_account("u@rasp:22");
+    until("an attempt", || world.count("carry") > attempts + 1);
+    again.service.retry_account("u@rasp:22");
+    until("an attempt", || world.count("carry") > attempts + 2);
+    again.service.retry_account("u@rasp:22");
+    until("an attempt", || world.count("carry") > attempts + 3);
+    let counted = Instant::now();
+    assert_eq!(asked.outcome(), Outcome::FallBack);
+    assert!(
+        counted.elapsed() < Duration::from_millis(3500),
+        "{:?}",
+        counted.elapsed()
+    );
+    assert!(!world.bridge().has(&SessionId::new("b-2").expect("a name")));
+    assert_eq!(
+        ledger.terminals_of("u@rasp:22"),
+        std::slice::from_ref(&terminal)
+    );
+}
+
+/// A kablo that could not be run, and then a network that is down: the pane that waits is not
+/// kept for the first miss for ever (it waited for the dial that would mend it, and that dial
+/// found the network down), and what counts is the attempts that did not reach the server, not
+/// the connection that was lost to begin with.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_missing_kablo_then_a_network_that_is_down_lets_a_new_terminal_go_after_three_attempts() {
+    let rig = Rig::new("missing-then-down");
+    let pane = pane_named(&rig.world);
+    let kept = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || kept.shown.bytes() == b"one");
+
+    // The far shell could not run kablo, and nothing can be reached for the dials that follow.
+    rig.world.refresh_fails.store(true, Ordering::SeqCst);
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Missing;
+    rig.world.break_connection();
+    until("the loss told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+    });
+    let numbered = rig.world.count("number");
+    let mut asked = Holder::new(&rig.socket(), "b-2");
+    until("the new terminal was numbered", || {
+        rig.world.count("number") == numbered + 1
+    });
+
+    // The connection that was lost is not an attempt that failed: two dials are not three.
+    let attempts = rig.world.count("carry");
+    rig.service.retry_account("u@rasp:22");
+    until("a first attempt", || rig.world.count("carry") > attempts);
+    rig.service.retry_account("u@rasp:22");
+    until("a second attempt", || {
+        rig.world.count("carry") > attempts + 1
+    });
+    assert!(
+        asked
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
+        "two attempts are not three"
+    );
+    rig.service.retry_account("u@rasp:22");
+    assert_eq!(asked.outcome(), Outcome::FallBack);
+    assert!(
+        kept.handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
+        "a terminal that exists is waited for"
+    );
+}
+
+/// The account of a ledger (bateri was closed when the folder of kablo was removed) comes back
+/// the way an account that was up does: the first dial finds nothing to run, the next writes
+/// kablo again, and the pane that waited for its terminal has it.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn an_account_the_ledger_brings_back_mends_a_missing_kablo_before_its_pane_is_shown() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept("ledger-missing-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    first.service.stop();
+    drop(first);
+
+    // The folder was removed while bateri was closed; writing kablo again mends it.
+    world.carry_fails_with(Some(io::ErrorKind::NotFound));
+    world.refresh_mends.store(true, Ordering::SeqCst);
+    let again = Rig::kept("ledger-missing-2", world.clone(), ledger.clone(), END_GRACE);
+    let resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    until("kablo written again", || world.count("refresh") == 1);
+    world.bridge().write(&terminal, b"def");
+    until("the pane is back", || resumed.shown.bytes() == b"def");
 }
 
 #[test]

@@ -1082,6 +1082,43 @@ impl Hub {
         }
     }
 
+    /// The holders of `account` whose new terminal the server has not made are let fall back to a
+    /// plain `ssh`, and the terminals are not asked for any more: said of a connection that is
+    /// not coming, to the ones that are only waiting (a holder that was shown something, or
+    /// whose terminal existed before, waits for the connection as it does). Returns the
+    /// terminals that were given up on.
+    pub fn give_up_new(&mut self, account: &str) -> Vec<SessionId> {
+        let Some(client) = self.clients.get(account) else {
+            return Vec::new();
+        };
+        let waiting: Vec<(HoldId, SessionId)> = self
+            .bound
+            .iter()
+            .filter(|((owner, terminal), _)| owner == account && client.is_creating(terminal))
+            .map(|((_, terminal), hold)| (*hold, terminal.clone()))
+            .filter(|(hold, _)| {
+                self.holds.get(hold).is_some_and(|entry| {
+                    !entry.raw && entry.bound.as_ref().is_some_and(|b| !b.shown)
+                })
+            })
+            .collect();
+        let mut given_up = Vec::new();
+        for (hold, terminal) in waiting {
+            self.release(hold, false);
+            if let Some(client) = self.clients.get_mut(account) {
+                client.forget(&terminal);
+            }
+            if let Some(entry) = self.holds.get_mut(&hold) {
+                entry.finish(&ToHold::Refused {
+                    fall_back: true,
+                    text: String::new(),
+                });
+            }
+            given_up.push(terminal);
+        }
+        given_up
+    }
+
     /// The wire version a holder speaks (0 before its greeting).
     pub fn version_of(&self, hold: HoldId) -> u8 {
         self.holds.get(&hold).map_or(0, |entry| entry.version)

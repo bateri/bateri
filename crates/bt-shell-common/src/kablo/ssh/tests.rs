@@ -403,6 +403,62 @@ fn ending_a_bridge_ends_what_its_ssh_started() {
     }
 }
 
+/// A bridge whose ssh ends by itself leaves nothing of what the ssh started either: the status is
+/// read from the ssh, which is reaped for it, and the group goes in the same breath. (The stand-in
+/// `attach` starts a process of its own in the background, as a proxy does, and ends with 3.)
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_bridge_whose_ssh_ended_by_itself_takes_what_it_started_with_it() {
+    let world = stand_in("bridge-self-end", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    let installed = backend.install(&host, &[]).expect("installed");
+    let started = world.home.join("started");
+    crate::child::tests::write_program(
+        &world.home.join(&installed.path),
+        &format!(
+            "#!/bin/sh\ncase $1 in attach) sleep 60 >/dev/null </dev/null & echo $! > '{}'; exit 3;; esac\n",
+            started.display()
+        ),
+    );
+
+    let Carried {
+        mut reader,
+        writer,
+        close,
+        ended,
+    } = backend.carry(&host, &installed).expect("a bridge");
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).expect("the stream ends");
+    // 3 is neither a missing kablo nor a login: the network's, tried again. What the ssh left
+    // holds its stderr, which is not waited for before the leftover is ended.
+    let asked_at = Instant::now();
+    assert_eq!(ended(), Cause::Dropped);
+    assert!(
+        asked_at.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        asked_at.elapsed()
+    );
+    let pid = std::fs::read_to_string(&started)
+        .expect("the bridge started it")
+        .trim()
+        .parse::<libc::pid_t>()
+        .expect("a pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // SAFETY: signal 0 only asks whether the process exists.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "what the bridge's ssh started outlived it"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    close();
+    drop(writer);
+}
+
 /// The server's counter is run over the connection the user made, as a step of its own: kablo's
 /// own (`kablo bateri --next-number`, which the agent's command there runs too), in the home the
 /// server says (a stand-in that sets it, as an ssh login does).
@@ -535,7 +591,7 @@ fn what_ssh_says_when_the_bridge_ends_tells_a_login_from_a_network() {
         "u@rasp: Permission denied (publickey,password).\n",
         "Permission denied (publickey,keyboard-interactive).",
     ] {
-        assert_eq!(why_it_ended(said), Cause::LoginNeeded, "{said}");
+        assert_eq!(why_it_ended(said, Some(255)), Cause::LoginNeeded, "{said}");
     }
     // A key's refusal is not a password's business, and a network is a network.
     for said in [
@@ -546,15 +602,79 @@ fn what_ssh_says_when_the_bridge_ends_tells_a_login_from_a_network() {
         "Connection closed by 10.0.0.2 port 22\n",
         "",
     ] {
-        assert_eq!(why_it_ended(said), Cause::Dropped, "{said:?}");
+        assert_eq!(why_it_ended(said, Some(255)), Cause::Dropped, "{said:?}");
+        assert_eq!(why_it_ended(said, None), Cause::Dropped, "{said:?}");
     }
     // A server whose key is not the trusted one is not asked about anything.
     for said in [
         "Host key verification failed.\n",
         "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n",
     ] {
-        assert_eq!(why_it_ended(said), Cause::Refused, "{said}");
+        assert_eq!(why_it_ended(said, Some(255)), Cause::Refused, "{said}");
     }
+}
+
+/// The far shell that could not run kablo says so by its status, in its own words (or in none): a
+/// kablo that is not there is mended, not waited for like a network. The words are not read.
+#[test]
+fn a_status_of_the_far_shell_that_could_not_run_kablo_is_a_kablo_that_is_missing() {
+    for said in [
+        "",
+        "bash: line 1: .local/share/kablo/0.2.0/kablo: No such file or directory\n",
+        "zsh:1: no such file or directory: .local/share/kablo/0.2.0/kablo\n",
+        "fish: Unknown command: .local/share/kablo/0.2.0/kablo\n",
+    ] {
+        assert_eq!(why_it_ended(said, Some(127)), Cause::Missing, "{said:?}");
+    }
+    assert_eq!(
+        why_it_ended("", Some(126)),
+        Cause::Missing,
+        "not executable"
+    );
+    // Anything else the command ended with is the network's or the program's.
+    for status in [Some(0), Some(1), Some(69), Some(255), None] {
+        assert_eq!(why_it_ended("", status), Cause::Dropped, "{status:?}");
+    }
+    // What ssh said about the key or the login comes first.
+    assert_eq!(
+        why_it_ended("Host key verification failed.\n", Some(127)),
+        Cause::Refused
+    );
+    assert_eq!(
+        why_it_ended(
+            "u@rasp: Permission denied (publickey,password).\n",
+            Some(127)
+        ),
+        Cause::LoginNeeded
+    );
+}
+
+/// A bridge whose kablo was removed on the server ends with the far shell's 127, which the ssh
+/// carries out; the ssh is waited for, and what ends the bridge afterwards finds nothing to end.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_bridge_whose_kablo_is_gone_from_the_server_ends_as_missing() {
+    let world = stand_in("bridge-missing", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    let installed = backend.install(&host, &[]).expect("installed");
+    std::fs::remove_dir_all(world.home.join(".local/share/kablo")).expect("removed on the server");
+
+    let Carried {
+        mut reader,
+        writer,
+        close,
+        ended,
+    } = backend.carry(&host, &installed).expect("a bridge");
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).expect("the stream ends");
+    assert_eq!(ended(), Cause::Missing);
+    // The bridge is let go of afterwards, as the service does; the ssh was reaped by `ended` and
+    // `close` has nothing to signal.
+    close();
+    drop(writer);
 }
 
 #[test]
