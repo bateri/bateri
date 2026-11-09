@@ -58,6 +58,7 @@ use std::time::{Duration, Instant};
 use kablo_proto::SessionId;
 use kablo_proto::install::{self, Target};
 
+use crate::ssh_wrap::Wants;
 use crate::upload::sq;
 
 /// How long a step may take before the channel is given up on. The upload is
@@ -271,39 +272,40 @@ pub struct Installed {
 /// it if it is not there. See the module documentation for what a [`Failure`]
 /// means.
 pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failure> {
-    ensure_for(channel, bundle, true)
+    ensure_for(channel, bundle, Wants::COMMAND)
 }
 
-/// [`ensure`] for a server whose `bateri` command is wanted (`agent`) or not
-/// (`commands = "off"`, [`crate::ssh_wrap::files_script_for`]).
+/// [`ensure`] for a server whose `bateri` command is wanted (`wants.agent`) or not
+/// (`commands = "off"`, [`crate::ssh_wrap::files_script_for`]), with the hooks its agents' settings
+/// ask for ([`Wants`]; a `bool` is the command alone).
 pub fn ensure_for(
     channel: &dyn Channel,
     bundle: &Bundle,
-    agent: bool,
+    wants: impl Into<Wants>,
 ) -> Result<Installed, Failure> {
-    place(channel, bundle, Files::Server { agent })
+    place(channel, bundle, Files::Server(wants.into()))
 }
 
 /// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, with the one
-/// file of the shells' that this Mac has a reader for — the agent's command
-/// ([`crate::ssh_wrap::files_script_here`]; with `agent` false, `[commands] level = "off"`, it is
-/// not written and is removed). The rest of a server's files have none: a terminal here starts
-/// from the application's own shells.
+/// files of the shells' that this Mac has a reader for — the agent's command and the agents'
+/// hooks ([`crate::ssh_wrap::files_script_here`]; without the command, `[commands] level = "off"`,
+/// neither is written and both are removed). The rest of a server's files have none: a terminal
+/// here starts from the application's own shells.
 pub fn ensure_here(
     channel: &dyn Channel,
     bundle: &Bundle,
-    agent: bool,
+    wants: impl Into<Wants>,
 ) -> Result<Installed, Failure> {
-    place(channel, bundle, Files::Here { agent })
+    place(channel, bundle, Files::Here(wants.into()))
 }
 
 /// Which of the shells' files go with the look at kablo ([`place`]).
 #[derive(Clone, Copy)]
 enum Files {
-    /// A server's whole set, with the `bateri` command or without it.
-    Server { agent: bool },
-    /// This Mac's one ([`crate::ssh_wrap::files_script_here`]).
-    Here { agent: bool },
+    /// A server's whole set, with the `bateri` command or without it, and the hooks asked for.
+    Server(Wants),
+    /// This Mac's ([`crate::ssh_wrap::files_script_here`]).
+    Here(Wants),
 }
 
 /// What [`ensure`] and [`ensure_here`] are: the look at kablo, and the files that ride it.
@@ -321,8 +323,8 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
     // The shells' files ride the call that looks for kablo: no step of their own, on a connection
     // that has no limit on how many bytes one call carries ([`probe_and_files_script`]).
     let script = match files {
-        Files::Server { agent } => crate::ssh_wrap::files_script_for(Some(&installed.path), agent),
-        Files::Here { agent } => crate::ssh_wrap::files_script_here(Some(&installed.path), agent),
+        Files::Server(wants) => crate::ssh_wrap::files_script_for(Some(&installed.path), wants),
+        Files::Here(wants) => crate::ssh_wrap::files_script_here(Some(&installed.path), wants),
     };
     let probe = channel
         .run(&probe_and_files_script(bundle.version()), script.as_bytes())
@@ -425,15 +427,15 @@ pub fn probe_and_files_script(version: &str) -> String {
 /// application's ledger knew it, so there was no look): the same script, the same bytes, as a call
 /// of their own (the command file in them is the one line that starts kablo). **Best effort**: what could not be written is found missing by the bootstrap,
 /// which says so.
-pub fn put_files(channel: &dyn Channel, installed: &Installed, agent: bool) {
-    let files = crate::ssh_wrap::files_script_for(Some(&installed.path), agent);
+pub fn put_files(channel: &dyn Channel, installed: &Installed, wants: impl Into<Wants>) {
+    let files = crate::ssh_wrap::files_script_for(Some(&installed.path), wants);
     let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
 }
 
-/// [`put_files`] for this Mac ([`crate::ssh_wrap::files_script_here`]): the agent's command, or
-/// its removal when the command is not wanted.
-pub fn put_files_here(channel: &dyn Channel, installed: &Installed, agent: bool) {
-    let files = crate::ssh_wrap::files_script_here(Some(&installed.path), agent);
+/// [`put_files`] for this Mac ([`crate::ssh_wrap::files_script_here`]): the agent's command and
+/// the hooks asked for, or their removal when they are not wanted.
+pub fn put_files_here(channel: &dyn Channel, installed: &Installed, wants: impl Into<Wants>) {
+    let files = crate::ssh_wrap::files_script_here(Some(&installed.path), wants);
     let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
 }
 

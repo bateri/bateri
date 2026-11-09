@@ -58,6 +58,7 @@ use bt_core::{PaneUuid, Settings, TERM_PROGRAM_VERSION};
 use kablo_bateri::paths;
 
 use crate::jobs::ssh_call;
+use crate::program::reply;
 use crate::ssh_route::{
     Account, SESSION_PERSIST, SshConfig, SshRunner, parse_config, session_socket,
 };
@@ -718,8 +719,11 @@ const MAGIC: &str = "bateri_boot=1";
 /// **verbatim**, the remote zsh body beside them, bash's `ENV` file and fish's
 /// `vendor_conf.d` file, with the dock's functions each of the three shares with
 /// the Mac's own wrapper (`zsh/dock.zsh`, `bash/dock.bash`, `fish/dock.fish`: the
-/// same bytes, not a copy), the agent's command, and the bootstrap.
-const REMOTE_FILES: [(&str, &str); 13] = [
+/// same bytes, not a copy) and the agents' function each of the three shares too
+/// (`zsh/agents.zsh`, `bash/agents.bash`, `fish/agents.fish`), the agent's command, and the
+/// bootstrap. The hook the agents' function reads (`agents/claude.json`) is not here: it is
+/// the settings' and is written by [`files_script_of`] ([`Wants`]).
+const REMOTE_FILES: [(&str, &str); 16] = [
     (
         "zsh/.zshenv",
         include_str!("../../../assets/shell/zsh/.zshenv"),
@@ -745,6 +749,10 @@ const REMOTE_FILES: [(&str, &str); 13] = [
         include_str!("../../../assets/shell/zsh/dock.zsh"),
     ),
     (
+        "zsh/agents.zsh",
+        include_str!("../../../assets/shell/zsh/agents.zsh"),
+    ),
+    (
         "zsh/bateri.zsh",
         include_str!("../../../assets/shell/remote/zsh/bateri.zsh"),
     ),
@@ -757,6 +765,10 @@ const REMOTE_FILES: [(&str, &str); 13] = [
         include_str!("../../../assets/shell/bash/dock.bash"),
     ),
     (
+        "bash/agents.bash",
+        include_str!("../../../assets/shell/bash/agents.bash"),
+    ),
+    (
         "fish/vendor_conf.d/bateri.fish",
         include_str!("../../../assets/shell/remote/fish/vendor_conf.d/bateri.fish"),
     ),
@@ -764,14 +776,74 @@ const REMOTE_FILES: [(&str, &str); 13] = [
         "fish/dock.fish",
         include_str!("../../../assets/shell/fish/dock.fish"),
     ),
+    (
+        "fish/agents.fish",
+        include_str!("../../../assets/shell/fish/agents.fish"),
+    ),
     (AGENT_COMMAND_PATH, AGENT_COMMAND),
     // The bootstrap itself, for the terminals an agent opens without a
     // program: `kablo bateri` runs this file where the one-liner's text ran.
     ("boot.sh", BOOT_SCRIPT),
 ];
 
-/// The files this Mac gets of [`REMOTE_FILES`]: the agent's command ([`files_script_here`]).
+/// The files this Mac gets of [`REMOTE_FILES`]: the agent's command ([`files_script_here`]). The
+/// agents' function files are not among them: a terminal here starts from the application's own
+/// shells, which read theirs from the package.
 const HERE_FILES: [&str; 1] = [AGENT_COMMAND_PATH];
+
+/// What the files of a server, or of this Mac, hold beside those that are always there: whether
+/// the `bateri` command is wanted (`agent`, `[commands] level` is not `off`) and the hook of each
+/// agent whose setting is on ([`reply::REPLIERS`]). A hook is a file under `agents/` that the
+/// agents' function reads when it starts the agent, so it is written where the setting asks for
+/// it and removed where it does not — and never without the command, which the hook calls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Wants {
+    pub agent: bool,
+    /// Bit `i` is [`reply::REPLIERS`]`[i]`: its setting is on. Kept 0 without `agent`.
+    replies: u32,
+}
+
+impl Wants {
+    /// The command and no hook: the plain set, for a caller that has no settings to ask.
+    pub const COMMAND: Self = Self {
+        agent: true,
+        replies: 0,
+    };
+
+    /// What `settings` ask for, where the command is wanted (`agent`) or not.
+    pub fn of(settings: &Settings, agent: bool) -> Self {
+        let replies = reply::REPLIERS
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| agent && (row.wanted)(settings))
+            .fold(0, |bits, (index, _)| bits | 1 << index);
+        Self { agent, replies }
+    }
+
+    /// Whether `REPLIERS[index]`'s hook is to be written.
+    fn replies(self, index: usize) -> bool {
+        self.replies >> index & 1 == 1
+    }
+}
+
+/// A test's shorthand: a bare `bool` is the command alone and no hook. Not outside tests: a caller
+/// that passed one in the application would take every hook away without saying so.
+#[cfg(test)]
+impl From<bool> for Wants {
+    /// The command alone: no hook.
+    fn from(agent: bool) -> Self {
+        Self { agent, replies: 0 }
+    }
+}
+
+/// Where an agent's hook is, below the shell directory.
+fn hook_path(row: &reply::Replier) -> String {
+    format!("{}/{}", HOOKS_DIR, row.file)
+}
+
+/// The folder of the hooks, below the shell directory: the agents' function reads
+/// `~/.local/share/bateri/shell/agents/<file>`.
+const HOOKS_DIR: &str = "agents";
 
 /// Files the writer does not write, on a server and on this Mac, and removes where it finds
 /// them: nothing reads them.
@@ -795,15 +867,15 @@ const RETIRED: [&str; 1] = ["next.sh"];
 /// sshd sets it); for any other nothing is written. It never fails the call:
 /// what could not be written is found missing by the bootstrap, which says so.
 pub fn files_script(kablo: Option<&str>) -> String {
-    files_script_for(kablo, true)
+    files_script_for(kablo, Wants::COMMAND)
 }
 
 /// [`files_script`] for a server whose `bateri` command is wanted (`agent`) or not
 /// (`commands = "off"`): without it the command's file is not written and is removed if an
 /// earlier call left it, so a program on the server that runs it stops working. The rest — the
 /// bootstrap, the shells' files — is what the window's own panes need and stays.
-pub fn files_script_for(kablo: Option<&str>, agent: bool) -> String {
-    files_script_of(kablo, agent, false)
+pub fn files_script_for(kablo: Option<&str>, wants: impl Into<Wants>) -> String {
+    files_script_of(kablo, wants.into(), false)
 }
 
 /// [`files_script_for`] for this Mac (`kablo::install::ensure_here`): only the agent's command,
@@ -813,13 +885,14 @@ pub fn files_script_for(kablo: Option<&str>, agent: bool) -> String {
 /// looked at. Without the command (`agent` false: `[commands] level = "off"`) it is not
 /// written, and is removed if an earlier call left it: nothing of the command is left to be
 /// found.
-pub fn files_script_here(kablo: Option<&str>, agent: bool) -> String {
-    files_script_of(kablo, agent, true)
+pub fn files_script_here(kablo: Option<&str>, wants: impl Into<Wants>) -> String {
+    files_script_of(kablo, wants.into(), true)
 }
 
 /// [`files_script_for`] and [`files_script_here`]: `here` writes the Mac's file
 /// ([`HERE_FILES`]) and does not look at `$SHELL`.
-fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
+fn files_script_of(kablo: Option<&str>, wants: Wants, here: bool) -> String {
+    let agent = wants.agent;
     /// Where the files go, on a server and on this Mac alike: under the home, in the one place
     /// the wrappers and kablo look in (`~/.local/share/bateri`, [`paths`]), whatever the
     /// environment of the call is.
@@ -861,6 +934,20 @@ fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
             dirs.push(dir);
         }
     }
+    // The hooks: those whose setting is on are written (their folder made), the others are taken
+    // away where an earlier call left them.
+    let (kept, dropped): (Vec<_>, Vec<_>) = reply::REPLIERS
+        .iter()
+        .enumerate()
+        .partition(|(index, _)| wants.replies(*index));
+    let kept: Vec<(String, &str)> = kept
+        .into_iter()
+        .map(|(_, row)| (hook_path(row), row.hook))
+        .collect();
+    let dropped: Vec<String> = dropped.into_iter().map(|(_, row)| hook_path(row)).collect();
+    if !kept.is_empty() && !dirs.contains(&HOOKS_DIR) {
+        dirs.push(HOOKS_DIR);
+    }
     let made = dirs
         .iter()
         .map(|dir| format!("\"$bt_dir/{dir}\""))
@@ -879,7 +966,12 @@ fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let retired = quoted(&RETIRED);
+    // What no call writes any more, and the hooks that are not wanted.
+    let retired = {
+        let mut gone: Vec<&str> = RETIRED.to_vec();
+        gone.extend(dropped.iter().map(String::as_str));
+        quoted(&gone)
+    };
     if here && !agent {
         // Nothing to write; what an earlier call wrote goes.
         let gone = quoted(&HERE_FILES);
@@ -900,6 +992,13 @@ fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
             "  bt_put {} {} && \\\n",
             crate::upload::sq(path),
             crate::upload::sq(&content)
+        ));
+    }
+    for (path, hook) in &kept {
+        text.push_str(&format!(
+            "  bt_put {} {} && \\\n",
+            crate::upload::sq(path),
+            crate::upload::sq(hook)
         ));
     }
     let command = quoted(&[AGENT_COMMAND_PATH]);
@@ -941,7 +1040,8 @@ pub(crate) fn seed_files_with(
     seed_files_for(sh, shell, home, extra, kablo, true)
 }
 
-/// [`seed_files_with`] for a server whose `bateri` command is wanted (`agent`) or not.
+/// [`seed_files_with`] for a server whose `bateri` command is wanted (`agent`) or not, and the
+/// hooks asked for ([`Wants`]; a `bool` is the command alone).
 #[cfg(test)]
 pub(crate) fn seed_files_for(
     sh: &std::path::Path,
@@ -949,7 +1049,7 @@ pub(crate) fn seed_files_for(
     home: &std::path::Path,
     extra: &[(&str, String)],
     kablo: Option<&str>,
-    agent: bool,
+    agent: impl Into<Wants>,
 ) -> std::process::ExitStatus {
     use std::io::Write as _;
     let mut child = std::process::Command::new(sh)
@@ -984,7 +1084,7 @@ pub(crate) fn seed_files_for(
 pub(crate) fn seed_files_here(
     home: &std::path::Path,
     kablo: Option<&str>,
-    agent: bool,
+    agent: impl Into<Wants>,
 ) -> std::process::ExitStatus {
     use std::io::Write as _;
     let mut child = std::process::Command::new("/bin/sh")
@@ -3019,6 +3119,112 @@ mod remote_shells {
         assert!(dir.join("bin/bateri").is_file());
     }
 
+    /// The agents' hook is written where the setting asks for it and the command is wanted, and
+    /// is taken away where either is not: on a server and on this Mac alike, byte for byte what
+    /// the agents' table holds, in a folder only its owner reads, beside files that stay as they
+    /// are. A server's shells get the three function files that read it; this Mac does not (its
+    /// shells read them from the package).
+    #[test]
+    fn the_agents_hook_is_written_where_asked_and_taken_away_where_not() {
+        use super::Wants;
+        use bt_core::Settings;
+        let root = TempRoot::new("remote-files-hooks");
+        let base = std::fs::canonicalize(&root.0).expect("root");
+        let sh = Path::new("/bin/sh");
+        let shell = Path::new("/usr/bin/bash");
+        let on = Settings {
+            agents_claude_last_reply: true,
+            ..Settings::default()
+        };
+        let hook = super::reply::REPLIERS[0].hook;
+        let file = |home: &Path| {
+            home.join(".local/share/bateri/shell/agents")
+                .join(super::reply::REPLIERS[0].file)
+        };
+        // A home that exists: the script runs in it.
+        let home = |name: String| {
+            let home = base.join(name);
+            std::fs::create_dir_all(&home).expect("home");
+            home
+        };
+        // (what is wanted, whether the hook is there afterwards)
+        let cases = [
+            (Wants::of(&on, true), true),
+            (Wants::of(&Settings::default(), true), false),
+            // The hook calls the command: without the command there is no hook.
+            (Wants::of(&on, false), false),
+            (Wants::from(true), false),
+        ];
+        for (index, (wants, written)) in cases.into_iter().enumerate() {
+            let server = home(format!("server-{index}"));
+            assert!(
+                super::seed_files_for(sh, shell, &server, &[], Some("k/kablo"), wants).success()
+            );
+            assert_eq!(file(&server).is_file(), written, "server, case {index}");
+            let mac = home(format!("mac-{index}"));
+            assert!(super::seed_files_here(&mac, Some("k/kablo"), wants).success());
+            assert_eq!(file(&mac).is_file(), written, "this Mac, case {index}");
+            if written {
+                for home in [&server, &mac] {
+                    assert_eq!(std::fs::read_to_string(file(home)).expect("hook"), hook);
+                }
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(file(&server).parent().expect("dir"))
+                    .expect("dir")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o077, 0, "the hooks' folder is the owner's");
+            }
+        }
+        // A server's shells get the files that read the hook; this Mac's do not.
+        let server = base.join("server-0");
+        let mac = base.join("mac-0");
+        for name in ["zsh/agents.zsh", "bash/agents.bash", "fish/agents.fish"] {
+            let there = server.join(".local/share/bateri/shell").join(name);
+            assert!(there.is_file(), "{name} not written to a server");
+            assert!(
+                !mac.join(".local/share/bateri/shell").join(name).exists(),
+                "{name} written to this Mac"
+            );
+        }
+        // The setting turned off after a call that wrote it: the next call takes it away, and
+        // the command and the other files stay.
+        let turned = home("turned-off".to_owned());
+        assert!(
+            super::seed_files_for(
+                sh,
+                shell,
+                &turned,
+                &[],
+                Some("k/kablo"),
+                Wants::of(&on, true)
+            )
+            .success()
+        );
+        assert!(file(&turned).is_file());
+        assert!(super::seed_files_for(sh, shell, &turned, &[], Some("k/kablo"), true).success());
+        assert!(
+            !file(&turned).exists(),
+            "the hook stayed after the setting went off"
+        );
+        assert!(
+            turned
+                .join(".local/share/bateri/shell/bin/bateri")
+                .is_file()
+        );
+        assert!(
+            turned
+                .join(".local/share/bateri/shell/zsh/bateri.zsh")
+                .is_file()
+        );
+        // Without the command the Mac loses the hook with it.
+        let mac = home("mac-off".to_owned());
+        assert!(super::seed_files_here(&mac, Some("k/kablo"), Wants::of(&on, true)).success());
+        assert!(file(&mac).is_file());
+        assert!(super::seed_files_here(&mac, Some("k/kablo"), Wants::of(&on, false)).success());
+        assert!(!file(&mac).exists());
+    }
+
     /// The counter file a machine got from an earlier call goes with the next call, on a server
     /// and on this Mac alike, and the files beside it stay as they are.
     #[test]
@@ -3754,6 +3960,265 @@ mod remote_shells {
         ] {
             assert!(!home.join(file).exists(), "{file} was written");
         }
+    }
+
+    /// The agents' function, in the three shells: with the hook file in `home` `claude` starts
+    /// the agent with `--settings '<hook>'` before the user's own words, each of them whole (a
+    /// space and a quote in one), and with none of these it runs as it was typed — no file, a
+    /// `--settings` of the user's, `CLAUDECODE` set (Claude Code's own shell), a `claude` function
+    /// of the user's own (it is left alone: the wrappers read the user's files first), and an
+    /// alias, which keeps working and calls the function (zsh and bash; in fish an alias is a
+    /// function, and wins as one). A fake `claude` says what it was started with. `shells` is
+    /// where the wrappers are read from (`zsh/`, `bash/`, `fish/vendor_conf.d/` in it); the
+    /// number of shells that ran comes back (a shell not on this machine is skipped).
+    fn agents_function_in(world: &str, home: &Path, shells: &Path) -> usize {
+        let hook_dir = home.join(".local/share/bateri/shell/agents");
+        std::fs::create_dir_all(&hook_dir).expect("agents");
+        let hook_file = hook_dir.join(super::reply::REPLIERS[0].file);
+        let hook = super::reply::REPLIERS[0].hook;
+        let bin = home.join("fakebin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::write(
+            bin.join("claude"),
+            "#!/bin/sh\nprintf 'N=%s\\n' \"$#\"\nfor a in \"$@\"; do printf '<%s>\\n' \"$a\"; done\n",
+        )
+        .expect("claude");
+        std::fs::set_permissions(
+            bin.join("claude"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("executable");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        // What each shell is told before the user's word `claude`, and how it reads the wrapper;
+        // `own` and `alias` are that shell's spelling of a function and an alias of the user's.
+        struct Shell {
+            name: &'static str,
+            args: Vec<&'static str>,
+            env: Vec<(&'static str, String)>,
+            load: String,
+            own: &'static str,
+            alias: Option<&'static str>,
+            /// An option of the user's that has bitten a shell's script before (zsh's
+            /// `ignore_close_braces` made `{ …; break }` a parse error; `set -u` a missing name).
+            quirk: &'static str,
+        }
+        let shells = [
+            Shell {
+                name: "zsh",
+                args: vec!["-f", "-c"],
+                env: vec![("ZDOTDIR", shells.join("zsh").display().to_string())],
+                load: "source $ZDOTDIR/bateri.zsh; __bateri_hooks; ".to_owned(),
+                own: "function claude { print -r mine; }; ",
+                alias: Some("alias claude='claude --foo'; "),
+                quirk: "",
+            },
+            Shell {
+                name: "bash",
+                args: vec!["--noprofile", "--norc", "-c"],
+                env: vec![],
+                load: format!("source {}; ", shells.join("bash/bateri.bash").display()),
+                own: "function claude { echo mine; }; ",
+                alias: Some("shopt -s expand_aliases; alias claude='claude --foo'; "),
+                quirk: "",
+            },
+            // The file alone, in zsh under an option the wrapper itself does not read under.
+            Shell {
+                name: "zsh",
+                args: vec!["-f", "-c"],
+                env: vec![],
+                load: format!("source {}; ", shells.join("zsh/agents.zsh").display()),
+                own: "function claude { print -r mine; }; ",
+                alias: Some("alias claude='claude --foo'; "),
+                quirk: "setopt ignore_close_braces; ",
+            },
+            // The file alone, in the system's bash (3.2 on a Mac): a server's wrapper reads it
+            // whatever bash it has, before it asks the version.
+            Shell {
+                name: "/bin/bash",
+                args: vec!["--noprofile", "--norc", "-c"],
+                env: vec![],
+                load: format!("source {}; ", shells.join("bash/agents.bash").display()),
+                own: "function claude { echo mine; }; ",
+                alias: Some("shopt -s expand_aliases; alias claude='claude --foo'; "),
+                quirk: "set -u; ",
+            },
+            Shell {
+                name: "fish",
+                args: vec!["--no-config", "-i", "-c"],
+                env: vec![],
+                load: format!(
+                    "source {}; emit fish_prompt; ",
+                    shells.join("fish/vendor_conf.d/bateri.fish").display()
+                ),
+                own: "function claude; echo mine; end; ",
+                alias: None,
+                quirk: "",
+            },
+        ];
+        let words = r#"claude one 'two words' "q\"uote""#;
+        // The output of one run, or none where the shell is not on this machine (or bash is
+        // older than 4.4, where the wrapper is not set up).
+        let run =
+            |shell: &Shell, before: &str, after: &str, claudecode: bool| -> Option<Vec<String>> {
+                let mut command = std::process::Command::new(shell.name);
+                command
+                    .args(&shell.args)
+                    .arg(format!("{before}{}{after}", shell.load))
+                    .env_clear()
+                    .env("HOME", home)
+                    .env("PATH", &path);
+                if claudecode {
+                    command.env("CLAUDECODE", "1");
+                }
+                for (key, value) in &shell.env {
+                    command.env(key, value);
+                }
+                let output = command.output().ok()?;
+                // The prompt marks fish writes (`ESC ] … BEL`) are not what `claude` printed.
+                let mut text = String::new();
+                let raw = String::from_utf8_lossy(&output.stdout);
+                let mut rest = &*raw;
+                while let Some(start) = rest.find("\u{1b}]") {
+                    text.push_str(&rest[..start]);
+                    rest = rest[start..]
+                        .find('\u{7}')
+                        .map_or("", |end| &rest[start + end + 1..]);
+                }
+                text.push_str(rest);
+                if shell.name.ends_with("bash") && !text.contains("N=") && !text.contains("mine") {
+                    return None;
+                }
+                Some(text.lines().map(str::to_owned).collect())
+            };
+        let started = |lines: &[String]| -> Vec<String> { lines.to_vec() };
+        let plain = ["N=3", "<one>", "<two words>", "<q\"uote>"];
+        let hooked = [
+            "N=5".to_owned(),
+            "<--settings>".to_owned(),
+            format!("<{hook}>"),
+            "<one>".to_owned(),
+            "<two words>".to_owned(),
+            "<q\"uote>".to_owned(),
+        ];
+        let mut ran = 0;
+        for shell in &shells {
+            std::fs::write(&hook_file, hook).expect("hook");
+            let Some(lines) = run(shell, "", words, false) else {
+                continue;
+            };
+            ran += 1;
+            let name = format!("{world}, {}", shell.name);
+            assert_eq!(started(&lines), hooked, "{name}: with the hook");
+            // The same under an option that changes how the script reads.
+            assert_eq!(
+                run(shell, shell.quirk, words, false).expect("ran"),
+                hooked,
+                "{name}: {}",
+                shell.quirk
+            );
+            // The user's own `--settings`: theirs alone, their words as they were.
+            let theirs = run(shell, "", "claude --settings mine one", false).expect("ran");
+            assert_eq!(theirs, ["N=3", "<--settings>", "<mine>", "<one>"], "{name}");
+            let theirs = run(shell, "", "claude --settings=mine one", false).expect("ran");
+            assert_eq!(theirs, ["N=2", "<--settings=mine>", "<one>"], "{name}");
+            // After `--` a `--settings` is no flag of the agent's: the hook goes.
+            let after = run(shell, "", "claude -- --settings x", false).expect("ran");
+            assert_eq!(
+                after,
+                [
+                    "N=5".to_owned(),
+                    "<--settings>".to_owned(),
+                    format!("<{hook}>"),
+                    "<-->".to_owned(),
+                    "<--settings>".to_owned(),
+                    "<x>".to_owned(),
+                ][..],
+                "{name}"
+            );
+            // Claude Code's own shell: the line it types stays as it is.
+            assert_eq!(
+                run(shell, "", words, true).expect("ran"),
+                plain,
+                "{name}: CLAUDECODE"
+            );
+            // A function of the user's own is left alone.
+            assert_eq!(
+                run(shell, shell.own, "claude", false).expect("ran"),
+                ["mine"],
+                "{name}: the user's function"
+            );
+            // The alias runs, and goes through the function.
+            if let Some(alias) = shell.alias {
+                let lines = run(shell, alias, "eval 'claude hi'", false).expect("ran");
+                assert_eq!(
+                    lines,
+                    [
+                        "N=4".to_owned(),
+                        "<--settings>".to_owned(),
+                        format!("<{hook}>"),
+                        "<--foo>".to_owned(),
+                        "<hi>".to_owned(),
+                    ][..],
+                    "{name}: the alias"
+                );
+            }
+            // No hook file (the setting is off): `claude` is the agent's own, unchanged.
+            std::fs::remove_file(&hook_file).expect("removed");
+            assert_eq!(
+                run(shell, "", words, false).expect("ran"),
+                plain,
+                "{name}: without the file"
+            );
+        }
+        ran
+    }
+
+    /// The function behind the Mac's own wrappers, from the files of the bundle.
+    #[test]
+    fn the_agents_function_starts_claude_with_the_hook_in_all_three_shells() {
+        let root = TempRoot::new("agents-function");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell");
+        assert!(
+            agents_function_in("this Mac", &home, &assets) > 0,
+            "no shell to try"
+        );
+    }
+
+    /// The function behind a server's wrappers, from the files the script writes there (the
+    /// hook file too: the whole way from the setting to the flag).
+    #[test]
+    fn the_agents_function_is_there_on_a_server_too() {
+        use super::Wants;
+        use bt_core::Settings;
+        let root = TempRoot::new("agents-function-server");
+        let home = std::fs::canonicalize(&root.0).expect("root").join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let on = Settings {
+            agents_claude_last_reply: true,
+            ..Settings::default()
+        };
+        assert!(
+            super::seed_files_for(
+                Path::new("/bin/sh"),
+                Path::new("/usr/bin/bash"),
+                &home,
+                &[],
+                Some("k/kablo"),
+                Wants::of(&on, true),
+            )
+            .success()
+        );
+        let shells = home.join(".local/share/bateri/shell");
+        assert!(
+            agents_function_in("a server", &home, &shells) > 0,
+            "no shell to try"
+        );
     }
 
     /// A login shell that is not zsh, bash or fish: a plain login shell (its

@@ -48,7 +48,7 @@ use super::service::{
     Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal, Streams,
 };
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
-use crate::ssh_wrap::{self, Fact, KabloHost};
+use crate::ssh_wrap::{self, Fact, KabloHost, Wants};
 use crate::upload::ssh_argv_for;
 
 /// How a process is found to be in a pane (see [`SshBackend::panes`]).
@@ -204,10 +204,11 @@ impl SshBackend {
         let Some(bundle) = &self.bundle else {
             return;
         };
-        // Whether the command is wanted is part of what was done: a server whose level went to
-        // `off` (the file taken away) and back is set up again by the next reach.
-        let agent = self.agent_wanted(server);
-        let done = format!("{}#{agent}", server.key);
+        // Whether the command and the hooks are wanted is part of what was done: a server whose
+        // level went to `off` (the file taken away) and back, or whose agent's setting turned, is
+        // set up again by the next reach.
+        let wants = self.wants(server);
+        let done = format!("{}#{wants:?}", server.key);
         if self.filed.lock().is_ok_and(|filed| filed.contains(&done)) {
             return;
         }
@@ -215,7 +216,7 @@ impl SshBackend {
             argv: argv.to_vec(),
             limit: install::STEP_LIMIT,
         };
-        let Ok(installed) = install::ensure_for(&channel, bundle, agent) else {
+        let Ok(installed) = install::ensure_for(&channel, bundle, wants) else {
             return;
         };
         if installed.fresh {
@@ -230,11 +231,20 @@ impl SshBackend {
     /// ([`Settings::commands_for`]), where nothing of it is to be found. This Mac's level is
     /// `[commands] level`.
     fn agent_wanted(&self, server: &KabloHost) -> bool {
+        self.wants(server).agent
+    }
+
+    /// What goes to this server of the files that depend on the settings: [`Self::agent_wanted`]'s
+    /// command and the hooks of the agents whose setting is on ([`Wants::of`]), read from the
+    /// file once.
+    fn wants(&self, server: &KabloHost) -> Wants {
         let settings = (self.settings)();
-        if local::is_account(&server.key) {
-            return settings.commands_level != CommandLevel::Off;
-        }
-        settings.commands_for(&server.host) != CommandLevel::Off
+        let agent = if local::is_account(&server.key) {
+            settings.commands_level != CommandLevel::Off
+        } else {
+            settings.commands_for(&server.host) != CommandLevel::Off
+        };
+        Wants::of(&settings, agent)
     }
 
     /// The server as the file jobs know a target: the user's arguments, with
@@ -294,7 +304,7 @@ impl SshBackend {
     fn install_here(&self, live: &[SessionId]) -> Result<Installed, Refusal> {
         let (bundle, home) = self.here().ok_or_else(Refusal::plain)?;
         let channel = LocalChannel::new(home.to_owned());
-        let installed = install::ensure_here(&channel, bundle, self.agent_wanted(&local::host()))
+        let installed = install::ensure_here(&channel, bundle, self.wants(&local::host()))
             .map_err(|_| Refusal::plain())?;
         if installed.fresh {
             // The binary was not there: terminals this user has here run an earlier one.
@@ -371,7 +381,7 @@ impl Backend for SshBackend {
             argv: ssh_argv_for(&target, &self.route_of(&target)),
             limit: install::STEP_LIMIT,
         };
-        match install::ensure_for(&channel, bundle, self.agent_wanted(server)) {
+        match install::ensure_for(&channel, bundle, self.wants(server)) {
             Ok(installed) => {
                 self.remember(Fact::Touched, server);
                 if installed.fresh {
@@ -392,12 +402,21 @@ impl Backend for SshBackend {
     }
 
     fn files(&self, server: &KabloHost, installed: &Installed) {
+        let wants = self.wants(server);
+        // What a reach has done for this server ([`Self::install_for_reach`]) under other wants
+        // is no longer what its files are: a reach with those again must write them, not find
+        // them done.
+        if let Ok(mut filed) = self.filed.lock() {
+            let kept = format!("{}#{wants:?}", server.key);
+            let prefix = format!("{}#", server.key);
+            filed.retain(|done| *done == kept || !done.starts_with(&prefix));
+        }
         // The shells of this Mac start from the application's own files: what it has of these
         // is the agent's command and its counter.
         if local::is_account(&server.key) {
             if let Some((_, home)) = self.here() {
                 let channel = LocalChannel::new(home.to_owned());
-                install::put_files_here(&channel, installed, self.agent_wanted(server));
+                install::put_files_here(&channel, installed, wants);
             }
             return;
         }
@@ -406,7 +425,7 @@ impl Backend for SshBackend {
             argv: ssh_argv_for(&target, &self.route_of(&target)),
             limit: install::STEP_LIMIT,
         };
-        install::put_files(&channel, installed, self.agent_wanted(server));
+        install::put_files(&channel, installed, wants);
     }
 
     fn stage_folder(&self, server: &KabloHost) -> Option<crate::stage::Folder> {
@@ -517,7 +536,7 @@ impl Backend for SshBackend {
             let installed = install::ensure_here(
                 &LocalChannel::new(home.to_owned()),
                 bundle,
-                self.agent_wanted(server),
+                self.wants(server),
             )
             .ok()?;
             settle(&here_channel(home), &installed, live);
@@ -537,7 +556,7 @@ impl Backend for SshBackend {
         // A server that cannot keep kablo *now* is not recorded as one that never
         // can: terminals are running there, and what `install` would write down
         // changes what the next `ssh` is.
-        let installed = install::ensure_for(&channel, bundle, self.agent_wanted(server)).ok()?;
+        let installed = install::ensure_for(&channel, bundle, self.wants(server)).ok()?;
         renew(&argv, &installed, live);
         Some(installed)
     }

@@ -71,6 +71,14 @@ function __bateri_path --on-event fish_prompt
     end
 end
 
+# The agents' function (`agents.fish`, one level above this directory, shared with the server's
+# wrapper): it defines itself at the first prompt, after `config.fish`, so that a `claude` of the
+# user's is seen and wins. Without the file the shell is the user's.
+set -l __bateri_agents_file (status dirname)/../agents.fish
+if test -r $__bateri_agents_file
+    source $__bateri_agents_file 2>/dev/null
+end
+
 # The dock's prompt (`dock.fish`, one level above this directory, shared with the server's wrapper).
 # Without the file the prompt is the user's, with the marks around it, as for `"blocks"`.
 if test $__bateri_dock = 1

@@ -604,7 +604,7 @@ fn a_build_without_the_package_has_nothing_to_install() {
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
     let world = stand_in("files", 0);
-    let backend = world.backend(Some(world.package()));
+    let mut backend = world.backend(Some(world.package()));
     let host = KabloHost {
         host: "rasp".into(),
         port: None,
@@ -627,6 +627,45 @@ fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
             .contains(".local/share/kablo/0.2.0/kablo"),
         "kablo's place is where the ledger says"
     );
+    // An agent's hook comes with the setting and goes with it, on the next call.
+    let hook = shell.join("agents/claude.json");
+    assert!(!hook.exists(), "the setting is off by default");
+    backend.settings = Box::new(|| Settings {
+        agents_claude_last_reply: true,
+        ..Settings::default()
+    });
+    backend.files(&host, &installed);
+    assert_eq!(
+        std::fs::read_to_string(&hook).expect("the hook"),
+        crate::program::reply::REPLIERS[0].hook
+    );
+    backend.settings = Box::new(Settings::default);
+    backend.files(&host, &installed);
+    assert!(!hook.exists(), "the hook stayed after the setting went off");
+    // What a reach believes is done for other wants goes when the files are written under these:
+    // turned on again, the reach writes them instead of finding them done. The belief that holds
+    // stays.
+    use crate::ssh_wrap::Wants;
+    let on = Wants::of(
+        &Settings {
+            agents_claude_last_reply: true,
+            ..Settings::default()
+        },
+        true,
+    );
+    let off = Wants::of(&Settings::default(), true);
+    let (before, now) = (format!("u@h:22#{on:?}"), format!("u@h:22#{off:?}"));
+    let other = "u@elsewhere:22#anything".to_owned();
+    for belief in [&before, &now, &other] {
+        backend.filed.lock().expect("lock").insert(belief.clone());
+    }
+    backend.files(&host, &installed);
+    let filed = backend.filed.lock().expect("lock");
+    assert!(
+        !filed.contains(&before),
+        "a belief about other wants stayed"
+    );
+    assert!(filed.contains(&now) && filed.contains(&other));
 }
 
 /// The dock's tier a server's new terminal gets is the settings' `[shell] integration`, the

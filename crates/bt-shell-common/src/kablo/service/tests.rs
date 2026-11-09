@@ -75,6 +75,11 @@ struct Fake {
     install_refuses: AtomicBool,
     /// How long the install takes, in milliseconds: a machine too busy to answer at once.
     install_millis: AtomicU64,
+    /// How long writing the files takes, in milliseconds, and how many writes are in it at once
+    /// now and at the most.
+    files_millis: AtomicU64,
+    at_once: AtomicU32,
+    most_at_once: AtomicU32,
     pane: AtomicBool,
     /// What the pane lookup says of the pane when there is one.
     info: Mutex<PaneInfo>,
@@ -135,6 +140,9 @@ impl Fake {
             lives: Mutex::new(Vec::new()),
             install_refuses: AtomicBool::new(false),
             install_millis: AtomicU64::new(0),
+            files_millis: AtomicU64::new(0),
+            at_once: AtomicU32::new(0),
+            most_at_once: AtomicU32::new(0),
             pane: AtomicBool::new(true),
             info: Mutex::new(PaneInfo::default()),
             kablo: AtomicBool::new(true),
@@ -442,6 +450,12 @@ impl Backend for Fake {
     }
 
     fn files(&self, _: &KabloHost, _: &Installed) {
+        let running = self.at_once.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_at_once.fetch_max(running, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(
+            self.files_millis.load(Ordering::SeqCst),
+        ));
+        self.at_once.fetch_sub(1, Ordering::SeqCst);
         self.note("files");
     }
 
@@ -3905,6 +3919,63 @@ fn the_files_of_this_mac_are_written_again_when_its_level_changes() {
     assert_eq!(world.count("files"), 0);
     rig.service.rewrite_files(local::ACCOUNT);
     until("the files written", || world.count("files") == 1);
+}
+
+/// A setting that every machine's files hold (an agent's hook) is written to the accounts that are
+/// connected — and to no server that is not: a connection is not made for a file. What is not
+/// written now is written by the first new terminal's step, since the account's files are asked
+/// for again either way.
+#[test]
+fn a_setting_every_machine_has_is_written_to_the_connected_accounts_only() {
+    let rig = Rig::new("rewrite-all");
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    until("the pane found live", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.link == PaneLink::Live)
+    });
+    rig.service.rewrite_all_files();
+    until("the connected account's files written", || {
+        rig.world.count("files") == 1
+    });
+
+    // The network goes with the connection: the account is there, nobody is connected to it.
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    until("the pane told", || {
+        rig.world.links() == [(pane.clone(), PaneLink::Reconnecting)]
+    });
+    rig.service.rewrite_all_files();
+    // Asked for by name, which does not look at the connection: it is written, the one for all
+    // is not.
+    rig.service.rewrite_files("u@rasp:22");
+    until("the file asked for by name", || {
+        rig.world.count("files") >= 2
+    });
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        rig.world.count("files"),
+        2,
+        "no write for a server that is not connected"
+    );
+}
+
+/// Two writes of one account's files end in the order they were asked for, whatever each takes:
+/// the last reads the setting last, so a hook switched on and off in a moment is not left behind.
+#[test]
+fn the_files_of_an_account_are_written_one_at_a_time() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.files_millis.store(150, Ordering::SeqCst);
+    let rig = Rig::over("local-files-order", world.clone());
+    let _mac = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    for _ in 0..3 {
+        rig.service.rewrite_files(local::ACCOUNT);
+    }
+    until("three writes", || world.count("files") == 3);
+    assert_eq!(world.most_at_once.load(Ordering::SeqCst), 1);
 }
 
 #[test]

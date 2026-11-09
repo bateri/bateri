@@ -514,23 +514,24 @@ bundle: sparkle
 	@# as long as ZDOTDIR points at our directory, an arm that writes there
 	@# (`/etc/zshrc` once spawned a `.zsh_history` there) or a
 	@# `.DS_Store` would silently enter the product through a recursive copy.
-	@# That the directory's inventory is EXACTLY these seven files (the dock's
-	@# functions, `dock.zsh`, among them) is tested
+	@# That the directory's inventory is EXACTLY these eight files (the dock's
+	@# functions, `dock.zsh`, and the agents' function, `agents.zsh`, among them) is tested
 	@# by `bundle_assets`; fish's is the file below, in the `vendor_conf.d`
 	@# fish reads it from (`shell/` is the `XDG_DATA_DIRS` entry that
-	@# makes fish find it) and its dock's functions, `dock.fish`, one level above, where
-	@# fish reads nothing by itself; bash's is the file `ENV` points at and the dock's
-	@# functions it reads, `dock.bash`. The remote wrapper (`assets/shell/remote/`) is not
-	@# copied: the application embeds it (with the three dock files) and writes it to a server.
+	@# makes fish find it) and its dock's functions, `dock.fish`, and the agents' function,
+	@# `agents.fish`, one level above, where fish reads nothing by itself; bash's is the file
+	@# `ENV` points at and the functions it reads, `dock.bash` and `agents.bash`. The remote
+	@# wrapper (`assets/shell/remote/`) is not copied: the application embeds it (with the
+	@# dock and agents files) and writes it to a server.
 	mkdir -p $(STAGE)/Contents/Resources/shell/zsh
 	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
 		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh assets/shell/zsh/dock.zsh \
-		assets/shell/zsh/zdotdir.zsh $(STAGE)/Contents/Resources/shell/zsh/
+		assets/shell/zsh/agents.zsh assets/shell/zsh/zdotdir.zsh $(STAGE)/Contents/Resources/shell/zsh/
 	mkdir -p $(STAGE)/Contents/Resources/shell/fish/vendor_conf.d
 	cp assets/shell/fish/vendor_conf.d/bateri.fish $(STAGE)/Contents/Resources/shell/fish/vendor_conf.d/
-	cp assets/shell/fish/dock.fish $(STAGE)/Contents/Resources/shell/fish/
+	cp assets/shell/fish/dock.fish assets/shell/fish/agents.fish $(STAGE)/Contents/Resources/shell/fish/
 	mkdir -p $(STAGE)/Contents/Resources/shell/bash
-	cp assets/shell/bash/bateri.bash assets/shell/bash/dock.bash $(STAGE)/Contents/Resources/shell/bash/
+	cp assets/shell/bash/bateri.bash assets/shell/bash/dock.bash assets/shell/bash/agents.bash $(STAGE)/Contents/Resources/shell/bash/
 	@# kablo's files: the release is checked against its own list, then exactly the
 	@# files the list names are copied (no glob: a second version in the directory
 	@# would be a package with two).
@@ -596,7 +597,7 @@ bundle: sparkle
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f is not in the package or differs from the input"; \
 	done; \
-	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/dock.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish fish/dock.fish bash/bateri.bash bash/dock.bash; do \
+	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/dock.zsh zsh/agents.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish fish/dock.fish fish/agents.fish bash/bateri.bash bash/dock.bash bash/agents.bash; do \
 		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f is not in the package or differs from the input"; \
 	done; \
 	fd=$$c/Resources/fonts; \

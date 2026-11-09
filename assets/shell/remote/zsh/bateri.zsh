@@ -55,6 +55,12 @@ __bateri_hooks() {
   if [[ -x $bt_bin/bateri ]] && (( ! ${path[(Ie)$bt_bin]} )); then
     path=($bt_bin $path)
   fi
+  # The agents' function (`agents.zsh`, beside this file, shared with the Mac's own wrapper), now
+  # that the user's files are read: a `claude` function of theirs is seen and wins. Without the
+  # file, or if it fails, the shell is the user's.
+  if [[ -r $__bateri_dir/agents.zsh ]]; then
+    source $__bateri_dir/agents.zsh 2>/dev/null
+  fi
   add-zsh-hook precmd __bateri_cwd
   if [[ $__bateri_rblock == <-> ]]; then
     # `<P>.<S>`: the parent and this shell's pid — two shells under one `ssh`

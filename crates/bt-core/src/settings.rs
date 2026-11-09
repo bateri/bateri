@@ -2491,6 +2491,11 @@ level = "own"
 # (where [appearance] tab_details shows details). It is told by a hook that
 # only the Claude Code sessions started from a bateri terminal after the change
 # get, for that session alone: nothing is written to Claude Code's own files.
+# The terminal's shell (zsh, bash or fish; a server's too, once bateri has set
+# its shell up there) starts it with the hook through its `claude` command.
+# A `claude` function of your own, an alias that names the program by its path,
+# a --settings you pass yourself and a Claude Code started from inside another
+# one are left exactly as they are.
 claude_last_reply = false
 
 [remote]

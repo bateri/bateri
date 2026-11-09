@@ -57,6 +57,14 @@ if set -q __bateri_bin
     end
 end
 
+# The agents' function (`agents.fish`, one level above this directory, shared with the Mac's own
+# wrapper): it defines itself at the first prompt, after `config.fish`, so that a `claude` of the
+# user's is seen and wins. Without the file the shell is the user's.
+set -l __bateri_agents_file (status dirname)/../agents.fish
+if test -r $__bateri_agents_file
+    source $__bateri_agents_file 2>/dev/null
+end
+
 # Reports the working directory with OSC 7, per prompt. The authority is the
 # server's name (the zsh wrapper's reason).
 function __bateri_cwd --on-event fish_prompt

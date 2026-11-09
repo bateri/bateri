@@ -926,6 +926,8 @@ enum Msg {
     Retry(String),
     /// The files of an account's server are to be written again ([`Service::rewrite_files`]).
     Rewrite(String),
+    /// The files of every account's server are ([`Service::rewrite_all_files`]).
+    RewriteAll,
     /// A caller wants a program or a connection on an account's server ([`Streams`]).
     StreamOpen(pipes::StreamOpen),
     /// Whether the account's connection is up now ([`Streams::live`]).
@@ -1111,6 +1113,9 @@ struct Account {
     /// has them: written with the look for kablo ([`Backend::install`]) or, for an account the
     /// ledger brought back, by the first new terminal's step ([`Backend::files`]).
     files: bool,
+    /// Held while the files are written ([`Core::rewrite`]), so that writes made one after the
+    /// other end in the order they were asked for: the last one reads the setting last.
+    writing: Arc<Mutex<()>>,
 }
 
 /// What one account's server keeps that no pane of this Mac shows, in the roster's two halves.
@@ -1649,6 +1654,13 @@ impl Service {
         let _ = self.tx.send(Msg::Rewrite(account.to_owned()));
     }
 
+    /// [`Service::rewrite_files`] for every account made so far that is connected (this Mac's
+    /// always): what the files hold is a setting of every machine's (an agent's hook), not of one.
+    /// A server that is not connected is written by its first new terminal after.
+    pub fn rewrite_all_files(&self) {
+        let _ = self.tx.send(Msg::RewriteAll);
+    }
+
     /// The computer woke up: a connection that looked open is asked whether it
     /// is, and the ones waiting for their pause dial now.
     pub fn wake(&self) {
@@ -1937,6 +1949,35 @@ impl Core {
         }
     }
 
+    /// Writes the account's server's files again, on a thread of their own, one write of an
+    /// account after the other. Not while its kablo is an earlier release's (`stale`): the command
+    /// file would name a binary that has no `bateri` in it and undo what the renewal of the first
+    /// dial writes. `connected` leaves a server that is not connected alone (this Mac is always
+    /// there): no connection is made for a file, and what the setting asks is written by the first
+    /// new terminal's step ([`Backend::files`]), since `files` is false again either way.
+    fn rewrite(&mut self, account: &str, connected: bool) {
+        let Some(entry) = self.accounts.get_mut(account) else {
+            return;
+        };
+        entry.files = false;
+        let here = local::is_account(&entry.server.key);
+        if entry.stale || (connected && !here && entry.bridge.is_none()) {
+            return;
+        }
+        let (shared, server, installed, writing) = (
+            Arc::clone(&self.shared),
+            entry.server.clone(),
+            entry.installed.clone(),
+            Arc::clone(&entry.writing),
+        );
+        let _ = thread::Builder::new()
+            .name("ssh-hold writes the files".into())
+            .spawn(move || {
+                let _one_at_a_time = writing.lock().unwrap_or_else(PoisonError::into_inner);
+                shared.backend.files(&server, &installed);
+            });
+    }
+
     fn handle(&mut self, message: Msg) {
         let now = Instant::now();
         match message {
@@ -2063,16 +2104,11 @@ impl Core {
                 // A login that was waited for is a connection being made.
                 self.refresh = true;
             }
-            Msg::Rewrite(account) => {
-                if let Some(entry) = self.accounts.get(&account) {
-                    let (shared, server, installed) = (
-                        Arc::clone(&self.shared),
-                        entry.server.clone(),
-                        entry.installed.clone(),
-                    );
-                    let _ = thread::Builder::new()
-                        .name("ssh-hold writes the files".into())
-                        .spawn(move || shared.backend.files(&server, &installed));
+            Msg::Rewrite(account) => self.rewrite(&account, false),
+            Msg::RewriteAll => {
+                let accounts: Vec<String> = self.accounts.keys().cloned().collect();
+                for account in accounts {
+                    self.rewrite(&account, true);
                 }
             }
             Msg::Wake => {
@@ -3757,6 +3793,7 @@ impl Core {
                 queued: Arc::new(AtomicUsize::new(0)),
                 purged: false,
                 files,
+                writing: Arc::new(Mutex::new(())),
             },
         );
     }

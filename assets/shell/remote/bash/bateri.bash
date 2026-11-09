@@ -65,6 +65,15 @@ if [ -x "$__bateri_bin/bateri" ]; then
 fi
 unset __bateri_bin
 
+# The agents' function (`agents.bash`, beside this file, shared with the Mac's own wrapper), after
+# the user's login files: a `claude` function of theirs is seen and wins. Without the file, or if
+# it fails, the shell is the user's.
+__bateri_agents_file=${BASH_SOURCE[0]%/*}/agents.bash
+if [[ -r $__bateri_agents_file ]]; then
+  . "$__bateri_agents_file" 2> /dev/null
+fi
+unset __bateri_agents_file
+
 # Reports the working directory with OSC 7, per prompt (from `__bateri_precmd`).
 #
 # THE AUTHORITY IS THE SERVER'S NAME (the zsh wrapper's reason): a foreign

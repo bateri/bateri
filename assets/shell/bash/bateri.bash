@@ -81,6 +81,15 @@ if [ -x "$__bateri_cmd/bateri" ]; then
 fi
 unset __bateri_cmd
 
+# The agents' function (`agents.bash`, beside this file, shared with the server's wrapper), after
+# the user's login files: a `claude` function of theirs is seen and wins. Without the file, or if
+# it fails, the shell is the user's.
+__bateri_agents_file=${BASH_SOURCE[0]%/*}/agents.bash
+if [[ -r $__bateri_agents_file ]]; then
+  . "$__bateri_agents_file" 2> /dev/null
+fi
+unset __bateri_agents_file
+
 # The dock's functions and the hooks' installer (`dock.bash`, beside this file, shared with the
 # server's wrapper). Read at every start, `"blocks"` too: the installer is in it. Without the
 # file the shell is the user's, unmarked.

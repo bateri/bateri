@@ -178,9 +178,9 @@ fn info_plist_template_carries_the_updater_keys() {
     );
 }
 
-/// The zsh wrapper's inventory is **exactly** these seven files (the ZDOTDIR
-/// swap, `zdotdir.zsh`, and the dock's functions, `dock.zsh`, joined with remote
-/// shell integration).
+/// The zsh wrapper's inventory is **exactly** these eight files (the ZDOTDIR
+/// swap, `zdotdir.zsh`, the dock's functions, `dock.zsh`, and the agents' function, `agents.zsh`,
+/// joined with remote shell integration).
 ///
 /// The "nothing missing" half is also asked by `bt-shell-common` (the test of
 /// `child::zsh_wrapper_dir`); the half this one alone sees is **the excess**.
@@ -221,6 +221,7 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
             ".zprofile",
             ".zshenv",
             ".zshrc",
+            "agents.zsh",
             "bateri.zsh",
             "dock.zsh",
             "zdotdir.zsh"
@@ -294,9 +295,10 @@ fn font_inventory_is_exactly_what_the_sums_list() {
     }
 }
 
-/// The fish wrapper's inventory is **exactly** two files, `vendor_conf.d/bateri.fish` and the
-/// dock's functions it reads, `dock.fish`, one level above `vendor_conf.d` (fish reads every file
-/// of that directory by itself, and this one is for the wrappers alone).
+/// The fish wrapper's inventory is **exactly** three files, `vendor_conf.d/bateri.fish` and the
+/// dock's and the agents' functions it reads, `dock.fish` and `agents.fish`, one level above
+/// `vendor_conf.d` (fish reads every file of that directory by itself, and these are for the
+/// wrappers alone).
 ///
 /// For the reasons of the zsh test above: `make bundle` copies the files by name
 /// and `cmp`s them, so a third file added to the directory never enters the
@@ -328,14 +330,14 @@ fn fish_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     found.sort();
     assert_eq!(
         found,
-        ["dock.fish", "vendor_conf.d/bateri.fish"],
+        ["agents.fish", "dock.fish", "vendor_conf.d/bateri.fish"],
         "the assets/shell/fish inventory changed; `make bundle`'s copy and cmp \
          lists must be updated too"
     );
 }
 
-/// The bash wrapper's inventory is **exactly** two files, `bateri.bash` and the dock's functions
-/// it reads, `dock.bash`.
+/// The bash wrapper's inventory is **exactly** three files, `bateri.bash` and the dock's and the
+/// agents' functions it reads, `dock.bash` and `agents.bash`.
 ///
 /// For the reasons of the zsh test above: `make bundle` copies the files by name and `cmp`s them,
 /// so a third file added to the directory never enters the package while everything stays
@@ -356,10 +358,42 @@ fn bash_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     found.sort();
     assert_eq!(
         found,
-        ["bateri.bash", "dock.bash"],
+        ["agents.bash", "bateri.bash", "dock.bash"],
         "the assets/shell/bash inventory changed; `make bundle`'s copy and cmp \
          lists must be updated too"
     );
+}
+
+/// The agents' function files (`agents.zsh`, `agents.bash`, `agents.fish`) go into the package and
+/// are checked against their inputs by `make bundle`, and the server's copy is the same bytes: the
+/// application embeds the very file the package carries (`ssh_wrap::REMOTE_FILES`), so the Mac and
+/// a server never run two versions of the function that starts an agent.
+#[test]
+fn the_agents_function_files_are_copied_and_compared_by_the_bundle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let makefile = std::fs::read_to_string(root.join("Makefile")).expect("Makefile");
+    let compared = makefile
+        .lines()
+        .find(|line| line.trim_start().starts_with("for f in zsh/.zshenv"))
+        .expect("the bundle's list of files to compare");
+    for (dir, name) in [
+        (shell_asset_dir(), "zsh/agents.zsh"),
+        (bash_asset_dir(), "bash/agents.bash"),
+        (fish_asset_dir(), "fish/agents.fish"),
+    ] {
+        let file = name.rsplit('/').next().expect("a file name");
+        assert!(dir.join(file).is_file(), "{name} is not in the tree");
+        assert!(
+            compared
+                .split_whitespace()
+                .any(|word| word.trim_end_matches(';') == name),
+            "make bundle does not compare {name}"
+        );
+        assert!(
+            makefile.contains(&format!("assets/shell/{name}")),
+            "make bundle does not copy {name}"
+        );
+    }
 }
 
 /// GPL-3.0 §4: everyone who receives the binary is given a copy of the

@@ -166,6 +166,15 @@ pub(crate) fn rewrite_files(account: &str) {
     }
 }
 
+/// [`rewrite_files`] for every account: what an agent's hook is a setting of every machine's
+/// ([`bt_shell_common::ssh_wrap::Wants`]), written where the setting now says, on this Mac and on
+/// each server the application knows.
+pub(crate) fn rewrite_all_files() {
+    if let Some(service) = SERVICE.get() {
+        service.rewrite_all_files();
+    }
+}
+
 /// The terminal the pane shows, if it shows one a kablo server keeps (the
 /// program in front of it included, as the server last said). `None` for a pane
 /// that shows its own shell and, in a process without the service, for every pane.
