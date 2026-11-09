@@ -14868,8 +14868,8 @@ mod tests {
         let typed = typed_into(&mut terminal.terminal, 7);
         assert_eq!(
             typed
-                .windows(5)
-                .filter(|window| window == b"\x1b[?6c")
+                .windows(9)
+                .filter(|window| window == b"\x1b[?62;22c")
                 .count(),
             1,
             "{typed:?}"
@@ -31904,13 +31904,13 @@ e\\314\\201.'; sleep 5";
         wait_until("the reply to CSI c", Duration::from_secs(10), || {
             program
                 .input()
-                .windows(5)
-                .any(|window| window == b"\x1b[?6c")
+                .windows(9)
+                .any(|window| window == b"\x1b[?62;22c")
         });
         let input = program.input();
         let at = |needle: &[u8]| input.windows(needle.len()).position(|w| w == needle);
         let welcome = at(b"\x1b_pencere;welcome;").expect("a welcome");
-        let reply = at(b"\x1b[?6c").expect("the reply");
+        let reply = at(b"\x1b[?62;22c").expect("the reply");
         assert!(welcome < reply, "{input:?}");
         assert_eq!(token_of(&frames[0]).len(), 22);
         assert_eq!(program.state(), Some(crate::pencere::State::Offered));
@@ -33999,11 +33999,11 @@ e\\314\\201.'; sleep 5";
             "stty echo echoctl; printf '\\033_Gi=4207,a=q,t=d,f=24,s=1,v=1;AAAA\\033\\\\\\033[c'; sleep 8",
             wake,
         );
-        let text = wait_text(&session, "[?6c");
+        let text = wait_text(&session, "[?62;22c");
         let graphics = text
             .find("^[_Gi=4207;OK^[\\")
             .unwrap_or_else(|| panic!("no graphics answer in {text:?}"));
-        let attributes = text.find("[?6c").expect("the attributes");
+        let attributes = text.find("[?62;22c").expect("the attributes");
         assert!(graphics < attributes, "{text:?}");
         assert_eq!(stored_ids(&session), (vec![], vec![]));
         session.shutdown();
@@ -34052,11 +34052,11 @@ e\\314\\201.'; sleep 5";
             file.encoded()
         );
         let session = spawn_session(&script, Arc::new(TestWake::default()));
-        let text = wait_text(&session, "[?6c");
+        let text = wait_text(&session, "[?62;22c");
         let graphics = text
             .find("^[_Gi=4207;OK^[\\")
             .unwrap_or_else(|| panic!("no graphics answer in {text:?}"));
-        let attributes = text.find("[?6c").expect("the attributes");
+        let attributes = text.find("[?62;22c").expect("the attributes");
         assert!(graphics < attributes, "{text:?}");
         assert!(!file.0.exists(), "the query took the temporary file");
         assert_eq!(stored_ids(&session), (vec![], vec![]));

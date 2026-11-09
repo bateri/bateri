@@ -2119,6 +2119,28 @@ mod screenful {
     }
 
     #[test]
+    fn the_device_attributes_are_an_answer_kittys_kittens_take() {
+        // `kitten icat` ends its probe on a DA1 answer whose body (after
+        // `CSI`) is longer than three bytes; alacritty's `?6c` is not, and
+        // the kitten timed out.
+        for question in [&b"\x1b[c"[..], b"\x1bZ"] {
+            let mut screen = Screenful::new(20, 10, 100);
+            screen.feed(question);
+            let told = screen.told();
+            assert_eq!(
+                told,
+                crate::handler::PRIMARY_DEVICE_ATTRIBUTES,
+                "{question:?}"
+            );
+            let body = &told[2..];
+            assert!(
+                body.len() > 3 && body[0] == b'?' && body.ends_with(b"c"),
+                "{told:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_command_cut_by_the_reads_is_one_command() {
         let bytes = [
             at(1, 1),

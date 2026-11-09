@@ -20,6 +20,10 @@ of every installed copy. A version without a section is not released.
 - **An image can hang on another in kitty's graphics protocol.** A program can place an image relative to one already placed (`P=` the parent image, `Q=` its placement, `H=` and `V=` the cells right and down from the parent's first cell, negative for left and up): it goes where the parent goes, scrolls with it, and ends with it, so a program can move a picture and everything that hangs on it by moving one placement. The parent can itself hang on another, up to eight deep; a program that makes a loop, a chain that is too long or names a parent that is not there is told (`ECYCLE`, `ETOODEEP`, `ENOPARENT`). A relative placement never moves the cursor, and a parent made of Unicode placeholders is where its first placeholder cell is. The part of a picture that lies left of the window's first column is not drawn.
 - **Images can be drawn in the terminal's own colours in kitty's graphics protocol.** A program can send a picture whose pixels are palette numbers instead of colours (`f=8`, or `f=16` with an opacity after each number): a chart or a diagram then matches the text around it, and is drawn again when the colours change, when you switch from a dark theme to a light one or when the program itself changes a colour with `OSC 4`. Numbers 0 to 247 are the 256-colour table; 248 and 249 are the background and the foreground, 250 the selection, 252 the cursor, 254 the link colour and 255 the foreground. Such an image has one frame: adding frames to it or laying one frame on another is refused. A program can ask whether bateri does this with a query that names `f=8`.
 
+### Fixed
+
+- **kitty's `kitten icat` shows images.** bateri answered the device attributes question the way a VT102 does (`CSI ? 6 c`), an answer too short for the kittens, which waited ten seconds and gave up with "Timed out waiting for a response from the terminal". It now answers as a VT220 with ANSI colour (`CSI ? 62 ; 22 c`), as kitty and Ghostty do.
+
 ## [0.27.0] - 2026-11-09
 
 ### Added

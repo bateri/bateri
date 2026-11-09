@@ -1155,7 +1155,7 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
         std::fs::read_to_string(&log).is_ok_and(|text| text.lines().count() == 2)
     });
     let received = std::fs::read_to_string(&log).expect("the log");
-    let answers = received.matches("033[?6c").count();
+    let answers = received.matches("033[?62;22c").count();
     assert_eq!(answers, 1, "one answer to the one question: {received:?}");
     let lines: Vec<&str> = received.lines().collect();
     assert!(lines[0].ends_with('a'), "{received:?}");

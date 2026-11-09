@@ -95,6 +95,10 @@ use crate::input::PIXEL_MOUSE_MODE;
 /// ask the kernel and races the redraw.
 pub(crate) const RESIZE_REPORT_MODE: u16 = 2048;
 
+/// The answer to DA1 (`CSI c`) and DECID (`ESC Z`): a VT220 (`62`) with ANSI
+/// colour (`22`), as kitty and Ghostty answer.
+pub(crate) const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+
 /// The DEC private modes the stream's wrapper keeps because alacritty does
 /// not know them: `Term` has no bit for either, so they live with the session
 /// ([`Sink::kept_modes`]). Every stream that rebuilds a session's `Term` binds
@@ -760,6 +764,20 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         self.term.report_private_mode(mode);
     }
 
+    /// DA1 (and DECID) answered as a VT220 with ANSI colour, the way kitty
+    /// and Ghostty answer, not as alacritty's VT102 `CSI ? 6 c`: kitty's
+    /// `kitten icat` ends its graphics probe only on an answer longer than
+    /// `?6c` and otherwise waits out its timeout. Through the sink, so it
+    /// keeps its place behind a graphics command's answer; a stream without a
+    /// sink replies to nobody and is left to `Term`, like DA2.
+    fn identify_terminal(&mut self, intermediate: Option<char>) {
+        *self.last_input = false;
+        match (intermediate, self.graphics) {
+            (None, Some(graphics)) => graphics.reply(PRIMARY_DEVICE_ATTRIBUTES.to_vec()),
+            _ => self.term.identify_terminal(intermediate),
+        }
+    }
+
     fn clear_screen(&mut self, mode: ClearMode) {
         self.clearing_screen(mode);
     }
@@ -896,7 +914,6 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         fn insert_blank(&mut self, count: usize);
         fn move_up(&mut self, rows: usize);
         fn move_down(&mut self, rows: usize);
-        fn identify_terminal(&mut self, intermediate: Option<char>);
         fn device_status(&mut self, arg: usize);
         fn move_forward(&mut self, cols: usize);
         fn move_backward(&mut self, cols: usize);

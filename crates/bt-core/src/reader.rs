@@ -2173,7 +2173,7 @@ mod tests {
             let pty = ScriptedPty::new([Step::Wire(stream.clone())]).chunked(chunk);
             let input = input_after(pty, &rig);
             let welcome = position(&input, b"\x1b_pencere;welcome;").expect("a welcome");
-            let reply = position(&input, b"\x1b[?6c").expect("the reply to CSI c");
+            let reply = position(&input, b"\x1b[?62;22c").expect("the reply to CSI c");
             assert!(welcome < reply, "reads of {chunk}: {input:?}");
             assert_eq!(
                 position(&input[reply..], b"pencere;welcome"),
@@ -2191,7 +2191,7 @@ mod tests {
         let (rig, _, _) = Rig::new(false);
         let stream = [hello(), b"\x1b[c".to_vec()].concat();
         let input = input_after(ScriptedPty::new([Step::Wire(stream)]), &rig);
-        assert_eq!(input, b"\x1b[?6c");
+        assert_eq!(input, b"\x1b[?62;22c");
     }
 
     /// The text on both sides of a frame reaches the grid in order, and the
