@@ -73,8 +73,10 @@ pub(crate) fn osc777(payload: &[u8]) -> Option<Notification> {
 }
 
 /// `bytes` as text a notification can show: UTF-8, no control or bidirectional/invisible
-/// formatting character, trimmed, at most `limit` bytes; `None` when nothing is left.
-fn clean(bytes: &[u8], limit: usize) -> Option<String> {
+/// formatting character, trimmed, at most `limit` bytes; `None` when nothing is left. Text from a
+/// program that is shown on a tab goes through it, a notification's and an agent's last reply
+/// ([`crate::program_status::ProgramStatus::set_reply`]) alike.
+pub(crate) fn clean(bytes: &[u8], limit: usize) -> Option<String> {
     let text: String = String::from_utf8_lossy(bytes)
         .chars()
         .filter(|&c| !c.is_control() && !formatting(c))

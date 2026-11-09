@@ -61,6 +61,7 @@ mod container;
 mod database;
 pub mod identity;
 mod options;
+pub mod reply;
 mod shell;
 
 pub use container::Kube;

@@ -1762,6 +1762,11 @@ pub struct Settings {
     pub keep_running: KeepRunning,
     /// `[commands] level`: what the `bateri` command may do on this Mac ([`CommandLevel`]).
     pub commands_level: CommandLevel,
+    /// `[agents] claude_last_reply`: whether Claude Code's last reply shows under its tab
+    /// (`bateri message`, from a hook the shell function adds to the sessions it starts).
+    /// Off by default: nothing is added to a session until it is asked for. Doesn't enter
+    /// `TerminalOptions`.
+    pub agents_claude_last_reply: bool,
     /// `[terminal] scrollbar`: when the scroll bar shows ([`Scrollbar`]).
     /// Doesn't enter `TerminalOptions`.
     pub scrollbar: Scrollbar,
@@ -1836,6 +1841,7 @@ impl Default for Settings {
             restore_windows: RestoreWindows::default(),
             keep_running: KeepRunning::default(),
             commands_level: CommandLevel::default(),
+            agents_claude_last_reply: false,
             scrollbar: Scrollbar::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -1902,6 +1908,8 @@ pub enum SettingsEdit {
     RestoreWindows(RestoreWindows),
     KeepRunning(KeepRunning),
     CommandLevel(CommandLevel),
+    /// The settings window's "Show its last reply" of Claude Code: `[agents] claude_last_reply`.
+    AgentsClaudeLastReply(bool),
     Scrollbar(Scrollbar),
     Theme(String),
     LightTheme(String),
@@ -2046,6 +2054,9 @@ impl SettingsEdit {
             Self::RestoreWindows(_) => ("terminal", "restore_windows", "terminal.restore_windows"),
             Self::KeepRunning(_) => ("terminal", "keep_running", "terminal.keep_running"),
             Self::CommandLevel(_) => ("commands", "level", "commands.level"),
+            Self::AgentsClaudeLastReply(_) => {
+                ("agents", "claude_last_reply", "agents.claude_last_reply")
+            }
             Self::Scrollbar(_) => ("terminal", "scrollbar", "terminal.scrollbar"),
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
@@ -2176,6 +2187,7 @@ impl SettingsEdit {
             | Self::ShellPorts(on)
             | Self::ShellPythonEnv(on)
             | Self::ShellNodeVersion(on)
+            | Self::AgentsClaudeLastReply(on)
             | Self::DimUnfocusedSplits(on)
             | Self::FocusFrame(on)
             | Self::ResizeInSteps(on)
@@ -2472,6 +2484,14 @@ node_version = true
 # taken over (bateri runs them for it), and is not given to a pattern like
 # prod-*, only to a host's exact name.
 level = "own"
+
+[agents]
+# true | false. Shows the last thing Claude Code said under its tab, between its
+# status and its folder, in the side column's Activity and in the tab list
+# (where [appearance] tab_details shows details). It is told by a hook that
+# only the Claude Code sessions started from a bateri terminal after the change
+# get, for that session alone: nothing is written to Claude Code's own files.
+claude_last_reply = false
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
@@ -3134,6 +3154,23 @@ stats_interval = 3
             }
             None => {}
         }
+        match section(text, root, "agents", &mut parsed.diagnostics) {
+            Some(agents) => {
+                if let Some(item) = agents.get("claude_last_reply") {
+                    parsed.settings.agents_claude_last_reply = boolean(
+                        text,
+                        item,
+                        "agents.claude_last_reply",
+                        fallback.agents_claude_last_reply,
+                        &mut parsed.diagnostics,
+                    );
+                }
+            }
+            None if root.contains_key("agents") => {
+                parsed.settings.agents_claude_last_reply = fallback.agents_claude_last_reply;
+            }
+            None => {}
+        }
         match section(text, root, "remote", &mut parsed.diagnostics) {
             Some(remote) => {
                 let before = parsed.diagnostics.len();
@@ -3301,7 +3338,8 @@ stats_interval = 3
             dim_splits: self.dim_unfocused_splits != new.dim_unfocused_splits,
             focus_frame: self.focus_frame != new.focus_frame,
             split_style: self.split_style != new.split_style,
-            tab_details: self.tab_details != new.tab_details,
+            tab_details: self.tab_details != new.tab_details
+                || self.agents_claude_last_reply != new.agents_claude_last_reply,
             minimized_panes: self.minimized_panes != new.minimized_panes,
             resize_in_steps: self.resize_in_steps != new.resize_in_steps,
             tab_icons: self.tab_icons != new.tab_icons
@@ -4071,8 +4109,9 @@ pub struct Changes {
     /// split tab out again, as cards or divided by a line. A field of its
     /// own, for [`Self::caret`]'s reason.
     pub split_style: bool,
-    /// [`Settings::tab_details`] changed: the platform shell lays every side
-    /// column out again. A field of its own, for [`Self::caret`]'s reason.
+    /// [`Settings::tab_details`] or [`Settings::agents_claude_last_reply`] changed (an agent's
+    /// last reply is one more detail of a row): the platform shell lays every side column out
+    /// again. A field of its own, for [`Self::caret`]'s reason.
     pub tab_details: bool,
     /// [`Settings::minimized_panes`] changed: the platform shell lays every tab's container
     /// out again, with the capsules in their new place. A field of its own, for
@@ -4941,6 +4980,7 @@ mod tests {
             ("terminal", "restore_windows"),
             ("terminal", "scrollbar"),
             ("commands", "level"),
+            ("agents", "claude_last_reply"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -5209,6 +5249,7 @@ mod tests {
             restore_windows: RestoreWindows::Off,
             keep_running: KeepRunning::Quit,
             commands_level: CommandLevel::Own,
+            agents_claude_last_reply: false,
             scrollbar: Scrollbar::Always,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -6443,6 +6484,76 @@ found 1.5; using 0.1"
             let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
             assert_eq!(parsed.settings.keep_running, KeepRunning::Quit, "{text}");
         }
+    }
+
+    #[test]
+    fn claude_last_reply_is_off_until_the_file_turns_it_on() {
+        assert!(!Settings::default().agents_claude_last_reply);
+        assert!(!clean("").agents_claude_last_reply);
+        assert!(clean("[agents]\nclaude_last_reply = true\n").agents_claude_last_reply);
+        assert!(!clean("[agents]\nclaude_last_reply = false\n").agents_claude_last_reply);
+        // A value that is not a boolean is named and keeps the one given (the default: off).
+        for text in [
+            "[agents]\nclaude_last_reply = \"on\"\n",
+            "[agents]\nclaude_last_reply = 1\n",
+        ] {
+            let (settings, diagnostic) = rejected(text);
+            assert!(!settings.agents_claude_last_reply, "{text}");
+            assert_eq!(diagnostic.key, Some("agents.claude_last_reply"), "{text}");
+        }
+        let current = Settings {
+            agents_claude_last_reply: true,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[agents]\nclaude_last_reply = \"x\"\n", &current)
+            .expect("parses");
+        assert!(
+            parsed.settings.agents_claude_last_reply,
+            "the one given is kept"
+        );
+        // The section is not one: nothing is turned on.
+        let parsed = Settings::parse_keeping("agents = 3\n", &current).expect("parses");
+        assert!(parsed.settings.agents_claude_last_reply);
+        // Unknown keys of the section are ignored like everywhere else.
+        assert!(!clean("[agents]\nfuture = 1\n").agents_claude_last_reply);
+    }
+
+    #[test]
+    fn claude_last_reply_is_written_in_place_and_the_rest_of_the_file_stays() {
+        let text = "[agents]\n# mine\nclaude_last_reply = false\nfuture = 1\n";
+        let on =
+            Settings::with_edit(text, &SettingsEdit::AgentsClaudeLastReply(true)).expect("edits");
+        assert_eq!(
+            on,
+            "[agents]\n# mine\nclaude_last_reply = true\nfuture = 1\n"
+        );
+        assert!(clean(&on).agents_claude_last_reply);
+        let off =
+            Settings::with_edit(&on, &SettingsEdit::AgentsClaudeLastReply(false)).expect("edits");
+        assert!(!clean(&off).agents_claude_last_reply);
+        // From a file that has no such section, one is added and nothing else moves.
+        let added = Settings::with_edit(
+            "[font]\nsize = 15\n",
+            &SettingsEdit::AgentsClaudeLastReply(true),
+        )
+        .expect("edits");
+        assert!(added.starts_with("[font]\nsize = 15\n"), "{added}");
+        assert!(clean(&added).agents_claude_last_reply);
+        assert_eq!(clean(&added).font.size, 15.0);
+    }
+
+    #[test]
+    fn claude_last_reply_changes_what_a_row_says_and_nothing_else() {
+        let off = clean("");
+        let on = clean("[agents]\nclaude_last_reply = true\n");
+        assert_eq!(
+            off.changes(&on),
+            Changes {
+                tab_details: true,
+                ..Changes::default()
+            }
+        );
+        assert_eq!(off.changes(&off), Changes::default());
     }
 
     #[test]
@@ -8180,6 +8291,7 @@ cursor = \"spring\"
             SettingsEdit::RestoreWindows(restore) => settings.restore_windows = restore,
             SettingsEdit::KeepRunning(keep) => settings.keep_running = keep,
             SettingsEdit::CommandLevel(level) => settings.commands_level = level,
+            SettingsEdit::AgentsClaudeLastReply(on) => settings.agents_claude_last_reply = on,
             SettingsEdit::Scrollbar(scrollbar) => settings.scrollbar = scrollbar,
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
@@ -8307,6 +8419,7 @@ cursor = \"spring\"
             SettingsEdit::ConfirmClose(ConfirmClose::Always),
             SettingsEdit::RestoreWindows(RestoreWindows::Layout),
             SettingsEdit::KeepRunning(KeepRunning::Quit),
+            SettingsEdit::AgentsClaudeLastReply(true),
             SettingsEdit::Scrollbar(Scrollbar::Always),
             SettingsEdit::Theme("paper".to_owned()),
             SettingsEdit::LightTheme("paper".to_owned()),

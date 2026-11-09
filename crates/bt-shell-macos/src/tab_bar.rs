@@ -5838,9 +5838,21 @@ pub(crate) struct AgentLine {
     pub(crate) place: Option<String>,
     /// What it asks while it waits for the user (`OSC 7501`'s `msg`).
     pub(crate) asks: Option<String>,
+    /// The last thing it said (`bateri message`, its hook's `last_assistant_message`): set only
+    /// for an agent of the table (`program::reply`) whose setting is on.
+    pub(crate) reply: Option<String>,
     /// What its pane reports, as a tab's chip says it of the tab (`tabs::indicator`): the badge on
     /// its tile's corner.
     pub(crate) indicator: Option<Indicator>,
+}
+
+impl AgentLine {
+    /// What the row says under its status, above where it stands: the question while the agent
+    /// asks (it is what waits for the user), else its last reply. Never both: the row does not
+    /// grow by two texts and the place stays at its foot.
+    pub(crate) fn said(&self) -> Option<&str> {
+        self.asks.as_deref().or(self.reply.as_deref())
+    }
 }
 
 /// The colour of an agent's status line: what asks for the user stands out.

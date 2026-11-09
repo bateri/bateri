@@ -65,6 +65,7 @@ use crate::notices::Source;
 use crate::pane::{PaneHost, TerminalPane};
 use crate::pencere_view::face::FaceId;
 use crate::program::identity::Kind;
+use crate::program::reply;
 use crate::restore::SavedTab;
 use crate::sheets;
 use crate::split::{Axis, Direction, Placement, Tree};
@@ -2249,15 +2250,22 @@ impl TerminalTab {
                 };
                 let held =
                     bt_core::running_counter(report.held).unwrap_or_else(|| "now".to_owned());
+                let kind = pane.program_kind();
+                // The last reply is the table's agents' and only when their setting asks for it.
+                let reply = report.reply.filter(|_| {
+                    app::delegate(self.mtm())
+                        .is_some_and(|app| reply::shows_reply(&app.settings(), kind))
+                });
                 Some(AgentLine {
                     pane: id,
-                    kind: pane.program_kind(),
+                    kind,
                     title: report.title.unwrap_or_else(|| session.title()),
                     status: format!("{word} · {held}"),
                     tone,
                     focused: id == focused,
                     place,
                     asks: report.message,
+                    reply,
                     indicator,
                 })
             })

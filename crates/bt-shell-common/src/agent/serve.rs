@@ -33,9 +33,9 @@
 //! relaxed, for `full` alone**: a relay is read like any request, then `off`, `own` and `screen` are
 //! refused (77) before anything is run, and a relay runs only the commands of [`RELAYED`](super::message::RELAYED).
 //!
-//! The other three requests need the bateri app's windows, a question to the user or the server's own
+//! The other requests need the bateri app's windows, a question to the user or the server's own
 //! list, none of which a decision with no window in it has: they are an [`Answer`] of their own
-//! (`List`, `Close`, `Notify`) that the shell carries out — building `ls` from the live windows
+//! (`List`, `Close`, `Notify`, `Message`) that the shell carries out — building `ls` from the live windows
 //! and a [`survey`](crate::kablo::service::Service::survey), closing a terminal, showing a
 //! notification — and answers when it has. **Nothing asks the user:** what a machine's commands
 //! may do is its [`CommandLevel`] ([`super::level`]), decided here and by the shell from the
@@ -139,6 +139,10 @@ pub enum Answer {
     Close(Anchor),
     /// `notify`: the shell shows it and answers.
     Notify(String),
+    /// `message`: the last thing an agent said. The shell keeps it for the pane the letter came
+    /// from, to be shown beside the pane's tab, and answers; it asks nothing and starts nothing,
+    /// so the level has only judged that it is not `off`.
+    Message(String),
     /// `focus`, `zoom`, `swap`, `move`, `resize`: the shell decides by what the keyboard is
     /// doing ([`super::arrange`]) and by the level over the layers it touches, then does it.
     Arrange(Arrange),
@@ -207,6 +211,7 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
         Ok(Request::Ls(format)) => Answer::List(format),
         Ok(Request::Close(terminal)) => Answer::Close(terminal),
         Ok(Request::Notify(text)) => Answer::Notify(text),
+        Ok(Request::Message(text)) => Answer::Message(text),
         Ok(Request::Arrange(arrange)) => Answer::Arrange(arrange),
         // The machine that asks is no other machine: nothing is reached, and the answer is `here`,
         // which needs no level (the command does it itself, as it does what is its own).
@@ -1162,6 +1167,10 @@ mod tests {
             serve(&server(), None, "bateri 2\nnotify\ntext hi\n", &mut app),
             Answer::Notify("hi".to_owned())
         );
+        assert_eq!(
+            serve(&server(), None, "bateri 2\nmessage\ntext hi\n", &mut app),
+            Answer::Message("hi".to_owned())
+        );
         // A target that is no name kablo has is no request.
         let Answer::Reply(Reply::Failed(failure)) =
             serve(&server(), None, "bateri 2\nclose\nterminal a b\n", &mut app)
@@ -1226,6 +1235,7 @@ mod tests {
             "bateri 2\nls\n".to_owned(),
             "bateri 2\nclose\nterminal p7\n".to_owned(),
             "bateri 2\nnotify\ntext hi\n".to_owned(),
+            "bateri 2\nmessage\ntext hi\n".to_owned(),
             "not a message".to_owned(),
         ] {
             let Answer::Reply(Reply::Failed(failure)) = serve(&server, Some("p4"), &text, &mut app)

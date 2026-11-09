@@ -52,7 +52,8 @@ use objc2_app_kit::{
     NSAccessibility, NSAffineTransformNSAppKitAdditions, NSBezierPath, NSBox, NSColor, NSFont,
     NSFontAttributeName, NSFontWeightMedium, NSFontWeightSemibold, NSForegroundColorAttributeName,
     NSGraphicsContext, NSLineBreakMode, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
-    NSStringDrawing, NSTextAlignment, NSView,
+    NSStringDrawing, NSStringDrawingOptions, NSStringNSExtendedStringDrawing, NSTextAlignment,
+    NSView,
 };
 use objc2_foundation::{
     NSAffineTransform, NSAttributedStringKey, NSDictionary, NSObjectProtocol, NSPoint, NSRect,
@@ -1146,7 +1147,7 @@ struct RowShape {
 impl RowShape {
     fn of(label: &super::Label, activity: bool, details: bool, room: f64) -> Self {
         let height_of = |line: &AgentLine, top: f64| {
-            let asks = line.asks.as_deref().map(AgentRows::ask_width);
+            let asks = line.said().map(AgentRows::ask_width);
             tabs::detail_height(
                 top,
                 details && line.place.is_some(),
@@ -1217,7 +1218,7 @@ pub(crate) struct AgentIvars {
     /// The lines are the row (Activity): the face, the tile, the name and the status are drawn
     /// here. Otherwise the row is the chip's own and only the details under its band are.
     whole: Cell<bool>,
-    /// The details under each line: where it stands and what it asks.
+    /// The details under each line: what it asks or last said, and under it where it stands.
     details: Cell<bool>,
     /// The ⌘ key that reaches each line, while Select Tab's modifiers are held.
     hints: RefCell<Vec<Option<String>>>,
@@ -1270,6 +1271,7 @@ define_class!(
         fn mouse_exited(&self, _event: &objc2_app_kit::NSEvent) {
             if self.ivars().hot.replace(None).is_some() {
                 self.setNeedsDisplay(true);
+                self.tip_for(None);
             }
         }
 
@@ -1306,6 +1308,7 @@ impl AgentRows {
     pub(super) fn hide(&self) {
         self.setHidden(true);
         self.ivars().hot.set(None);
+        self.tip_for(None);
     }
 
     /// The pointer moved over the lines: the one under it is the hot one.
@@ -1314,7 +1317,25 @@ impl AgentRows {
         let hot = self.line_at(at.y);
         if self.ivars().hot.replace(hot) != hot {
             self.setNeedsDisplay(true);
+            self.tip_for(hot);
         }
+    }
+
+    /// The line's last reply in full, as the tooltip while the pointer is over it: the row shows
+    /// it cut where it does not fit. A question is not told so, and nothing is where the reply
+    /// does not show.
+    fn tip_for(&self, hot: Option<usize>) {
+        let iv = self.ivars();
+        let tip = hot
+            .filter(|_| iv.details.get() && !self.isHidden())
+            .and_then(|index| {
+                iv.lines
+                    .borrow()
+                    .get(index)
+                    .filter(|line| line.asks.is_none())
+                    .and_then(|line| line.reply.clone())
+            });
+        self.setToolTip(tip.as_deref().map(NSString::from_str).as_deref());
     }
 
     /// The index of the line at `y` (the view's own, top-down); the last one below the end.
@@ -1366,6 +1387,8 @@ impl AgentRows {
         self.setHidden(false);
         if changed {
             self.setNeedsDisplay(true);
+            // What the line under the pointer says may have changed under it.
+            self.tip_for(iv.hot.get());
         }
     }
 
@@ -1511,13 +1534,50 @@ impl AgentRows {
 }
 
 impl AgentRows {
-    /// A line's details from `base` down: where it stands, in the dim ink, and what it asks, in
-    /// the title's, cut at [`tabs::ASK_LINES`] lines.
+    /// A line's details from `base` down: what it says — the question it asks, in the title's
+    /// ink and cut at [`tabs::ASK_LINES`] lines, else its last reply, in [`REPLY_INK`] of it and
+    /// ending in `…` where the last line does not hold the rest — and under it, always at the
+    /// row's foot, where it stands, in the dim ink.
     fn draw_details(&self, line: &AgentLine, x: f64, base: f64, room: f64, palette: Palette) {
         if !self.ivars().details.get() {
             return;
         }
         let mut at = base;
+        if let Some(said) = line.said() {
+            let lines = tabs::ask_lines(Some(Self::ask_width(said)), room);
+            let asking = line.asks.is_some();
+            let (_, attributes) = line_type_faded(
+                DETAIL_TEXT,
+                false,
+                palette.title,
+                if asking { 1.0 } else { REPLY_INK },
+                NSLineBreakMode::ByWordWrapping,
+            );
+            let rect = NSRect::new(
+                NSPoint::new(x, at),
+                NSSize::new(room, lines as f64 * tabs::ASK_ROW),
+            );
+            if asking {
+                // SAFETY: the dictionary holds a font, a colour and a paragraph style under
+                // their keys; the text wraps in the box and what is past its foot is not drawn.
+                unsafe {
+                    NSString::from_str(said).drawInRect_withAttributes(rect, Some(&attributes));
+                }
+            } else {
+                // SAFETY: as above; the options are AppKit's own, and the view is flipped, so
+                // the rectangle's origin is the text's top left.
+                unsafe {
+                    NSString::from_str(said).drawWithRect_options_attributes_context(
+                        rect,
+                        NSStringDrawingOptions::UsesLineFragmentOrigin
+                            | NSStringDrawingOptions::TruncatesLastVisibleLine,
+                        Some(&attributes),
+                        None,
+                    );
+                }
+            }
+            at += lines as f64 * tabs::ASK_ROW;
+        }
         if let Some(place) = &line.place {
             draw_line(
                 place,
@@ -1526,23 +1586,6 @@ impl AgentRows {
                 false,
                 palette.dim,
             );
-            at += tabs::PLACE_ROW;
-        }
-        if let Some(asks) = &line.asks {
-            let lines = tabs::ask_lines(Some(Self::ask_width(asks)), room);
-            let (_, attributes) = line_type(
-                DETAIL_TEXT,
-                false,
-                palette.title,
-                NSLineBreakMode::ByWordWrapping,
-            );
-            let rect = NSRect::new(
-                NSPoint::new(x, at),
-                NSSize::new(room, lines as f64 * tabs::ASK_ROW),
-            );
-            // SAFETY: the dictionary holds a font, a colour and a paragraph style under their
-            // keys; the text wraps in the box and what is past its foot is not drawn.
-            unsafe { NSString::from_str(asks).drawInRect_withAttributes(rect, Some(&attributes)) };
         }
     }
 }
@@ -1550,12 +1593,30 @@ impl AgentRows {
 /// The type of a detail's line and of the status, points.
 const DETAIL_TEXT: f64 = 11.0;
 
+/// How much of the title's ink an agent's last reply is written in: it is what the agent said,
+/// not what waits for the user, and reads under the question's full ink.
+const REPLY_INK: f64 = 0.74;
+
 /// The font and the attributes of a line of `size` points, semibold when `strong`, else medium,
 /// in `color`, broken as `breaking` says.
 fn line_type(
     size: f64,
     strong: bool,
     color: u32,
+    breaking: NSLineBreakMode,
+) -> (
+    Retained<NSFont>,
+    Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
+) {
+    line_type_faded(size, strong, color, 1.0, breaking)
+}
+
+/// [`line_type`] with the ink at `alpha` of its opacity.
+fn line_type_faded(
+    size: f64,
+    strong: bool,
+    color: u32,
+    alpha: f64,
     breaking: NSLineBreakMode,
 ) -> (
     Retained<NSFont>,
@@ -1572,7 +1633,7 @@ fn line_type(
     let font = NSFont::systemFontOfSize_weight(size, weight);
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setLineBreakMode(breaking);
-    let ink = Tint::of(color, 1.0).color();
+    let ink = Tint::of(color, alpha).color();
     // SAFETY: AppKit's constant attribute keys, alive for the process.
     let keys: [&NSAttributedStringKey; 3] = unsafe {
         [
@@ -1683,6 +1744,136 @@ mod tests {
             side_entries(&[heading(0), heading(2)], 2, None, 0),
             [HEAD, TAB, TAB, HEAD]
         );
+    }
+
+    fn agent(asks: Option<&str>, reply: Option<&str>, place: Option<&str>) -> AgentLine {
+        AgentLine {
+            pane: 1,
+            kind: crate::program::identity::Kind::Agent(
+                crate::program::identity::Agent::ClaudeCode,
+            ),
+            title: "Add rate limiting".to_owned(),
+            status: "Idle · 3m".to_owned(),
+            tone: if asks.is_some() {
+                AgentTone::Asking
+            } else {
+                AgentTone::Quiet
+            },
+            focused: true,
+            place: place.map(str::to_owned),
+            asks: asks.map(str::to_owned),
+            reply: reply.map(str::to_owned),
+            indicator: None,
+        }
+    }
+
+    fn label(agents: Vec<AgentLine>) -> super::super::Label {
+        super::super::Label {
+            tab: 1,
+            title: "api".to_owned(),
+            place_len: 0,
+            server: None,
+            indicator: None,
+            emblem: Emblem {
+                kind: crate::program::identity::Kind::Shell,
+                edges: 1,
+                face: None,
+            },
+            running: None,
+            upload: None,
+            mark: bt_core::HostMark::None,
+            agents,
+        }
+    }
+
+    const SHORT: &str = "Done.";
+    const LONG: &str = "Added a per-key limiter and 12 tests. The Redis fallback is still missing, so a restart forgets every count.";
+
+    /// What a row of the plain list is tall: its lead's height (the agent that asks, else the
+    /// focused one) with its details, or the tab's own.
+    fn listed(agents: Vec<AgentLine>, details: bool) -> f64 {
+        RowShape::of(&label(agents), false, details, 120.0).height
+    }
+
+    #[test]
+    fn a_row_says_the_question_else_the_reply_and_never_both() {
+        let both = agent(Some("Allow edit?"), Some(LONG), None);
+        assert_eq!(both.said(), Some("Allow edit?"));
+        assert_eq!(agent(None, Some(SHORT), None).said(), Some(SHORT));
+        assert_eq!(agent(None, None, Some("api · main")).said(), None);
+    }
+
+    #[test]
+    fn a_reply_grows_a_row_by_its_lines_where_a_question_does_and_the_place_adds_its_own() {
+        let plain = tabs::TAB_HEIGHT;
+        let place = Some("api · main");
+        // Nothing to say, nowhere to stand: a plain row.
+        assert_eq!(listed(vec![agent(None, None, None)], true), plain);
+        // The place alone, as before.
+        assert_eq!(
+            listed(vec![agent(None, None, place)], true),
+            plain + tabs::PLACE_ROW
+        );
+        // A short reply is one line; a long one two (the rest is cut), whatever the place.
+        assert_eq!(
+            listed(vec![agent(None, Some(SHORT), None)], true),
+            plain + tabs::ASK_ROW
+        );
+        assert_eq!(
+            listed(vec![agent(None, Some(LONG), None)], true),
+            plain + tabs::ASK_LINES as f64 * tabs::ASK_ROW
+        );
+        assert_eq!(
+            listed(vec![agent(None, Some(LONG), place)], true),
+            plain + tabs::ASK_LINES as f64 * tabs::ASK_ROW + tabs::PLACE_ROW
+        );
+        // The same height as the question of the same words takes.
+        assert_eq!(
+            listed(vec![agent(Some(LONG), None, place)], true),
+            listed(vec![agent(None, Some(LONG), place)], true)
+        );
+        // Both: the question's, whatever the reply would take.
+        assert_eq!(
+            listed(vec![agent(Some(SHORT), Some(LONG), place)], true),
+            listed(vec![agent(Some(SHORT), None, place)], true)
+        );
+        // With the details off a row is plain, with a reply or without.
+        assert_eq!(listed(vec![agent(None, Some(LONG), place)], false), plain);
+    }
+
+    #[test]
+    fn in_activity_each_line_is_as_tall_as_what_it_says_and_the_list_picks_its_lead_as_before() {
+        let place = Some("api · main");
+        let lines = vec![
+            agent(None, Some(LONG), place),
+            agent(Some(SHORT), None, place),
+            agent(None, None, None),
+        ];
+        let shape = RowShape::of(&label(lines.clone()), true, true, 120.0);
+        assert!(shape.whole);
+        assert_eq!(
+            shape.heights,
+            [
+                tabs::AGENT_ROW + tabs::ASK_LINES as f64 * tabs::ASK_ROW + tabs::PLACE_ROW,
+                tabs::AGENT_ROW + tabs::ASK_ROW + tabs::PLACE_ROW,
+                tabs::AGENT_ROW,
+            ]
+        );
+        assert_eq!(shape.height, shape.heights.iter().sum::<f64>());
+        // In the plain list a tab of several agents says the one that asks (a question outranks a
+        // reply), else the focused one's.
+        let mut asking = lines;
+        asking[0].focused = true;
+        asking[1].focused = false;
+        let shape = RowShape::of(&label(asking), false, true, 120.0);
+        assert_eq!(shape.lead, Some(1));
+        let mut quiet = vec![
+            agent(None, Some(LONG), place),
+            agent(None, Some(SHORT), place),
+        ];
+        quiet[0].focused = false;
+        let shape = RowShape::of(&label(quiet), false, true, 120.0);
+        assert_eq!(shape.lead, Some(1), "the focused pane's reply");
     }
 
     #[test]

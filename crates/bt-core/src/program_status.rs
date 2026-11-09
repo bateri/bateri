@@ -21,6 +21,15 @@
 //! next prompt for a record still alive. A `done` or `error` record survives the
 //! prompt, so its name does too — the program's result is still on show.
 //!
+//! **An agent's last reply** is one more text beside the records, not in one: it does not come in
+//! an `OSC 7501` report but from the agent's hook through the app channel (`bateri message`), so
+//! [`ProgramStatus::set_reply`] is how it enters. It is cleaned like a notification's text
+//! ([`crate::notify`]: control, bidirectional and invisible characters go) and held while a record
+//! is: it goes with the last one, at the shell's prompt (`prompt`) or at `state=clear`, which is
+//! when the program ended. A `done` or `error` record survives the prompt, and so does the reply
+//! with it. Text that arrives with no record to hold it is dropped, so a reply never outlives the
+//! program that said it. It is shown beside the tab ([`ProgramReport::reply`]).
+//!
 //! **`OSC 9 ; 4` is the root record's stand-in** until the first `OSC 7501` report
 //! arrives ([`progress`]): ConEmu's progress sequence — what `cargo`, `zig` and
 //! `winget` print — says "working" and "failed" and nothing else, and a program that
@@ -62,6 +71,9 @@ const MAX_DEPTH: usize = 8;
 const MAX_APP: usize = 32;
 const MAX_TITLE: usize = 192;
 const MAX_MSG: usize = 2048;
+/// The agent's last reply, bytes after cleaning. `bateri message` cuts to the same length before
+/// it sends, so this is the bound of a sender that does not.
+const MAX_REPLY: usize = 1000;
 
 /// The progress sequence's OSC number: iTerm2's `OSC 9` is a notification and
 /// ConEmu's `OSC 9 ; 4 ; state ; percent` a progress bar, told apart by the `4;`.
@@ -329,6 +341,8 @@ pub struct ProgramReport {
     pub title: Option<String>,
     /// What a blocked program asks.
     pub message: Option<String>,
+    /// The last thing an agent in the pane said ([`ProgramStatus::set_reply`]).
+    pub reply: Option<String>,
 }
 
 /// The terminal's records, by id.
@@ -344,6 +358,8 @@ pub(crate) struct ProgramStatus {
     /// grow, which the tab compares between two looks like a command's ends.
     pub(crate) done: u64,
     pub(crate) failed: u64,
+    /// What the agent last said, cleaned; held while a record is.
+    reply: Option<String>,
 }
 
 impl ProgramStatus {
@@ -411,7 +427,32 @@ impl ProgramStatus {
     pub(crate) fn prompt(&mut self) -> bool {
         let before = self.records.len();
         self.records.retain(|_, record| !record.state.live());
+        self.drop_reply_when_alone();
         self.records.len() != before
+    }
+
+    /// The agent said something (`bateri message`): kept, cleaned, for [`Self::report`]. `true` if
+    /// what the tab reads changed. Nothing is kept while no record is there to hold it, and an
+    /// empty text (nothing left once cleaned) leaves the last reply as it was.
+    pub(crate) fn set_reply(&mut self, text: &str) -> bool {
+        if self.records.is_empty() {
+            return false;
+        }
+        let Some(text) = crate::notify::clean(text.as_bytes(), MAX_REPLY) else {
+            return false;
+        };
+        if self.reply.as_deref() == Some(text.as_str()) {
+            return false;
+        }
+        self.reply = Some(text);
+        true
+    }
+
+    /// The reply leaves with the last record.
+    fn drop_reply_when_alone(&mut self) {
+        if self.records.is_empty() {
+            self.reply = None;
+        }
     }
 
     /// `state=clear`: the record and its children (`build` takes `build/test`),
@@ -428,6 +469,7 @@ impl ProgramStatus {
                         .is_some_and(|rest| rest.starts_with('/'))
             });
         }
+        self.drop_reply_when_alone();
         self.records.len() != before
     }
 
@@ -465,8 +507,9 @@ impl ProgramStatus {
     /// What the pane's program says of itself, for the side column's Activity
     /// and the tab's details: the record that decides what the user sees — a
     /// question first, then work, a failure, a finish, rest — with how long it
-    /// has been so, the work's title (that record's, else the newest one's) and
-    /// what a blocked program asks. `None` while no record is there.
+    /// has been so, the work's title (that record's, else the newest one's),
+    /// what a blocked program asks and what the agent last said. `None` while
+    /// no record is there.
     pub(crate) fn report(&self, now: Instant) -> Option<ProgramReport> {
         let rank = |state: State| match state {
             State::Blocked => 4,
@@ -494,6 +537,7 @@ impl ProgramStatus {
             held: now.saturating_duration_since(decisive.since),
             title,
             message: decisive.msg.clone(),
+            reply: self.reply.clone(),
         })
     }
 
@@ -584,6 +628,96 @@ mod tests {
         );
         status.apply(report("state=clear"), later);
         assert_eq!(status.report(later), None);
+    }
+
+    #[test]
+    fn an_agents_reply_is_held_beside_the_records_and_goes_with_the_last() {
+        let now = Instant::now();
+        let mut status = ProgramStatus::default();
+        // With no record to hold it, a reply is not kept.
+        assert!(!status.set_reply("Done."));
+        status.apply(set("", State::Working), now);
+        assert_eq!(status.report(now).expect("a record").reply, None);
+        assert!(status.set_reply("Added a limiter and 12 tests."));
+        assert_eq!(
+            status.report(now).expect("a record").reply.as_deref(),
+            Some("Added a limiter and 12 tests.")
+        );
+        // The same text again changes nothing the tab reads; a new one replaces the old.
+        assert!(!status.set_reply("Added a limiter and 12 tests."));
+        assert!(status.set_reply("The Redis fallback is still missing."));
+        // The state changes under it: the reply stays (a new turn has not answered yet).
+        status.apply(set("", State::Idle), now);
+        assert_eq!(
+            status.report(now).expect("a record").reply.as_deref(),
+            Some("The Redis fallback is still missing.")
+        );
+        // A prompt takes the live records, and the reply with the last of them.
+        assert!(status.prompt());
+        assert_eq!(status.report(now), None);
+        assert!(!status.set_reply("late"), "no record, no reply");
+        status.apply(set("", State::Idle), now);
+        assert_eq!(status.report(now).expect("a record").reply, None);
+    }
+
+    #[test]
+    fn a_reply_stays_while_a_result_waits_and_goes_when_it_is_cleared() {
+        let now = Instant::now();
+        let mut status = ProgramStatus::default();
+        status.apply(set("", State::Done), now);
+        assert!(status.set_reply("All green."));
+        // A `done` record survives the prompt, so its reply does.
+        assert!(!status.prompt());
+        assert_eq!(
+            status.report(now).expect("a record").reply.as_deref(),
+            Some("All green.")
+        );
+        // Another record going leaves the reply while one is left.
+        status.apply(set("build", State::Working), now);
+        assert!(status.prompt());
+        assert_eq!(
+            status.report(now).expect("a record").reply.as_deref(),
+            Some("All green.")
+        );
+        status.apply(set("build", State::Working), now);
+        assert!(status.apply(Report::Clear { id: "build".into() }, now));
+        assert_eq!(
+            status.report(now).expect("a record").reply.as_deref(),
+            Some("All green.")
+        );
+        // `state=clear` of the rest takes it.
+        assert!(status.apply(Report::Clear { id: String::new() }, now));
+        status.apply(set("", State::Idle), now);
+        assert_eq!(status.report(now).expect("a record").reply, None);
+    }
+
+    #[test]
+    fn a_reply_is_cleaned_trimmed_and_bounded() {
+        let now = Instant::now();
+        let mut status = ProgramStatus::default();
+        status.apply(set("", State::Idle), now);
+        // Control characters, bidirectional overrides and invisible ones go.
+        assert!(status.set_reply("  a\u{1b}[31mb \u{202e}c\u{200b}d\te\n  "));
+        assert_eq!(
+            status.report(now).expect("a record").reply.as_deref(),
+            Some("a[31mb cde")
+        );
+        // Nothing left once cleaned: the last reply stays.
+        assert!(!status.set_reply(" \u{1b}\u{202e}\n "));
+        assert!(!status.set_reply(""));
+        assert_eq!(
+            status.report(now).expect("a record").reply.as_deref(),
+            Some("a[31mb cde")
+        );
+        // Longer than the bound is cut at a character, never in one.
+        assert!(status.set_reply(&"\u{20ac}".repeat(600)));
+        let reply = status
+            .report(now)
+            .expect("a record")
+            .reply
+            .expect("a reply");
+        assert_eq!(reply, "\u{20ac}".repeat(333));
+        assert!(reply.len() <= MAX_REPLY);
     }
 
     #[test]

@@ -1545,15 +1545,16 @@ pub fn next_waiting<K: Copy + Eq>(order: &[K], current: Option<K>) -> Option<K> 
 /// stands, the folder and the branch or the server.
 pub const PLACE_ROW: f64 = 16.0;
 
-/// The height of a line of what a program asks, under a row; it takes [`ASK_LINES`] at the most.
+/// The height of a line of what a program asks — or, where it asks nothing, of what an agent last
+/// said — under a row; it takes [`ASK_LINES`] at the most.
 pub const ASK_ROW: f64 = 15.0;
 
-/// What a program asks is cut at this many lines.
+/// What a program asks, or an agent last said, is cut at this many lines.
 pub const ASK_LINES: usize = 2;
 
 /// How tall a row with details is (`[appearance] tab_details`): its own height `top` — a tab's
 /// [`TAB_HEIGHT`], an agent's [`AGENT_ROW`] — and under it the place's line when there is one
-/// and `asks` lines of what the program asks (at most [`ASK_LINES`]).
+/// and `asks` lines of what the program asks or the agent last said (at most [`ASK_LINES`]).
 pub fn detail_height(top: f64, place: bool, asks: usize) -> f64 {
     top + if place { PLACE_ROW } else { 0.0 } + asks.min(ASK_LINES) as f64 * ASK_ROW
 }

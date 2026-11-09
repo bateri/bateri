@@ -269,6 +269,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
             Err(failure) => letter.answer(Reply::Failed(failure).encode().into_bytes()),
         },
         Answer::Notify(text) => notify(app, letter, &server, from.as_deref(), &text),
+        Answer::Message(text) => message(app, letter, &server, from.as_deref(), &text),
         Answer::Arrange(request) => {
             arrange::arranged(app, letter, &server, from.as_deref(), &request);
         }
@@ -1178,6 +1179,24 @@ fn notify(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str>
         .collect();
     let at = found.as_ref().map(|(tab, pane, _)| (&**tab, pane.id()));
     notice(app.mtm(), at, &title, &body, None);
+    letter.answer(Reply::Done.encode().into_bytes());
+}
+
+/// `bateri message`: what an agent last said, kept for the pane that sent it (the session cleans
+/// and bounds it, and drops it with the pane's last program record) and shown beside the pane's
+/// tab when the agent's setting asks for it ([`TerminalTab::agents`]). Answered at once, whether
+/// or not a pane shows the terminal (the terminal may be a server's with no pane on this
+/// computer: the words then have nowhere to stand) and whatever the setting says: the hook is
+/// the shell function's to add, and a text that nothing shows costs nothing.
+fn message(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str>, text: &str) {
+    if let Some((tab, pane, _)) = from.and_then(|name| find_pane(app, &server.account, name))
+        && pane
+            .session()
+            .is_some_and(|session| session.set_program_reply(text))
+    {
+        // The tab's row reads the report again.
+        tab.activity_changed();
+    }
     letter.answer(Reply::Done.encode().into_bytes());
 }
 

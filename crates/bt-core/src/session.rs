@@ -9862,6 +9862,15 @@ impl Session {
         lock(&self.shell).program.report(Instant::now())
     }
 
+    /// The agent in the pane said something (`bateri message`: its hook's last reply): kept
+    /// beside the pane's program records for [`Self::program_report`], cleaned and bounded, and
+    /// gone with the last record. `true` if what the tab reads changed, which the caller then
+    /// announces (`Pane::program_status_changed`). One leaf-lock round, on a message, never on the
+    /// frame path.
+    pub fn set_program_reply(&self, text: &str) -> bool {
+        lock(&self.shell).program.set_reply(text)
+    }
+
     /// The newest block's [`BlockInfo`] — the tab bar's summary card, which
     /// has no mark's handle to ask [`Session::block_info`] with: our remote
     /// shell's last block while its session runs, else the local shell's.
