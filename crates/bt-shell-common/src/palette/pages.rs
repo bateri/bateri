@@ -350,7 +350,7 @@ mod tests {
             commands: &Commands::default(),
             fresh_ports: &[],
         };
-        assert_eq!(page_rows(&Scope::Settings, &src).len(), 40);
+        assert_eq!(page_rows(&Scope::Settings, &src).len(), 41);
         let themed = page_rows(&Scope::Theme(Slot::Active), &src);
         assert_eq!(ids(&themed), ["theme.system", "theme.nord"]);
         let shapes = page_rows(&Scope::Choices("terminal.cursor".to_owned()), &src);

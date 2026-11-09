@@ -42,6 +42,7 @@ pub enum Section {
     Motion,
     Shell,
     Remote,
+    Agents,
 }
 
 impl Section {
@@ -53,6 +54,7 @@ impl Section {
             Section::Motion => "Motion",
             Section::Shell => "Shell",
             Section::Remote => "Remote",
+            Section::Agents => "Agents",
         }
     }
 }
@@ -518,7 +520,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 40] = [
+static CATALOG: [Setting; 41] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -966,6 +968,16 @@ static CATALOG: [Setting; 40] = [
         |s| s.remote_stats.mode,
         SettingsEdit::RemoteStats
     ),
+    toggle!(
+        "agents.claude_integration",
+        Agents,
+        "Claude Code Integration",
+        "agent anthropic last reply tab hook",
+        false,
+        Some("new Claude Code sessions only"),
+        |s| s.agents_claude_integration,
+        SettingsEdit::AgentsClaudeIntegration
+    ),
 ];
 
 #[cfg(test)]
@@ -995,8 +1007,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_forty_settings_once_each() {
-        assert_eq!(all().len(), 40);
+    fn the_catalog_lists_the_forty_one_settings_once_each() {
+        assert_eq!(all().len(), 41);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -1136,8 +1148,20 @@ mod tests {
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
         // The font's own options are the machine's, so only the table is counted.
-        assert_eq!(all().len(), 40);
-        assert_eq!(rows(&settings).len(), 40 + font_rows(&settings).len());
+        assert_eq!(all().len(), 41);
+        assert_eq!(rows(&settings).len(), 41 + font_rows(&settings).len());
+    }
+
+    #[test]
+    fn the_claude_code_integration_is_a_switch_of_its_own_section_that_shows_the_file() {
+        let claude = find("agents.claude_integration").expect("the row");
+        assert_eq!(claude.section(), Section::Agents);
+        assert_eq!(claude.row(&Settings::default()).toggle, Some(true));
+        let off = Settings {
+            agents_claude_integration: false,
+            ..Settings::default()
+        };
+        assert_eq!(claude.row(&off).toggle, Some(false));
     }
 
     #[test]
