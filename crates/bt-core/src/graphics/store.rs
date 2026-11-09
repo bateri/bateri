@@ -35,8 +35,8 @@ use super::canvas::Rect;
 use super::command::{Action, Command, Scope};
 use super::edits::Edits;
 use super::follow::{self, Seen};
-use super::place::{Motion, Picture, Placement, Screen, Spec};
-use super::placeholder::{self, Run, Virtual};
+use super::place::{self, Motion, Parent, Picture, Placement, Screen, Spec};
+use super::placeholder::{self, Marks, Run, Virtual};
 use super::receive::Decoded;
 use super::{Echo, Error, IMAGE_LIMIT, PLACEMENT_LIMIT, Reply};
 use animation::Animation;
@@ -47,6 +47,20 @@ const AUTO_ID_BASE: u32 = 0x8000_0000;
 
 /// The gap a frame is given when its command names none, milliseconds.
 pub(super) const DEFAULT_GAP: u32 = 40;
+
+/// How many placements a relative one may hang above: its parent, that one's
+/// parent, and so on up to one that hangs on nothing.
+const PARENT_DEPTH_LIMIT: usize = 8;
+
+/// Where the cells of the virtual placements start on what a frame draws, by
+/// the placement's `seq`: grid line and column of the first of its
+/// placeholder cells that shows something.
+type Anchors = HashMap<u64, (i32, i32)>;
+
+/// Where the relative placements are on what a frame draws, by `seq`: the grid
+/// line and the column of their first cell. Either can lie off the surface;
+/// one whose parent has no place is not in it.
+type Spots = HashMap<u64, (i32, i32)>;
 
 /// One frame of an image: all of it, as straight RGBA.
 pub(crate) struct Frame {
@@ -130,6 +144,14 @@ pub(crate) struct Window {
     pub(crate) shift: i32,
 }
 
+/// What one frame draws of a screen: the lines of the grid, those of the fill
+/// band when it shows any, and the placeholder cells read from them.
+pub(crate) struct View<'a> {
+    pub(crate) grid: Window,
+    pub(crate) band: Option<Window>,
+    pub(crate) marks: &'a Marks,
+}
+
 /// One screen's images, oldest first, and their placements.
 pub(crate) struct Store {
     images: Vec<Image>,
@@ -144,6 +166,9 @@ pub(crate) struct Store {
     /// are on no line and no scroll, clear or resize moves or ends them.
     virtuals: VecDeque<Virtual>,
     next_seq: u64,
+    /// Whether some placement is relative: where they are is looked for only
+    /// then.
+    has_relatives: bool,
     /// The main screen's rows as of the last look ([`follow`]).
     pub(super) seen: Option<Seen>,
     /// The alternate screen's rows as of the last look.
@@ -160,6 +185,7 @@ impl Store {
             placements: VecDeque::new(),
             virtuals: VecDeque::new(),
             next_seq: 0,
+            has_relatives: false,
             seen: None,
             rows: Vec::new(),
         }
@@ -199,6 +225,126 @@ impl Store {
         self.virtuals.retain(|proto| proto.image != gone.generation);
     }
 
+    /// Ends the relative placements whose parent is gone, and those hanging
+    /// on them: a placement that hangs on another lives as long as it does.
+    /// When `free`, an image that is left with no placement goes too, as in
+    /// kitty, where the layout takes it out with its last placement.
+    /// What takes an image out ([`Store::remove`]) is followed by this, for
+    /// what hung on its placements. The generations of the images of the
+    /// placements that ended are what it returns.
+    fn prune_relatives(&mut self, free: bool) -> Vec<u64> {
+        let mut ended = Vec::new();
+        if !self.has_relatives {
+            return ended;
+        }
+        loop {
+            let alive: HashSet<u64> = self
+                .placements
+                .iter()
+                .map(|placement| placement.seq)
+                .chain(self.virtuals.iter().map(|proto| proto.seq))
+                .collect();
+            let before = self.placements.len();
+            let mut lost = Vec::new();
+            self.placements.retain(|placement| {
+                let gone = placement
+                    .parent
+                    .is_some_and(|parent| !alive.contains(&parent.seq));
+                if gone {
+                    lost.push(placement.image);
+                }
+                !gone
+            });
+            if self.placements.len() == before {
+                break;
+            }
+            if free {
+                let shown = self.shown();
+                for generation in &lost {
+                    if shown.contains(generation) {
+                        continue;
+                    }
+                    if let Some(index) = self
+                        .images
+                        .iter()
+                        .position(|image| image.generation == *generation)
+                    {
+                        self.remove(index);
+                    }
+                }
+            }
+            ended.extend(lost);
+        }
+        self.has_relatives = self.placements.iter().any(Placement::is_relative);
+        ended
+    }
+
+    /// What a put that names a parent (`P=`) hangs on, or why it cannot: the
+    /// parent image has to be here with a placement of the id `Q=` (any one
+    /// when it names none: the newest), and the chain above it may be
+    /// [`PARENT_DEPTH_LIMIT`] placements long and cannot lead back to the
+    /// placement `own`, which the put is making again.
+    fn relate(&self, command: &Command, own: Option<u64>) -> Result<Option<Parent>, Error> {
+        if !command.is_relative() {
+            return Ok(None);
+        }
+        let Some(image) = self
+            .images
+            .iter()
+            .find(|image| image.id == command.parent_image)
+        else {
+            return Err(Error::no_parent(format!(
+                "the parent image with id {} does not exist",
+                command.parent_image
+            )));
+        };
+        let wanted = command.parent_placement;
+        let parent = self
+            .placements
+            .iter()
+            .map(|placement| (placement.image, placement.id, placement.seq))
+            .chain(
+                self.virtuals
+                    .iter()
+                    .map(|proto| (proto.image, proto.id, proto.seq)),
+            )
+            .filter(|&(shown, id, _)| shown == image.generation && (wanted == 0 || id == wanted))
+            .map(|(_, _, seq)| seq)
+            .max();
+        let Some(parent) = parent else {
+            return Err(Error::no_parent(format!(
+                "the parent image with id {} has no placement with id {wanted}",
+                command.parent_image
+            )));
+        };
+        if own == Some(parent) {
+            return Err(Error::invalid("a placement cannot be its own parent"));
+        }
+        let by_seq: HashMap<u64, &Placement> = self
+            .placements
+            .iter()
+            .map(|placement| (placement.seq, placement))
+            .collect();
+        let mut at = parent;
+        let mut above = 1;
+        while let Some(link) = by_seq.get(&at).and_then(|placement| placement.parent) {
+            if own == Some(link.seq) {
+                return Err(Error::cycle(
+                    "the parent reference leads back to the placement",
+                ));
+            }
+            above += 1;
+            if above > PARENT_DEPTH_LIMIT {
+                return Err(Error::too_deep("too many levels of parent references"));
+            }
+            at = link.seq;
+        }
+        Ok(Some(Parent {
+            seq: parent,
+            offset: command.offset,
+        }))
+    }
+
     /// Keeps `image`, replacing a stored image of the same id (and ending its
     /// placements), and makes room — in bytes, and in images
     /// ([`IMAGE_LIMIT`]): images no placement shows go first, oldest first,
@@ -228,6 +374,7 @@ impl Store {
                 .unwrap_or(0);
             self.remove(victim);
         }
+        self.prune_relatives(true);
         Ok(())
     }
 
@@ -256,28 +403,69 @@ impl Store {
     /// for it. Showing an image makes it the newest, so the quota goes after
     /// the ones nobody looked at. A virtual placement (`U=1`) is kept apart:
     /// it has no line and no column, only the box of cells its image will be
-    /// fitted to.
-    fn place(&mut self, generation: u64, command: &Command, screen: &Screen, motion: Motion) {
+    /// fitted to. A relative one (`P=`) has no line and column either: it is
+    /// where its parent is, wherever that is when the frame is drawn.
+    fn place(
+        &mut self,
+        generation: u64,
+        command: &Command,
+        screen: &Screen,
+        motion: Motion,
+    ) -> Result<(), Error> {
+        if command.unicode && command.is_relative() {
+            return Err(Error::invalid(
+                "a virtual placement cannot hang on a parent",
+            ));
+        }
         let Some(at) = self
             .images
             .iter()
             .position(|image| image.generation == generation)
         else {
-            return;
+            return Ok(());
         };
+        let id = command.echo.placement;
+        // A placement of this id is the one being moved, whichever kind it is.
+        let moved = (id != 0)
+            .then(|| {
+                let same = |image: u64, own: u32| image == generation && own == id;
+                self.placements
+                    .iter()
+                    .find(|placement| same(placement.image, placement.id))
+                    .map(|placement| placement.seq)
+                    .or_else(|| {
+                        self.virtuals
+                            .iter()
+                            .find(|proto| same(proto.image, proto.id))
+                            .map(|proto| proto.seq)
+                    })
+            })
+            .flatten();
+        let parent = self.relate(command, moved)?;
         let image = self.images.remove(at);
         let size = (image.width, image.height);
         self.images.push(image);
-        let id = command.echo.placement;
-        // A placement of this id is the one being moved, whichever kind it is.
         if id != 0 {
             self.placements
                 .retain(|placement| !(placement.image == generation && placement.id == id));
             self.virtuals
                 .retain(|proto| !(proto.image == generation && proto.id == id));
         }
+        self.next_seq += 1;
+        let seq = self.next_seq;
+        if let Some(moved) = moved {
+            // What hung on the placement that was here hangs on this one.
+            for placement in &mut self.placements {
+                if let Some(link) = &mut placement.parent
+                    && link.seq == moved
+                {
+                    link.seq = seq;
+                }
+            }
+        }
         if command.unicode {
             self.virtuals.push_back(Virtual {
+                seq,
                 image: generation,
                 id,
                 columns: command.columns,
@@ -285,23 +473,34 @@ impl Store {
             });
             if self.virtuals.len() > PLACEMENT_LIMIT {
                 self.virtuals.pop_front();
+                self.prune_relatives(true);
             }
-            return;
+            return Ok(());
         }
-        self.next_seq += 1;
+        self.has_relatives |= parent.is_some();
+        let (line, col) = match parent {
+            Some(_) => (0, 0),
+            None => (
+                screen.cursor.0.saturating_sub(motion.above()),
+                screen.cursor.1,
+            ),
+        };
         self.placements.push_back(Placement {
-            seq: self.next_seq,
+            seq,
             image: generation,
             id,
-            line: screen.cursor.0.saturating_sub(motion.above()),
-            col: screen.cursor.1,
+            line,
+            col,
             spec: Spec::new(command, size),
+            parent,
         });
         // The image of the one that goes stays, for the program to show again
         // or for the quota to take first.
         if self.placements.len() > PLACEMENT_LIMIT {
             self.placements.pop_front();
+            self.prune_relatives(true);
         }
+        Ok(())
     }
 
     /// Takes out the images no placement shows that `only` names — those
@@ -318,6 +517,7 @@ impl Store {
                 self.remove(index);
             }
         }
+        self.prune_relatives(true);
     }
 
     /// Removes what a delete command names. A delete ends the placements it
@@ -339,6 +539,18 @@ impl Store {
             .then(|| self.numbered(echo.number).map(|image| image.generation))
             .flatten();
         let in_range = |image: &Image| image.id != 0 && (command.x..=command.y).contains(&image.id);
+        // A relative placement is on no line of its own: what a delete names
+        // by place leaves it, and it ends with its parent. Its image stays
+        // then, as it does for any placement a delete takes.
+        let by_place = matches!(
+            command.scope,
+            Scope::Visible
+                | Scope::Cursor
+                | Scope::Cell
+                | Scope::CellZ
+                | Scope::Column
+                | Scope::Row
+        );
         let mut touched = HashSet::new();
         {
             let Self {
@@ -371,6 +583,9 @@ impl Store {
                 !hit
             });
             placements.retain(|placement| {
+                if by_place && placement.is_relative() {
+                    return true;
+                }
                 let covers_cell = || placement.covers(line, col, cell);
                 let hit = match command.scope {
                     // What reaches onto the screen: everything but what has
@@ -400,6 +615,7 @@ impl Store {
                 !hit
             });
         }
+        touched.extend(self.prune_relatives(!by_place));
         let free = command.free;
         match command.scope {
             Scope::Visible => self.sweep(free, |_| true),
@@ -416,8 +632,10 @@ impl Store {
     /// address.
     fn clear_placements(&mut self, screen: &Screen, everything: bool) {
         let cell = screen.cell;
-        self.placements
-            .retain(|placement| !everything && placement.bottom(cell) < 0);
+        self.placements.retain(|placement| {
+            placement.is_relative() || (!everything && placement.bottom(cell) < 0)
+        });
+        self.prune_relatives(false);
         self.sweep(false, |_| true);
     }
 
@@ -426,22 +644,26 @@ impl Store {
     /// rest moves up.
     fn wipe(&mut self, top: i32, cell: (u16, u16)) {
         self.placements
-            .retain(|placement| placement.bottom(cell) >= top);
-        for placement in &mut self.placements {
+            .retain(|placement| placement.is_relative() || placement.bottom(cell) >= top);
+        for placement in self.placements.iter_mut().filter(|p| !p.is_relative()) {
             placement.line = placement.line.saturating_sub(top);
         }
+        self.prune_relatives(false);
         self.sweep(false, |_| true);
     }
 
     /// Moves every placement up `rows` lines (down when negative) and drops
     /// those left wholly above `top` or at or below `limit`.
     pub(super) fn lift(&mut self, rows: i32, top: i32, limit: Option<i32>, cell: (u16, u16)) {
-        for placement in &mut self.placements {
+        for placement in self.placements.iter_mut().filter(|p| !p.is_relative()) {
             placement.line = placement.line.saturating_sub(rows);
         }
         self.placements.retain(|placement| {
-            placement.bottom(cell) >= top && limit.is_none_or(|limit| placement.line < limit)
+            placement.is_relative()
+                || (placement.bottom(cell) >= top
+                    && limit.is_none_or(|limit| placement.line < limit))
         });
+        self.prune_relatives(false);
     }
 
     fn clear(&mut self) {
@@ -449,6 +671,7 @@ impl Store {
         self.bytes = 0;
         self.placements.clear();
         self.virtuals.clear();
+        self.has_relatives = false;
         self.seen = None;
         self.rows.clear();
     }
@@ -516,16 +739,103 @@ impl Store {
         }
     }
 
+    /// Where the cells of each virtual placement start: the top row and the
+    /// left column of the placeholder cells of `marks` that show it. Only the
+    /// placements something hangs on are looked for.
+    fn anchors(&self, marks: &Marks, cell: (u16, u16)) -> Anchors {
+        let mut anchors = Anchors::new();
+        if !self.has_relatives {
+            return anchors;
+        }
+        let hung_on: HashSet<u64> = self
+            .placements
+            .iter()
+            .filter_map(|placement| placement.parent.map(|parent| parent.seq))
+            .collect();
+        for run in marks.all() {
+            let Some((image, proto)) = self.prototype(run) else {
+                continue;
+            };
+            if !hung_on.contains(&proto.seq)
+                || placeholder::fit(
+                    run,
+                    cell,
+                    (image.width, image.height),
+                    (proto.columns, proto.rows),
+                )
+                .is_none()
+            {
+                continue;
+            }
+            let start = (run.line, i32::from(run.col));
+            anchors
+                .entry(proto.seq)
+                .and_modify(|first| *first = (first.0.min(start.0), first.1.min(start.1)))
+                .or_insert(start);
+        }
+        anchors
+    }
+
+    /// Where the relative placements are: each one's parent's place and its
+    /// offsets from it, through all the placements it hangs above. One whose
+    /// parent is nowhere on the surface (a virtual placement with no cell
+    /// showing it) or that has more than [`PARENT_DEPTH_LIMIT`] above it has
+    /// none.
+    fn locate(&self, marks: &Marks, cell: (u16, u16)) -> Spots {
+        if !self.has_relatives {
+            return Spots::new();
+        }
+        let anchors = self.anchors(marks, cell);
+        let by_seq: HashMap<u64, &Placement> = self
+            .placements
+            .iter()
+            .map(|placement| (placement.seq, placement))
+            .collect();
+        let spot = |placement: &Placement| -> Option<(i32, i32)> {
+            let mut link = placement.parent?;
+            let (mut line, mut col) = (0i32, 0i32);
+            for _ in 0..PARENT_DEPTH_LIMIT {
+                line = line.saturating_add(link.offset.1);
+                col = col.saturating_add(link.offset.0);
+                let Some(above) = by_seq.get(&link.seq) else {
+                    let (at_line, at_col) = anchors.get(&link.seq)?;
+                    return Some((at_line.saturating_add(line), at_col.saturating_add(col)));
+                };
+                let Some(next) = above.parent else {
+                    return Some((
+                        above.line.saturating_add(line),
+                        i32::from(above.col).saturating_add(col),
+                    ));
+                };
+                link = next;
+            }
+            None
+        };
+        self.placements
+            .iter()
+            .filter(|placement| placement.is_relative())
+            .filter_map(|placement| spot(placement).map(|at| (placement.seq, at)))
+            .collect()
+    }
+
     /// The pictures of the placements that reach into `window`, in drawing
     /// order: by layer, then by age.
-    fn collect(&self, window: Window, cell: (u16, u16), columns: u16, out: &mut Vec<Picture>) {
-        let mut shown: Vec<&Placement> = self.in_window(window, cell, columns).collect();
+    fn collect(
+        &self,
+        window: Window,
+        cell: (u16, u16),
+        columns: u16,
+        spots: &Spots,
+        out: &mut Vec<Picture>,
+    ) {
+        let mut shown: Vec<(&Placement, i32, i32)> =
+            self.in_window(window, cell, columns, spots).collect();
         if shown.is_empty() {
             return;
         }
-        shown.sort_by_key(|placement| (placement.spec.z, placement.seq));
+        shown.sort_by_key(|(placement, _, _)| (placement.spec.z, placement.seq));
         let images = by_generation(&self.images);
-        for placement in shown {
+        for (placement, line, col) in shown {
             let Some(image) = images.get(&placement.image) else {
                 continue;
             };
@@ -533,19 +843,34 @@ impl Store {
                 continue;
             };
             let spec = &placement.spec;
-            let (width, height) = spec.dest_px(cell);
-            let (x_offset, y_offset) = spec.offset_in(cell);
+            let (mut width, height) = spec.dest_px(cell);
+            let (mut x_offset, y_offset) = spec.offset_in(cell);
+            let mut source = spec.source;
             if spec.source[2] == 0 || spec.source[3] == 0 || width == 0 || height == 0 {
                 continue;
             }
+            // A relative placement can start left of the surface: what is
+            // there is cut off.
+            if col < 0 {
+                let Some((kept, rest)) = place::cut_left(
+                    col.unsigned_abs(),
+                    u32::from(cell.0),
+                    x_offset,
+                    width,
+                    source,
+                ) else {
+                    continue;
+                };
+                (width, source, x_offset) = (kept, rest, 0);
+            }
             out.push(Picture {
-                col: placement.col,
-                row: placement.line.saturating_add(window.shift),
+                col: u16::try_from(col.max(0)).unwrap_or(u16::MAX),
+                row: line.saturating_add(window.shift),
                 x_offset,
                 y_offset,
                 width,
                 height,
-                source: spec.source,
+                source,
                 z: spec.z,
                 image: image.revision,
                 key: image.generation,
@@ -631,6 +956,7 @@ impl Store {
             line: 0,
             col: 0,
             spec: Spec::new(&Command::parse(b"").expect("an empty command"), size),
+            parent: None,
         });
     }
 }
@@ -695,8 +1021,12 @@ impl Images {
         };
         match store.insert(image) {
             Ok(()) => {
-                if command.action == Action::TransmitAndPut {
-                    store.place(generation, command, screen, motion);
+                // The image is kept when the placement it came with is
+                // refused, and the answer says why.
+                if command.action == Action::TransmitAndPut
+                    && let Err(error) = store.place(generation, command, screen, motion)
+                {
+                    return Reply::failed(echo, error);
                 }
                 Reply::ok(echo)
             }
@@ -708,6 +1038,12 @@ impl Images {
     pub(crate) fn put(&mut self, screen: &Screen, command: &Command, motion: Motion) -> Reply {
         let store = self.screen(screen.alt);
         let mut echo: Echo = command.echo;
+        if command.unicode && command.is_relative() {
+            return Reply::failed(
+                echo,
+                Error::invalid("a virtual placement cannot hang on a parent"),
+            );
+        }
         let Some(image) = store.named(echo) else {
             return Reply::failed(
                 echo,
@@ -719,8 +1055,10 @@ impl Images {
         };
         let generation = image.generation;
         echo.id = image.id;
-        store.place(generation, command, screen, motion);
-        Reply::ok(echo)
+        match store.place(generation, command, screen, motion) {
+            Ok(()) => Reply::ok(echo),
+            Err(error) => Reply::failed(echo, error),
+        }
     }
 
     pub(crate) fn delete(&mut self, screen: &Screen, command: &Command) {
@@ -755,10 +1093,12 @@ impl Images {
     pub(crate) fn resized(&mut self, moved: i32, reflowed: bool, cell: (u16, u16)) {
         if reflowed {
             self.main.placements.clear();
+            self.main.prune_relatives(false);
         } else {
             self.main.lift(moved, i32::MIN, None, cell);
         }
         self.alt.placements.clear();
+        self.alt.prune_relatives(false);
         self.alt.rows.clear();
     }
 
@@ -809,43 +1149,26 @@ impl Images {
             .is_empty()
     }
 
-    /// The generations of the images the placeholder runs show, each once.
-    pub(crate) fn marked<'a>(&self, alt: bool, runs: impl Iterator<Item = &'a Run>) -> Vec<u64> {
-        (if alt { &self.alt } else { &self.main }).marked(runs)
-    }
-
-    /// Adds the pictures of the active screen's placeholder cells: the runs
-    /// read from the grid's `window` and from the band's.
-    pub(crate) fn collect_marked(
-        &self,
-        alt: bool,
-        cell: (u16, u16),
-        grid: (Window, &[Run]),
-        band: Option<(Window, &[Run])>,
-        out: &mut super::place::Pictures,
-    ) {
-        let store = if alt { &self.alt } else { &self.main };
-        store.collect_marked(grid.0, cell, grid.1, &mut out.grid);
-        if let Some((window, runs)) = band {
-            store.collect_marked(window, cell, runs, &mut out.band);
-        }
-    }
-
     /// Adds the pictures of the active screen's placements that reach into
-    /// the grid's `window` and the band's.
+    /// the view's grid lines and its band's, then those of its placeholder
+    /// cells.
     pub(crate) fn collect(
         &self,
         alt: bool,
         cell: (u16, u16),
         columns: u16,
-        grid: Window,
-        band: Option<Window>,
+        view: &View,
         out: &mut super::place::Pictures,
     ) {
         let store = if alt { &self.alt } else { &self.main };
-        store.collect(grid, cell, columns, &mut out.grid);
-        if let Some(band) = band {
-            store.collect(band, cell, columns, &mut out.band);
+        let spots = store.locate(view.marks, cell);
+        store.collect(view.grid, cell, columns, &spots, &mut out.grid);
+        store.collect_marked(view.grid, cell, &view.marks.grid, &mut out.grid);
+        if let Some(band) = view.band {
+            store.collect(band, cell, columns, &spots, &mut out.band);
+            if let Some(runs) = &view.marks.band {
+                store.collect_marked(band, cell, runs, &mut out.band);
+            }
         }
     }
 

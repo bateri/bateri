@@ -97,8 +97,9 @@ pub(crate) use receive::{Env, Outcome, Receiver};
 pub(crate) use store::{Window, screen_of};
 
 use command::{Action, Command, Medium};
+use placeholder::Marks;
 use receive::{Decoded, Room};
-use store::Images;
+use store::{Images, View};
 
 /// The most stored pixel bytes one screen keeps: kitty's own quota, so a
 /// program that fits kitty fits here. Past it the images with no placement
@@ -228,6 +229,21 @@ impl Error {
     /// A command that names an image there is none of.
     pub(crate) fn missing(message: impl Into<String>) -> Self {
         Self::new("ENOENT", message)
+    }
+
+    /// A relative placement whose parent there is none of.
+    pub(crate) fn no_parent(message: impl Into<String>) -> Self {
+        Self::new("ENOPARENT", message)
+    }
+
+    /// A relative placement that would hang on itself, through its parents.
+    pub(crate) fn cycle(message: impl Into<String>) -> Self {
+        Self::new("ECYCLE", message)
+    }
+
+    /// A relative placement with more parents above it than are followed.
+    pub(crate) fn too_deep(message: impl Into<String>) -> Self {
+        Self::new("ETOODEEP", message)
     }
 
     /// An image that cannot be kept.
@@ -841,32 +857,25 @@ impl Hub {
         let columns = u16::try_from(term.columns()).unwrap_or(u16::MAX);
         // The cells that show an image are read only when a virtual placement
         // could be what they show.
-        let (grid_cells, band_cells) = if images.holds_virtual(alt) {
-            (
-                placeholder::read(term, grid, columns),
-                band.map(|band| placeholder::read(term, band, columns)),
-            )
+        let marks = if images.holds_virtual(alt) {
+            Marks::read(term, grid, band, columns)
         } else {
-            (Vec::new(), None)
+            Marks::default()
+        };
+        let view = View {
+            grid,
+            band,
+            marks: &marks,
         };
         // What the terminal plays comes before the pictures are made, so that a
         // frame that is due is the one drawn. It is the frames on screen that
         // are played, and the time to the next is for the clock.
         let due = if self.playing.load(Ordering::Relaxed) {
-            let windows: Vec<Window> = std::iter::once(grid).chain(band).collect();
-            let shown = images.marked(alt, grid_cells.iter().chain(band_cells.iter().flatten()));
-            images.advance(alt, cell, columns, &windows, &shown, now)
+            images.advance(alt, cell, columns, &view, now)
         } else {
             None
         };
-        images.collect(alt, cell, columns, grid, band, out);
-        images.collect_marked(
-            alt,
-            cell,
-            (grid, &grid_cells),
-            band.zip(band_cells.as_deref()),
-            out,
-        );
+        images.collect(alt, cell, columns, &view, out);
         due.map(|due| due.saturating_duration_since(now))
     }
 

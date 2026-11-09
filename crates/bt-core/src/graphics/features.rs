@@ -20,8 +20,8 @@ use super::{Echo, Error, Reply};
 
 /// What a key may be set to, for an action that reads it.
 enum Values {
-    /// Any number (a signed one for `z=`), as long as it is not the default,
-    /// zero.
+    /// Any number (a signed one for `z=`, `H=` and `V=`), as long as it is
+    /// not the default, zero.
     Number,
     /// Any of these; the key's default is not among them, as it is never
     /// reported.
@@ -56,6 +56,10 @@ const PLACE: Table = &[
     (b'z', Values::Number),
     (b'C', Values::Only(&["1"])),
     (b'U', Values::Only(&["1"])),
+    (b'P', Values::Number),
+    (b'Q', Values::Number),
+    (b'H', Values::Number),
+    (b'V', Values::Number),
 ];
 
 /// What `a=f` adds to a transmission: where the pixels go, which frame is the
@@ -135,7 +139,7 @@ fn understood(tables: &[Table], key: u8, value: &[u8]) -> bool {
                 !digits.is_empty()
                     && digits.iter().all(u8::is_ascii_digit)
                     && digits.iter().any(|&digit| digit != b'0')
-                    && (key == b'z' || digits.len() == value.len())
+                    && (matches!(key, b'z' | b'H' | b'V') || digits.len() == value.len())
             }
             Values::Only(only) => only.iter().any(|one| one.as_bytes() == value),
         })

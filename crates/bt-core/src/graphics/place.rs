@@ -219,28 +219,52 @@ impl Motion {
     }
 }
 
+/// What a relative placement hangs on: it goes where the parent goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Parent {
+    /// The `seq` of the placement it hangs on, a real one or a virtual one.
+    pub(crate) seq: u64,
+    /// Cells right and down of the parent's first cell; negative is left and
+    /// up.
+    pub(crate) offset: (i32, i32),
+}
+
 /// One image shown on a screen.
 #[derive(Clone, Debug)]
 pub(crate) struct Placement {
-    /// Counts the placements made on the session, so that two on the same
-    /// layer are drawn in the order they were made.
+    /// Counts the placements made on the session (the virtual ones too), so
+    /// that two on the same layer are drawn in the order they were made, and
+    /// names the placement for what hangs on it.
     pub(crate) seq: u64,
     /// The generation of the image shown.
     pub(crate) image: u64,
     /// The program's id for this placement; 0 for none.
     pub(crate) id: u32,
-    /// The grid line of the placement's top row; negative is the history.
+    /// The grid line of the placement's top row; negative is the history. Not
+    /// a relative placement's: where that one is comes from its parent.
     pub(crate) line: i32,
     /// The column of its first cell.
     pub(crate) col: u16,
     pub(crate) spec: Spec,
+    /// What it hangs on, if it is relative.
+    pub(crate) parent: Option<Parent>,
 }
 
 impl Placement {
+    /// Whether it hangs on another placement and has no place of its own.
+    pub(crate) fn is_relative(&self) -> bool {
+        self.parent.is_some()
+    }
+
     /// The last line the placement covers.
     pub(crate) fn bottom(&self, cell: (u16, u16)) -> i32 {
+        self.bottom_at(self.line, cell)
+    }
+
+    /// The last line the placement covers when its top row is `line`.
+    pub(crate) fn bottom_at(&self, line: i32, cell: (u16, u16)) -> i32 {
         let rows = i32::try_from(self.spec.span(cell).1).unwrap_or(i32::MAX);
-        self.line.saturating_add(rows.saturating_sub(1))
+        line.saturating_add(rows.saturating_sub(1))
     }
 
     /// Whether it covers the line `line`.
@@ -258,6 +282,32 @@ impl Placement {
     pub(crate) fn covers(&self, line: i32, col: i64, cell: (u16, u16)) -> bool {
         self.holds_line(line, cell) && self.holds_column(col, cell)
     }
+}
+
+/// A picture that starts `cells` cells and `x_offset` pixels left of the
+/// surface's first column, cut to the surface: the width that is left and the
+/// part of the image's pixels it shows, or `None` when none is. The cut is
+/// taken off the image at the picture's own scale.
+pub(crate) fn cut_left(
+    cells: u32,
+    cell_width: u32,
+    x_offset: u32,
+    width: u32,
+    source: Source,
+) -> Option<(u32, Source)> {
+    let left_of = u64::from(cells) * u64::from(cell_width.max(1));
+    let cut = left_of.checked_sub(u64::from(x_offset))?;
+    let kept = u64::from(width).checked_sub(cut).filter(|&kept| kept > 0)?;
+    let scale = f64::from(source[2]) / f64::from(width.max(1));
+    let taken = (cut as f64 * scale).round().min(f64::from(source[2]));
+    let rest = (f64::from(source[2]) - taken).max(0.0);
+    if rest < 1.0 {
+        return None;
+    }
+    Some((
+        u32::try_from(kept).ok()?,
+        [source[0] + taken as u32, source[1], rest as u32, source[3]],
+    ))
 }
 
 /// One placement as the drawing sees it: pixels and rectangles, nothing of
@@ -470,6 +520,24 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_left_of_the_first_column_is_cut_at_its_own_scale() {
+        // 40 pixels of a 20 pixel image that starts 4 pixels into the cell
+        // before the first: 6 pixels are left of the surface, 3 of the image's.
+        assert_eq!(
+            cut_left(1, 10, 4, 40, [0, 5, 20, 8]),
+            Some((34, [3, 5, 17, 8]))
+        );
+        // Whole cells.
+        assert_eq!(
+            cut_left(2, 10, 0, 40, [3, 0, 20, 8]),
+            Some((20, [13, 0, 10, 8]))
+        );
+        // Nothing of it is on the surface.
+        assert_eq!(cut_left(4, 10, 0, 40, [0, 0, 20, 8]), None);
+        assert_eq!(cut_left(5, 10, 0, 40, [0, 0, 20, 8]), None);
+    }
+
+    #[test]
     fn a_placement_covers_the_cells_of_its_span() {
         let placement = Placement {
             seq: 1,
@@ -478,6 +546,7 @@ mod tests {
             line: -2,
             col: 5,
             spec: spec("a=p,c=3,r=4", (30, 80)),
+            parent: None,
         };
         assert_eq!(placement.bottom(CELL), 1);
         assert!(placement.covers(-2, 5, CELL) && placement.covers(1, 7, CELL));

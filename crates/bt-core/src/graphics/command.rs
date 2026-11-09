@@ -145,9 +145,13 @@ pub(crate) struct Command {
     /// placeholder character show; it covers no cell of its own and does not
     /// move the cursor.
     pub(crate) unicode: bool,
-    /// `P=` and `Q=` as written: relative placement, which this terminal does
-    /// not do yet, so [`parse`] refuses it.
-    pub(crate) relative: bool,
+    /// `P=` and `Q=`: the image and the placement of it that a relative
+    /// placement hangs on; 0 is none. A placement with an image to hang on
+    /// goes where its parent goes, `H=` cells right and `V=` cells down of
+    /// the parent's first cell, and does not move the cursor.
+    pub(crate) parent_image: u32,
+    pub(crate) parent_placement: u32,
+    pub(crate) offset: (i32, i32),
 }
 
 impl Command {
@@ -166,6 +170,11 @@ impl Command {
                     self.action,
                     Action::Transmit | Action::TransmitAndPut | Action::Query | Action::Frame
                 ))
+    }
+
+    /// Whether the placement hangs on another (`P=`).
+    pub(crate) fn is_relative(&self) -> bool {
+        self.parent_image != 0
     }
 
     /// Parses `control`; on failure the error carries the addressing keys
@@ -203,7 +212,9 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
         z: 0,
         still: false,
         unicode: false,
-        relative: false,
+        parent_image: 0,
+        parent_placement: 0,
+        offset: (0, 0),
     };
     let mut feature = false;
     if echo.id != 0 && echo.number != 0 {
@@ -291,16 +302,14 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
             b'z' => command.z = signed(value)?,
             b'C' => command.still = number(value)? == 1,
             b'U' => command.unicode = number(value)? != 0,
-            b'P' | b'Q' => command.relative |= number(value)? != 0,
+            b'P' => command.parent_image = number(value)?,
+            b'Q' => command.parent_placement = number(value)?,
+            b'H' => command.offset.0 = signed(value)?,
+            b'V' => command.offset.1 = signed(value)?,
             b'e' => feature = true,
             // `i`, `I`, `p` and `q` are the echo's; the rest is not read.
             _ => {}
         }
-    }
-    // A way of placing an image that this terminal does not do: refusing is
-    // better than drawing it in the wrong place.
-    if command.relative {
-        return Err(Error::invalid("relative placement is not supported"));
     }
     if feature && command.action != Action::Query {
         return Err(Error::invalid("the e key asks a query about a feature"));
@@ -415,16 +424,23 @@ mod tests {
     }
 
     #[test]
-    fn placements_this_terminal_cannot_do_are_refused_by_name() {
-        for (control, word) in [
-            ("a=T,i=1,P=2,Q=3", "relative"),
-            ("a=p,i=1,U=1,P=2", "relative"),
-        ] {
-            let (echo, error) = failed(control);
-            assert_eq!(echo.id, 1);
-            assert!(error.message().contains(word), "{control}");
-        }
+    fn a_relative_placement_is_read_with_its_parent_and_its_offset() {
+        let command = parsed("a=p,i=1,p=2,P=3,Q=4,H=-5,V=6");
+        assert!(command.is_relative());
+        assert_eq!(
+            (
+                command.parent_image,
+                command.parent_placement,
+                command.offset
+            ),
+            (3, 4, (-5, 6))
+        );
+        // A placement no parent is named for is a real one, whatever else is.
+        let command = parsed("a=p,i=1,Q=4,H=2,V=2");
+        assert!(!command.is_relative());
         assert_eq!(parsed("a=p,i=1,U=0,P=0,Q=0,H=4").action, Action::Put);
+        let (_, error) = failed("a=p,i=1,P=3,H=x");
+        assert_eq!(error.code(), "EINVAL");
     }
 
     #[test]

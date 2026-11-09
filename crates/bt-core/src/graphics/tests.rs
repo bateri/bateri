@@ -14,6 +14,19 @@ use super::command::Command;
 use super::store::Images;
 use super::*;
 
+/// The lines a frame shows, with no placeholder cell among them.
+fn view(grid: Window, band: Option<Window>) -> View<'static> {
+    static NONE: Marks = Marks {
+        grid: Vec::new(),
+        band: None,
+    };
+    View {
+        grid,
+        band,
+        marks: &NONE,
+    }
+}
+
 mod animation;
 mod frames;
 mod placeholders;
@@ -1398,12 +1411,14 @@ fn the_layer_changes_at_the_protocols_two_thresholds() {
                     false,
                     (10, 20),
                     80,
-                    Window {
-                        first: 0,
-                        last: 23,
-                        shift: 0,
-                    },
-                    None,
+                    &view(
+                        Window {
+                            first: 0,
+                            last: 23,
+                            shift: 0,
+                        },
+                        None,
+                    ),
                     &mut pictures,
                 );
             });
@@ -1496,16 +1511,18 @@ fn the_frame_gets_the_pictures_in_drawing_order() {
             false,
             (10, 20),
             80,
-            Window {
-                first: 0,
-                last: 23,
-                shift: 0,
-            },
-            Some(Window {
-                first: -4,
-                last: -1,
-                shift: 4,
-            }),
+            &view(
+                Window {
+                    first: 0,
+                    last: 23,
+                    shift: 0,
+                },
+                Some(Window {
+                    first: -4,
+                    last: -1,
+                    shift: 4,
+                }),
+            ),
             &mut pictures,
         );
     });
@@ -1541,12 +1558,14 @@ fn a_placement_cut_by_its_source_rectangle_is_drawn_that_big() {
             false,
             (10, 20),
             80,
-            Window {
-                first: 0,
-                last: 23,
-                shift: 0,
-            },
-            None,
+            &view(
+                Window {
+                    first: 0,
+                    last: 23,
+                    shift: 0,
+                },
+                None,
+            ),
             &mut pictures,
         );
     });
@@ -2579,6 +2598,226 @@ mod screenful {
             [
                 (0, 0, 20, 20, [0, 0, 20, 20]),
                 (1, 0, 20, 20, [0, 20, 20, 20])
+            ]
+        );
+    }
+
+    // ─── relative placements ─────────────────────────────────────────────
+
+    /// What the program is told after it sends `control`.
+    fn answer(screen: &mut Screenful, control: &str) -> String {
+        screen.feed(&wire(control, &[]));
+        String::from_utf8_lossy(&screen.told()).into_owned()
+    }
+
+    /// A screen with image 1 (two cells across, two down) and image 2 (one
+    /// cell) stored.
+    fn two_images() -> Screenful {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=1"));
+        screen.feed(&wire("a=t,f=32,s=10,v=20,i=2", &rgba(10, 20, 1)));
+        screen.told();
+        screen
+    }
+
+    fn stored(screen: &Screenful) -> Vec<u32> {
+        screen.sink.hub.with_images(|images| images.main().ids())
+    }
+
+    #[test]
+    fn a_relative_placement_goes_where_its_parent_is_and_leaves_the_cursor_alone() {
+        let mut screen = two_images();
+        screen.feed(&at(2, 3));
+        assert!(answer(&mut screen, "a=p,i=1,p=1,C=1").contains("OK"));
+        screen.feed(&at(7, 0));
+        // No `C=1`: a relative placement covers no cell where the cursor is.
+        let told = answer(&mut screen, "a=p,i=2,P=1,Q=1,H=5,V=-1");
+        assert!(told.contains("OK"), "{told:?}");
+        assert_eq!(screen.cursor(), (7, 0));
+        assert_eq!(
+            shapes(screen.screen_pictures().grid()),
+            [
+                (2, 3, 20, 40, [0, 0, 20, 40]),
+                (1, 8, 10, 20, [0, 0, 10, 20])
+            ],
+            "the parent, then what hangs on it, one row up and five columns across"
+        );
+    }
+
+    #[test]
+    fn a_relative_placement_goes_up_the_screen_with_its_parent() {
+        let mut screen = two_images();
+        screen.feed(&at(2, 3));
+        screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+        screen.feed(&wire("a=p,i=2,P=1,Q=1,H=5,V=1", &[]));
+        screen.feed(&at(9, 0));
+        // Four line feeds from the last line: the screen scrolls by four.
+        screen.feed(&lines(4));
+        assert_eq!(screen.history(), 4);
+        // A frame that shows the history: grid line -2 is its row 2.
+        assert_eq!(
+            shapes(screen.pictures(-4, 9, 4).grid()),
+            [
+                (2, 3, 20, 40, [0, 0, 20, 40]),
+                (3, 8, 10, 20, [0, 0, 10, 20])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_placement_made_again_keeps_what_hangs_on_it() {
+        let mut screen = two_images();
+        screen.feed(&at(2, 3));
+        screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+        screen.feed(&wire("a=p,i=2,P=1,Q=1,H=1", &[]));
+        screen.feed(&at(5, 6));
+        screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+        // The parent was made again, so it is the newer of the two now: they
+        // are drawn in that order.
+        assert_eq!(
+            shapes(screen.screen_pictures().grid()),
+            [
+                (5, 7, 10, 20, [0, 0, 10, 20]),
+                (5, 6, 20, 40, [0, 0, 20, 40])
+            ]
+        );
+    }
+
+    #[test]
+    fn what_hangs_on_a_placement_ends_with_it_and_an_image_left_with_none_goes_with_it() {
+        // A delete by name leaves the layout to end what hung on the placement,
+        // and the image of that goes with its last placement (as in kitty); one
+        // by place takes the relative placements as any, and the image of
+        // them stays but in upper case.
+        for (control, left) in [
+            ("a=d,d=i,i=1,p=1", vec![1]),
+            ("a=d,d=I,i=1,p=1", vec![]),
+            ("a=d,d=a", vec![1, 2]),
+            ("a=d,d=A", vec![]),
+        ] {
+            let mut screen = two_images();
+            screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+            screen.feed(&wire("a=p,i=2,P=1,Q=1,p=2", &[]));
+            screen.feed(&wire("a=p,i=2,P=2,Q=2,p=3,H=1", &[]));
+            assert_eq!(screen.screen_pictures().grid().len(), 3);
+            screen.feed(&wire(control, &[]));
+            assert!(screen.screen_pictures().grid().is_empty(), "{control}");
+            assert_eq!(stored(&screen), left, "{control}");
+        }
+    }
+
+    #[test]
+    fn a_delete_by_place_leaves_a_relative_placement_and_one_by_name_ends_it() {
+        let mut screen = two_images();
+        screen.feed(&at(2, 3));
+        screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+        screen.feed(&wire("a=p,i=2,P=1,Q=1,p=2,H=9,V=5", &[]));
+        // The cell the child is on is not the child's to give up.
+        screen.feed(&wire("a=d,d=p,x=13,y=8", &[]));
+        assert_eq!(screen.screen_pictures().grid().len(), 2);
+        screen.feed(&wire("a=d,d=i,i=2,p=2", &[]));
+        assert_eq!(screen.screen_pictures().grid().len(), 1);
+    }
+
+    #[test]
+    fn a_chain_of_eight_hangs_and_a_ninth_is_too_deep() {
+        let mut screen = two_images();
+        screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+        for number in 2..=9 {
+            let told = answer(
+                &mut screen,
+                &format!("a=p,i=1,p={number},P=1,Q={},H=1", number - 1),
+            );
+            assert!(told.contains("OK"), "{number}: {told:?}");
+        }
+        let cols: Vec<u16> = screen
+            .screen_pictures()
+            .grid()
+            .iter()
+            .map(|picture| picture.col)
+            .collect();
+        assert_eq!(cols, (0..=8).collect::<Vec<_>>());
+        let told = answer(&mut screen, "a=p,i=1,p=10,P=1,Q=9,H=1");
+        assert!(told.contains("ETOODEEP"), "{told:?}");
+        assert_eq!(screen.screen_pictures().grid().len(), 9, "nothing was made");
+    }
+
+    #[test]
+    fn a_parent_that_is_not_there_or_that_leads_back_or_a_virtual_child_is_an_error() {
+        let mut screen = two_images();
+        screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+        screen.feed(&wire("a=p,i=2,P=1,Q=1,p=2,H=1", &[]));
+        screen.told();
+        for (control, error) in [
+            ("a=p,i=2,p=5,P=9", "ENOPARENT"),
+            ("a=p,i=2,p=5,P=1,Q=77", "ENOPARENT"),
+            ("a=p,i=1,p=1,P=1,Q=1", "EINVAL"),
+            ("a=p,i=1,p=1,P=2,Q=2", "ECYCLE"),
+            ("a=p,i=2,U=1,P=1,Q=1,c=1,r=1", "EINVAL"),
+            ("a=p,i=2,p=6,P=1,Q=1,H=x", "EINVAL"),
+        ] {
+            let told = answer(&mut screen, control);
+            assert!(told.contains(error), "{control}: {told:?}");
+            let shown = screen.screen_pictures();
+            assert_eq!(shown.grid().len(), 2, "{control}: nothing changed");
+        }
+        // An image that has no placement has nothing to hang on either.
+        screen.feed(&wire("a=t,f=32,s=1,v=1,i=3", &[0; 4]));
+        assert!(answer(&mut screen, "a=p,i=2,p=5,P=3").contains("ENOPARENT"));
+        // The image that came with a refused placement is kept.
+        screen.feed(&wire("a=T,f=32,s=1,v=1,i=4,P=77", &[0; 4]));
+        let told = String::from_utf8_lossy(&screen.told()).into_owned();
+        assert!(told.contains("ENOPARENT"), "{told:?}");
+        assert!(stored(&screen).contains(&4));
+    }
+
+    #[test]
+    fn a_virtual_placement_can_be_a_parent_and_is_where_its_first_placeholder_cell_is() {
+        let mut screen = two_images();
+        screen.feed(&wire("a=p,i=1,U=1,p=5,c=2,r=2", &[]));
+        screen.feed(&wire("a=p,i=2,P=1,Q=5,H=3,V=1", &[]));
+        assert!(
+            screen.screen_pictures().grid().is_empty(),
+            "no cell shows the parent: nothing hangs on it"
+        );
+        // Image 1's id is 1: the foreground colour says it.
+        screen.feed(b"\x1b[3;5H");
+        screen.feed(
+            format!(
+                "\x1b[38;5;1m\x1b[58;5;5m{}{}\x1b[39m\r\n    \x1b[38;5;1m\x1b[58;5;5m{}{}\x1b[39m",
+                cell_of(&[0, 0]),
+                cell_of(&[0, 1]),
+                cell_of(&[1, 0]),
+                cell_of(&[1, 1]),
+            )
+            .as_bytes(),
+        );
+        let pictures = screen.screen_pictures();
+        assert_eq!(
+            shapes(pictures.grid()),
+            [
+                (3, 7, 10, 20, [0, 0, 10, 20]),
+                (2, 4, 20, 20, [0, 0, 20, 20]),
+                (3, 4, 20, 20, [0, 20, 20, 20])
+            ],
+            "the child, one row and three columns from the first cell, then the placeholders"
+        );
+        assert_eq!(pictures.grid()[0].z, 0);
+    }
+
+    #[test]
+    fn a_relative_placement_left_of_the_first_column_is_cut() {
+        let mut screen = two_images();
+        screen.feed(&at(0, 1));
+        screen.feed(&wire("a=p,i=1,p=1,C=1", &[]));
+        // One column left of the surface, then two: wholly off it.
+        screen.feed(&wire("a=p,i=1,P=1,Q=1,p=2,H=-2", &[]));
+        screen.feed(&wire("a=p,i=1,P=1,Q=1,p=3,H=-3", &[]));
+        assert_eq!(
+            shapes(screen.screen_pictures().grid()),
+            [
+                (0, 1, 20, 40, [0, 0, 20, 40]),
+                (0, 0, 10, 40, [10, 0, 10, 40])
             ]
         );
     }

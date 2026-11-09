@@ -98,6 +98,9 @@ fn number_of(mark: char) -> Option<u32> {
 /// A virtual placement: the box of cells an image is fitted to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Virtual {
+    /// Names the placement for what hangs on it: the same count as the real
+    /// placements'.
+    pub(super) seq: u64,
     /// The generation of the image.
     pub(super) image: u64,
     /// The program's id for this placement; 0 for none.
@@ -274,8 +277,37 @@ impl Reader {
     }
 }
 
+/// The placeholder cells of the lines a frame draws, as runs: the grid's and
+/// the fill band's.
+#[derive(Debug, Default)]
+pub(crate) struct Marks {
+    pub(super) grid: Vec<Run>,
+    pub(super) band: Option<Vec<Run>>,
+}
+
+impl Marks {
+    /// The runs of the grid's lines `grid` and, if the band shows any, of the
+    /// lines `band`.
+    pub(super) fn read<T>(
+        term: &Term<T>,
+        grid: Window,
+        band: Option<Window>,
+        columns: u16,
+    ) -> Self {
+        Self {
+            grid: read(term, grid, columns),
+            band: band.map(|band| read(term, band, columns)),
+        }
+    }
+
+    /// All the runs, the grid's first.
+    pub(super) fn all(&self) -> impl Iterator<Item = &Run> {
+        self.grid.iter().chain(self.band.iter().flatten())
+    }
+}
+
 /// The runs of the placeholder cells in the grid lines of `window`.
-pub(super) fn read<T>(term: &Term<T>, window: Window, columns: u16) -> Vec<Run> {
+fn read<T>(term: &Term<T>, window: Window, columns: u16) -> Vec<Run> {
     let grid = term.grid();
     let first = window.first.max(term.topmost_line().0);
     let last = window.last.min(term.bottommost_line().0);

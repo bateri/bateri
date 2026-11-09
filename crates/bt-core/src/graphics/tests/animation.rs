@@ -39,7 +39,7 @@ fn command_at(rig: &mut Rig, now: Instant, control: &str) -> Vec<u8> {
 /// The images on show played up to `now`; when the next frame is due.
 fn play(rig: &Rig, now: Instant) -> Option<Instant> {
     rig.hub
-        .with_images_mut(|images| images.advance(false, (10, 20), 80, &[WINDOW], &[], now))
+        .with_images_mut(|images| images.advance(false, (10, 20), 80, &view(WINDOW, None), now))
 }
 
 fn current(rig: &Rig) -> usize {
@@ -66,6 +66,22 @@ fn a_running_animation_takes_the_next_frame_when_the_gap_has_passed() {
     // After the last it begins again, for ever.
     assert_eq!(play(&rig, after(start, 350)), Some(after(start, 450)));
     assert_eq!(current(&rig), 0);
+}
+
+#[test]
+fn an_animation_that_only_a_relative_placement_shows_plays() {
+    let mut rig = Rig::new();
+    rig.run(&wire("a=T,f=32,s=1,v=1,i=1,C=1", &rgba(1, 1, 0)));
+    rig.run(&wire("a=t,f=32,s=4,v=3,i=7", &rgba(4, 3, 1)));
+    rig.run(&wire("a=f,i=7,s=4,v=3,z=100", &rgba(4, 3, 2)));
+    rig.run(&wire("a=a,i=7,r=1,z=100", &[]));
+    let start = Instant::now();
+    command_at(&mut rig, start, "a=a,i=7,s=3");
+    assert_eq!(play(&rig, after(start, 100)), None, "nothing shows it yet");
+    assert_eq!(current(&rig), 0);
+    rig.run(&wire("a=p,i=7,P=1,H=3", &[]));
+    assert_eq!(play(&rig, after(start, 100)), Some(after(start, 200)));
+    assert_eq!(current(&rig), 1);
 }
 
 #[test]
@@ -245,13 +261,19 @@ fn only_an_image_the_windows_show_is_played() {
         shift: 0,
     };
     let played = rig.hub.with_images_mut(|images| {
-        images.advance(false, (10, 20), 80, &[elsewhere], &[], after(start, 500))
+        images.advance(
+            false,
+            (10, 20),
+            80,
+            &view(elsewhere, None),
+            after(start, 500),
+        )
     });
     assert_eq!(played, None);
     assert_eq!(current(&rig), 0);
     // And not the images of the other screen.
     let alt = rig.hub.with_images_mut(|images| {
-        images.advance(true, (10, 20), 80, &[WINDOW], &[], after(start, 500))
+        images.advance(true, (10, 20), 80, &view(WINDOW, None), after(start, 500))
     });
     assert_eq!(alt, None);
     assert_eq!(current(&rig), 0);

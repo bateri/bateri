@@ -281,13 +281,14 @@ impl Receiver {
     }
 
     /// How placing `command` moves the cursor; the cursor stays when the
-    /// command asks it to, when the placement is virtual (it covers no cell)
-    /// or when the image's size is not known. No more rows than the screen
-    /// has: past that the screen is already all new, and the placement's top
-    /// is that far above the cursor, no further.
+    /// command asks it to, when the placement is virtual (it covers no cell),
+    /// when it is relative (it goes where its parent is, not where the cursor
+    /// is, and whatever `C=` says) or when the image's size is not known. No
+    /// more rows than the screen has: past that the screen is already all
+    /// new, and the placement's top is that far above the cursor, no further.
     fn motion(command: &Command, size: Option<(u32, u32)>, env: Env) -> Motion {
         match size {
-            Some(size) if !command.still && !command.unicode => {
+            Some(size) if !command.still && !command.unicode && !command.is_relative() => {
                 let motion = Motion::of(&Spec::new(command, size), env.cell, env.columns);
                 Motion {
                     rows: motion.rows.min(u32::from(env.lines)),

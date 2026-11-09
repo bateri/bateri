@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use super::super::command::Command;
 use super::super::{Echo, Error, Reply};
 use super::frames::gap_of;
-use super::{Frame, Image, Images, Placement, Screen, Store, Window};
+use super::{Frame, Image, Images, Placement, Screen, Spots, Store, View, Window};
 
 /// What the terminal does with the frames of an image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -103,37 +103,48 @@ impl Image {
 }
 
 impl Store {
-    /// The placements that touch `window`, as a frame draws them.
-    pub(super) fn in_window(
-        &self,
+    /// The placements that touch `window`, as a frame draws them, each with
+    /// the grid line and the column of its first cell: a relative placement
+    /// is where `spots` has it, and is not here when it has no place.
+    pub(super) fn in_window<'a>(
+        &'a self,
         window: Window,
         cell: (u16, u16),
         columns: u16,
-    ) -> impl Iterator<Item = &Placement> {
-        self.placements.iter().filter(move |placement| {
-            placement.line <= window.last
-                && placement.bottom(cell) >= window.first
-                && placement.col < columns
+        spots: &'a Spots,
+    ) -> impl Iterator<Item = (&'a Placement, i32, i32)> {
+        self.placements.iter().filter_map(move |placement| {
+            let (line, col) = if placement.is_relative() {
+                *spots.get(&placement.seq)?
+            } else {
+                (placement.line, i32::from(placement.col))
+            };
+            let cols = i32::try_from(placement.spec.span(cell).0).unwrap_or(i32::MAX);
+            let reaches = line <= window.last
+                && placement.bottom_at(line, cell) >= window.first
+                && col < i32::from(columns)
+                && col.saturating_add(cols) > 0;
+            reaches.then_some((placement, line, col))
         })
     }
 
-    /// Plays the images the windows show up to `now` — through a placement or,
-    /// for those in `marked`, through placeholder cells; when the next frame of
-    /// any of them is due, if one will be.
+    /// Plays the images the view shows up to `now` — through a placement or,
+    /// for those the placeholder cells show, through them; when the next frame
+    /// of any of them is due, if one will be.
     pub(super) fn advance(
         &mut self,
-        windows: &[Window],
-        marked: &[u64],
+        view: &View,
         cell: (u16, u16),
         columns: u16,
         now: Instant,
         stamp: &mut dyn FnMut() -> u64,
     ) -> Option<Instant> {
-        let shown: Vec<u64> = windows
-            .iter()
-            .flat_map(|window| self.in_window(*window, cell, columns))
-            .map(|placement| placement.image)
-            .chain(marked.iter().copied())
+        let spots = self.locate(view.marks, cell);
+        let shown: Vec<u64> = std::iter::once(view.grid)
+            .chain(view.band)
+            .flat_map(|window| self.in_window(window, cell, columns, &spots))
+            .map(|(placement, _, _)| placement.image)
+            .chain(self.marked(view.marks.all()))
             .collect();
         if shown.is_empty() {
             return None;
@@ -200,25 +211,21 @@ impl Store {
 }
 
 impl Images {
-    /// Plays the images of the screen showing that the windows show, up to
+    /// Plays the images of the screen showing that the view shows, up to
     /// `now`, and says when the next frame of any of them is due, if one is.
-    /// `marked` are the images the placeholder cells in the windows show.
     pub(crate) fn advance(
         &mut self,
         alt: bool,
         cell: (u16, u16),
         columns: u16,
-        windows: &[Window],
-        marked: &[u64],
+        view: &View,
         now: Instant,
     ) -> Option<Instant> {
         let mut counter = self.generation;
-        let due = self
-            .screen(alt)
-            .advance(windows, marked, cell, columns, now, &mut || {
-                counter += 1;
-                counter
-            });
+        let due = self.screen(alt).advance(view, cell, columns, now, &mut || {
+            counter += 1;
+            counter
+        });
         self.generation = counter;
         due
     }

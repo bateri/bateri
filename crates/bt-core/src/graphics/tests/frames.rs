@@ -48,12 +48,14 @@ pub(super) fn pictures_of(rig: &Rig) -> Pictures {
             false,
             (10, 20),
             80,
-            Window {
-                first: 0,
-                last: 23,
-                shift: 0,
-            },
-            None,
+            &view(
+                Window {
+                    first: 0,
+                    last: 23,
+                    shift: 0,
+                },
+                None,
+            ),
             &mut pictures,
         );
     });
@@ -729,9 +731,13 @@ fn a_key_with_its_default_or_one_that_is_not_understood_is_left_out() {
         "\x1b_Gi=31,e=f,s=2;OK\x1b\\"
     );
     assert_eq!(
-        features(&mut rig, "a=q,i=31,e=T,U=1,C=1,P=3,H=2"),
-        "\x1b_Gi=31,e=T,U=1,C=1;OK\x1b\\",
-        "the keys of a placement this terminal does not do are not claimed"
+        features(&mut rig, "a=q,i=31,e=T,U=2,C=1,P=3,Q=2,H=-2,V=0,Z=1"),
+        "\x1b_Gi=31,e=T,C=1,P=3,Q=2,H=-2;OK\x1b\\",
+        "a relative placement's keys are claimed; a value that is not understood is not, nor is a default"
+    );
+    assert_eq!(
+        features(&mut rig, "a=q,i=31,e=T,P=3,H=x"),
+        "\x1b_Gi=31,e=T,P=3;OK\x1b\\"
     );
     assert_eq!(
         features(&mut rig, "a=q,i=31,e=T,U=0"),

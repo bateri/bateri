@@ -87,6 +87,7 @@ impl Store {
             };
             self.remove(victim);
         }
+        self.prune_relatives(true);
         Ok(())
     }
 
@@ -312,6 +313,7 @@ impl Store {
         if count <= 1 {
             if command.free {
                 self.remove(at);
+                self.prune_relatives(true);
             }
             return;
         }
