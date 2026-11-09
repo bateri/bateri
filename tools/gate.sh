@@ -28,7 +28,9 @@ set -u
 tier=${1:?usage: gate.sh commit|push|check-push}
 cd "$(git rev-parse --show-toplevel)" || exit 1
 git_dir=$(git rev-parse --git-dir)
-stamp=$git_dir/bateri-gate
+# Shared by the worktrees of the repository: a stamp names content, so what passed in one has
+# passed in all of them. The logs and the index are the worktree's own.
+stamp=$(git rev-parse --git-common-dir)/bateri-gate
 logs=$git_dir/bateri-gate-logs
 UNREAD="README.md CHANGELOG.md tools/pre-push"
 
@@ -47,7 +49,7 @@ write_stamp() {
     local t
     for t in "$@"; do
         { [ -f "$stamp" ] && grep -vx "$t $tree" "$stamp"; echo "$t $tree"; } |
-            tail -n 300 >"$stamp.new" && mv "$stamp.new" "$stamp"
+            tail -n 300 >"$stamp.new.$$" && mv "$stamp.new.$$" "$stamp"
     done
 }
 only_unread() {

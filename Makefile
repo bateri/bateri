@@ -1,5 +1,15 @@
 CARGO ?= cargo
 
+# `make dev KABLO_LOCAL=<a kablo checkout>`: the copy is built against that checkout's crates and
+# packs its `dist` (`make dist` there, on a commit that need not be pushed); `Cargo.toml`'s `rev`
+# stays. For trying a kablo change in the app: `dev` puts `Cargo.lock` back, and no gate runs so.
+ifneq ($(KABLO_LOCAL),)
+KABLO_ROOT := $(abspath $(KABLO_LOCAL))
+KABLO_DIST := $(KABLO_ROOT)/dist
+KABLO_PATCH := patch."https://github.com/bateri/kablo"
+CARGO := cargo --config '$(KABLO_PATCH).kablo-proto.path="$(KABLO_ROOT)/crates/kablo-proto"' --config '$(KABLO_PATCH).kablo-bateri.path="$(KABLO_ROOT)/crates/kablo-bateri"' --config '$(KABLO_PATCH).vte.path="$(KABLO_ROOT)/vendor/vte"' --config '$(KABLO_PATCH).alacritty_terminal.path="$(KABLO_ROOT)/vendor/alacritty_terminal"'
+endif
+
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
@@ -864,7 +874,11 @@ DEV_SETTINGS = $(HOME)/.config/bateri-dev
 # typed. Any other release would be a bateri whose kablo and kablo's crates are two versions of the
 # wire; this stops before anything is packaged or opened.
 KABLO_DIST_VERSION = awk '{print $$2}' $(KABLO_DIST)/SHA256SUMS | grep '^kablo-' | sed -E 's/^kablo-(.*)-(aarch64|x86_64)-(apple|unknown)-.*/\1/' | sort -u
-.PHONY: kablo-rev kablo-published
+.PHONY: kablo-rev kablo-published kablo-bump
+ifneq ($(KABLO_LOCAL),)
+kablo-rev:
+	@echo 'kablo: built against $(KABLO_ROOT), not the pin in Cargo.toml'
+else
 kablo-rev:
 	@revs=$$(grep 'git = "https://github.com/bateri/kablo"' Cargo.toml | sed -E 's/.*rev = "([0-9a-f]+)".*/\1/' | sort -u); \
 	case "$$revs" in ""|*[!0-9a-f]*) echo "kablo: Cargo.toml pins kablo's crates at more than one commit (or none): $$revs"; exit 1;; esac; \
@@ -878,6 +892,21 @@ kablo-rev:
 		echo "kablo: build the pinned one — \`make dist\` in kablo's checkout at $$revs, or \`make release\` there to publish it — or give KABLO_DIST=<its dist>."; \
 		exit 1; \
 	fi
+endif
+
+# Moves bateri to the commit kablo's checkout is at: the `rev` of its four crates, `Cargo.lock`
+# and the release in `dist` that gets packed. The commit has to be on GitHub's `main`, where
+# cargo fetches it from.
+KABLO_CHECKOUT ?= ../kablo
+kablo-bump:
+	@rev=$$(git -C $(KABLO_CHECKOUT) rev-parse HEAD) || exit 1; \
+	git -C $(KABLO_CHECKOUT) fetch -q origin; \
+	git -C $(KABLO_CHECKOUT) merge-base --is-ancestor $$rev origin/main || { echo "kablo-bump: $$rev is not on kablo's origin/main; push it first"; exit 1; }; \
+	sed -i '' -E 's|(github.com/bateri/kablo", rev = ")[0-9a-f]{40}|\1'"$$rev"'|' Cargo.toml; \
+	$(CARGO) update -p kablo-proto -p kablo-bateri -p vte -p alacritty_terminal; \
+	echo "kablo-bump: Cargo.toml pins kablo at $$rev"
+	$(MAKE) -C $(KABLO_CHECKOUT) dist
+	@$(MAKE) --no-print-directory kablo-rev
 
 # A release of bateri carries a published kablo; a development release is for `dev`.
 kablo-published: kablo-rev
@@ -887,7 +916,10 @@ kablo-published: kablo-rev
 dev: kablo-rev
 	@if pgrep -f '^$(DEV_APP)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
 		echo "dev: bateri-dev is open — quit it first (⌘Q), then retry"; exit 1; fi
-	$(MAKE) --no-print-directory bundle APP=$(DEV_APP) SIGN_ID=-
+	@lock=$$(mktemp); cp Cargo.lock $$lock; \
+	$(MAKE) --no-print-directory bundle APP=$(DEV_APP) SIGN_ID=-; built=$$?; \
+	if [ -n "$(KABLO_LOCAL)" ]; then cp $$lock Cargo.lock; fi; \
+	rm -f $$lock; exit $$built
 	@p=$(DEV_APP)/Contents/Info.plist; \
 	plutil -replace CFBundleIdentifier -string $(DEV_ID) $$p && \
 	plutil -replace CFBundleName -string bateri-dev $$p && \

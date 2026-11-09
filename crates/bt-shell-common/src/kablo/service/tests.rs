@@ -3555,7 +3555,15 @@ fn a_pane_that_gave_up_on_a_slow_account_does_not_turn_away_the_panes_after_it_i
             .is_err(),
         "and the next one is not made to wait for it too"
     );
-    until("the account", || ledger.known(local::ACCOUNT).is_some());
+    // Not the ledger: the terminal of the pane that gave up ends at once and takes the account's
+    // row with it, a moment a poll can miss. The refusal goes when the account is made.
+    until("the account", || {
+        rig.service
+            .local_gave_up
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+    });
     let stream = rig
         .service
         .open_local(&a_pane(), a_shell(), MAC, Duration::from_secs(15))
