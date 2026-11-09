@@ -23,6 +23,7 @@ of every installed copy. A version without a section is not released.
 ### Fixed
 
 - **kitty's `kitten icat` shows images.** bateri answered the device attributes question the way a VT102 does (`CSI ? 6 c`), an answer too short for the kittens, which waited ten seconds and gave up with "Timed out waiting for a response from the terminal". It now answers as a VT220 with ANSI colour (`CSI ? 62 ; 22 c`), as kitty and Ghostty do.
+- **An image right below its command shows whole.** The rows an image covers were not counted as content, so with the input line in the dock an image printed under the last line of text (`kitten icat`) was pushed under the dock and only its top showed.
 
 ## [0.27.0] - 2026-11-09
 

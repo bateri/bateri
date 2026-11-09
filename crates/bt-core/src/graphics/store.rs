@@ -1164,6 +1164,17 @@ impl Images {
         !store.placements.is_empty() || !store.virtuals.is_empty()
     }
 
+    /// The last grid line a placement on the main screen covers; a relative
+    /// one is not asked, its place is its parent's.
+    pub(crate) fn lowest_main_line(&self, cell: (u16, u16)) -> Option<i32> {
+        self.main
+            .placements
+            .iter()
+            .filter(|placement| !placement.is_relative())
+            .map(|placement| placement.bottom(cell))
+            .max()
+    }
+
     /// Whether an image may be drawn from the palette: true from the first one
     /// that is stored until a look finds none ([`Images::repaint`]), so that a
     /// frame with no such image asks no more than this.

@@ -801,6 +801,18 @@ impl Hub {
         lock(&self.images).look(term, cell);
     }
 
+    /// The last grid line an image placed on the main screen covers, brought
+    /// to the grid as it is now; `None` with none placed. A relative
+    /// placement is not asked: its place is its parent's.
+    pub(crate) fn lowest_line<T>(&self, term: &Term<T>, cell: (u16, u16)) -> Option<i32> {
+        let mut images = lock(&self.images);
+        if !images.shows(false) {
+            return None;
+        }
+        images.look(term, cell);
+        images.lowest_main_line(cell)
+    }
+
     /// Takes the look of the screen showing as it is now, after something
     /// that knew where the placements went changed them.
     pub(crate) fn settle<T>(&self, term: &Term<T>) {

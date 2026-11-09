@@ -7089,6 +7089,21 @@ impl Session {
         // [`Session::fill_rows`]. Since `fill == 0` here, as the fullness grows the
         // offset shrinks, i.e. a **new row enters** from the top — exactly the
         // intended behaviour.
+        //
+        // **A row an image covers is content too**, though none of its cells is
+        // drawn: counted by text alone, the rows of an image below the last text
+        // row were the empty bottom and the content was anchored over them, i.e.
+        // the image went under the dock (`kitten icat`, right below its command).
+        let image_rows = if alt_screen {
+            0
+        } else {
+            self.adapter
+                .0
+                .graphics
+                .lowest_line(&term, self.adapter.cell_px())
+                .and_then(|line| u16::try_from(line + offset + 1).ok())
+                .map_or(0, |rows| rows.min(grid_rows))
+        };
         let content_rows = if alt_screen {
             grid_rows
         } else if caret_in_dock {
@@ -7110,9 +7125,11 @@ impl Session {
             // Floor 1: in the degenerate state where the whole window is suppressed
             // (the first prompt, no output above it) `drawn_rows` would stay zero and
             // `content_rows`'s `1..=rows` contract would break.
-            drawn_rows.max(1)
+            drawn_rows.max(image_rows).max(1)
         } else {
-            drawn_rows.max(cursor_screen_row.saturating_add(1))
+            drawn_rows
+                .max(image_rows)
+                .max(cursor_screen_row.saturating_add(1))
         };
         debug_assert!(
             (1..=grid_rows).contains(&content_rows),
@@ -16125,6 +16142,40 @@ mod tests {
             cursor.visible,
             "the dock-less window was left without a caret: {cursor:?}"
         );
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_image_below_the_last_text_row_is_content_and_stays_above_the_dock() {
+        // `kitten icat` right below its command: the image's rows carry no text,
+        // and counted by text alone they were the empty bottom the content is
+        // anchored over, i.e. the image went under the dock.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf 'out\\r\\n\\033_Ga=T,f=24,s=1,v=1,c=4,r=4,q=2;AAAA\\033\\\\\\r\\n{}ls -la{}'; sleep 5",
+                anchored_prompt(1),
+                mirror("bHMgLWxh", 6),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
+            &mut Clusters::default(),
+            &mut Pictures::default(),
+            &mut Leads::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        assert!(cursor.caret_in_dock, "{cursor:?}");
+        // `out` on row 0, the image on rows 1–4, the prompt's row in the dock.
+        assert_eq!(cursor.content_rows, 5, "{cursor:?}");
         session.shutdown();
     }
 
