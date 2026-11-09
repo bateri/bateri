@@ -48,5 +48,15 @@ fn main() {
         "{} layout problems in the settings window",
         problems.len()
     );
+    // The card a new server asks with, in each of its states and both appearances.
+    let card = bt_shell_macos::apps_card_layout_problems(mtm, shots.as_deref());
+    for problem in &card {
+        eprintln!("settings_window: {problem}");
+    }
+    assert!(
+        card.is_empty(),
+        "{} layout problems in the card a server asks with",
+        card.len()
+    );
     println!("settings_window: ok");
 }

@@ -458,6 +458,10 @@ fn on_wait(link: PaneLink, enter: bool) -> Wait {
 /// text's inset inside it, in points. Design constants (not measured) — a
 /// browser's status bubble.
 const LINK_LABEL_MARGIN: f64 = 6.0;
+
+/// How far a card the application holds over the pane stands from its top and from its right edge
+/// ([`TerminalPane::set_corner_card`]).
+pub(crate) const CORNER_INSET: (f64, f64) = (10.0, 12.0);
 const LINK_LABEL_PAD_X: f64 = 6.0;
 const LINK_LABEL_PAD_Y: f64 = 2.0;
 
@@ -2260,6 +2264,9 @@ pub struct PaneIvars {
     list_closed_at: Cell<Option<f64>>,
     /// The open server card ([`crate::server_card`]).
     server_card: RefCell<Option<ServerCard>>,
+    /// A card the application holds over the pane's top right corner
+    /// ([`TerminalPane::set_corner_card`]).
+    corner_card: RefCell<Option<Retained<NSView>>>,
     /// The ports the pane's programs listen on, as the last scan found them
     /// ([`crate::footer`]): the dock shows their numbers, the ports menu
     /// these records.
@@ -2929,6 +2936,7 @@ impl TerminalPane {
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
             server_card: RefCell::new(None),
+            corner_card: RefCell::new(None),
             card_closed_at: Cell::new(None),
             listeners: RefCell::new(Vec::new()),
             environment_wants: Cell::new(environment_wants),
@@ -5590,6 +5598,7 @@ impl TerminalPane {
         // The server card and its Esc monitor go with the pane (the upload
         // list's goes in `abandon_uploads`).
         self.close_server_card();
+        self.set_corner_card(None);
         self.stop_stats();
         // A forward tunnel of ours goes with the pane.
         self.end_remote_ports();
@@ -7835,6 +7844,44 @@ impl TerminalPane {
     /// The open server card.
     pub(crate) fn server_card(&self) -> &RefCell<Option<ServerCard>> {
         &self.ivars().server_card
+    }
+
+    /// Puts `card` over the pane's top right corner, or takes the one that is there away (`None`).
+    /// The card is the application's: it takes no key and is the pane's only as far as where it
+    /// stands, which follows the pane's size ([`CORNER_INSET`]); the terminal's oldest lines are
+    /// where it is, and not the input. It goes right over the terminal's view, under the veils, as
+    /// the search panel does.
+    pub(crate) fn set_corner_card(&self, card: Option<&NSView>) {
+        let slot = &self.ivars().corner_card;
+        if let Some(old) = slot.borrow_mut().take() {
+            old.removeFromSuperview();
+        }
+        let Some(card) = card else {
+            return;
+        };
+        // The container is not flipped (y up): sticking to the top right corner is flexible
+        // left and bottom margins.
+        card.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        self.addSubview_positioned_relativeTo(card, NSWindowOrderingMode::Above, Some(self.view()));
+        *slot.borrow_mut() = Some(objc2::Message::retain(card));
+        self.place_corner_card();
+    }
+
+    /// Stands the card in the corner again: its size changed.
+    pub(crate) fn place_corner_card(&self) {
+        let Some(card) = self.ivars().corner_card.borrow().clone() else {
+            return;
+        };
+        let bounds = self.bounds();
+        let size = card.frame().size;
+        // A pane too low for the card keeps the card's foot (its buttons) in view and loses
+        // the top of its title.
+        card.setFrameOrigin(NSPoint::new(
+            (bounds.size.width - CORNER_INSET.1 - size.width).max(0.0),
+            (bounds.size.height - CORNER_INSET.0 - size.height).max(0.0),
+        ));
     }
 
     pub(crate) fn listeners(&self) -> &RefCell<Vec<Listener>> {

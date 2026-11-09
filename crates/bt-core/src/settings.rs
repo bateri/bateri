@@ -2603,11 +2603,12 @@ stats_interval = 3
 # Programs bateri keeps up to date for you, such as the textpen editor. Each
 # entry says where a program publishes its releases: user/repo for a GitHub
 # project (its latest release), or the full https:// address of an app.json.
-# A program runs with your rights, on this computer and on the servers with
-# shell integration, so a program signed with a key you have not approved waits
-# for your approval and is not downloaded. Taking an entry out of the list
-# removes the program from this computer at once and from those servers the
-# next time bateri connects to them.
+# A program runs with your rights on this computer, so a program signed with a
+# key you have not approved waits for your approval and is not downloaded.
+# Remove in the Apps page of Settings takes the program off this computer at
+# once; the servers keep their copies (bateri package remove takes one off).
+# An entry taken out of this file by hand only leaves the list: the copy that
+# runs here stays until bateri package remove.
 sources = ["bateri/textpen"]
 
 [keys]

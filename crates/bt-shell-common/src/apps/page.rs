@@ -341,7 +341,7 @@ fn row(status: &Status, checks: &Checks<'_>, root: &Path) -> Row {
             Sign::Quiet,
             Tip::new(
                 "No file for this computer",
-                "It runs on the servers it has a file for.",
+                "Its author has not built it for this kind of computer.",
             ),
             None,
             None,
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(nothere.sign, Sign::Quiet);
         assert_eq!(
             nothere.tip.lines(),
-            "No file for this computer\nIt runs on the servers it has a file for."
+            "No file for this computer\nIts author has not built it for this kind of computer."
         );
     }
 

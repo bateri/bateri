@@ -3363,6 +3363,7 @@ mod packages {
                     let text = String::from_utf8_lossy(&letter.bytes).into_owned();
                     let who = Who {
                         account: letter.account.clone(),
+                        host: letter.host.clone(),
                         local: super::is_account(&letter.account),
                     };
                     let reply = match (Request::parse(&text), served.get()) {

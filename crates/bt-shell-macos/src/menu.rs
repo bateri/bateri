@@ -612,6 +612,16 @@ pub(crate) fn install(
             // new tab: handled by the app delegate (`openAllBackground:`), grey unless the
             // pane is on a server with some waiting (its `validateMenuItem:`).
             item(mtm, "Open All in New Tab", sel!(openAllBackground:)),
+            // The two buttons of the card a new server asks about the programs the person follows
+            // with: handled by the app delegate, grey unless a card asks over a pane of the key
+            // window's tab (its `validateMenuItem:`). Without one the keys go nowhere, as every
+            // key of ⌘ that no item owns.
+            item(mtm, "Install Programs Here", sel!(installProgramsHere:)),
+            item(
+                mtm,
+                "Don\u{2019}t Install Programs Here",
+                sel!(programsNotHere:),
+            ),
             // The tab's saved ssh password: the handler is the focused
             // pane (`forgetPassword:`), grey without one (`validateMenuItem:`).
             {

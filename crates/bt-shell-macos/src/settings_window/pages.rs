@@ -220,7 +220,7 @@ const AGENTS: &[Group] = &[group(
 )];
 
 fn following_aside(_: &Settings) -> Option<&'static str> {
-    Some("run on this computer and on servers with shell integration")
+    Some("kept on this computer; a server gets one when you ask")
 }
 
 const APPS: &[Group] = &[

@@ -27,6 +27,7 @@ use bt_shell_common::agent::level::{self, Why};
 use bt_shell_common::agent::message::{Failure, Kind, Package, Place, Reach, Relay, Reply};
 use bt_shell_common::agent::relay as run;
 use bt_shell_common::agent::serve::{self, Server};
+use bt_shell_common::apps::card;
 use bt_shell_common::apps::followed;
 use bt_shell_common::apps::package::Who;
 use bt_shell_common::apps::upload::{self, Through};
@@ -239,17 +240,21 @@ fn placed(
 pub(super) fn package(letter: Letter, server: &Server, package: Package) {
     let who = Who {
         account: server.account.clone(),
+        host: server.host.clone(),
         local: local::is_account(&server.account),
     };
     let machine = Machine {
         backend: hold_service::backend(),
         who: who.clone(),
-        host: server.host.clone(),
+        ssh: ssh_args(server),
     };
     let started = thread::Builder::new()
         .name("bateri package".into())
         .spawn(move || {
-            let state_of_this_computer = who.local && matches!(package, Package::State(_));
+            let ssh = machine.ssh.clone();
+            let said_state = matches!(package, Package::State(_));
+            let state_of_this_computer = who.local && said_state;
+            let said_key_change = matches!(package, Package::KeyChanged(_));
             let reply = match crate::apps_answerer() {
                 Some(answerer) => answerer.answer(&who, package, &machine),
                 None => Reply::Failed(Failure::new(
@@ -258,6 +263,14 @@ pub(super) fn package(letter: Letter, server: &Server, package: Package) {
                 )),
             };
             letter.answer(reply.encode().into_bytes());
+            if !who.local {
+                if said_state {
+                    ask_about(&who, ssh);
+                }
+                if said_key_change {
+                    tell_of_key_changes();
+                }
+            }
             // This computer's kablo has started its watch: the programs the person follows are
             // asked for, if they are not here yet.
             if state_of_this_computer
@@ -273,12 +286,64 @@ pub(super) fn package(letter: Letter, server: &Server, package: Package) {
     }
 }
 
+/// A server told what it has: the programs the person follows that it lacks are the card's rows
+/// (`bt_shell_common::apps::card`), which the application raises over a pane of the server when one
+/// is ready. Read here, on the thread of the answer, so that the main thread reads no file.
+fn ask_about(who: &Who, ssh: Vec<String>) {
+    let (Some(answerer), Some(root)) = (crate::apps_answerer(), crate::apps_root()) else {
+        return;
+    };
+    let rows = answerer
+        .machine(&who.account)
+        .map(|machine| card::missing(&root, &machine))
+        .unwrap_or_default();
+    let (account, host) = (who.account.clone(), who.host.clone());
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        crate::apps_card::state_arrived(mtm, &account, &host, ssh, rows);
+    });
+}
+
+/// A program stopped on a server for a key that is not the one approved: one notification, even
+/// in front, because nothing else of bateri says it and a person who is not in that server's
+/// terminal does not see it ([`KeyChange::notice`]); the answerer tells of each change once.
+fn tell_of_key_changes() {
+    let Some(answerer) = crate::apps_answerer() else {
+        return;
+    };
+    let changes = answerer.take_key_changes();
+    if changes.is_empty() {
+        return;
+    }
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        for change in &changes {
+            let (title, body) = change.notice();
+            crate::uploader::deliver_notification_in_front(mtm, &title, &body);
+        }
+    });
+}
+
+/// The `ssh` arguments that reach `server` (`-p 2222 rasp`), not only the name the person typed
+/// for it: a name alone can stand for another account once the options are gone.
+fn ssh_args(server: &Server) -> Vec<String> {
+    let args: Vec<String> = server.argv.iter().skip(1).cloned().collect();
+    if args.is_empty() {
+        vec![server.host.clone()]
+    } else {
+        args
+    }
+}
+
 /// The machine a `fetch` writes its file on: found when it is first needed, over the connection
 /// bateri keeps to it.
 struct Machine {
     backend: Option<Arc<dyn Backend>>,
     who: Who,
-    host: String,
+    /// The `ssh` arguments that reach it ([`ssh_args`]).
+    ssh: Vec<String>,
 }
 
 impl Channel for Machine {
@@ -291,11 +356,7 @@ impl Channel for Machine {
             local::host()
         } else {
             backend
-                .reach(
-                    std::slice::from_ref(&self.host),
-                    Ask::Never,
-                    &hold_service::terminals_of,
-                )
+                .reach(&self.ssh, Ask::Never, &hold_service::terminals_of)
                 .map_err(io::Error::other)?
                 .server
         };

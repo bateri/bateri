@@ -23,7 +23,7 @@
 //! follows is answered too and nothing of it is kept: the file is downloaded to a folder of its
 //! own, sent, and deleted.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -42,10 +42,15 @@ use crate::kablo::install::Channel;
 /// The longest a line of what is said to a machine is.
 const SAID_MAX: usize = 300;
 
+/// The longest a name of a machine's, or of a program on it, is in a notice.
+const SAID_NAME: usize = 60;
+
 /// Who asks: the account a letter came from, on the connection bateri keeps to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Who {
     pub account: String,
+    /// The machine as the person typed it (`rasp`): what a notice about it says.
+    pub host: String,
     /// Whether the account is this computer's own.
     pub local: bool,
 }
@@ -56,7 +61,8 @@ pub struct Limits {
     /// The span an account's `most` is counted in.
     pub window: Duration,
     /// The most the app goes to the internet for one account in a `window`: a look at a source
-    /// that was not looked at lately, or a program's download.
+    /// that was not looked at lately, or a program's download. A card of the most rows
+    /// (`card::ROWS_MAX`) asks for a look and a download of each, so it fits.
     pub most: usize,
     /// How long what was read of a source is kept for the next machine that asks.
     pub keep: Duration,
@@ -66,7 +72,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             window: Duration::from_secs(10 * 60),
-            most: 30,
+            most: 100,
             keep: Duration::from_secs(5 * 60),
         }
     }
@@ -84,8 +90,30 @@ pub struct MachineState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyChange {
     pub account: String,
+    /// The machine as the person typed it.
+    pub host: String,
     pub name: String,
     pub key: String,
+}
+
+impl KeyChange {
+    /// What the notification says: the title, and the body that names the command that decides.
+    /// The name and the machine are the machine's words, so they are cut and cleaned.
+    pub fn notice(&self) -> (String, String) {
+        let say = |text: &str| -> String {
+            text.chars()
+                .filter(|c| !c.is_control())
+                .take(SAID_NAME)
+                .collect()
+        };
+        let (name, host) = (say(&self.name), say(&self.host));
+        (
+            format!("{name} stopped updating on {host}"),
+            format!(
+                "Its author\u{2019}s key changed, so the version there keeps running. Run bateri package update {name} on {host} to decide."
+            ),
+        )
+    }
 }
 
 #[derive(Default)]
@@ -94,7 +122,14 @@ struct Inner {
     spent: HashMap<String, VecDeque<Instant>>,
     machines: HashMap<String, MachineState>,
     changes: Vec<KeyChange>,
+    /// The (account, name, key) that were told of, so that a machine that says it again, as every
+    /// start of its `watch` does, is not told of again. Bounded: a machine cannot grow it without
+    /// end.
+    told: HashSet<(String, String, String)>,
 }
+
+/// How many changes of key are remembered as told of.
+const TOLD_MAX: usize = 256;
 
 /// The app's answers to `package`.
 pub struct Answerer {
@@ -149,7 +184,8 @@ impl Answerer {
         self.inner().machines.get(account).cloned()
     }
 
-    /// The programs that stopped for a key since the last call, each once.
+    /// The programs that stopped for a key since the last call, each once for as long as this
+    /// bateri runs.
     pub fn take_key_changes(&self) -> Vec<KeyChange> {
         std::mem::take(&mut self.inner().changes)
     }
@@ -171,13 +207,20 @@ impl Answerer {
     }
 
     fn said_key_changed(&self, who: &Who, change: &KeyChanged) {
+        // This computer's own key changes are decided on the Apps page, not told of; and a name
+        // that is not a program's name is not the word of a kablo.
+        if who.local || !is_name(&change.name) {
+            return;
+        }
         let mut inner = self.inner();
-        let known = inner.changes.iter().any(|seen| {
-            seen.account == who.account && seen.name == change.name && seen.key == change.key
-        });
-        if !known {
+        if inner.told.len() >= TOLD_MAX {
+            return;
+        }
+        let key = (who.account.clone(), change.name.clone(), change.key.clone());
+        if inner.told.insert(key) {
             inner.changes.push(KeyChange {
                 account: who.account.clone(),
+                host: who.host.clone(),
                 name: change.name.clone(),
                 key: change.key.clone(),
             });
@@ -219,9 +262,11 @@ impl Answerer {
     /// The release of the source at `address` this bateri opens: from what was read lately, or
     /// from the internet.
     fn release(&self, who: &Who, address: &str) -> Result<Chosen, Failure> {
+        // What this computer read with its own reach is not handed to a server from the cache.
+        let key = format!("{}{address}", if who.local { "local:" } else { "server:" });
         {
             let inner = self.inner();
-            if let Some((at, chosen)) = inner.cache.get(address)
+            if let Some((at, chosen)) = inner.cache.get(&key)
                 && at.elapsed() < self.limits.keep
             {
                 return Ok(chosen.clone());
@@ -237,9 +282,7 @@ impl Answerer {
         let mut inner = self.inner();
         let keep = self.limits.keep;
         inner.cache.retain(|_, (at, _)| at.elapsed() < keep);
-        inner
-            .cache
-            .insert(address.to_owned(), (Instant::now(), chosen.clone()));
+        inner.cache.insert(key, (Instant::now(), chosen.clone()));
         Ok(chosen)
     }
 

@@ -8,6 +8,7 @@
 //! than this bateri has, another author's key).
 
 mod answering;
+mod card;
 mod support;
 
 use std::fs;

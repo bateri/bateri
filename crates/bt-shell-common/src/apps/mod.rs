@@ -33,6 +33,7 @@
 //! The network is [`fetch::Curl`] behind the [`Fetch`] seam; the folder is [`store`]; the rules
 //! are [`check`]. The shell gives the folder (`~/Library/Application Support/bateri/apps`).
 
+pub mod card;
 mod check;
 pub mod fetch;
 pub mod followed;

@@ -8,7 +8,7 @@
 //! behind; the ones more than a day old are swept away by the next, as kablo sweeps them too.
 //!
 //! **No byte a program or a server chose is read by a shell.** The script holds fixed text and
-//! three words that are checked first: the program's name (an `app.json` signed by its author
+//! four words that are checked first: the program's name (an `app.json` signed by its author
 //! names it, in the characters [`is_name`] allows), the version (three numbers), the sum (64
 //! hex digits) and the part (letters, digits and `-`).
 

@@ -46,6 +46,7 @@
 
 mod agent;
 pub(crate) mod app;
+mod apps_card;
 mod arrange;
 mod card;
 mod clipboard;
@@ -127,6 +128,17 @@ pub fn settings_layout_problems(
     shots: Option<&std::path::Path>,
 ) -> Vec<String> {
     settings_window::SettingsWindow::new(mtm).layout_problems(shots)
+}
+
+/// Builds the card a server asks about its programs with, in each of its states, over a pane-sized
+/// stand-in in a light and a dark appearance, and lists what runs into what; with `shots`, writes
+/// each as a PNG there. Only for `tests/settings_window.rs`.
+#[doc(hidden)]
+pub fn apps_card_layout_problems(
+    mtm: MainThreadMarker,
+    shots: Option<&std::path::Path>,
+) -> Vec<String> {
+    apps_card::layout_check::layout_problems(mtm, shots)
 }
 
 /// Builds the settings window, shows it off the screen before it has a theme, refreshes it in two

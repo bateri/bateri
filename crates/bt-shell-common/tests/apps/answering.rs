@@ -92,6 +92,7 @@ impl World {
 fn server(account: &str) -> Who {
     Who {
         account: account.to_owned(),
+        host: "dev-1".to_owned(),
         local: false,
     }
 }
@@ -99,6 +100,7 @@ fn server(account: &str) -> Who {
 fn this_computer() -> Who {
     Who {
         account: "local".to_owned(),
+        host: String::new(),
         local: true,
     }
 }
@@ -504,5 +506,38 @@ fn what_a_machine_has_and_a_key_that_stopped_a_program_are_remembered_once() {
     let changes = answerer.take_key_changes();
     assert_eq!(changes.len(), 1, "{changes:?}");
     assert_eq!(changes[0].name, "textpen");
+    assert_eq!(changes[0].host, "dev-1");
     assert!(answerer.take_key_changes().is_empty());
+    // Every start of the machine's watch says it again: it was told of, and is not told again,
+    // not even after the first telling was taken.
+    assert_eq!(
+        world.ask(&answerer, &server("u@h:22"), stopped()),
+        Reply::Done
+    );
+    assert!(answerer.take_key_changes().is_empty());
+    // Another key is another change; this computer's own are for the Apps page; a name that is
+    // not a program's is not told of.
+    let other_key = Package::KeyChanged(KeyChanged {
+        name: "textpen".to_owned(),
+        key: "ed25519:BBBB=".to_owned(),
+    });
+    world.ask(&answerer, &server("u@h:22"), other_key);
+    world.ask(&answerer, &this_computer(), stopped());
+    world.ask(
+        &answerer,
+        &server("u@h:22"),
+        Package::KeyChanged(KeyChanged {
+            name: "not a name\nCall 555".to_owned(),
+            key: "ed25519:CCCC=".to_owned(),
+        }),
+    );
+    let more = answerer.take_key_changes();
+    assert_eq!(more.len(), 1, "{more:?}");
+    assert_eq!(more[0].key, "ed25519:BBBB=");
+    let (title, body) = changes[0].notice();
+    assert_eq!(title, "textpen stopped updating on dev-1");
+    assert!(
+        body.contains("bateri package update textpen on dev-1"),
+        "{body}"
+    );
 }

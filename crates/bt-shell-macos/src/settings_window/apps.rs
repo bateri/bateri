@@ -1208,11 +1208,16 @@ impl Apps {
                     // The program is kablo's on this computer: it is asked to take it off (a
                     // server's copy is not touched: it is that machine's).
                     let name = name.to_string();
-                    std::thread::spawn(move || {
-                        if let Some(backend) = crate::hold_service::backend() {
-                            let _ = bt_shell_common::apps::followed::remove(&backend, &name);
-                        }
-                    });
+                    let spawned = std::thread::Builder::new()
+                        .name("bateri programs".into())
+                        .spawn(move || {
+                            if let Some(backend) = crate::hold_service::backend() {
+                                let _ = bt_shell_common::apps::followed::remove(&backend, &name);
+                            }
+                        });
+                    if let Err(error) = spawned {
+                        eprintln!("bateri: no thread to take a program off this computer: {error}");
+                    }
                 }
             }
             _ => {}
@@ -1757,9 +1762,8 @@ fn sheet_content(mtm: MainThreadMarker, window: &SettingsWindow, ask: &Ask) -> R
             );
             add(
                 &sheet_text(
-                    "It is deleted from this computer now, and from the servers with shell \
-                     integration the next time bateri connects to them. Adding it again brings \
-                     it back.",
+                    "It is deleted from this computer now. The servers keep their copies: take \
+                     one off there with bateri package remove. Adding it again brings it back.",
                     11.5,
                     Ink::Dim,
                     SHEET_TEXT,
@@ -1813,8 +1817,8 @@ fn sheet_content(mtm: MainThreadMarker, window: &SettingsWindow, ask: &Ask) -> R
             } else {
                 warn_box(
                     mtm,
-                    "It runs on this computer and on the servers where bateri sets up shell \
-                     integration, with your permissions.",
+                    "It runs on this computer with your permissions. A server gets it only when \
+                     you ask it to.",
                     "",
                     false,
                 )

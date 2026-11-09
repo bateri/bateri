@@ -223,6 +223,14 @@ pub const COMMANDS: &[Command] = &[
     command("shell_integration", "toggleHostIntegration", &[]),
     // The terminals the focused pane's server keeps that no pane shows, together in a new tab.
     command("open_all_background", "openAllBackground", &[]),
+    // The card a new server asks about the programs the person follows with: its two buttons,
+    // only while one asks (the application greys the items otherwise).
+    command(
+        "install_programs_here",
+        "installProgramsHere",
+        &["cmd+return"],
+    ),
+    command("programs_not_here", "programsNotHere", &["cmd+escape"]),
     // The id's tag is the menu item's marker (its title changes with the host).
     command("forget_password", "forgetPassword:47", &[]),
     command("cancel_upload", "cancelUpload", &["cmd+."]),
@@ -531,6 +539,8 @@ mod tests {
             ("toggleFloatPane", "\r", "co"),
             ("minimizeFloatingPane", "m", "co"),
             ("toggleFloatingPanes", "\r", "cos"),
+            ("installProgramsHere", "\r", "c"),
+            ("programsNotHere", "\u{1b}", "c"),
             ("movePaneToPreviousTab", "{", "co"),
             ("movePaneToNextTab", "}", "co"),
         ];

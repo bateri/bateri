@@ -17,13 +17,15 @@ use crate::agent::LOCAL_SERVER;
 use crate::agent::relay;
 use crate::kablo::served::Served;
 use crate::kablo::service::{Backend, Gone};
+use crate::ssh_wrap::KabloHost;
 
-/// How long `kablo bateri package install` is let take.
+/// How long a machine is let take to answer when `bateri package install` (or another of the
+/// words) is asked of it: the connection and the start. The command is let run as long as it does.
 const INSTALL_WAIT: Duration = Duration::from_secs(30);
 
 /// What this computer's kablo is asked to install for the followed program `name` that landed
 /// from `address`: the words of the `bateri` command.
-fn install_words(root: &Path, name: &str, address: &str) -> Vec<String> {
+pub(super) fn install_words(root: &Path, name: &str, address: &str) -> Vec<String> {
     let mut words = vec![
         "package".to_owned(),
         "install".to_owned(),
@@ -62,9 +64,22 @@ pub fn install(backend: &Arc<dyn Backend>, root: &Path) -> Vec<(String, String)>
 
 /// Asks this computer's kablo to take `name` off this computer (`bateri package remove`).
 pub fn remove(backend: &Arc<dyn Backend>, name: &str) -> Result<(), String> {
-    let served = Served::new(Arc::clone(backend), crate::kablo::local::host());
     let words = ["package".to_owned(), "remove".to_owned(), name.to_owned()];
-    let done = relay::run_for(&served, LOCAL_SERVER, &words, &Gone::new(), INSTALL_WAIT)?;
+    on(backend, crate::kablo::local::host(), LOCAL_SERVER, &words)
+}
+
+/// Runs `bateri WORDS` on a machine (`host`, as the connection to it is kept; `server` is the name
+/// it is told by) and says how it ended: `Err` is a line for the person when it did not end well.
+/// A machine's kablo is asked what a person would type there; this waits as long as the command
+/// does, so it is called on a thread of its own.
+pub fn on(
+    backend: &Arc<dyn Backend>,
+    host: KabloHost,
+    server: &str,
+    words: &[String],
+) -> Result<(), String> {
+    let served = Served::new(Arc::clone(backend), host);
+    let done = relay::run_for(&served, server, words, &Gone::new(), INSTALL_WAIT)?;
     if done.status == 0 {
         Ok(())
     } else {

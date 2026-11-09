@@ -591,11 +591,12 @@ stats_interval = 3
 # Programs bateri keeps up to date for you, such as the textpen editor. Each
 # entry says where a program publishes its releases: user/repo for a GitHub
 # project (its latest release), or the full https:// address of an app.json.
-# A program runs with your rights, on this computer and on the servers with
-# shell integration, so a program signed with a key you have not approved waits
-# for your approval and is not downloaded. Taking an entry out of the list
-# removes the program from this computer at once and from those servers the
-# next time bateri connects to them.
+# A program runs with your rights on this computer, so a program signed with a
+# key you have not approved waits for your approval and is not downloaded.
+# Remove in the Apps page of Settings takes the program off this computer at
+# once; the servers keep their copies (bateri package remove takes one off).
+# An entry taken out of this file by hand only leaves the list: the copy that
+# runs here stays until bateri package remove.
 sources = ["bateri/textpen"]
 
 [keys]
@@ -2766,8 +2767,8 @@ sources = ["bateri/textpen"]
 
 An entry is `user/repo`, a GitHub project (bateri reads the `app.json` of its latest release), or a full
 `https://…` or `file:///…` address of an `app.json`. An entry that is none of these is dropped with a warning and the
-others stay; a `sources` that is not a list of strings keeps the list in use. A program that leaves the list is
-deleted from this computer (and from the servers, in the background) — but not while the list has an entry that was
+others stay; a `sources` that is not a list of strings keeps the list in use. A program that leaves the list has
+its folder in bateri's own store deleted (the copies on this computer's machine folder and on the servers stay) — but not while the list has an entry that was
 dropped, or was not accepted: a mistake in a typed address does not delete the program it was meant to be. The warning
 stays until the line is mended, and the Apps page of Settings cannot add, review or remove anything until then (a
 change it wrote would write the list without that entry).
@@ -2788,23 +2789,50 @@ nothing but its `app.json` downloaded, until its key is approved: the key is kep
 release must be signed with it — a release signed with another key is not downloaded and asks again. A program's name
 belongs to the first source that uses it; `bateri`, `kablo` and `pencere` are never a program's name.
 
-**Where the programs run.** Each program in the list is also put where your shells find it, on this computer and on
-the servers with shell integration (`remote.integration`, and a server marked Production only where the Shell menu turns
-it on; a server without it gets nothing): the file is in `~/.local/share/bateri/apps/<name>/<version>/<name>`, and
-`~/.local/share/bateri/apps/bin/<name>` is a link to the release in use. bateri's shell integration adds
-`~/.local/share/bateri/apps/bin` to the **end** of `PATH`, once, so a command you or the system already has under the
-same name is the one that runs. The link only ever moves to a newer release, and a `bin/<name>` that is not a link
-bateri made is left alone (bateri logs it). A server gets its programs when a connection to it is set up, in the
-background: a terminal never waits for them, and a server that is visited again within ten minutes with nothing new is
-not asked twice. The server's own kind of file (Linux or macOS, Intel or ARM) is downloaded to this computer the first
-time a server of that kind needs it. Old releases on a machine are cleaned the same way as here: the one in use, the
-one before it and anything newer than 30 days stay.
+**Programs belong to the machine they run on.** On every machine, this computer included, the programs are in
+`~/.local/share/bateri/apps`, and only kablo writes there: `<name>/<version>/<name>` is the program, and
+`bin/<name>` a link to the release in use. bateri's shell integration adds `~/.local/share/bateri/apps/bin` to the
+**end** of `PATH`, once, so a command you or the system already has under the same name is the one that runs. The
+folder under `~/Library/Application Support/bateri/apps` above is bateri's own: what it fetched, to answer from. bateri
+does not write to a machine, and goes to the internet for one only when that machine's kablo asks (`file://` sources
+only for this computer; a server's must be a public `https` address; only bytes whose signature and sum hold are handed
+over; at most a hundred trips in ten minutes for one machine).
+
+**This computer** is brought what you follow without a question: bateri has this computer's kablo install each program
+(`bateri package install`, with the key you approved), and newer releases arrive the same way while bateri runs and at
+Check Now. A program with no file for this computer's kind (the grey dot) stays out.
+
+**A server gets a program only when you ask it to**, in either of two ways. In a terminal on it, `bateri package
+install textpen` (or `user/repo`, or the address of an `app.json`; a name is one bateri follows). Or the card: the first
+time a terminal on a server shows its prompt, a card in the top right corner of the pane says *Programs you follow
+aren't on dev-1* and lists the programs you follow, whose key you approved, that the server does not have and that their
+author built for that server's kind of computer. Install (⌘Return, Shell ▸ Install Programs Here) brings the ones left
+checked, one after the other, each with a ring, a dot or a triangle and the reason when it failed; the card goes by
+itself when all are in, and stays with Try Again and Close when some are not. Not Here (⌘Escape, Shell ▸ Don't Install
+Programs Here) tells that server none of them is wanted (`bateri package not-here`), and it does not ask about those
+again. The card takes no key, so you keep typing; it is over the first pane of that server that has a prompt, once for a
+server while bateri runs; it never comes on a server marked Production, one without shell integration, or this computer,
+and ⌘Return and ⌘Escape do nothing without a card.
+
+**`bateri package`**, in a terminal on a machine that has kablo and bateri's shell integration: `list` (what the machine
+has, what stopped for a key, whether it updates on its own, and what it was told is not wanted), `install SOURCE`, `update [NAME]`, `remove NAME`, `auto on|off` (whether this machine
+updates its programs on its own; on by default) and `not-here [NAME]…` (the programs this machine is not to be asked
+about). `install`, `update` and the daily look need a bateri that is connected, and are not allowed on a machine whose
+administrator forbade forwarding (`/etc/kablo/no-forwarding`). An unknown key is asked about at a terminal
+(`Signed with ed25519:… Trust it? [y/N]`), and refused where nobody can be asked.
+
+**Updates are the machine's.** While you are connected to a machine that has a program, its kablo asks bateri once a
+day, and at once at Check Now, whether there is a newer release, and takes it without a question; the release in use
+stays until the new one is whole, and a program that is running keeps running. A release signed with a different key
+than the one approved stops that program on that machine: the version there keeps running, one notification says so
+(*textpen stopped updating on dev-1*), and `bateri package update textpen` shows both keys and asks. `auto off` stops
+the updates of a machine; `bateri package update` there still looks when you ask.
 
 **The Apps page** (Settings ▸ Apps) is this list as rows, under Following, and a field under Add. A row has the
 program's name and version, the source it came from, and at the right a mark and a trash can, with a button left of
 the mark when the row has something to do. The mark is all the row says of its state: a green dot when the release in
-use is the newest, a grey dot when the release has no file for this computer (it still runs on the servers it has a
-file for), a turning ring while bateri reads the source, and a triangle when something needs you — orange for a
+use is the newest, a grey dot when the release has no file for this computer (its author has not built it for this kind of
+computer), a turning ring while bateri reads the source, and a triangle when something needs you — orange for a
 release that waits for a newer bateri (with Update bateri, the menu's Check for Updates…, in a bateri that updates
 itself), for a key not yet approved, or for a check that failed, red when the key changed. A check that failed where a
 later try may mend it — the network did not answer, a file arrived wrong, the disk was full — has Try Again, and bateri
@@ -2821,7 +2849,7 @@ triangle and Check Now starts it again.
 *Add.* Type `user/repo` or the address of an `app.json` and press Enter or Add. bateri reads the source first, and
 writes nothing: if the program is signed with the key that comes with bateri it is added at once; any other program
 asks, in a sheet that shows the name, the version, where it is from and the key that signed it, and says it runs on this
-computer and on the servers with shell integration with your permissions. Follow (Enter) keeps the key and adds the
+computer with your permissions and that a server gets it only when you ask it to. Follow (Enter) keeps the key and adds the
 source to `[apps] sources`; Cancel (Esc) writes nothing and leaves what you typed in the field. A source that is not a
 GitHub project or an address, one the list has, one with no `app.json` and one whose name is taken are said under
 the field.
@@ -2831,13 +2859,13 @@ changed key it shows the approved key and the new one side by side; Cancel is th
 New Key, in red, replaces the approved key. Until you decide, the release you have stays and updates stop.
 
 *Remove.* The trash can on a row asks first (`Remove <name>?`), with Cancel as the default (Enter and Esc) and Remove in
-red. Remove writes the list without the entry; the program is deleted from this computer at once and from the
-servers with shell integration the next time bateri connects to them. Adding it again brings it back, and asks for its
-key again unless it is signed with bateri's own.
+red. Remove writes the list without the entry; the program is deleted from this computer at once, and the servers keep
+their copies: take one off there with `bateri package remove`. Adding it again brings it back, and asks for its key
+again unless it is signed with bateri's own.
 
-**Taking a source out of the list** deletes its folder from this computer at once; bateri remembers the name for 30
-days, and a server that connects in that time loses its copy of the program too (and the `bin/<name>` link, if bateri
-made it).
+**Taking a source out of the list by hand** deletes bateri's own folder of the program (what it downloaded and
+checked) and touches no machine: the copy that runs on this computer, like the servers' copies, stays until
+`bateri package remove` takes it off. Remove on the Apps page does take this computer's copy off.
 
 ### `[keys]`
 

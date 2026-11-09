@@ -276,10 +276,12 @@ impl PaneHost for TabHost {
         }
     }
 
-    fn activity_changed(&self, _pane: u64) {
+    fn activity_changed(&self, pane: u64) {
         if let Some(tab) = self.tab() {
             tab.activity_changed();
         }
+        // The shell spoke, so it is past its opening moment: a server's card may come over it.
+        crate::apps_card::prompted(Self::mtm(), pane);
     }
 
     fn upload_ended(&self, pane: u64, finish: Finish) {

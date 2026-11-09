@@ -1623,6 +1623,15 @@ define_class!(
                 // kablo keeps terminals on, and some of them run with no pane showing them.
                 self.key_server_background()
                     .is_some_and(|(_, waiting)| waiting > 0)
+            } else if item.action() == Some(sel!(installProgramsHere:))
+                || item.action() == Some(sel!(programsNotHere:))
+            {
+                // Shell ▸ Install Programs Here, Don't Install Programs Here: the card a new
+                // server asks with is up over a pane of the tab the key window shows, and asks
+                // (Install wants a box checked).
+                let install = item.action() == Some(sel!(installProgramsHere:));
+                self.key_tab()
+                    .is_some_and(|tab| crate::apps_card::asking_in(&tab, install).is_some())
             } else if item.action() == Some(sel!(openSettingsFile:))
                 || item.action() == Some(sel!(openThemesFolder:))
             {
@@ -1863,6 +1872,26 @@ define_class!(
                 && let Some(window) = self.key_window()
             {
                 self.open_all_background(&window, &host);
+            }
+        }
+
+        /// Shell ▸ Install Programs Here (⌘Return): the card's Install.
+        #[unsafe(method(installProgramsHere:))]
+        fn install_programs_here(&self, _sender: Option<&AnyObject>) {
+            if let Some(tab) = self.key_tab()
+                && let Some(account) = crate::apps_card::asking_in(&tab, true)
+            {
+                crate::apps_card::chosen(self.mtm(), &account, crate::apps_card::Act::Install);
+            }
+        }
+
+        /// Shell ▸ Don't Install Programs Here (⌘Escape): the card's Not Here.
+        #[unsafe(method(programsNotHere:))]
+        fn programs_not_here(&self, _sender: Option<&AnyObject>) {
+            if let Some(tab) = self.key_tab()
+                && let Some(account) = crate::apps_card::asking_in(&tab, false)
+            {
+                crate::apps_card::chosen(self.mtm(), &account, crate::apps_card::Act::NotHere);
             }
         }
 
@@ -2833,7 +2862,7 @@ impl AppDelegate {
 
     /// All panes of all tabs — the list for the walking paths (settings
     /// distribution, Dock icon, lookup by identity); a copy, like the window list.
-    fn all_panes(&self) -> Vec<Retained<TerminalPane>> {
+    pub(crate) fn all_panes(&self) -> Vec<Retained<TerminalPane>> {
         self.tabs().iter().flat_map(|tab| tab.panes()).collect()
     }
 
@@ -3031,7 +3060,7 @@ impl AppDelegate {
     /// or a panel is key, and the new window is born at home. The source of
     /// inheritance is its selected tab's **focused pane**
     /// (`TerminalTab::focused_pane`).
-    fn key_window(&self) -> Option<Retained<TerminalWindow>> {
+    pub(crate) fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
         let key = key.sheetParent().unwrap_or(key);
         self.window_owning(&key)
@@ -3051,7 +3080,7 @@ impl AppDelegate {
     }
 
     /// The active tab: the key window's selected tab.
-    fn key_tab(&self) -> Option<Retained<TerminalTab>> {
+    pub(crate) fn key_tab(&self) -> Option<Retained<TerminalTab>> {
         Some(self.key_window()?.selected_tab())
     }
 
