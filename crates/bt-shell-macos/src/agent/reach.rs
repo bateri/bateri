@@ -255,6 +255,11 @@ pub(super) fn package(letter: Letter, server: &Server, production: bool, package
         .spawn(move || {
             let ssh = machine.ssh.clone();
             let said_state = matches!(package, Package::State(_));
+            // What this computer's kablo has, as it said: only what it lacks is asked for below.
+            let here = match &package {
+                Package::State(state) => state.installed.clone(),
+                _ => Vec::new(),
+            };
             let state_of_this_computer = who.local && said_state;
             let said_key_change = matches!(package, Package::KeyChanged(_));
             let reply = match crate::apps_answerer() {
@@ -273,12 +278,13 @@ pub(super) fn package(letter: Letter, server: &Server, production: bool, package
                     tell_of_key_changes();
                 }
             }
-            // This computer's kablo has started its watch: the programs the person follows are
-            // asked for, if they are not here yet.
+            // This computer's kablo has told its state, at the start of its watch and again each
+            // day while updating is off: the programs the person follows are asked for, if they are
+            // not here yet. A program that is here is not touched, so that `auto off` holds.
             if state_of_this_computer
                 && let (Some(backend), Some(root)) = (&machine.backend, crate::apps_root())
             {
-                for (name, why) in followed::install(backend, &root) {
+                for (name, why) in followed::install_missing(backend, &root, &here) {
                     eprintln!("bateri: could not install {name} on this computer: {why}");
                 }
             }

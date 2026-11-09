@@ -43,9 +43,36 @@ pub(super) fn install_words(root: &Path, name: &str, address: &str) -> Vec<Strin
 /// not an error; one whose key changed since the person approved it (the command's exit 77) waits
 /// for the person on the Apps page and is not reported here.
 pub fn install(backend: &Arc<dyn Backend>, root: &Path) -> Vec<(String, String)> {
+    install_each(backend, root, store::followed_names(root))
+}
+
+/// The same for the followed programs this computer does not have yet. `here` is what its kablo
+/// said it has (`package state`): a program that is there is left to the machine's own updating,
+/// which the person may have turned off (`bateri package auto off`), so that a kablo telling its
+/// state again every day does not bring a newer version in through this door.
+pub fn install_missing(
+    backend: &Arc<dyn Backend>,
+    root: &Path,
+    here: &[String],
+) -> Vec<(String, String)> {
+    install_each(backend, root, missing(root, here))
+}
+
+/// The followed programs of `root` that are not among the names in `here`.
+fn missing(root: &Path, here: &[String]) -> Vec<(String, String)> {
+    let mut wanted = store::followed_names(root);
+    wanted.retain(|(name, _)| !here.contains(name));
+    wanted
+}
+
+fn install_each(
+    backend: &Arc<dyn Backend>,
+    root: &Path,
+    wanted: Vec<(String, String)>,
+) -> Vec<(String, String)> {
     let served = Served::new(Arc::clone(backend), crate::kablo::local::host());
     let mut problems = Vec::new();
-    for (name, address) in store::followed_names(root) {
+    for (name, address) in wanted {
         let words = install_words(root, &name, &address);
         match relay::run_for(&served, LOCAL_SERVER, &words, &Gone::new(), INSTALL_WAIT) {
             Ok(done) if done.status == 0 || done.status == 77 => {}
@@ -116,5 +143,23 @@ mod tests {
                 "ed25519:KEY="
             ]
         );
+    }
+
+    #[test]
+    fn only_the_followed_programs_the_computer_does_not_have_are_asked_for_again() {
+        let root = TempRoot::new("followed-missing");
+        let folder = &root.0;
+        store::follow(folder, "textpen", "https://example.org/textpen/app.json").expect("followed");
+        store::follow(folder, "pencil", "https://example.org/pencil/app.json").expect("followed");
+        let names = |here: &[&str]| -> Vec<String> {
+            let here: Vec<String> = here.iter().map(|n| (*n).to_owned()).collect();
+            missing(folder, &here)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        assert_eq!(names(&[]), ["pencil", "textpen"]);
+        assert_eq!(names(&["textpen"]), ["pencil"]);
+        assert_eq!(names(&["textpen", "pencil", "other"]), Vec::<String>::new());
     }
 }
