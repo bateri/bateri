@@ -36,6 +36,7 @@ use super::command::{Action, Command, Scope};
 use super::edits::Edits;
 use super::follow::{self, Seen};
 use super::place::{Motion, Picture, Placement, Screen, Spec};
+use super::placeholder::{self, Run, Virtual};
 use super::receive::Decoded;
 use super::{Echo, Error, IMAGE_LIMIT, PLACEMENT_LIMIT, Reply};
 use animation::Animation;
@@ -138,6 +139,10 @@ pub(crate) struct Store {
     /// In the order they were made: the oldest, which goes past the limit,
     /// at the front.
     pub(super) placements: VecDeque<Placement>,
+    /// The virtual placements (`U=1`), in the order they were made: boxes the
+    /// cells that hold the placeholder character show an image through. They
+    /// are on no line and no scroll, clear or resize moves or ends them.
+    virtuals: VecDeque<Virtual>,
     next_seq: u64,
     /// The main screen's rows as of the last look ([`follow`]).
     pub(super) seen: Option<Seen>,
@@ -153,6 +158,7 @@ impl Store {
             quota,
             next_auto: AUTO_ID_BASE,
             placements: VecDeque::new(),
+            virtuals: VecDeque::new(),
             next_seq: 0,
             seen: None,
             rows: Vec::new(),
@@ -174,11 +180,13 @@ impl Store {
     }
 
     /// The images some placement shows, by generation: one look through the
-    /// placements for all the images that ask.
+    /// placements for all the images that ask. A virtual placement shows its
+    /// image too: it is what the placeholders in the text will show.
     fn shown(&self) -> HashSet<u64> {
         self.placements
             .iter()
             .map(|placement| placement.image)
+            .chain(self.virtuals.iter().map(|proto| proto.image))
             .collect()
     }
 
@@ -188,6 +196,7 @@ impl Store {
         self.bytes -= gone.bytes();
         self.placements
             .retain(|placement| placement.image != gone.generation);
+        self.virtuals.retain(|proto| proto.image != gone.generation);
     }
 
     /// Keeps `image`, replacing a stored image of the same id (and ending its
@@ -245,7 +254,9 @@ impl Store {
     /// image is the one being moved, not a second one; one with no id is
     /// always another, and past [`PLACEMENT_LIMIT`] the oldest placement goes
     /// for it. Showing an image makes it the newest, so the quota goes after
-    /// the ones nobody looked at.
+    /// the ones nobody looked at. A virtual placement (`U=1`) is kept apart:
+    /// it has no line and no column, only the box of cells its image will be
+    /// fitted to.
     fn place(&mut self, generation: u64, command: &Command, screen: &Screen, motion: Motion) {
         let Some(at) = self
             .images
@@ -258,9 +269,24 @@ impl Store {
         let size = (image.width, image.height);
         self.images.push(image);
         let id = command.echo.placement;
+        // A placement of this id is the one being moved, whichever kind it is.
         if id != 0 {
             self.placements
                 .retain(|placement| !(placement.image == generation && placement.id == id));
+            self.virtuals
+                .retain(|proto| !(proto.image == generation && proto.id == id));
+        }
+        if command.unicode {
+            self.virtuals.push_back(Virtual {
+                image: generation,
+                id,
+                columns: command.columns,
+                rows: command.rows,
+            });
+            if self.virtuals.len() > PLACEMENT_LIMIT {
+                self.virtuals.pop_front();
+            }
+            return;
         }
         self.next_seq += 1;
         self.placements.push_back(Placement {
@@ -316,12 +342,34 @@ impl Store {
         let mut touched = HashSet::new();
         {
             let Self {
-                images, placements, ..
+                images,
+                placements,
+                virtuals,
+                ..
             } = self;
             let images = by_generation(images);
             let image_of = |generation: u64| images.get(&generation).copied();
             let named =
                 |placement: &Placement| echo.placement == 0 || placement.id == echo.placement;
+            // The virtual placements are on no cell and no layer: only a
+            // delete that names their image reaches them.
+            virtuals.retain(|proto| {
+                let named = echo.placement == 0 || proto.id == echo.placement;
+                let hit = match command.scope {
+                    Scope::Id => {
+                        echo.id != 0
+                            && image_of(proto.image).is_some_and(|image| image.id == echo.id)
+                            && named
+                    }
+                    Scope::Number => numbered == Some(proto.image) && named,
+                    Scope::Range => image_of(proto.image).is_some_and(in_range),
+                    _ => false,
+                };
+                if hit {
+                    touched.insert(proto.image);
+                }
+                !hit
+            });
             placements.retain(|placement| {
                 let covers_cell = || placement.covers(line, col, cell);
                 let hit = match command.scope {
@@ -400,8 +448,72 @@ impl Store {
         self.images.clear();
         self.bytes = 0;
         self.placements.clear();
+        self.virtuals.clear();
         self.seen = None;
         self.rows.clear();
+    }
+
+    /// The image and the virtual placement a run of placeholder cells names:
+    /// the placement with the run's id, or the newest one the image has when
+    /// the run names none.
+    fn prototype(&self, run: &Run) -> Option<(&Image, &Virtual)> {
+        let image = self.images.iter().find(|image| image.id == run.image)?;
+        let proto = self.virtuals.iter().rev().find(|proto| {
+            proto.image == image.generation && (run.placement == 0 || proto.id == run.placement)
+        })?;
+        Some((image, proto))
+    }
+
+    /// The generations of the images `runs` show, each once.
+    fn marked<'a>(&self, runs: impl Iterator<Item = &'a Run>) -> Vec<u64> {
+        let mut shown = Vec::new();
+        for run in runs {
+            if let Some((image, _)) = self.prototype(run)
+                && !shown.contains(&image.generation)
+            {
+                shown.push(image.generation);
+            }
+        }
+        shown
+    }
+
+    /// The pictures of the placeholder cells of `window`, a picture for each
+    /// of the `runs` that has an image to show.
+    fn collect_marked(
+        &self,
+        window: Window,
+        cell: (u16, u16),
+        runs: &[Run],
+        out: &mut Vec<Picture>,
+    ) {
+        for run in runs {
+            let Some((image, proto)) = self.prototype(run) else {
+                continue;
+            };
+            let Some(shown) = image.shown() else {
+                continue;
+            };
+            let size = (image.width, image.height);
+            let Some(fitted) = placeholder::fit(run, cell, size, (proto.columns, proto.rows))
+            else {
+                continue;
+            };
+            out.push(Picture {
+                col: run.col.saturating_add(fitted.col),
+                row: run.line.saturating_add(window.shift),
+                x_offset: fitted.x_offset,
+                y_offset: fitted.y_offset,
+                width: fitted.width,
+                height: fitted.height,
+                source: fitted.source,
+                z: placeholder::LAYER,
+                image: image.revision,
+                key: image.generation,
+                edits: Arc::clone(&image.edits),
+                size,
+                pixels: Arc::clone(&shown.pixels),
+            });
+        }
     }
 
     /// The pictures of the placements that reach into `window`, in drawing
@@ -467,6 +579,23 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn placements(&self) -> &VecDeque<Placement> {
         &self.placements
+    }
+
+    /// Each virtual placement as (image id, placement id, columns, rows), in
+    /// the order they were made.
+    #[cfg(test)]
+    pub(crate) fn virtuals(&self) -> Vec<(u32, u32, u32, u32)> {
+        self.virtuals
+            .iter()
+            .map(|proto| {
+                let id = self
+                    .images
+                    .iter()
+                    .find(|image| image.generation == proto.image)
+                    .map_or(0, |image| image.id);
+                (id, proto.id, proto.columns, proto.rows)
+            })
+            .collect()
     }
 
     /// Each placement as (image id, line, column), in the order they were made.
@@ -665,11 +794,41 @@ impl Images {
             .map(|image| (image.width, image.height))
     }
 
-    /// Whether the screen shows anything at all.
+    /// Whether the screen shows anything at all: a placement, or a virtual
+    /// one that the placeholders in its text may show.
     pub(crate) fn shows(&self, alt: bool) -> bool {
+        let store = if alt { &self.alt } else { &self.main };
+        !store.placements.is_empty() || !store.virtuals.is_empty()
+    }
+
+    /// Whether the screen has a virtual placement: no cell of its grid is
+    /// looked at for a placeholder when it has none.
+    pub(crate) fn holds_virtual(&self, alt: bool) -> bool {
         !(if alt { &self.alt } else { &self.main })
-            .placements
+            .virtuals
             .is_empty()
+    }
+
+    /// The generations of the images the placeholder runs show, each once.
+    pub(crate) fn marked<'a>(&self, alt: bool, runs: impl Iterator<Item = &'a Run>) -> Vec<u64> {
+        (if alt { &self.alt } else { &self.main }).marked(runs)
+    }
+
+    /// Adds the pictures of the active screen's placeholder cells: the runs
+    /// read from the grid's `window` and from the band's.
+    pub(crate) fn collect_marked(
+        &self,
+        alt: bool,
+        cell: (u16, u16),
+        grid: (Window, &[Run]),
+        band: Option<(Window, &[Run])>,
+        out: &mut super::place::Pictures,
+    ) {
+        let store = if alt { &self.alt } else { &self.main };
+        store.collect_marked(grid.0, cell, grid.1, &mut out.grid);
+        if let Some((window, runs)) = band {
+            store.collect_marked(window, cell, runs, &mut out.band);
+        }
     }
 
     /// Adds the pictures of the active screen's placements that reach into

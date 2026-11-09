@@ -53,6 +53,12 @@
 //! `s=` and `v=` keys (`kitten icat` sends them for a PNG too), and one that
 //! does not leaves the cursor where it is.
 //!
+//! **A placement that no cell of its own holds** (`U=1`) is a box an image is
+//! fitted to, and the character `U+10EEEE` in the grid's cells is what shows
+//! it ([`placeholder`]): the frame reads the cells when such a box exists and
+//! hands over a [`Picture`] for each stretch of them, so that text moves the
+//! image.
+//!
 //! Nothing here draws. The store holds decoded pixels and placements per
 //! screen ([`Images`]); the frame hands them over as [`Picture`]s.
 
@@ -63,6 +69,7 @@ mod edits;
 mod features;
 mod follow;
 mod place;
+mod placeholder;
 mod receive;
 mod source;
 mod store;
@@ -85,6 +92,7 @@ pub use edits::{Dirty, Edits};
 pub(crate) use place::Motion;
 pub(crate) use place::Screen;
 pub use place::{Picture, PictureLayer, Pictures};
+pub(crate) use placeholder::has_glyph;
 pub(crate) use receive::{Env, Outcome, Receiver};
 pub(crate) use store::{Window, screen_of};
 
@@ -831,16 +839,34 @@ impl Hub {
         }
         images.look(term, cell);
         let columns = u16::try_from(term.columns()).unwrap_or(u16::MAX);
+        // The cells that show an image are read only when a virtual placement
+        // could be what they show.
+        let (grid_cells, band_cells) = if images.holds_virtual(alt) {
+            (
+                placeholder::read(term, grid, columns),
+                band.map(|band| placeholder::read(term, band, columns)),
+            )
+        } else {
+            (Vec::new(), None)
+        };
         // What the terminal plays comes before the pictures are made, so that a
         // frame that is due is the one drawn. It is the frames on screen that
         // are played, and the time to the next is for the clock.
         let due = if self.playing.load(Ordering::Relaxed) {
             let windows: Vec<Window> = std::iter::once(grid).chain(band).collect();
-            images.advance(alt, cell, columns, &windows, now)
+            let shown = images.marked(alt, grid_cells.iter().chain(band_cells.iter().flatten()));
+            images.advance(alt, cell, columns, &windows, &shown, now)
         } else {
             None
         };
         images.collect(alt, cell, columns, grid, band, out);
+        images.collect_marked(
+            alt,
+            cell,
+            (grid, &grid_cells),
+            band.zip(band_cells.as_deref()),
+            out,
+        );
         due.map(|due| due.saturating_duration_since(now))
     }
 

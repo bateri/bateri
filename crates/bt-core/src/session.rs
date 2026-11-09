@@ -6762,7 +6762,12 @@ impl Session {
             // selection highlight. Had it been written in three separate expressions
             // one could change later and the others stay old and the symptom would be
             // "hidden text is read from its underline/highlight".
-            let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
+            //
+            // **A placeholder cell has no glyph either** (`graphics::has_glyph`): the
+            // image it stands for is drawn in its place, and a font without the
+            // character would draw a box. The cell's background is still drawn.
+            let ch = (!hidden && !flags.intersects(SPACERS) && graphics::has_glyph(cell.c))
+                .then_some(cell.c);
             // The gate's rule half is a single mask test; **which** kind it is is
             // asked after the gate. `!hidden` is not outside the mask but **inside**:
             // had it stayed outside a hidden and underlined cell would pass the gate
@@ -7324,7 +7329,8 @@ impl Session {
                     color::resolve(cell.bg, colors, &theme)
                 };
                 let bg = (back != background).then(|| color::linear_rgba(back));
-                let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
+                let ch = (!hidden && !flags.intersects(SPACERS) && graphics::has_glyph(cell.c))
+                    .then_some(cell.c);
                 let ruled = !hidden && flags.intersects(RULES);
                 // The hover in the band's screen row (negative: `-channel..0`, the
                 // space of [`LinkPoint::Screen`]) — the grid's rule, the same helper.
@@ -34319,6 +34325,38 @@ e\\314\\201.'; sleep 5";
         session.set_reduce_motion(false);
         let (_, _, cursor) = picture_frame(&session);
         assert!(cursor.next_tick.is_some());
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_placeholder_cell_has_no_glyph_and_its_image_is_in_the_frame() {
+        // `U+10EEEE` and the marks for row 0 and columns 0 and 1, as UTF-8.
+        let (cell, zero, one) = ("\\364\\216\\273\\256", "\\314\\205", "\\315\\215");
+        let session = spawn_session(
+            &format!(
+                "stty -echo; printf '\\033_Ga=T,f=32,s=1,v=1,i=42,U=1,c=2,r=1;AAAAAA==\\033\\\\\\033[41;38;5;42m{cell}{zero}{zero}{cell}{zero}{one}\\033[0mREADY'; sleep 8"
+            ),
+            Arc::new(TestWake::default()),
+        );
+        wait_text(&session, "READY");
+        let (cells, pictures, cursor) = picture_frame(&session);
+        assert_eq!((cursor.col, cursor.row), (7, 0), "the image moved nothing");
+        let [picture] = pictures.grid() else {
+            panic!("one picture, got {:?}", pictures.grid().len());
+        };
+        // The window's cells are 9 × 18 pixels: two of them, as the image's box.
+        assert_eq!((picture.row, picture.col), (0, 0));
+        assert_eq!((picture.width, picture.height), (18, 18));
+        assert_eq!((picture.size, picture.z), ((1, 1), -1));
+        assert!(cells.iter().all(|cell| cell.ch != Some('\u{10EEEE}')));
+        // The cells keep the background the program gave them.
+        let under: Vec<_> = cells.iter().filter(|cell| cell.col < 2).collect();
+        assert_eq!(under.len(), 2);
+        assert!(
+            under
+                .iter()
+                .all(|cell| cell.bg.is_some() && cell.ch.is_none())
+        );
         session.shutdown();
     }
 

@@ -117,11 +117,13 @@ impl Store {
         })
     }
 
-    /// Plays the images the windows show up to `now`; when the next frame of
+    /// Plays the images the windows show up to `now` — through a placement or,
+    /// for those in `marked`, through placeholder cells; when the next frame of
     /// any of them is due, if one will be.
     pub(super) fn advance(
         &mut self,
         windows: &[Window],
+        marked: &[u64],
         cell: (u16, u16),
         columns: u16,
         now: Instant,
@@ -131,6 +133,7 @@ impl Store {
             .iter()
             .flat_map(|window| self.in_window(*window, cell, columns))
             .map(|placement| placement.image)
+            .chain(marked.iter().copied())
             .collect();
         if shown.is_empty() {
             return None;
@@ -199,18 +202,20 @@ impl Store {
 impl Images {
     /// Plays the images of the screen showing that the windows show, up to
     /// `now`, and says when the next frame of any of them is due, if one is.
+    /// `marked` are the images the placeholder cells in the windows show.
     pub(crate) fn advance(
         &mut self,
         alt: bool,
         cell: (u16, u16),
         columns: u16,
         windows: &[Window],
+        marked: &[u64],
         now: Instant,
     ) -> Option<Instant> {
         let mut counter = self.generation;
         let due = self
             .screen(alt)
-            .advance(windows, cell, columns, now, &mut || {
+            .advance(windows, marked, cell, columns, now, &mut || {
                 counter += 1;
                 counter
             });

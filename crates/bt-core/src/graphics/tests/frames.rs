@@ -723,15 +723,19 @@ fn a_feature_query_answers_with_the_keys_that_work() {
 #[test]
 fn a_key_with_its_default_or_one_that_is_not_understood_is_left_out() {
     let mut rig = Rig::new();
-    // `X=0`, `r=0` and `f=32` are the defaults; `f=8` and `U=1` are not done yet.
+    // `X=0`, `r=0` and `f=32` are the defaults; `f=8` is not done yet.
     assert_eq!(
         features(&mut rig, "a=q,i=31,e=f,X=0,r=0,f=32,s=2,f=8"),
         "\x1b_Gi=31,e=f,s=2;OK\x1b\\"
     );
     assert_eq!(
         features(&mut rig, "a=q,i=31,e=T,U=1,C=1,P=3,H=2"),
-        "\x1b_Gi=31,e=T,C=1;OK\x1b\\",
+        "\x1b_Gi=31,e=T,U=1,C=1;OK\x1b\\",
         "the keys of a placement this terminal does not do are not claimed"
+    );
+    assert_eq!(
+        features(&mut rig, "a=q,i=31,e=T,U=0"),
+        "\x1b_Gi=31,e=T;OK\x1b\\"
     );
 }
 

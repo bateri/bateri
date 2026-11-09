@@ -141,9 +141,12 @@ pub(crate) struct Command {
     /// `C=1`: placing leaves the cursor where it is; for `a=c`, overwriting
     /// instead of blending.
     pub(crate) still: bool,
-    /// `U=` and `P=`/`Q=` as written: the ways of placing an image that this
-    /// terminal does not do yet, which [`parse`] refuses.
+    /// `U=1`: the placement is virtual, a prototype that the cells holding the
+    /// placeholder character show; it covers no cell of its own and does not
+    /// move the cursor.
     pub(crate) unicode: bool,
+    /// `P=` and `Q=` as written: relative placement, which this terminal does
+    /// not do yet, so [`parse`] refuses it.
     pub(crate) relative: bool,
 }
 
@@ -294,11 +297,8 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
             _ => {}
         }
     }
-    // Two ways of placing an image that this terminal does not do: refusing
-    // is better than drawing it in the wrong place.
-    if command.unicode {
-        return Err(Error::invalid("unicode placeholders are not supported"));
-    }
+    // A way of placing an image that this terminal does not do: refusing is
+    // better than drawing it in the wrong place.
     if command.relative {
         return Err(Error::invalid("relative placement is not supported"));
     }
@@ -416,12 +416,21 @@ mod tests {
 
     #[test]
     fn placements_this_terminal_cannot_do_are_refused_by_name() {
-        for (control, word) in [("a=p,i=1,U=1", "unicode"), ("a=T,i=1,P=2,Q=3", "relative")] {
+        for (control, word) in [
+            ("a=T,i=1,P=2,Q=3", "relative"),
+            ("a=p,i=1,U=1,P=2", "relative"),
+        ] {
             let (echo, error) = failed(control);
             assert_eq!(echo.id, 1);
             assert!(error.message().contains(word), "{control}");
         }
         assert_eq!(parsed("a=p,i=1,U=0,P=0,Q=0,H=4").action, Action::Put);
+    }
+
+    #[test]
+    fn a_virtual_placement_is_read_and_a_zero_is_a_real_one() {
+        assert!(parsed("a=p,i=1,U=1,c=4,r=2").unicode);
+        assert!(!parsed("a=p,i=1,U=0").unicode);
     }
 
     #[test]

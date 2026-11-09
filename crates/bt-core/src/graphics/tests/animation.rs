@@ -39,7 +39,7 @@ fn command_at(rig: &mut Rig, now: Instant, control: &str) -> Vec<u8> {
 /// The images on show played up to `now`; when the next frame is due.
 fn play(rig: &Rig, now: Instant) -> Option<Instant> {
     rig.hub
-        .with_images_mut(|images| images.advance(false, (10, 20), 80, &[WINDOW], now))
+        .with_images_mut(|images| images.advance(false, (10, 20), 80, &[WINDOW], &[], now))
 }
 
 fn current(rig: &Rig) -> usize {
@@ -245,14 +245,14 @@ fn only_an_image_the_windows_show_is_played() {
         shift: 0,
     };
     let played = rig.hub.with_images_mut(|images| {
-        images.advance(false, (10, 20), 80, &[elsewhere], after(start, 500))
+        images.advance(false, (10, 20), 80, &[elsewhere], &[], after(start, 500))
     });
     assert_eq!(played, None);
     assert_eq!(current(&rig), 0);
     // And not the images of the other screen.
-    let alt = rig
-        .hub
-        .with_images_mut(|images| images.advance(true, (10, 20), 80, &[WINDOW], after(start, 500)));
+    let alt = rig.hub.with_images_mut(|images| {
+        images.advance(true, (10, 20), 80, &[WINDOW], &[], after(start, 500))
+    });
     assert_eq!(alt, None);
     assert_eq!(current(&rig), 0);
 }

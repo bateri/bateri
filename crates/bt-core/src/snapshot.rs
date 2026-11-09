@@ -1758,6 +1758,21 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_placeholder_cell_comes_back_with_its_marks_and_the_colours_that_name_the_image() {
+        // The foreground is the image's id and the underline the placement's,
+        // so both are part of the cell's text.
+        let bytes = "\x1b[38;5;42m\x1b[58;2;1;2;3m\u{10EEEE}\u{305}\u{30D}\u{10EEEE}\u{305}\u{30E}\
+                     \x1b[0m\r\n\x1b[38;2;0;1;2m\u{10EEEE}\u{30D}\x1b[0m\r\n";
+        let (original, replayed, _) = round_trip(20, 20, bytes.as_bytes());
+        assert_eq!(cells(&replayed), cells(&original));
+        let cell = &replayed.grid()[Line(0)][Column(1)];
+        assert_eq!(cell.c, '\u{10EEEE}');
+        assert_eq!(cell.zerowidth(), Some(&['\u{305}', '\u{30E}'][..]));
+        assert_eq!(cell.fg, Color::Indexed(42));
+        assert!(cell.underline_color().is_some());
+    }
+
+    #[test]
     fn a_named_colour_stays_apart_from_its_palette_slot() {
         let (_, replayed, _) = round_trip(20, 20, b"\x1b[31ma\x1b[38;5;1mb\r\n");
         let row = &replayed.grid()[Line(0)];

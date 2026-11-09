@@ -55,6 +55,7 @@ const PLACE: Table = &[
     (b'r', Values::Number),
     (b'z', Values::Number),
     (b'C', Values::Only(&["1"])),
+    (b'U', Values::Only(&["1"])),
 ];
 
 /// What `a=f` adds to a transmission: where the pixels go, which frame is the

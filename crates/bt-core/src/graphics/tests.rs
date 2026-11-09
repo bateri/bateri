@@ -16,6 +16,7 @@ use super::*;
 
 mod animation;
 mod frames;
+mod placeholders;
 
 /// What the parser knows of an 80-column terminal with 10 × 20 pixel cells.
 const ENV: Env = Env {
@@ -2241,6 +2242,345 @@ mod screenful {
             .map(|column| screen.term.grid()[line][Column(column)].c)
             .collect();
         assert!(last.contains("END"), "{last:?}");
+    }
+
+    // ─── placeholders ────────────────────────────────────────────────────
+
+    use super::super::placeholder::{PLACEHOLDER, mark_for};
+
+    /// A placeholder cell: the character and the marks, numbers as written.
+    fn cell_of(marks: &[usize]) -> String {
+        let marks: String = marks.iter().map(|&number| mark_for(number)).collect();
+        format!("{PLACEHOLDER}{marks}")
+    }
+
+    impl Screenful {
+        /// The pictures of the grid's lines `first..=last`, which the frame
+        /// numbers from `shift`.
+        fn pictures(&self, first: i32, last: i32, shift: i32) -> Pictures {
+            let mut out = Pictures::default();
+            self.sink.hub.pictures(
+                &self.term,
+                CELL,
+                Window { first, last, shift },
+                None,
+                Instant::now(),
+                &mut out,
+            );
+            out
+        }
+
+        fn screen_pictures(&self) -> Pictures {
+            let lines = i32::try_from(self.term.screen_lines()).expect("a few lines");
+            self.pictures(0, lines - 1, 0)
+        }
+    }
+
+    /// `(row, col, width, height, source)` of each picture.
+    fn shapes(pictures: &[Picture]) -> Vec<(i32, u16, u32, u32, [u32; 4])> {
+        pictures
+            .iter()
+            .map(|picture| {
+                (
+                    picture.row,
+                    picture.col,
+                    picture.width,
+                    picture.height,
+                    picture.source,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_two_by_two_placeholder_of_the_protocol_shows_the_image_one_picture_a_line() {
+        let mut screen = Screenful::new(20, 10, 100);
+        // The image is 20 × 40 pixels: two of these 10 × 20 cells by two.
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=42"));
+        screen.feed(b"\x1b[3;5H"); // line 2, column 4
+        screen.feed(&wire("a=p,i=42,U=1,c=2,r=2", &[]));
+        assert_eq!(screen.cursor(), (2, 4), "the cursor did not move");
+        screen.feed(
+            format!(
+                "\x1b[38;5;42m{}{}\x1b[39m\r\n    \x1b[38;5;42m{}{}\x1b[39m",
+                cell_of(&[0, 0]),
+                cell_of(&[0, 1]),
+                cell_of(&[1, 0]),
+                cell_of(&[1, 1]),
+            )
+            .as_bytes(),
+        );
+        let pictures = screen.screen_pictures();
+        assert_eq!(
+            shapes(pictures.grid()),
+            [
+                (2, 4, 20, 20, [0, 0, 20, 20]),
+                (3, 4, 20, 20, [0, 20, 20, 20])
+            ]
+        );
+        assert!(pictures.grid().iter().all(|picture| picture.z == -1));
+        assert!(pictures.band().is_empty());
+        assert_eq!(pictures.grid()[0].size, (20, 40));
+    }
+
+    #[test]
+    fn a_cell_that_leaves_out_its_marks_takes_them_from_the_left_as_the_protocol_says() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(&wire("a=t,f=32,s=30,v=40,i=42", &rgba(30, 40, 0)));
+        screen.feed(&wire("a=p,i=42,U=1,c=3,r=2", &[]));
+        // Two rows by three columns, the row of the first cell only.
+        screen.feed(
+            format!(
+                "\x1b[38;5;42m{}{}{}\r\n{}{}{}\x1b[39m",
+                cell_of(&[0]),
+                cell_of(&[]),
+                cell_of(&[]),
+                cell_of(&[1]),
+                cell_of(&[]),
+                cell_of(&[]),
+            )
+            .as_bytes(),
+        );
+        let pictures = screen.screen_pictures();
+        assert_eq!(
+            shapes(pictures.grid()),
+            [
+                (0, 0, 30, 20, [0, 0, 30, 20]),
+                (1, 0, 30, 20, [0, 20, 30, 20])
+            ]
+        );
+    }
+
+    #[test]
+    fn the_id_is_the_foreground_in_true_colour_and_its_top_byte_the_third_mark() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(&wire("a=t,f=32,s=10,v=20,i=258", &rgba(10, 20, 0)));
+        screen.feed(&wire("a=p,i=258,U=1,c=1,r=1", &[]));
+        let wide = 42 + (2 << 24);
+        screen.feed(&wire(
+            &format!("a=t,f=32,s=10,v=20,i={wide}"),
+            &rgba(10, 20, 7),
+        ));
+        screen.feed(&wire(&format!("a=p,i={wide},U=1,c=1,r=1"), &[]));
+        screen.feed(
+            format!(
+                "\x1b[38;2;0;1;2m{}\x1b[38;5;42m {}\x1b[39m",
+                cell_of(&[0, 0]),
+                cell_of(&[0, 0, 2]),
+            )
+            .as_bytes(),
+        );
+        let pictures = screen.screen_pictures();
+        let keys: Vec<(u16, u8)> = pictures
+            .grid()
+            .iter()
+            .map(|picture| (picture.col, picture.pixels[0]))
+            .collect();
+        assert_eq!(keys, [(0, 0), (2, 7)], "the image 258, then 42 + (2 << 24)");
+    }
+
+    #[test]
+    fn the_underline_colour_names_the_placement_and_without_one_the_newest_is_taken() {
+        let mut screen = Screenful::new(20, 10, 100);
+        // 20 × 40 pixels: a 2 × 2 box of these cells fills it, and a 2 × 1 one
+        // holds it at half the size, in the middle.
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=5"));
+        screen.feed(&wire("a=p,i=5,U=1,p=1,c=2,r=2", &[]));
+        screen.feed(&wire("a=p,i=5,U=1,p=2,c=2,r=1", &[]));
+        screen.feed(
+            format!(
+                "\x1b[38;5;5m\x1b[58;5;1m{}\x1b[58;5;2m {}\x1b[59m {}",
+                cell_of(&[0, 0]),
+                cell_of(&[0, 0]),
+                cell_of(&[0, 0]),
+            )
+            .as_bytes(),
+        );
+        let pictures = screen.screen_pictures();
+        let shown: Vec<(u16, u32, u32, [u32; 4])> = pictures
+            .grid()
+            .iter()
+            .map(|picture| (picture.col, picture.x_offset, picture.width, picture.source))
+            .collect();
+        // The first is the top-left cell of the image at its own size; the
+        // second the left half of a cell the image only fills in the middle
+        // of; the third names no placement and gets the newest, the second.
+        assert_eq!(
+            shown,
+            [
+                (0, 0, 10, [0, 0, 10, 20]),
+                (2, 5, 5, [0, 0, 10, 40]),
+                (4, 5, 5, [0, 0, 10, 40])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_placeholder_with_no_image_or_no_placement_shows_nothing_and_the_grid_is_not_read() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(format!("\x1b[38;5;42m{}", cell_of(&[0, 0])).as_bytes());
+        assert!(screen.screen_pictures().grid().is_empty());
+        // An image with no virtual placement is not the placeholder's.
+        screen.feed(&tile_command("a=T,f=32,s=20,v=40,i=42,C=1"));
+        assert!(
+            !screen
+                .sink
+                .hub
+                .with_images(|images| images.holds_virtual(false))
+        );
+        assert_eq!(
+            screen.screen_pictures().grid().len(),
+            1,
+            "the real placement"
+        );
+        screen.feed(&wire("a=p,i=42,U=1,c=2,r=2", &[]));
+        assert!(
+            screen
+                .sink
+                .hub
+                .with_images(|images| images.holds_virtual(false))
+        );
+        assert_eq!(screen.screen_pictures().grid().len(), 2);
+        // An id the store does not have, or a placement it does not have.
+        screen.feed(b"\r\n\x1b[38;5;43m");
+        screen.feed(cell_of(&[0, 0]).as_bytes());
+        screen.feed(b"\x1b[38;5;42m\x1b[58;5;9m");
+        screen.feed(cell_of(&[0, 0]).as_bytes());
+        assert_eq!(screen.screen_pictures().grid().len(), 2);
+    }
+
+    #[test]
+    fn the_image_goes_where_the_text_goes() {
+        let mut screen = Screenful::new(20, 6, 100);
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=42"));
+        screen.feed(&wire("a=p,i=42,U=1,c=2,r=2", &[]));
+        screen.feed(
+            format!(
+                "\x1b[38;5;42m{}{}\r\n{}{}\x1b[39m",
+                cell_of(&[0, 0]),
+                cell_of(&[0, 1]),
+                cell_of(&[1, 0]),
+                cell_of(&[1, 1]),
+            )
+            .as_bytes(),
+        );
+        assert_eq!(screen.screen_pictures().grid().len(), 2);
+        // Four lines more reach the bottom, two more scroll the placeholders
+        // into the history.
+        screen.feed(&lines(6));
+        assert_eq!(screen.history(), 2);
+        assert!(screen.screen_pictures().grid().is_empty());
+        // Looked at from two lines up, they are on the surface's first rows.
+        let pictures = screen.pictures(-2, 3, 2);
+        assert_eq!(
+            shapes(pictures.grid()),
+            [
+                (0, 0, 20, 20, [0, 0, 20, 20]),
+                (1, 0, 20, 20, [0, 20, 20, 20])
+            ]
+        );
+        // The text is gone and so is the image, which the program may show again.
+        screen.feed(b"\x1b[3J\x1b[2J");
+        assert!(screen.pictures(-2, 3, 2).grid().is_empty());
+        assert!(
+            screen
+                .sink
+                .hub
+                .with_images(|images| images.holds_virtual(false))
+        );
+    }
+
+    #[test]
+    fn placeholders_on_the_alternate_screen_show_what_that_screen_stored() {
+        let mut screen = Screenful::new(20, 6, 100);
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=42"));
+        screen.feed(&wire("a=p,i=42,U=1,c=2,r=2", &[]));
+        screen.feed(b"\x1b[?1049h");
+        screen.feed(format!("\x1b[38;5;42m{}", cell_of(&[0, 0])).as_bytes());
+        assert!(
+            screen.screen_pictures().grid().is_empty(),
+            "the alternate screen has not got the image"
+        );
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=42"));
+        screen.feed(&wire("a=p,i=42,U=1,c=2,r=2", &[]));
+        let mut pictures = Pictures::default();
+        screen.sink.hub.pictures(
+            &screen.term,
+            CELL,
+            Window {
+                first: 0,
+                last: 5,
+                shift: 0,
+            },
+            None,
+            Instant::now(),
+            &mut pictures,
+        );
+        assert_eq!(pictures.grid().len(), 1);
+    }
+
+    #[test]
+    fn a_hundred_by_forty_placeholder_is_a_picture_a_line() {
+        let mut screen = Screenful::new(100, 40, 0);
+        screen.feed(&wire("a=t,f=32,s=1000,v=800,i=1", &rgba(1000, 800, 0)));
+        screen.feed(&wire("a=p,i=1,U=1,c=100,r=40", &[]));
+        let mut text = String::from("\x1b[38;5;1m");
+        for row in 0..40 {
+            // The first cell says the row, the other ninety-nine nothing.
+            text.push_str(&cell_of(&[row]));
+            text.push_str(&cell_of(&[]).repeat(99));
+        }
+        screen.feed(text.as_bytes());
+        let pictures = screen.screen_pictures();
+        assert_eq!(pictures.grid().len(), 40);
+        assert!(pictures.grid().iter().enumerate().all(|(row, picture)| {
+            picture.row == row as i32
+                && (picture.col, picture.width, picture.height) == (0, 1000, 20)
+                && picture.source == [0, row as u32 * 20, 1000, 20]
+        }));
+    }
+
+    #[test]
+    fn the_band_reads_its_own_lines_of_the_grid() {
+        let mut screen = Screenful::new(20, 6, 100);
+        screen.feed(&tile_command("a=t,f=32,s=20,v=40,i=42"));
+        screen.feed(&wire("a=p,i=42,U=1,c=2,r=2", &[]));
+        screen.feed(
+            format!(
+                "\x1b[38;5;42m{}{}\r\n{}{}\x1b[39m",
+                cell_of(&[0, 0]),
+                cell_of(&[0, 1]),
+                cell_of(&[1, 0]),
+                cell_of(&[1, 1]),
+            )
+            .as_bytes(),
+        );
+        screen.feed(&lines(6));
+        let mut pictures = Pictures::default();
+        screen.sink.hub.pictures(
+            &screen.term,
+            CELL,
+            Window {
+                first: 0,
+                last: 5,
+                shift: 0,
+            },
+            Some(Window {
+                first: -2,
+                last: -1,
+                shift: 2,
+            }),
+            Instant::now(),
+            &mut pictures,
+        );
+        assert!(pictures.grid().is_empty());
+        assert_eq!(
+            shapes(pictures.band()),
+            [
+                (0, 0, 20, 20, [0, 0, 20, 20]),
+                (1, 0, 20, 20, [0, 20, 20, 20])
+            ]
+        );
     }
 }
 
