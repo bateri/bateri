@@ -14,7 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
-- **Programs can edit the frames of an image in kitty's graphics protocol.** A program can add frames to an image it has sent (`a=f`), change one rectangle of a frame, lay a rectangle of one frame on another (`a=c`, with alpha blending or plain replacement) and delete frames (`d=f`); a change to the frame on show reaches the screen with the image staying where it was placed, and a small edit no longer copies the whole image. Every frame counts against the image storage quota. A program can also ask which parts of the protocol bateri does with a feature query (`a=q` with `e=`), and is told only what works. Frames are stored but not played yet.
+- **Programs can edit the frames of an image in kitty's graphics protocol.** A program can add frames to an image it has sent (`a=f`), change one rectangle of a frame, lay a rectangle of one frame on another (`a=c`, with alpha blending or plain replacement) and delete frames (`d=f`); a change to the frame on show reaches the screen with the image staying where it was placed, and a small edit no longer copies the whole image: only the part that changed is sent to the graphics card. Every frame counts against the image storage quota. A program can also ask which parts of the protocol bateri does with a feature query (`a=q` with `e=`), and is told only what works. Frames are stored but not played yet.
 
 ## [0.27.0] - 2026-11-09
 

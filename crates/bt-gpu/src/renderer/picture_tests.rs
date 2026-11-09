@@ -47,6 +47,8 @@ fn picture(
         source: [0, 0, size.0, size.1],
         z,
         image,
+        key: image,
+        edits: Arc::new(bt_core::Edits::default()),
         size,
         pixels: Arc::new(texels.concat()),
     }
@@ -354,7 +356,7 @@ fn the_pixels_of_a_drawn_picture_are_let_go_and_its_texture_draws_it_again() {
         ],
     );
     let first = render_offscreen(&r, EDGE, ACCENT, &frame);
-    frame.release_pictures(|key| r.has_picture_texture(key));
+    frame.release_pictures(|picture| r.has_picture_texture(picture));
     let held: Vec<usize> = frame
         .pictures(PictureSurface::Grid)
         .iter()
@@ -419,4 +421,174 @@ fn a_frame_without_pictures_plans_what_it_did_before_them() {
         "{:?}",
         state.plan.ops
     );
+}
+
+// ─── a texture brought up to date, not made again ───────────────────────
+
+/// An image four texels square, red but for the texels `marked` says: (column,
+/// row) and colour.
+fn texels_of(marked: &[((usize, usize), [u8; 4])]) -> Vec<[u8; 4]> {
+    let mut texels = vec![RED; 16];
+    for &((column, row), colour) in marked {
+        texels[row * 4 + column] = colour;
+    }
+    texels
+}
+
+/// The image of `key` as it is at `revision`, with what is known of how it
+/// came to be.
+fn revised(key: u64, revision: u64, texels: &[[u8; 4]], edits: bt_core::Edits) -> Picture {
+    let mut picture = picture(revision, texels, (4, 4), (0, 0), (8, 8), 0);
+    picture.key = key;
+    picture.edits = Arc::new(edits);
+    picture
+}
+
+fn draw_one(r: &Renderer, picture: Picture) -> Vec<u8> {
+    let frame = frame_of((CELL, CELL), (2, 2), vec![picture]);
+    render_offscreen(r, 16, ACCENT, &frame)
+}
+
+const EDIT: ((usize, usize), [u8; 4]) = ((1, 2), GREEN);
+const LATER: ((usize, usize), [u8; 4]) = ((3, 0), BLUE);
+
+#[test]
+fn a_small_edit_writes_its_rectangle_and_draws_what_a_whole_upload_draws() {
+    let r = renderer();
+    draw_one(
+        &r,
+        revised(1, 10, &texels_of(&[]), bt_core::Edits::default()),
+    );
+    assert_eq!(
+        r.picture_bytes_uploaded(),
+        64,
+        "the first time is all of it"
+    );
+    let edited = texels_of(&[EDIT]);
+    let edits = bt_core::Edits::built(10, &[(11, [1, 2, 1, 1])]);
+    let drawn = draw_one(&r, revised(1, 11, &edited, edits));
+    assert_eq!(
+        r.picture_bytes_uploaded(),
+        64 + 4,
+        "one texel is written, not the image"
+    );
+    // What a renderer that never had the image draws from all of it.
+    let fresh = renderer();
+    let whole = draw_one(&fresh, revised(1, 11, &edited, bt_core::Edits::default()));
+    assert_eq!(drawn, whole);
+    assert_ne!(
+        drawn,
+        draw_one(
+            &fresh,
+            revised(2, 5, &texels_of(&[]), bt_core::Edits::default())
+        ),
+        "and the edit shows"
+    );
+    assert_eq!(cached(&r), 1, "the same texture, not a second one");
+}
+
+#[test]
+fn a_renderer_that_missed_edits_is_given_what_covers_them_and_a_renderer_up_to_date_is_not_waited_for()
+ {
+    let steady = renderer();
+    let late = renderer();
+    let first = texels_of(&[]);
+    let second = texels_of(&[EDIT]);
+    let third = texels_of(&[EDIT, LATER]);
+    let edits = [(11, [1, 2, 1, 1]), (12, [3, 0, 1, 1])];
+    draw_one(&steady, revised(1, 10, &first, bt_core::Edits::default()));
+    draw_one(&late, revised(1, 10, &first, bt_core::Edits::default()));
+    draw_one(
+        &steady,
+        revised(1, 11, &second, bt_core::Edits::built(10, &edits[..1])),
+    );
+    assert_eq!(steady.picture_bytes_uploaded(), 64 + 4);
+    let seen_by_steady = draw_one(
+        &steady,
+        revised(1, 12, &third, bt_core::Edits::built(10, &edits)),
+    );
+    assert_eq!(steady.picture_bytes_uploaded(), 64 + 4 + 4);
+    // The renderer that skipped the middle revision takes the rectangle that
+    // covers both edits: columns 1 to 3, rows 0 to 2.
+    let seen_by_late = draw_one(
+        &late,
+        revised(1, 12, &third, bt_core::Edits::built(10, &edits)),
+    );
+    assert_eq!(late.picture_bytes_uploaded(), 64 + 3 * 3 * 4);
+    assert_eq!(seen_by_late, seen_by_steady);
+}
+
+#[test]
+fn a_renderer_further_behind_than_the_edits_remembered_takes_the_whole_image() {
+    let r = renderer();
+    draw_one(
+        &r,
+        revised(1, 10, &texels_of(&[]), bt_core::Edits::default()),
+    );
+    let edited = texels_of(&[EDIT]);
+    // The memory begins after the revision the texture holds.
+    let edits = bt_core::Edits::built(20, &[(21, [1, 2, 1, 1])]);
+    let drawn = draw_one(&r, revised(1, 21, &edited, edits));
+    assert_eq!(r.picture_bytes_uploaded(), 64 + 64);
+    let whole = draw_one(
+        &renderer(),
+        revised(1, 21, &edited, bt_core::Edits::default()),
+    );
+    assert_eq!(drawn, whole);
+}
+
+#[test]
+fn a_texture_of_another_size_is_made_again_under_the_same_key() {
+    let r = renderer();
+    draw_one(
+        &r,
+        revised(1, 10, &texels_of(&[]), bt_core::Edits::default()),
+    );
+    let mut wide = picture(11, &[GREEN; 8], (4, 2), (0, 0), (8, 8), 0);
+    wide.key = 1;
+    let drawn = draw_one(&r, wide);
+    assert_eq!(r.picture_bytes_uploaded(), 64 + 32);
+    assert_eq!(pixel_at(&drawn, 16, 4, 4), (0, 0xff, 0));
+    assert_eq!(cached(&r), 1);
+}
+
+#[test]
+fn a_texture_that_holds_older_pixels_than_the_picture_is_written_whole_or_not_at_all() {
+    let r = renderer();
+    let first = texels_of(&[]);
+    draw_one(&r, revised(1, 10, &first, bt_core::Edits::default()));
+    let edited = texels_of(&[EDIT]);
+    let edits = bt_core::Edits::built(10, &[(11, [1, 2, 1, 1])]);
+    let mut released = revised(1, 11, &edited, edits.clone());
+    released.pixels = Arc::default();
+    let drawn = draw_one(&r, released.clone());
+    assert_eq!(
+        pixel_at(&drawn, 16, 4, 4),
+        clear(),
+        "a picture that let its pixels go cannot bring a texture up to date"
+    );
+    assert!(!r.has_picture_texture(&released));
+    assert_eq!(r.picture_bytes_uploaded(), 64, "and nothing was written");
+}
+
+#[test]
+fn a_texture_is_said_to_hold_the_pixels_a_picture_names_and_no_others() {
+    let r = renderer();
+    let first = revised(1, 10, &texels_of(&[]), bt_core::Edits::default());
+    assert!(!r.has_picture_texture(&first));
+    draw_one(&r, first.clone());
+    assert!(r.has_picture_texture(&first));
+    let next = revised(
+        1,
+        11,
+        &texels_of(&[EDIT]),
+        bt_core::Edits::built(10, &[(11, [1, 2, 1, 1])]),
+    );
+    assert!(
+        !r.has_picture_texture(&next),
+        "the next revision is not yet there"
+    );
+    draw_one(&r, next.clone());
+    assert!(r.has_picture_texture(&next));
+    assert!(!r.has_picture_texture(&first));
 }

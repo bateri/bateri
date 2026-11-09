@@ -40,7 +40,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use bt_atlas::{Atlas, Metrics, Plane, Spacing, TOFU};
-use bt_core::{Clusters, FontOptions, LinearRgba, Picture, PictureLayer};
+use bt_core::{Clusters, Dirty, FontOptions, LinearRgba, Picture, PictureLayer};
 
 use crate::GpuError;
 use crate::frame::{
@@ -824,15 +824,21 @@ impl SlotUpload for WgpuUpload<'_> {
 /// One picture on the GPU: its texture and the bind group that samples it
 /// with the `image` pipeline's layout.
 struct ImageTexture {
-    /// Kept so the texture lives exactly as long as the bind group over it.
-    _texture: wgpu::Texture,
+    /// The texture, which the bind group samples and a picture's edit is
+    /// written to.
+    texture: wgpu::Texture,
     bind: wgpu::BindGroup,
     /// The plan being made draws it ([`ImageCache::begin`]).
     seen: bool,
+    /// The pixels it holds, as the picture that made it names them
+    /// ([`Picture::image`]); 0 for a texture that is not a picture's.
+    revision: u64,
+    /// The size of the image it was made for, pixels.
+    size: (u32, u32),
 }
 
-/// The textures of the pictures the plans draw, by the picture's name
-/// ([`Picture::image`]).
+/// The textures of the pictures the plans draw, by the picture's key
+/// ([`Picture::key`]).
 ///
 /// A texture is made the first time a plan draws its picture and **dropped by
 /// the first plan that does not**: the store keeps the pixels as long as the
@@ -841,12 +847,19 @@ struct ImageTexture {
 /// age or a byte budget, would leave megabytes on a pane that went idle after
 /// a `clear`, and an idle pane draws no frame to let them go.
 ///
-/// The name is the key because it changes whenever the pixels do — the
-/// program sends an id again, or edits the frame on show: a texture cached
-/// under it never shows stale pixels.
+/// A texture keeps the image's key while its pixels change — the program sends
+/// an id again and the key is another, the old texture goes — and says which
+/// revision it holds ([`Picture::image`]): a picture that names another is
+/// written onto it, the rectangle that changed if the picture's edits reach
+/// back to what the texture holds ([`Picture::edits`]) and all of it if they do
+/// not. Each renderer holds its own revision, so two that draw at different
+/// times each get what they miss, and neither waits for the other.
 #[derive(Default)]
 struct ImageCache {
     textures: HashMap<u64, ImageTexture>,
+    /// The bytes of pixels written to picture textures, made or brought up to
+    /// date.
+    uploaded: u64,
 }
 
 impl ImageCache {
@@ -862,18 +875,39 @@ impl ImageCache {
         self.textures.retain(|_, texture| texture.seen);
     }
 
-    /// Makes sure the picture has its texture and marks it wanted. `false`:
-    /// it cannot be drawn ([`Gpu::picture_texture`]), and the plan leaves it
-    /// out.
+    /// Makes sure the picture has its texture, holding the pixels the picture
+    /// names, and marks it wanted. `false`: it cannot be drawn
+    /// ([`Gpu::picture_texture`]; or its texture is behind and the picture has
+    /// let its pixels go), and the plan leaves it out.
     fn ensure(&mut self, gpu: &Gpu, picture: &Picture) -> bool {
-        if let Some(texture) = self.textures.get_mut(&picture.image) {
+        if let Some(texture) = self.textures.get_mut(&picture.key)
+            && texture.size == picture.size
+        {
+            if texture.revision == picture.image {
+                texture.seen = true;
+                return true;
+            }
+            // A texture ahead of the picture (an older frame drawn after a
+            // newer one) has no edits to go by.
+            let dirty = if texture.revision < picture.image {
+                picture.edits.since(texture.revision)
+            } else {
+                Dirty::Whole
+            };
+            let Some(bytes) = gpu.update_picture(texture, picture, dirty) else {
+                return false;
+            };
+            texture.revision = picture.image;
             texture.seen = true;
+            self.uploaded += bytes;
             return true;
         }
-        let Some(texture) = gpu.picture_texture(picture) else {
+        let Some(mut texture) = gpu.picture_texture(picture) else {
             return false;
         };
-        self.textures.insert(picture.image, texture);
+        texture.revision = picture.image;
+        self.uploaded += u64::from(picture.size.0) * u64::from(picture.size.1) * 4;
+        self.textures.insert(picture.key, texture);
         true
     }
 }
@@ -1400,6 +1434,57 @@ impl Gpu {
         )
     }
 
+    /// Writes onto a picture's texture what `dirty` says it misses of the
+    /// picture's pixels, which are straight from the picture's buffer: the
+    /// rectangle is read in place, row by row, and nothing is copied out of it.
+    /// The bytes written; `None` where the picture has no pixels to write (it
+    /// let them go when it was drawn, and what the texture holds is not what it
+    /// names).
+    fn update_picture(
+        &self,
+        texture: &ImageTexture,
+        picture: &Picture,
+        dirty: Dirty,
+    ) -> Option<u64> {
+        let (width, height) = picture.size;
+        if picture.pixels.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+            return None;
+        }
+        let [x, y, w, h] = match dirty {
+            Dirty::Nothing => return Some(0),
+            Dirty::Whole => [0, 0, width, height],
+            Dirty::Rect([x, y, w, h]) => [
+                x.min(width),
+                y.min(height),
+                w.min(width.saturating_sub(x)),
+                h.min(height.saturating_sub(y)),
+            ],
+        };
+        if w == 0 || h == 0 {
+            return Some(0);
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &picture.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: (u64::from(y) * u64::from(width) + u64::from(x)) * 4,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        Some(u64::from(w) * u64::from(h) * 4)
+    }
+
     /// A texture of `width × height` four-byte pixels, uploaded once and bound with the linear
     /// sampler: what a kitty picture and a UI page's image are both drawn from. `format` is the
     /// caller's to justify (a picture's is sRGB, decoded by the hardware; a page's image is read
@@ -1484,9 +1569,11 @@ impl Gpu {
             ],
         });
         Some(ImageTexture {
-            _texture: texture,
+            texture,
             bind,
             seen: true,
+            revision: 0,
+            size: (width, height),
         })
     }
 
@@ -2881,7 +2968,7 @@ impl Renderer {
                 set = true;
             }
             plan.ops.push(Op::Image {
-                key: picture.image,
+                key: picture.key,
                 rect: quad.rect,
                 uv: quad.uv,
             });
@@ -2906,16 +2993,28 @@ impl Renderer {
             out.extend(
                 quads
                     .into_iter()
-                    .map(|quad| (picture.layer(), picture.image, quad)),
+                    .map(|quad| (picture.layer(), picture.key, quad)),
             );
         }
         out
     }
 
-    /// Whether the picture named `key` ([`Picture::image`]) has a texture here:
+    /// Whether the picture has a texture here that holds the pixels it names:
     /// what is drawn from it needs no pixels from the frame.
-    pub(crate) fn has_picture_texture(&self, key: u64) -> bool {
-        self.state.borrow().images.textures.contains_key(&key)
+    pub(crate) fn has_picture_texture(&self, picture: &Picture) -> bool {
+        self.state
+            .borrow()
+            .images
+            .textures
+            .get(&picture.key)
+            .is_some_and(|texture| texture.revision == picture.image)
+    }
+
+    /// The bytes of pixels written to picture textures so far, made or
+    /// brought up to date: what an edit of a small part of an image costs the
+    /// GPU is as small.
+    pub fn picture_bytes_uploaded(&self) -> u64 {
+        self.state.borrow().images.uploaded
     }
 
     /// Draws the frame into `target` and **submits** it: one render pass, the

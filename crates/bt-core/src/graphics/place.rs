@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use super::command::Command;
+use super::edits::Edits;
 
 /// The largest number of cells a placement may cover in either direction.
 /// Past it the numbers saturate, so that arithmetic on a hostile `c=` or
@@ -283,10 +284,18 @@ pub struct Picture {
     /// text.
     pub z: i32,
     /// Names the pixels on show: it changes when an id is sent again and
-    /// whenever the pixels of the image change (a frame edited or shown), so a
-    /// texture cached under it never shows stale pixels. What places the image
-    /// is not named by it and does not change with it.
+    /// whenever the pixels of the image change (a frame edited or shown). A
+    /// copy kept of them holds one of these and is told by [`Picture::edits`]
+    /// what it misses; it never shows pixels another name belongs to. What
+    /// places the image is not named by it and does not change with it.
     pub image: u64,
+    /// Names the image: it holds from the time an id is sent until the id is
+    /// sent again or deleted, whatever its pixels do. A copy kept under it is
+    /// brought up to date by [`Picture::edits`] instead of being made again.
+    pub key: u64,
+    /// Where the pixels changed lately: what a copy that holds an older
+    /// [`Picture::image`] is to take.
+    pub edits: Arc<Edits>,
     /// The image's size in pixels.
     pub size: (u32, u32),
     /// The image as straight RGBA, 8 bits a channel, `size.0 * size.1 * 4`

@@ -30,7 +30,9 @@ use std::sync::Arc;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Term, TermMode};
 
+use super::canvas::Rect;
 use super::command::{Action, Command, Scope};
+use super::edits::Edits;
 use super::follow::{self, Seen};
 use super::place::{Motion, Picture, Placement, Screen, Spec};
 use super::receive::Decoded;
@@ -74,9 +76,26 @@ pub(crate) struct Image {
     /// it never shows stale pixels, and nothing that places the image notices
     /// the change.
     pub(crate) revision: u64,
+    /// Where those pixels changed lately, for a copy kept elsewhere that holds
+    /// an older revision. Shared with the pictures that carry it, so a change
+    /// while one is in a frame being drawn copies it (a few rectangles).
+    pub(crate) edits: Arc<Edits>,
 }
 
 impl Image {
+    /// The pixels on show changed in `rect` (all of the image when `None`) and
+    /// are known as `stamp` from now on.
+    pub(super) fn changed(&mut self, stamp: u64, rect: Option<Rect>) {
+        let rect = rect.unwrap_or(Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        });
+        self.revision = stamp;
+        Arc::make_mut(&mut self.edits).note(stamp, [rect.x, rect.y, rect.width, rect.height]);
+    }
+
     fn bytes(&self) -> usize {
         self.frames.iter().map(|frame| frame.pixels.len()).sum()
     }
@@ -421,6 +440,8 @@ impl Store {
                 source: spec.source,
                 z: spec.z,
                 image: image.revision,
+                key: image.generation,
+                edits: Arc::clone(&image.edits),
                 size: (image.width, image.height),
                 pixels: Arc::clone(&shown.pixels),
             });
@@ -544,6 +565,7 @@ impl Images {
             current: 0,
             generation,
             revision: generation,
+            edits: Arc::new(Edits::from(generation)),
         };
         match store.insert(image) {
             Ok(()) => {

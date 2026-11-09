@@ -1641,7 +1641,7 @@ impl Core {
                 self.publish_origin(&frame);
                 // What is drawn is on the GPU: the store's pixels are the
                 // store's again, to be edited where they lie.
-                frame.release_pictures(|key| self.renderer.has_picture_texture(key));
+                frame.release_pictures(|picture| self.renderer.has_picture_texture(picture));
                 // The silence's base is refreshed only on a frame that
                 // **leaves**, for the same reason: a frame that could not be
                 // encoded changed nothing on screen. The stamp is the tick's

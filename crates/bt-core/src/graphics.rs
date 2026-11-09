@@ -59,6 +59,7 @@
 mod apc;
 mod canvas;
 mod command;
+mod edits;
 mod features;
 mod follow;
 mod place;
@@ -80,6 +81,7 @@ use crate::pointer::PointerShapes;
 use crate::shell::BlockKey;
 
 pub(crate) use apc::Collector;
+pub use edits::{Dirty, Edits};
 pub(crate) use place::Motion;
 pub(crate) use place::Screen;
 pub use place::{Picture, PictureLayer, Pictures};

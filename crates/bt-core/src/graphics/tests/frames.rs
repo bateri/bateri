@@ -323,6 +323,99 @@ fn an_image_sent_again_has_a_name_no_edit_has_had() {
     assert_eq!(once.len(), seen.len(), "{seen:?}");
 }
 
+#[test]
+fn an_edit_tells_the_drawing_which_rectangle_changed() {
+    let mut rig = Rig::new();
+    shown_image(&mut rig, &rgba(4, 3, 1));
+    let before = pictures_of(&rig);
+    rig.run(&wire("a=f,i=7,r=1,x=1,y=1,s=2,v=1,X=1", &[1; 8]));
+    let once = pictures_of(&rig);
+    assert_eq!(
+        once.grid()[0].edits.since(before.grid()[0].image),
+        Dirty::Rect([1, 1, 2, 1])
+    );
+    rig.run(&wire("a=f,i=7,r=1,x=0,y=2,s=1,v=1,X=1", &[2; 4]));
+    let twice = pictures_of(&rig);
+    assert_eq!(
+        twice.grid()[0].edits.since(before.grid()[0].image),
+        Dirty::Rect([0, 1, 3, 2]),
+        "what covers both"
+    );
+    assert_eq!(
+        twice.grid()[0].edits.since(once.grid()[0].image),
+        Dirty::Rect([0, 2, 1, 1]),
+        "what a copy that has the first edit is missing"
+    );
+    assert_eq!(
+        twice.grid()[0].edits.since(twice.grid()[0].image),
+        Dirty::Nothing
+    );
+}
+
+#[test]
+fn a_composed_rectangle_is_an_edit_of_the_frame_on_show() {
+    let mut rig = Rig::new();
+    shown_image(&mut rig, &rgba(4, 3, 1));
+    rig.run(&wire("a=f,i=7,s=1,v=1", &[3, 3, 3, 255]));
+    let before = pictures_of(&rig);
+    rig.run(&wire("a=c,i=7,r=2,c=1,x=3,y=2,w=1,h=1,X=0,C=1", &[]));
+    let after = pictures_of(&rig);
+    assert_eq!(
+        after.grid()[0].edits.since(before.grid()[0].image),
+        Dirty::Rect([3, 2, 1, 1])
+    );
+}
+
+#[test]
+fn the_name_of_the_image_holds_through_edits_and_not_through_a_resend() {
+    let mut rig = Rig::new();
+    shown_image(&mut rig, &rgba(4, 3, 1));
+    let first = pictures_of(&rig);
+    rig.run(&wire("a=f,i=7,r=1,s=1,v=1,X=1", &[1, 1, 1, 1]));
+    let edited = pictures_of(&rig);
+    assert_eq!(first.grid()[0].key, edited.grid()[0].key);
+    shown_image(&mut rig, &rgba(4, 3, 9));
+    let sent = pictures_of(&rig);
+    assert_ne!(first.grid()[0].key, sent.grid()[0].key);
+    assert_eq!(
+        sent.grid()[0].edits.since(edited.grid()[0].image),
+        Dirty::Whole,
+        "a copy of the image that was replaced is not brought up to date"
+    );
+}
+
+#[test]
+fn another_frame_shown_changes_all_of_the_image() {
+    let mut rig = Rig::new();
+    shown_image(&mut rig, &rgba(4, 3, 1));
+    rig.run(&wire("a=f,i=7,s=1,v=1", &[3, 3, 3, 255]));
+    let before = pictures_of(&rig);
+    // The frame on show goes, and the one after it is on show.
+    rig.run(&wire("a=d,d=f,i=7,r=1", &[]));
+    let after = pictures_of(&rig);
+    assert_eq!(
+        after.grid()[0].edits.since(before.grid()[0].image),
+        Dirty::Rect([0, 0, 4, 3])
+    );
+}
+
+#[test]
+fn a_copy_that_fell_further_behind_than_the_edits_remembered_takes_all() {
+    let mut rig = Rig::new();
+    shown_image(&mut rig, &rgba(4, 3, 1));
+    let start = pictures_of(&rig).grid()[0].image;
+    let mut seen = Vec::new();
+    for step in 0..9u8 {
+        rig.run(&wire("a=f,i=7,r=1,s=1,v=1,X=1", &[step, 0, 0, 255]));
+        seen.push(pictures_of(&rig).grid()[0].image);
+    }
+    let last = pictures_of(&rig);
+    let edits = &last.grid()[0].edits;
+    assert_eq!(edits.since(start), Dirty::Whole);
+    assert_eq!(edits.since(seen[0]), Dirty::Rect([0, 0, 1, 1]));
+    assert_eq!(edits.since(seen[8]), Dirty::Nothing);
+}
+
 /// The pixels of the frame on show as the store holds them.
 fn stored_pixels(rig: &Rig, id: u32) -> Option<Arc<Vec<u8>>> {
     rig.hub.with_images(|images| {

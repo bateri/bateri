@@ -151,7 +151,7 @@ impl Store {
                 frame.gap = gap_of(command.z);
             }
             if number - 1 == current {
-                image.revision = stamp;
+                image.changed(stamp, Some(rect));
             }
             return Ok(id);
         }
@@ -292,7 +292,7 @@ impl Store {
         )
         .ok_or_else(mismatch)?;
         if target == current {
-            image.revision = stamp;
+            image.changed(stamp, Some(to));
         }
         Ok(image.id)
     }
@@ -323,11 +323,11 @@ impl Store {
         let removed = number - 1;
         if image.current >= kept {
             image.current = kept - 1;
-            image.revision = stamp;
+            image.changed(stamp, None);
         } else if image.current > removed {
             image.current -= 1;
         } else if image.current == removed {
-            image.revision = stamp;
+            image.changed(stamp, None);
         }
         self.bytes = self.bytes.saturating_sub(gone.pixels.len());
     }
