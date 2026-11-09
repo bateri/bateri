@@ -347,6 +347,8 @@ pub(crate) enum Pending {
     Frame { command: Command, decoded: Decoded },
     /// Lay a rectangle of one frame on another (`a=c`).
     Compose(Command),
+    /// Control how an image plays (`a=a`), at the instant the command came.
+    Animate { command: Command, now: Instant },
     /// Show a stored image (`a=p`).
     Put { command: Command, motion: Motion },
     /// Remove placements and, for the upper-case forms, image data.
@@ -366,7 +368,9 @@ impl Pending {
             | Self::Store { motion, .. }
             | Self::Put { motion, .. }
             | Self::Reply { motion, .. } => *motion,
-            Self::Delete(_) | Self::Frame { .. } | Self::Compose(_) => Motion::NONE,
+            Self::Delete(_) | Self::Frame { .. } | Self::Compose(_) | Self::Animate { .. } => {
+                Motion::NONE
+            }
         }
     }
 
@@ -564,6 +568,10 @@ pub(crate) struct Hub {
     /// carried a command, since the parser last caught up with the reads
     /// ([`Hub::note_remote`]).
     remote_seen: AtomicBool,
+    /// Whether the images that have a gap play by themselves. Off while the
+    /// system asks for less motion: a program's own change of frame still shows,
+    /// the terminal's does not come.
+    playing: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -585,7 +593,14 @@ impl Hub {
             open: AtomicBool::new(false),
             remote: OnceLock::new(),
             remote_seen: AtomicBool::new(false),
+            playing: AtomicBool::new(true),
         }
+    }
+
+    /// Whether the animations the terminal runs go on (they do, but where
+    /// motion is to be reduced).
+    pub(crate) fn set_playing(&self, playing: bool) {
+        self.playing.store(playing, Ordering::Relaxed);
     }
 
     /// Holds the record of the command the parser has just halted behind.
@@ -733,6 +748,9 @@ impl Hub {
                 lock(&self.images).frame(screen, &command, decoded).encode()
             }
             Pending::Compose(command) => lock(&self.images).compose(screen, &command).encode(),
+            Pending::Animate { command, now } => lock(&self.images)
+                .animate(screen, &command, now)
+                .and_then(|reply| reply.encode()),
             Pending::Put { command, motion } => {
                 lock(&self.images).put(screen, &command, motion).encode()
             }
@@ -801,18 +819,29 @@ impl Hub {
         cell: (u16, u16),
         grid: Window,
         band: Option<Window>,
+        now: Instant,
         out: &mut Pictures,
-    ) {
+    ) -> Option<Duration> {
         let mut images = lock(&self.images);
         let alt = term
             .mode()
             .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
         if !images.shows(alt) {
-            return;
+            return None;
         }
         images.look(term, cell);
         let columns = u16::try_from(term.columns()).unwrap_or(u16::MAX);
+        // What the terminal plays comes before the pictures are made, so that a
+        // frame that is due is the one drawn. It is the frames on screen that
+        // are played, and the time to the next is for the clock.
+        let due = if self.playing.load(Ordering::Relaxed) {
+            let windows: Vec<Window> = std::iter::once(grid).chain(band).collect();
+            images.advance(alt, cell, columns, &windows, now)
+        } else {
+            None
+        };
         images.collect(alt, cell, columns, grid, band, out);
+        due.map(|due| due.saturating_duration_since(now))
     }
 
     /// The alternate screen was entered or left: what it showed goes.
@@ -856,6 +885,11 @@ impl Hub {
     #[cfg(test)]
     pub(crate) fn with_images<R>(&self, read: impl FnOnce(&Images) -> R) -> R {
         read(&lock(&self.images))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_images_mut<R>(&self, change: impl FnOnce(&mut Images) -> R) -> R {
+        change(&mut lock(&self.images))
     }
 }
 

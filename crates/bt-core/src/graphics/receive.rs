@@ -205,13 +205,7 @@ impl Receiver {
                 out(Outcome::Pending(Pending::Put { command, motion }));
             }
             Action::Compose => out(Outcome::Pending(Pending::Compose(command))),
-            // There is no reply to take back from the terminal for these yet:
-            // an animation is only stored, never run.
-            Action::Animate => out(failure(
-                false,
-                command.echo,
-                Error::invalid("animation control is not supported"),
-            )),
+            Action::Animate => out(Outcome::Pending(Pending::Animate { command, now })),
             Action::Transmit | Action::TransmitAndPut | Action::Query | Action::Frame => {
                 let mut command = command;
                 // A frame that names no size has the image's: it is the whole

@@ -82,6 +82,16 @@ const COMPOSE: Table = &[
     (b'C', Values::Only(&["1"])),
 ];
 
+/// The keys of `a=a`: the state and number of loops, the frame and its gap, and
+/// the frame that is on show.
+const ANIMATE: Table = &[
+    (b's', Values::Only(&["1", "2", "3"])),
+    (b'v', Values::Number),
+    (b'r', Values::Number),
+    (b'z', Values::Number),
+    (b'c', Values::Number),
+];
+
 /// The keys of `a=d`.
 const DELETE: Table = &[
     (
@@ -105,6 +115,7 @@ fn tables(action: u8) -> Option<&'static [Table]> {
         b'T' => &[TRANSMIT, PLACE],
         b'p' => &[PLACE],
         b'f' => &[TRANSMIT, FRAME],
+        b'a' => &[ANIMATE],
         b'c' => &[COMPOSE],
         b'd' => &[DELETE],
         _ => return None,

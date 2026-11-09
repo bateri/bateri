@@ -41,7 +41,7 @@ fn revision_of(rig: &Rig, id: u32) -> u64 {
 }
 
 /// The pictures the grid shows, as a frame draws them.
-fn pictures_of(rig: &Rig) -> Pictures {
+pub(super) fn pictures_of(rig: &Rig) -> Pictures {
     let mut pictures = Pictures::default();
     rig.hub.with_images(|images| {
         images.collect(
@@ -692,7 +692,7 @@ fn an_image_keeps_no_more_frames_than_the_limit() {
 // ─── the feature query ──────────────────────────────────────────────────
 
 /// What a feature query comes to: the answer the program reads.
-fn features(rig: &mut Rig, control: &str) -> String {
+pub(super) fn features(rig: &mut Rig, control: &str) -> String {
     rig.queries.clear();
     let (motions, answers) = rig.run(&wire(control, &[]));
     assert!(motions.is_empty() && answers.is_empty(), "{control}");
@@ -738,10 +738,6 @@ fn a_key_with_its_default_or_one_that_is_not_understood_is_left_out() {
 #[test]
 fn an_action_that_is_not_done_is_answered_without_e() {
     let mut rig = Rig::new();
-    assert_eq!(
-        features(&mut rig, "a=q,i=31,e=a,s=3"),
-        "\x1b_Gi=31;OK\x1b\\"
-    );
     assert_eq!(features(&mut rig, "a=q,i=31,e=Z"), "\x1b_Gi=31;OK\x1b\\");
     assert_eq!(features(&mut rig, "a=q,i=31,e=ff"), "\x1b_Gi=31;OK\x1b\\");
 }
@@ -774,12 +770,4 @@ fn the_e_key_of_any_other_action_is_refused() {
     let answers = answered(&mut rig, "a=t,i=2,e=f,s=1,v=1", &[0; 4]);
     assert!(answers.starts_with("\x1b_Gi=2;EINVAL:"), "{answers}");
     assert!(rig.main_ids().is_empty());
-}
-
-#[test]
-fn animation_control_is_refused_by_name_for_now() {
-    let mut rig = Rig::new();
-    let answers = answered(&mut rig, "a=a,i=3,s=3", &[]);
-    assert!(answers.starts_with("\x1b_Gi=3;EINVAL:"), "{answers}");
-    assert!(answers.contains("animation"));
 }

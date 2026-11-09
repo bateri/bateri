@@ -22,6 +22,7 @@
 //!
 //! [`QUOTA_BYTES`]: super::QUOTA_BYTES
 
+mod animation;
 mod frames;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -37,6 +38,7 @@ use super::follow::{self, Seen};
 use super::place::{Motion, Picture, Placement, Screen, Spec};
 use super::receive::Decoded;
 use super::{Echo, Error, IMAGE_LIMIT, PLACEMENT_LIMIT, Reply};
+use animation::Animation;
 
 /// Ids the terminal hands out for an image sent by number (`I=`) start
 /// here, far from the small ids programs choose themselves.
@@ -80,6 +82,8 @@ pub(crate) struct Image {
     /// an older revision. Shared with the pictures that carry it, so a change
     /// while one is in a frame being drawn copies it (a few rectangles).
     pub(crate) edits: Arc<Edits>,
+    /// Whether the terminal plays the frames by itself and how far it is.
+    pub(crate) animation: Animation,
 }
 
 impl Image {
@@ -403,15 +407,7 @@ impl Store {
     /// The pictures of the placements that reach into `window`, in drawing
     /// order: by layer, then by age.
     fn collect(&self, window: Window, cell: (u16, u16), columns: u16, out: &mut Vec<Picture>) {
-        let mut shown: Vec<&Placement> = self
-            .placements
-            .iter()
-            .filter(|placement| {
-                placement.line <= window.last
-                    && placement.bottom(cell) >= window.first
-                    && placement.col < columns
-            })
-            .collect();
+        let mut shown: Vec<&Placement> = self.in_window(window, cell, columns).collect();
         if shown.is_empty() {
             return;
         }
@@ -566,6 +562,7 @@ impl Images {
             generation,
             revision: generation,
             edits: Arc::new(Edits::from(generation)),
+            animation: Animation::default(),
         };
         match store.insert(image) {
             Ok(()) => {

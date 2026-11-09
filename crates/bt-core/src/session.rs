@@ -7373,7 +7373,9 @@ impl Session {
         // channel above it, in the fill-local rows its cells use.
         pictures.clear();
         let channel_rows = i32::from(channel);
-        self.adapter.0.graphics.pictures(
+        // The frame of an animated image is chosen by the time the frame is
+        // made, and the time to the next one is a clock like the counter's.
+        let picture_clock = self.adapter.0.graphics.pictures(
             &term,
             self.adapter.cell_px(),
             graphics::Window {
@@ -7386,6 +7388,7 @@ impl Session {
                 last: -offset - 1,
                 shift: offset + channel_rows,
             }),
+            std::time::Instant::now(),
             pictures,
         );
 
@@ -7679,6 +7682,11 @@ impl Session {
                 crate::shell::sooner(caret.hold_left, end_left),
             );
         }
+        // **An image that plays also asks for a frame**, on any screen: it is
+        // a content clock like the counter's and has its own stop (nothing
+        // that plays is on show), which is why it is not held behind the
+        // alternate screen's none.
+        cursor.next_tick = crate::shell::sooner(cursor.next_tick, picture_clock);
         cursor
     }
 
@@ -8752,6 +8760,14 @@ impl Session {
         }
         let report: &'static [u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
         self.send(Msg::Input(report.into()));
+    }
+
+    /// Whether the system asks for less motion. The animations that kitty
+    /// images run by themselves stop on the frame they are on and the clock they
+    /// ask for stops with them; a program that changes the frame itself is
+    /// not held back.
+    pub fn set_reduce_motion(&self, reduce: bool) {
+        self.adapter.0.graphics.set_playing(!reduce);
     }
 
     /// Scrolls the visible window by `pages` pages (Shift+PgUp/PgDn); a positive
@@ -34082,6 +34098,37 @@ e\\314\\201.'; sleep 5";
             .0
             .graphics
             .with_images(|images| images.main().placed())
+    }
+
+    #[test]
+    fn an_animated_image_on_show_asks_for_a_frame_when_its_next_is_due_and_not_when_motion_is_reduced()
+     {
+        // Two frames of 500 ms, run by the terminal.
+        let commands = [
+            "\\033_Ga=T,f=32,s=1,v=1,i=5;AAAAAA==\\033\\\\",
+            "\\033_Ga=f,i=5,s=1,v=1,z=500;AAAAAA==\\033\\\\",
+            "\\033_Ga=a,i=5,r=1,z=500\\033\\\\",
+            "\\033_Ga=a,i=5,s=3\\033\\\\",
+        ]
+        .concat();
+        let session = spawn_session(
+            &format!("stty -echo; printf '{commands}READY'; sleep 8"),
+            Arc::new(TestWake::default()),
+        );
+        wait_text(&session, "READY");
+        let (_, pictures, cursor) = picture_frame(&session);
+        assert_eq!(pictures.grid().len(), 1);
+        let tick = cursor.next_tick.expect("the next frame is asked for");
+        assert!(tick <= Duration::from_millis(500), "{tick:?}");
+        // The system asks for less motion: the frame on show stays, and no
+        // clock is asked for it.
+        session.set_reduce_motion(true);
+        let (_, _, cursor) = picture_frame(&session);
+        assert_eq!(cursor.next_tick, None);
+        session.set_reduce_motion(false);
+        let (_, _, cursor) = picture_frame(&session);
+        assert!(cursor.next_tick.is_some());
+        session.shutdown();
     }
 
     #[test]

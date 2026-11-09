@@ -3515,6 +3515,10 @@ impl DisplayLink {
         let changed = motion.reduce() != reduce;
         let finished = motion.set_reduce(reduce);
         core.motion.set(motion);
+        // What the terminal plays by itself (the frames of an animated image)
+        // stands still on the frame it is on; the frame request below is what
+        // lets it go on again when the setting is lifted.
+        core.session.set_reduce_motion(reduce);
         // The typing effects end in both directions too (`Motion::set_reduce`'s
         // reason); the frame request comes from `changed` below.
         if changed {

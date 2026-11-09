@@ -22,7 +22,7 @@ use super::{DEFAULT_GAP, Frame, Image, Images, Screen, Store};
 
 /// A gap as a command gives it: positive is the milliseconds, negative a
 /// frame that is passed over.
-fn gap_of(z: i32) -> u32 {
+pub(super) fn gap_of(z: i32) -> u32 {
     u32::try_from(z).unwrap_or(0)
 }
 
@@ -37,7 +37,7 @@ fn mismatch() -> Error {
 
 impl Store {
     /// The place of the image a command names, by id or else by number.
-    fn index_of(&self, echo: Echo) -> Option<usize> {
+    pub(super) fn index_of(&self, echo: Echo) -> Option<usize> {
         if echo.id != 0 {
             self.images.iter().position(|image| image.id == echo.id)
         } else if echo.number != 0 {
@@ -49,7 +49,7 @@ impl Store {
         }
     }
 
-    fn missing_image(echo: Echo) -> Error {
+    pub(super) fn missing_image(echo: Echo) -> Error {
         Error::missing(format!(
             "the image with id {} and number {} does not exist",
             echo.id, echo.number

@@ -14,6 +14,7 @@ use super::command::Command;
 use super::store::Images;
 use super::*;
 
+mod animation;
 mod frames;
 
 /// What the parser knows of an 80-column terminal with 10 × 20 pixel cells.
@@ -655,7 +656,6 @@ fn every_way_a_payload_can_be_wrong_is_an_answer_and_nothing_is_stored() {
         ("a=t,f=100,i=1".into(), Vec::new(), "EINVAL"),
         ("a=t,t=f,i=1".into(), b"/tmp/x".to_vec(), "EINVAL"),
         ("a=t,f=7,i=1".into(), pixels.clone(), "EINVAL"),
-        ("a=a,i=1".into(), pixels.clone(), "EINVAL"),
         ("a=z,i=1".into(), pixels.clone(), "EINVAL"),
     ];
     for (control, payload, code) in cases {
