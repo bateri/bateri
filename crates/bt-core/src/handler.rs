@@ -780,25 +780,27 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         self.term.reset_state();
     }
 
-    /// The kitty keyboard protocol's `CSI > flags u`, with only the level the
-    /// keys are encoded for: "disambiguate escape codes" (`input::text_key`).
-    /// A program that asks for more (Codex adds the alternate keys and the
-    /// event types) gets that level and `CSI ? u` tells it so, instead of
-    /// promising release events and shifted keys nobody sends.
+    /// The kitty keyboard protocol's `CSI > flags u`: every flag the program
+    /// pushes is kept, because every one of them is encoded for
+    /// ([`crate::input`]), and `CSI ? u` says what is kept.
     ///
-    /// The push stays a push when nothing is left of it: the program pops
-    /// as many as it pushed, and a dropped push would pop its parent's.
+    /// Typing (`last_input`) is over for the shell: a program that pushes the
+    /// protocol reads keys itself from here on.
     fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
         *self.last_input = false;
-        self.term
-            .push_keyboard_mode(mode & KeyboardModes::DISAMBIGUATE_ESC_CODES);
+        self.term.push_keyboard_mode(mode);
     }
 
-    /// `CSI = flags ; how u`, kept to the one level like a push.
+    /// `CSI = flags ; how u`. The library applies it to the active flags but
+    /// not to the stack entry `CSI ? u` reads and a pop restores, so the entry
+    /// is replaced by what is active: the answer to a query is what keys are
+    /// encoded for, whichever way the flags were asked for.
     fn set_keyboard_mode(&mut self, mode: KeyboardModes, behavior: KeyboardModesApplyBehavior) {
         *self.last_input = false;
-        self.term
-            .set_keyboard_mode(mode & KeyboardModes::DISAMBIGUATE_ESC_CODES, behavior);
+        self.term.set_keyboard_mode(mode, behavior);
+        let active = keyboard_flags(*self.term.mode());
+        self.term.pop_keyboard_modes(1);
+        self.term.push_keyboard_mode(active);
     }
 
     /// OSC 22 ([`crate::pointer`]): the request goes to the current screen's
@@ -949,6 +951,35 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         fn report_modify_other_keys(&mut self);
         fn set_scp(&mut self, char_path: ScpCharPath, update_mode: ScpUpdateMode);
     }
+}
+
+/// The kitty keyboard flags a terminal mode holds: what keys are encoded for.
+fn keyboard_flags(mode: TermMode) -> KeyboardModes {
+    [
+        (
+            TermMode::DISAMBIGUATE_ESC_CODES,
+            KeyboardModes::DISAMBIGUATE_ESC_CODES,
+        ),
+        (
+            TermMode::REPORT_EVENT_TYPES,
+            KeyboardModes::REPORT_EVENT_TYPES,
+        ),
+        (
+            TermMode::REPORT_ALTERNATE_KEYS,
+            KeyboardModes::REPORT_ALTERNATE_KEYS,
+        ),
+        (
+            TermMode::REPORT_ALL_KEYS_AS_ESC,
+            KeyboardModes::REPORT_ALL_KEYS_AS_ESC,
+        ),
+        (
+            TermMode::REPORT_ASSOCIATED_TEXT,
+            KeyboardModes::REPORT_ASSOCIATED_TEXT,
+        ),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| mode.contains(*bit))
+    .fold(KeyboardModes::NO_MODE, |all, (_, flag)| all | flag)
 }
 
 #[cfg(test)]
@@ -1525,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn a_program_gets_the_one_keyboard_level_there_is_and_is_told_so() {
+    fn a_program_gets_every_keyboard_flag_it_asks_for_and_is_told_so() {
         let config = Config {
             kitty_keyboard: true,
             ..Config::default()
@@ -1539,24 +1570,50 @@ mod tests {
         };
         let level = |term: &Term<Answers>| *term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL;
         let one = TermMode::DISAMBIGUATE_ESC_CODES;
+        let events = TermMode::REPORT_EVENT_TYPES;
+        let alternates = TermMode::REPORT_ALTERNATE_KEYS;
+        let all = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let text = TermMode::REPORT_ASSOCIATED_TEXT;
 
         // Codex's push: disambiguate, alternate keys, event types.
         feed(&mut term, b"\x1b[>7u\x1b[?u");
-        assert_eq!(level(&term), one);
-        // A push with nothing left of it is still a push: the pop that
-        // answers it gives the level under it back.
-        feed(&mut term, b"\x1b[>8u");
-        assert_eq!(level(&term), TermMode::empty());
+        assert_eq!(level(&term), one | events | alternates);
+        // A push on top of it, all five, and the pop that answers it.
+        feed(&mut term, b"\x1b[>31u\x1b[?u");
+        assert_eq!(level(&term), one | events | alternates | all | text);
         feed(&mut term, b"\x1b[<u\x1b[?u");
+        assert_eq!(level(&term), one | events | alternates);
+        // A set changes the flags the way it says and the query tells the
+        // flags it left, whichever way they were asked for.
+        feed(&mut term, b"\x1b[=8;2u\x1b[?u");
+        assert_eq!(level(&term), one | events | alternates | all);
+        feed(&mut term, b"\x1b[=2;3u\x1b[?u");
+        assert_eq!(level(&term), one | alternates | all);
+        feed(&mut term, b"\x1b[=1;1u\x1b[?u");
         assert_eq!(level(&term), one);
-        // A set is kept to the level too, whichever way it applies.
-        feed(&mut term, b"\x1b[=5;1u");
-        assert_eq!(level(&term), one);
-        feed(&mut term, b"\x1b[=4;3u");
-        assert_eq!(level(&term), one);
-        feed(&mut term, b"\x1b[=1;3u");
+        // The pop gives back what is under the entry that was set: nothing.
+        feed(&mut term, b"\x1b[<u\x1b[?u");
         assert_eq!(level(&term), TermMode::empty());
-        assert_eq!(*answers.0.lock().unwrap(), ["\x1b[?1u", "\x1b[?1u"]);
+        // A set with nothing pushed is the program's own flags: asked, kept,
+        // and a pop puts the keys back as they were.
+        feed(&mut term, b"\x1b[=5;1u\x1b[?u");
+        assert_eq!(level(&term), one | alternates);
+        feed(&mut term, b"\x1b[<u\x1b[?u");
+        assert_eq!(level(&term), TermMode::empty());
+        assert_eq!(
+            *answers.0.lock().unwrap(),
+            [
+                "\x1b[?7u",
+                "\x1b[?31u",
+                "\x1b[?7u",
+                "\x1b[?15u",
+                "\x1b[?13u",
+                "\x1b[?1u",
+                "\x1b[?0u",
+                "\x1b[?5u",
+                "\x1b[?0u"
+            ]
+        );
     }
 
     /// The parser hands a run of text over in one piece; the grid must come out as if it had

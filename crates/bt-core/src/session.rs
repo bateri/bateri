@@ -87,8 +87,8 @@ use crate::handler::{ClusterHandler, KeptModes, resize_report};
 use crate::history::{self, CommandMemory, CommandRecord, RecordState, Remembered};
 use crate::identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION};
 use crate::input::{
-    self, Arrow, ButtonRoute, FunctionKey, MouseButton, MouseEncoding, MouseModifiers, TextKey,
-    WHEEL_DOWN, WHEEL_UP, WheelRoute,
+    self, Arrow, ButtonRoute, FunctionKey, KeyEvent, KeyPhase, Keycap, MouseButton, MouseEncoding,
+    MouseModifiers, TextKey, WHEEL_DOWN, WHEEL_UP, WheelRoute,
 };
 use crate::link;
 use crate::pencere::{self, Desk, ViewOptions};
@@ -5292,6 +5292,10 @@ pub struct Session {
     /// The keyboard focus last heard ([`Session::set_focus`]); `None` before
     /// the pane first said. A leaf lock, never taken under `Term`.
     focus: Mutex<Option<bool>>,
+    /// The physical keys whose press the program was told and whose release it
+    /// has not been told yet ([`Session::write_key_event`]). A leaf lock, never
+    /// taken under `Term`.
+    pressed: Mutex<Vec<u16>>,
     /// `[appearance] minimum_contrast` as `f64` bits — the ratio a program's
     /// text keeps against its ground in [`Session::frame`]
     /// ([`LinearRgba::legible_on`]); [`Session::set_minimum_contrast`]
@@ -5937,6 +5941,7 @@ impl Session {
             alt_screen: AtomicBool::new(alt_at_birth),
             caret_in_dock: AtomicBool::new(false),
             focus: Mutex::new(None),
+            pressed: Mutex::new(Vec::new()),
             minimum_contrast: AtomicU64::new(crate::settings::MINIMUM_CONTRAST.to_bits()),
             search: Mutex::new(SearchSlot::default()),
             // Nothing wanted at opening: the shell asks when a bar is wide.
@@ -8741,6 +8746,76 @@ impl Session {
         self.send_input(|mode| input::text_key(key, mode));
     }
 
+    /// A key did something: went down, repeated or came up
+    /// ([`input::KeyEvent`]). What the program is told depends on what it asked
+    /// for with the kitty keyboard protocol and is decided in the same `Term`
+    /// lock the mode is read in ([`input::key_event`]); a program that asked for
+    /// nothing is told what [`KeyEvent::legacy`] says, as if it were
+    /// [`Session::write_key`], [`Session::write_text_key`] or [`Session::write`].
+    ///
+    /// **A release is told only for a key whose press the program was told**,
+    /// whichever way the mode changed in between: the press of a key the menu
+    /// took (⌘C), the dock's selection took or the text stack consumed never
+    /// reached the program, so its release would be a key coming up that never
+    /// went down. The keys are paired by [`KeyEvent::id`]; losing the keyboard
+    /// forgets them ([`Session::set_focus`]), because the release goes to
+    /// another window.
+    ///
+    /// A press or a repeat is typing, as in [`Session::write`]. A release and a
+    /// modifier key by itself are not: they say what the keyboard did, they
+    /// write nothing, so the selection and the window stay where they are, as
+    /// they do for a mouse report.
+    pub fn write_key_event(&self, event: &KeyEvent) {
+        let released = event.phase == KeyPhase::Release;
+        if released {
+            let mut pressed = lock(&self.pressed);
+            let before = pressed.len();
+            pressed.retain(|id| *id != event.id);
+            if pressed.len() == before {
+                return;
+            }
+        }
+        let at_prompt = lock(&self.shell).at_prompt();
+        let bytes = |mode| input::key_event(event, mode, at_prompt);
+        let by_itself = released
+            || matches!(
+                event.key,
+                Keycap::Modifier(..) | Keycap::CapsLock | Keycap::NumLock | Keycap::ScrollLock
+            );
+        let told = if by_itself {
+            self.send_report_with(bytes)
+        } else {
+            self.send_input(bytes).is_some()
+        };
+        if told && !released {
+            let mut pressed = lock(&self.pressed);
+            if !pressed.contains(&event.id) {
+                pressed.push(event.id);
+            }
+        }
+    }
+
+    /// Whether the program asked to hear every key as an escape code
+    /// (`CSI > 8 u`): a key that types text is then an event of its own and
+    /// does not go through the text stack.
+    pub fn reports_every_key(&self) -> bool {
+        self.term
+            .lock()
+            .mode()
+            .contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+    }
+
+    /// Sends what the keyboard says without typing: no selection cleared, no
+    /// return to the bottom. `true` when something was sent.
+    fn send_report_with(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) -> bool {
+        let bytes = bytes(*self.term.lock().mode());
+        if bytes.is_empty() {
+            return false;
+        }
+        self.send(Msg::Input(bytes.into()));
+        true
+    }
+
     /// The pane gained (`true`) or lost the keyboard: a program that asked for
     /// focus events (`CSI ? 1004 h` — vim, tmux) hears `CSI I` or `CSI O`.
     ///
@@ -8751,6 +8826,9 @@ impl Session {
     /// and the scrolled window where they are.
     ///
     pub fn set_focus(&self, focused: bool) {
+        if !focused {
+            lock(&self.pressed).clear();
+        }
         let before = lock(&self.focus).replace(focused);
         if before.is_none_or(|before| before == focused) {
             return;
@@ -12513,18 +12591,20 @@ impl Session {
     }
 
     /// The keyboard's **text** — the letter AppKit's text stack delivers
-    /// (`insertText:`). Its only difference from [`Session::write`] is the dock
+    /// (`insertText:`). Its differences from [`Session::write`] are the dock
     /// selection: while there is a selection and the editing gate is open the
     /// text is written **in place of** the selection — first the
     /// delete command, then the letter by the usual path, i.e. it still passes
-    /// through `self-insert`. Function keys, Enter and Control bytes stay in
+    /// through `self-insert` — and the program that asked to hear every key
+    /// with its text, which hears text no key made as `CSI 0 ; ; text u`
+    /// ([`input::typed_text`]). Function keys, Enter and Control bytes stay in
     /// `write`: they remove the selection and do today's job.
     pub fn type_text(&self, text: &str) {
         if text.is_empty() {
             return;
         }
         self.dock_delete_selection();
-        self.write(text.as_bytes());
+        self.send_input(|mode| input::typed_text(text, mode));
     }
 
     /// An owning write: the same gate as `write`, but does not copy the bytes
@@ -25278,6 +25358,117 @@ mod tests {
         asked.write_text_key(&key('\u{1b}', Mods::NONE, b"\x1b"));
         asked.write_key(FunctionKey::Arrow(Arrow::Left), shift);
         expect_sent(&asked, &wake, b"\x1b[13;2u\r\x1b[99;5u\x1b[27u\x1b[1;2D");
+    }
+
+    /// A key's event for the tests: `id` is the physical key.
+    fn key_event(id: u16, phase: KeyPhase, key: Keycap, mods: Mods, text: &str) -> KeyEvent {
+        KeyEvent {
+            id,
+            phase,
+            key,
+            mods,
+            caps_lock: false,
+            shifted: None,
+            base: None,
+            text: (!text.is_empty()).then(|| text.to_owned()),
+            legacy: Some(crate::KeyInput::Bytes(Cow::Owned(text.as_bytes().to_vec()))),
+        }
+    }
+
+    #[test]
+    fn a_program_that_asked_for_every_key_hears_what_it_was_told_the_press_of() {
+        // The flags 1, 2, 8 and 16; the shell's line discipline keeps its hands
+        // off the bytes so that `od` sees what was sent.
+        let (session, wake) = dump_session(40, "stty -isig -icrnl; printf '\\033[>27u'", |mode| {
+            mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+        });
+        assert!(session.reports_every_key());
+        let a = |id, phase| key_event(id, phase, Keycap::Char('a'), Mods::NONE, "a");
+        let shift = |phase, mods| {
+            let mut event = key_event(
+                56,
+                phase,
+                Keycap::Modifier(crate::Modifier::Shift, crate::KeySide::Left),
+                mods,
+                "",
+            );
+            event.legacy = None;
+            event
+        };
+        // Press and release of `a`; the release of a key nobody pressed says
+        // nothing.
+        session.write_key_event(&a(1, KeyPhase::Press));
+        session.write_key_event(&a(1, KeyPhase::Release));
+        session.write_key_event(&a(2, KeyPhase::Release));
+        // A press that was told is forgotten when the keyboard goes: its
+        // release goes to another window.
+        session.write_key_event(&key_event(
+            3,
+            KeyPhase::Press,
+            Keycap::Char('b'),
+            Mods::NONE,
+            "b",
+        ));
+        session.set_focus(false);
+        session.write_key_event(&key_event(
+            3,
+            KeyPhase::Release,
+            Keycap::Char('b'),
+            Mods::NONE,
+            "",
+        ));
+        // A modifier key by itself.
+        session.write_key_event(&shift(
+            KeyPhase::Press,
+            Mods::new(false, false, true, false),
+        ));
+        session.write_key_event(&shift(KeyPhase::Release, Mods::NONE));
+        // Text no key made.
+        session.type_text("é");
+        expect_sent(
+            &session,
+            &wake,
+            b"\x1b[97;;97u\x1b[97;1:3u\x1b[98;;98u\x1b[57441;2u\x1b[57441;1:3u\x1b[0;;233u",
+        );
+    }
+
+    #[test]
+    fn a_program_that_asked_for_the_first_level_only_hears_a_press_and_never_a_release() {
+        let (session, wake) = dump_session(40, "stty -isig -icrnl; printf '\\033[>1u'", |mode| {
+            mode.contains(TermMode::DISAMBIGUATE_ESC_CODES)
+        });
+        assert!(!session.reports_every_key());
+        let mut enter = key_event(
+            36,
+            KeyPhase::Press,
+            Keycap::Enter,
+            Mods::new(false, false, true, false),
+            "",
+        );
+        enter.legacy = Some(crate::KeyInput::Text(TextKey {
+            key: '\r',
+            mods: Mods::new(false, false, true, false),
+            legacy: Cow::Borrowed(b"\r"),
+        }));
+        session.write_key_event(&enter);
+        enter.phase = KeyPhase::Release;
+        session.write_key_event(&enter);
+        session.write_key_event(&key_event(
+            0,
+            KeyPhase::Press,
+            Keycap::Char('a'),
+            Mods::NONE,
+            "a",
+        ));
+        session.write_key_event(&key_event(
+            0,
+            KeyPhase::Release,
+            Keycap::Char('a'),
+            Mods::NONE,
+            "a",
+        ));
+        session.type_text("é");
+        expect_sent(&session, &wake, b"\x1b[13;2ua\xc3\xa9");
     }
 
     #[test]

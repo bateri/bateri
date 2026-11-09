@@ -92,7 +92,10 @@ pub use flow::{BACKLOG_LIMIT, BACKLOG_LOW, Flow, INBOX_LIMIT, INBOX_LOW};
 pub use graphics::{Dirty, Edits, Picture, PictureLayer, Pictures};
 pub use history::{CommandRecord, MEMORY_LIMIT as COMMAND_MEMORY_LIMIT, RecordState};
 pub use identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION, pane_env};
-pub use input::{Arrow, FunctionKey, MouseButton, MouseModifiers, TextKey};
+pub use input::{
+    Arrow, FunctionKey, KeyEvent, KeyInput, KeyPhase, KeySide, Keycap, Keypad, MouseButton,
+    MouseModifiers, TextKey,
+};
 pub use notify::Notification;
 pub use picture::pictured;
 pub use pointer::PointerShape;

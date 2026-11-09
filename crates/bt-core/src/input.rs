@@ -15,6 +15,11 @@ use alacritty_terminal::term::TermMode;
 
 use crate::Mods;
 
+mod event;
+
+pub use event::{KeyEvent, KeyInput, KeyPhase, KeySide, Keycap, Keypad};
+pub(crate) use event::{key_event, typed_text};
+
 /// Arrow key: the keyboard's four, the wheel's two.
 ///
 /// `bt-shell` translates the key into this, not into bytes: the format depends
@@ -82,10 +87,10 @@ fn modifier_param(mods: Mods) -> u8 {
 }
 
 /// Whether the program asked to have its keys told apart: the kitty keyboard
-/// protocol's first level, "disambiguate escape codes" (`CSI > 1 u`). It is
-/// the only level kept — the stream's wrapper takes the others off what a
-/// program pushes ([`crate::handler::ClusterHandler`]), so `CSI ? u` answers
-/// with what is really sent.
+/// protocol's first level, "disambiguate escape codes" (`CSI > 1 u`). The
+/// levels above it — release and repeat, alternate keys, every key, text —
+/// are [`event::key_event`]'s: [`function_key`] and [`text_key`] are what a key
+/// sends at this level, and the event falls back to them below the others.
 ///
 /// A shell that asks (fish 4 does, at its prompt) has said it reads every
 /// form, so the prompt's caution ([`function_key`]) does not hold for it.

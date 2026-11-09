@@ -2122,15 +2122,15 @@ pub(crate) mod tests {
         let probed = &trip.probed;
         assert_eq!(probed.tabs, [4, 12]);
         assert_eq!(probed.charset, CharsetIndex::G1);
-        // The stream's wrapper keeps the one level: `2` is pushed as nothing,
-        // `3` as `1`, and the set (`0`) leaves the top where it was.
+        // Every flag a program pushes is kept, and the set (`0`) is the
+        // top of the stack: it put the entry it replaced back as nothing.
         assert_eq!(
             probed.keyboard,
             [
                 vec![
                     KeyboardModes::DISAMBIGUATE_ESC_CODES,
-                    KeyboardModes::NO_MODE,
-                    KeyboardModes::DISAMBIGUATE_ESC_CODES
+                    KeyboardModes::REPORT_EVENT_TYPES,
+                    KeyboardModes::NO_MODE
                 ],
                 Vec::new()
             ]
@@ -2193,9 +2193,9 @@ pub(crate) mod tests {
             [
                 vec![KeyboardModes::DISAMBIGUATE_ESC_CODES],
                 vec![
-                    KeyboardModes::DISAMBIGUATE_ESC_CODES,
-                    KeyboardModes::NO_MODE,
-                    KeyboardModes::DISAMBIGUATE_ESC_CODES
+                    KeyboardModes::DISAMBIGUATE_ESC_CODES | KeyboardModes::REPORT_EVENT_TYPES,
+                    KeyboardModes::REPORT_EVENT_TYPES,
+                    KeyboardModes::DISAMBIGUATE_ESC_CODES | KeyboardModes::REPORT_ALTERNATE_KEYS
                 ]
             ]
         );
@@ -2206,8 +2206,8 @@ pub(crate) mod tests {
             [
                 vec![KeyboardModes::DISAMBIGUATE_ESC_CODES],
                 vec![
-                    KeyboardModes::DISAMBIGUATE_ESC_CODES,
-                    KeyboardModes::NO_MODE
+                    KeyboardModes::DISAMBIGUATE_ESC_CODES | KeyboardModes::REPORT_EVENT_TYPES,
+                    KeyboardModes::REPORT_EVENT_TYPES
                 ]
             ]
         );

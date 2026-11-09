@@ -10,7 +10,15 @@
 
 use std::borrow::Cow;
 
-use bt_core::{Arrow, Chord, DockKey, FunctionKey, Key, Mods, NamedKey, TextKey};
+use bt_core::{
+    Arrow, Chord, DockKey, FunctionKey, Key, KeyEvent, KeyPhase, KeySide, Keycap, Keypad, Modifier,
+    Mods, NamedKey, TextKey,
+};
+
+/// [`encode_key`]'s answer: a key with known bytes, a function key with its modifiers, or a
+/// typing key whose bytes the program chooses. It lives in `bt-core`, where a key event carries
+/// it ([`KeyEvent::legacy`]).
+pub use bt_core::KeyInput;
 
 use crate::program::identity::Kind;
 
@@ -161,21 +169,6 @@ pub fn line_editing(chord: &Chord) -> Option<&'static LineKey> {
     LINE_EDITING.iter().find(|key| key.chord == *chord)
 }
 
-/// [`encode_key`]'s answer: a key with known bytes, a function key with its modifiers, or a
-/// typing key whose bytes the program chooses.
-#[derive(Debug, PartialEq, Eq)]
-pub enum KeyInput {
-    /// Bytes independent of the terminal's state: a letter, ⌥←, ⌘⌫…
-    Bytes(Cow<'static, [u8]>),
-    /// Goes to `Session::write_key`: its bytes depend on the mode and on whether a shell is
-    /// reading the line. ⌘ never rides here — a ⌘ key that reaches the terminal is bytes.
-    Key(FunctionKey, Mods),
-    /// Goes to `Session::write_text_key`: Esc, ⏎, ⇥, ⌫ or a Control key, which a program that
-    /// asked for the kitty keyboard protocol hears as the key it is (⇧⏎ apart from ⏎, ⌃[ apart
-    /// from Esc) and everyone else as the bytes it always sent.
-    Text(TextKey),
-}
-
 /// [`encode_key`]'s input: the half of `NSEvent` that concerns this function.
 ///
 /// **One record**, not five separate parameters, because the arms ask the flags **together
@@ -246,9 +239,11 @@ pub struct KeyPress<'a> {
 /// **Out of scope:** IME; **Option as Meta across the board** — Meta encoding only for the
 /// navigation/deletion class, printable letters do not change (`Option+7` keeps typing `{` on
 /// Turkish Q); xterm's `modifyOtherKeys` (where no program asked for the kitty protocol, a
-/// modified ⏎, ⇥ or ⌫ keeps its plain byte); the kitty protocol's levels above the first
-/// (release events, the shifted and base-layout keys, text as escape codes) and the keypad as
-/// keys of its own — numpad Enter is ⏎; Insert, which a Mac keyboard does not have. **Dead keys stay out of scope and are no longer a debt**: AppKit's stack
+/// modified ⏎, ⇥ or ⌫ keeps its plain byte). This function says what a key sends where nobody
+/// asked for more; what a program that asked for the kitty protocol's higher levels hears — the
+/// release, the repeat, the modifier keys by themselves, the keypad as keys of its own, the
+/// shifted and base-layout keys, the text — is the key's **event** ([`key_event`]), which carries
+/// this answer along. **Dead keys stay out of scope and are no longer a debt**: AppKit's stack
 /// completes the composition, it never passes through here.
 pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
     let c = key.chars.chars().next()?;
@@ -497,6 +492,271 @@ pub fn dock_key(key: KeyPress<'_>) -> Option<DockKey> {
         ('\r' | '\u{3}', false) => Some(DockKey::Enter),
         _ => None,
     }
+}
+
+/// What the keyboard did, in the terms the kitty keyboard protocol wants: [`key_event`] turns it
+/// into a [`KeyEvent`]. The half of `NSEvent` that [`KeyPress`] does not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stroke<'a> {
+    /// `NSEvent.keyCode` — which physical key, whatever it types. A press and its release carry
+    /// the same one.
+    pub code: u16,
+    pub phase: KeyPhase,
+    /// The key as [`encode_key`] reads it.
+    pub press: KeyPress<'a>,
+    /// Caps Lock is on.
+    pub caps_lock: bool,
+    /// What the key types with Shift held and nothing else
+    /// (`charactersByApplyingModifiers:` with Shift): `A` for `a`.
+    pub shifted: Option<char>,
+}
+
+/// `NSEvent.keyCode`s of the keys whose identity is the key and not what it types: Esc, ⏎, ⇥
+/// and ⌫ (a Control chord's `characters` is another character: ⌃[ types Esc's).
+const KEY_RETURN: u16 = 36;
+const KEY_TAB: u16 = 48;
+const KEY_BACKSPACE: u16 = 51;
+const KEY_ESCAPE: u16 = 53;
+
+/// The keypad's keys: macOS's `kVK_ANSI_Keypad*`.
+fn keypad(code: u16) -> Option<Keypad> {
+    Some(match code {
+        65 => Keypad::Decimal,
+        67 => Keypad::Multiply,
+        69 => Keypad::Add,
+        75 => Keypad::Divide,
+        76 => Keypad::Enter,
+        78 => Keypad::Subtract,
+        81 => Keypad::Equal,
+        82 => Keypad::Digit(0),
+        83 => Keypad::Digit(1),
+        84 => Keypad::Digit(2),
+        85 => Keypad::Digit(3),
+        86 => Keypad::Digit(4),
+        87 => Keypad::Digit(5),
+        88 => Keypad::Digit(6),
+        89 => Keypad::Digit(7),
+        91 => Keypad::Digit(8),
+        92 => Keypad::Digit(9),
+        _ => return None,
+    })
+}
+
+/// The key a physical key is in the standard PC layout — the protocol's "base layout key" — for
+/// the keys of characters (macOS's `kVK_ANSI_*` codes are the US layout's).
+fn us_layout(code: u16) -> Option<char> {
+    Some(match code {
+        0 => 'a',
+        1 => 's',
+        2 => 'd',
+        3 => 'f',
+        4 => 'h',
+        5 => 'g',
+        6 => 'z',
+        7 => 'x',
+        8 => 'c',
+        9 => 'v',
+        11 => 'b',
+        12 => 'q',
+        13 => 'w',
+        14 => 'e',
+        15 => 'r',
+        16 => 'y',
+        17 => 't',
+        18 => '1',
+        19 => '2',
+        20 => '3',
+        21 => '4',
+        22 => '6',
+        23 => '5',
+        24 => '=',
+        25 => '9',
+        26 => '7',
+        27 => '-',
+        28 => '8',
+        29 => '0',
+        30 => ']',
+        31 => 'o',
+        32 => 'u',
+        33 => '[',
+        34 => 'i',
+        35 => 'p',
+        37 => 'l',
+        38 => 'j',
+        39 => '\'',
+        40 => 'k',
+        41 => ';',
+        42 => '\\',
+        43 => ',',
+        44 => '/',
+        45 => 'n',
+        46 => 'm',
+        47 => '.',
+        49 => ' ',
+        50 => '`',
+        _ => return None,
+    })
+}
+
+/// The key a function-key character of AppKit's range is, if it is one of the keys the protocol
+/// has a number for. `NSF1FunctionKey` is U+F704 and the rest of the F keys follow it up to F35.
+fn function_keycap(c: char) -> Option<Keycap> {
+    let n = u32::from(c);
+    Some(match c {
+        '\u{f700}' => Keycap::Up,
+        '\u{f701}' => Keycap::Down,
+        ARROW_LEFT => Keycap::Left,
+        ARROW_RIGHT => Keycap::Right,
+        '\u{f704}'..='\u{f726}' => Keycap::F(u8::try_from(n - 0xf704 + 1).ok()?),
+        '\u{f727}' | '\u{f746}' => Keycap::Insert,
+        FORWARD_DELETE => Keycap::Delete,
+        HOME => Keycap::Home,
+        END => Keycap::End,
+        PAGE_UP => Keycap::PageUp,
+        PAGE_DOWN => Keycap::PageDown,
+        '\u{f72e}' => Keycap::PrintScreen,
+        '\u{f72f}' => Keycap::ScrollLock,
+        '\u{f730}' => Keycap::Pause,
+        '\u{f735}' => Keycap::Menu,
+        _ => return None,
+    })
+}
+
+/// Which key an event is about. By its physical key where that is what it is (Esc, ⏎, ⇥, ⌫, the
+/// keypad), by AppKit's function key characters, and otherwise by the character it types with
+/// nothing held.
+fn keycap(code: u16, press: &KeyPress<'_>) -> Keycap {
+    match code {
+        KEY_ESCAPE => return Keycap::Escape,
+        KEY_RETURN => return Keycap::Enter,
+        KEY_TAB => return Keycap::Tab,
+        KEY_BACKSPACE => return Keycap::Backspace,
+        _ => {}
+    }
+    if let Some(pad) = keypad(code) {
+        return Keycap::Keypad(pad);
+    }
+    if let Some(c) = only_char(press.chars) {
+        if let Some(key) = function_keycap(c) {
+            return key;
+        }
+        if FUNCTION_KEYS.contains(&c) {
+            return Keycap::Unknown;
+        }
+    }
+    press
+        .bare
+        .or_else(|| only_char(press.chars))
+        .map_or(Keycap::Unknown, Keycap::Char)
+}
+
+/// Whether `characters` is text: something, with no control character and no function key in it.
+/// What a key typed is text where this holds and no Control or Command is in the way
+/// ([`key_event`]); a key that types text and has no modifier to make it more is an event of its
+/// own to a program that asked to hear every key (`view::BateriView`).
+pub fn is_text(chars: &str) -> bool {
+    !chars.is_empty()
+        && !chars
+            .chars()
+            .any(|c| c.is_control() || FUNCTION_KEYS.contains(&c))
+}
+
+/// What a key typed: `characters` where it is text and no Control or Command is in the way.
+fn typed(press: &KeyPress<'_>) -> Option<String> {
+    (is_text(press.chars) && !press.ctrl && !press.command).then(|| press.chars.to_owned())
+}
+
+/// A key's [`KeyEvent`]: what a program that asked for the kitty protocol's higher levels hears
+/// of it. `legacy` is what [`encode_key`] says the key sends where nobody asked for more.
+pub fn key_event(stroke: Stroke<'_>, legacy: Option<KeyInput>) -> KeyEvent {
+    let press = stroke.press;
+    KeyEvent {
+        id: stroke.code,
+        phase: stroke.phase,
+        key: keycap(stroke.code, &press),
+        mods: Mods::new(press.ctrl, press.option, press.shift, press.command),
+        caps_lock: stroke.caps_lock,
+        shifted: stroke.shifted,
+        base: us_layout(stroke.code),
+        text: typed(&press),
+        legacy,
+    }
+}
+
+/// `NSEvent.modifierFlags` carries, below the device-independent bits, one bit per physical
+/// modifier key (IOKit's `NX_DEVICE*KEYMASK`): which of a pair went down is told by them.
+const DEVICE_LEFT_CONTROL: u64 = 0x1;
+const DEVICE_LEFT_SHIFT: u64 = 0x2;
+const DEVICE_RIGHT_SHIFT: u64 = 0x4;
+const DEVICE_LEFT_COMMAND: u64 = 0x8;
+const DEVICE_RIGHT_COMMAND: u64 = 0x10;
+const DEVICE_LEFT_OPTION: u64 = 0x20;
+const DEVICE_RIGHT_OPTION: u64 = 0x40;
+const DEVICE_RIGHT_CONTROL: u64 = 0x2000;
+/// The key of the Caps Lock light: it is on or off, there is no device bit for it.
+const KEY_CAPS_LOCK: u16 = 57;
+
+/// A modifier key by itself (AppKit's `flagsChanged:`): `code` is its `keyCode`, `device` the
+/// event's modifier flags as they are (device bits included), `mods` and `caps_lock` the
+/// device-independent state **with** this event. `None` for a key that is no modifier of the
+/// protocol (fn).
+pub fn modifier_event(code: u16, device: u64, mods: Mods, caps_lock: bool) -> Option<KeyEvent> {
+    let (key, mask) = match code {
+        59 => (
+            Keycap::Modifier(Modifier::Ctrl, KeySide::Left),
+            DEVICE_LEFT_CONTROL,
+        ),
+        62 => (
+            Keycap::Modifier(Modifier::Ctrl, KeySide::Right),
+            DEVICE_RIGHT_CONTROL,
+        ),
+        56 => (
+            Keycap::Modifier(Modifier::Shift, KeySide::Left),
+            DEVICE_LEFT_SHIFT,
+        ),
+        60 => (
+            Keycap::Modifier(Modifier::Shift, KeySide::Right),
+            DEVICE_RIGHT_SHIFT,
+        ),
+        58 => (
+            Keycap::Modifier(Modifier::Option, KeySide::Left),
+            DEVICE_LEFT_OPTION,
+        ),
+        61 => (
+            Keycap::Modifier(Modifier::Option, KeySide::Right),
+            DEVICE_RIGHT_OPTION,
+        ),
+        55 => (
+            Keycap::Modifier(Modifier::Cmd, KeySide::Left),
+            DEVICE_LEFT_COMMAND,
+        ),
+        54 => (
+            Keycap::Modifier(Modifier::Cmd, KeySide::Right),
+            DEVICE_RIGHT_COMMAND,
+        ),
+        KEY_CAPS_LOCK => (Keycap::CapsLock, 0),
+        _ => return None,
+    };
+    let down = if code == KEY_CAPS_LOCK {
+        caps_lock
+    } else {
+        device & mask != 0
+    };
+    Some(KeyEvent {
+        id: code,
+        phase: if down {
+            KeyPhase::Press
+        } else {
+            KeyPhase::Release
+        },
+        key,
+        mods,
+        caps_lock,
+        shifted: None,
+        base: None,
+        text: None,
+        legacy: None,
+    })
 }
 
 #[cfg(test)]
@@ -1118,5 +1378,200 @@ mod tests {
         // Single-character match: a composition's first character is not read as
         // PgUp.
         assert_eq!(page_scroll("\u{f72c}x", true), None);
+    }
+
+    /// A key as `keyDown:` reads it: the physical key, what it typed, what it is with nothing held.
+    fn stroke(code: u16, chars: &str, bare: Option<char>) -> Stroke<'_> {
+        Stroke {
+            code,
+            phase: KeyPhase::Press,
+            press: KeyPress {
+                bare,
+                ..plain(chars)
+            },
+            caps_lock: false,
+            shifted: None,
+        }
+    }
+
+    fn event_of(stroke: Stroke<'_>) -> KeyEvent {
+        key_event(stroke, None)
+    }
+
+    #[test]
+    fn an_event_names_the_key_by_what_it_is_and_the_text_by_what_it_typed() {
+        let a = event_of(stroke(0, "a", Some('a')));
+        assert_eq!(
+            (a.id, a.phase, a.key, a.base, a.text.as_deref()),
+            (0, KeyPhase::Press, Keycap::Char('a'), Some('a'), Some("a"))
+        );
+        // ⇧A is the key `a` with Shift, typing `A`, and says what Shift makes of it.
+        let mut shift = stroke(0, "A", Some('a'));
+        shift.press.shift = true;
+        shift.shifted = Some('A');
+        let event = event_of(shift);
+        assert_eq!(event.key, Keycap::Char('a'));
+        assert_eq!(event.mods, SHIFT);
+        assert_eq!(
+            (event.shifted, event.text.as_deref()),
+            (Some('A'), Some("A"))
+        );
+        // A Cyrillic `с` sits where `c` does in the standard layout.
+        let event = event_of(stroke(8, "с", Some('с')));
+        assert_eq!((event.key, event.base), (Keycap::Char('с'), Some('c')));
+        // ⌃[ types Esc's character and is not Esc; ⌃C types nothing.
+        let mut chord = stroke(33, "\u{1b}", Some('['));
+        chord.press.ctrl = true;
+        let event = event_of(chord);
+        assert_eq!(
+            (event.key, event.mods, event.text),
+            (Keycap::Char('['), CTRL, None)
+        );
+        // The four keys that are the key and not a character.
+        for (code, chars, key) in [
+            (53, "\u{1b}", Keycap::Escape),
+            (36, "\r", Keycap::Enter),
+            (48, "\u{19}", Keycap::Tab),
+            (51, "\u{7f}", Keycap::Backspace),
+        ] {
+            let event = event_of(stroke(code, chars, only_char(chars)));
+            assert_eq!((event.key, event.text), (key, None), "{code}");
+        }
+        // The keypad is told by its keys, numpad Enter included.
+        let five = event_of(stroke(87, "5", Some('5')));
+        assert_eq!(
+            (five.key, five.text.as_deref()),
+            (Keycap::Keypad(Keypad::Digit(5)), Some("5"))
+        );
+        let enter = event_of(stroke(76, "\u{3}", None));
+        assert_eq!(
+            (enter.key, enter.text),
+            (Keycap::Keypad(Keypad::Enter), None)
+        );
+        // AppKit's function keys.
+        for (c, key) in [
+            ('\u{f700}', Keycap::Up),
+            ('\u{f701}', Keycap::Down),
+            ('\u{f702}', Keycap::Left),
+            ('\u{f703}', Keycap::Right),
+            ('\u{f704}', Keycap::F(1)),
+            ('\u{f706}', Keycap::F(3)),
+            ('\u{f70f}', Keycap::F(12)),
+            ('\u{f710}', Keycap::F(13)),
+            ('\u{f726}', Keycap::F(35)),
+            ('\u{f727}', Keycap::Insert),
+            ('\u{f746}', Keycap::Insert),
+            ('\u{f728}', Keycap::Delete),
+            ('\u{f729}', Keycap::Home),
+            ('\u{f72b}', Keycap::End),
+            ('\u{f72c}', Keycap::PageUp),
+            ('\u{f72d}', Keycap::PageDown),
+            ('\u{f741}', Keycap::Unknown),
+        ] {
+            let chars = c.to_string();
+            let event = event_of(stroke(123, &chars, Some(c)));
+            assert_eq!((event.key, event.text), (key, None), "{c:?}");
+        }
+        // What `encode_key` says rides along, and so does the phase.
+        let mut up = stroke(0, "a", Some('a'));
+        up.phase = KeyPhase::Release;
+        let event = key_event(up, Some(KeyInput::Bytes(Cow::Borrowed(b"a"))));
+        assert_eq!(event.phase, KeyPhase::Release);
+        assert_eq!(event.legacy, Some(KeyInput::Bytes(Cow::Borrowed(b"a"))));
+    }
+
+    #[test]
+    fn text_is_what_has_no_control_character_and_no_function_key_in_it() {
+        assert!(is_text("a"));
+        assert!(is_text("é"));
+        assert!(is_text("{"));
+        assert!(is_text("😀"));
+        assert!(!is_text(""));
+        assert!(!is_text("\r"));
+        assert!(!is_text("\u{1b}"));
+        assert!(!is_text("\u{7f}"));
+        assert!(!is_text("\u{f702}"));
+        assert!(!is_text("a\r"));
+    }
+
+    #[test]
+    fn every_key_of_characters_has_the_key_it_is_in_the_standard_layout() {
+        // The US layout's rows, by macOS's codes.
+        let row = |codes: &[u16]| {
+            codes
+                .iter()
+                .map(|code| us_layout(*code))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            row(&[18, 19, 20, 21, 23, 22, 26, 28, 25, 29]),
+            "1234567890".chars().map(Some).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            row(&[12, 13, 14, 15, 17, 16, 32, 34, 31, 35]),
+            "qwertyuiop".chars().map(Some).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            row(&[0, 1, 2, 3, 5, 4, 38, 40, 37, 41, 39]),
+            "asdfghjkl;'".chars().map(Some).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            row(&[6, 7, 8, 9, 11, 45, 46, 43, 47, 44]),
+            "zxcvbnm,./".chars().map(Some).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            row(&[50, 27, 24, 33, 30, 42, 49]),
+            "`-=[]\\ ".chars().map(Some).collect::<Vec<_>>()
+        );
+        // A key of no characters has none.
+        assert_eq!(us_layout(36), None);
+        assert_eq!(us_layout(126), None);
+    }
+
+    #[test]
+    fn a_modifier_key_by_itself_goes_down_and_up_by_its_own_bit() {
+        let shift = Mods::new(false, false, true, false);
+        // Left Shift down and up.
+        let down = modifier_event(56, 0x102, shift, false).unwrap();
+        assert_eq!(
+            (down.id, down.phase, down.key),
+            (
+                56,
+                KeyPhase::Press,
+                Keycap::Modifier(Modifier::Shift, KeySide::Left)
+            )
+        );
+        assert_eq!(down.mods, shift);
+        let up = modifier_event(56, 0x100, Mods::NONE, false).unwrap();
+        assert_eq!(up.phase, KeyPhase::Release);
+        // Both Shifts down, one comes up: the Shift bit is still on and the key is the one that
+        // came up.
+        let one_up = modifier_event(56, 0x104, shift, false).unwrap();
+        assert_eq!(one_up.phase, KeyPhase::Release);
+        assert_eq!(one_up.mods, shift);
+        // The right of each pair is its own key.
+        for (code, device, key) in [
+            (62, 0x2000, Modifier::Ctrl),
+            (60, 0x4, Modifier::Shift),
+            (61, 0x40, Modifier::Option),
+            (54, 0x10, Modifier::Cmd),
+        ] {
+            let event = modifier_event(code, device, Mods::NONE, false).unwrap();
+            assert_eq!(event.key, Keycap::Modifier(key, KeySide::Right), "{code}");
+            assert_eq!(event.phase, KeyPhase::Press);
+        }
+        let left = modifier_event(55, 0x8, Mods::CMD, false).unwrap();
+        assert_eq!(left.key, Keycap::Modifier(Modifier::Cmd, KeySide::Left));
+        // Caps Lock is on or off.
+        assert_eq!(
+            modifier_event(57, 0, Mods::NONE, true).unwrap().phase,
+            KeyPhase::Press
+        );
+        assert_eq!(
+            modifier_event(57, 0, Mods::NONE, false).unwrap().phase,
+            KeyPhase::Release
+        );
+        // fn is no modifier of the protocol.
+        assert_eq!(modifier_event(63, 0x800000, Mods::NONE, false), None);
     }
 }

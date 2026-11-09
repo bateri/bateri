@@ -36,8 +36,8 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
 use bt_core::{
-    BlockHandle, CellHalf, Click, MouseButton, MouseModifiers, Pointer, PointerShape, ScrollIntent,
-    SearchCover, SelectionPoint, Session, Wheel,
+    BlockHandle, CellHalf, Click, KeyEvent, KeyPhase, Mods, MouseButton, MouseModifiers, Pointer,
+    PointerShape, ScrollIntent, SearchCover, SelectionPoint, Session, Wheel,
 };
 use bt_gpu::{CellMetrics, ContextStrip, ContextTrailing, Origin, ScrollbarLayout};
 use objc2::rc::Retained;
@@ -67,8 +67,8 @@ use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::hyperlink::LinkState;
 use crate::keys::{
-    ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, dock_key, encode_key, image_paste_key,
-    only_char, page_scroll,
+    ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, Stroke, dock_key, encode_key,
+    image_paste_key, is_text, key_event, modifier_event, only_char, page_scroll,
 };
 use crate::pane::TerminalPane;
 use crate::pointer;
@@ -1162,6 +1162,20 @@ define_class!(
             {
                 pane.page_input(Input::Mods(crate::native_page::mods_of(event.modifierFlags())));
             }
+            // A modifier key by itself, down or up: a program that asked to hear every key
+            // hears it (`bt-core` says whether it did, and a key the menu took is not
+            // released to one that never heard it go down).
+            if let Some(session) = self.ivars().session.get() {
+                let flags = event.modifierFlags();
+                if let Some(modifier) = modifier_event(
+                    event.keyCode(),
+                    flags.0 as u64,
+                    mods_of(flags),
+                    flags.contains(NSEventModifierFlags::CapsLock),
+                ) {
+                    session.write_key_event(&modifier);
+                }
+            }
             self.link_flags(event);
             // SAFETY: `NSResponder`'s `flagsChanged:` takes an `NSEvent`, returns nothing.
             let _: () = unsafe { msg_send![super(self), flagsChanged: event] };
@@ -1454,13 +1468,23 @@ define_class!(
         ///    a command for it ([`ViewIvars::commanded`]), it falls to
         ///    `encode_key` anyway.
         /// A key went up: a page of the kit's is told, as it was told the key that went down;
-        /// the terminal has no use for it (`NSResponder`'s own, which passes it along the chain).
+        /// the terminal's program is told too if it asked to hear releases **and** heard the
+        /// key go down (`Session::write_key_event` pairs them: a key the menu or the dock took
+        /// has no release to tell). Then `NSResponder`'s own, which passes it along the chain.
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
             if let Some(pane) = self.pane()
                 && pane.page_key_up(event)
             {
                 return;
+            }
+            if let Some(session) = self.ivars().session.get() {
+                let chars = event
+                    .characters()
+                    .map(|chars| chars.to_string())
+                    .unwrap_or_default();
+                let key = key_press(event, &chars);
+                session.write_key_event(&key_event_of(event, KeyPhase::Release, key, None));
             }
             // SAFETY: `NSResponder`'s `keyUp:` takes an `NSEvent`, returns nothing.
             let _: () = unsafe { msg_send![super(self), keyUp: event] };
@@ -1536,9 +1560,7 @@ define_class!(
             // The key with no modifier applied: `c` for ⌃⇧C, `[` for ⌃[ whose
             // `characters` is Esc's. A program that asked for the kitty
             // protocol is told the key by it (`KeyPress::bare`).
-            let bare = event
-                .charactersByApplyingModifiers(NSEventModifierFlags::empty())
-                .and_then(|bare| only_char(&bare.to_string()));
+            let bare = bare_of(event);
             // **The dock selection's keys**, BEFORE the stack: ⌫
             // and the arrows would fall to `doCommandBySelector:` in the stack
             // and take their bytes from `encode_key`, i.e. instead of deleting
@@ -1569,6 +1591,36 @@ define_class!(
             // `doCommandBySelector:` would silently swallow them and the arms
             // below would never see their bytes.
             if !ctrl && !command {
+                // **A program that asked to hear every key** hears a key that types text as
+                // the key it is, with its press, repeat and release, and not as the text
+                // the stack would give: the stack cannot say a key was released. It is for
+                // the plain keys of a layout only: Option composes text, a dead key or an
+                // input method's composition is text no key made, and all three
+                // keep going through the stack (their text arrives as `insertText:` and
+                // a program that asked for the text hears `CSI 0 ; ; text u`).
+                if !option
+                    && let Some(text) = chars.as_deref().filter(|text| is_text(text))
+                    && self.ivars().marked_text.borrow().is_empty()
+                    && session.reports_every_key()
+                    && types_with_a_layout(self)
+                {
+                    let key = KeyPress {
+                        chars: text,
+                        shift,
+                        ctrl,
+                        option,
+                        command,
+                        bare,
+                    };
+                    let legacy = KeyInput::Bytes(std::borrow::Cow::Owned(text.as_bytes().to_vec()));
+                    session.write_key_event(&key_event_of(
+                        event,
+                        phase_of(event),
+                        key,
+                        Some(legacy),
+                    ));
+                    return;
+                }
                 // The text stack: it holds the dead-key state and when the
                 // composition completes it gives the text back with
                 // `insertText:`. The flag is lowered **before** the call; since
@@ -1620,9 +1672,9 @@ define_class!(
                 command,
                 bare,
             };
-            if let Some(input) = encode_key(key) {
-                send_key(session, input);
-            }
+            // What the key sends where nobody asked for more, and the key itself for the program
+            // that did (`bt-core` chooses).
+            session.write_key_event(&key_event_of(event, phase_of(event), key, encode_key(key)));
         }
     }
 
@@ -2118,6 +2170,79 @@ fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
                 .map(|path| path.to_string())
         })
         .collect()
+}
+
+/// The modifiers of an event, as the terminal knows them.
+fn mods_of(flags: NSEventModifierFlags) -> Mods {
+    Mods::new(
+        flags.contains(NSEventModifierFlags::Control),
+        flags.contains(NSEventModifierFlags::Option),
+        flags.contains(NSEventModifierFlags::Shift),
+        flags.contains(NSEventModifierFlags::Command),
+    )
+}
+
+/// The key of a keyboard event with no modifier applied (`c` for ⌃⇧C, `[` for ⌃[ whose
+/// `characters` is Esc's); `None` where AppKit gives none or more than one character.
+fn bare_of(event: &NSEvent) -> Option<char> {
+    event
+        .charactersByApplyingModifiers(NSEventModifierFlags::empty())
+        .and_then(|bare| only_char(&bare.to_string()))
+}
+
+/// A keyboard event as [`KeyPress`] reads it.
+fn key_press<'a>(event: &NSEvent, chars: &'a str) -> KeyPress<'a> {
+    let flags = event.modifierFlags();
+    KeyPress {
+        chars,
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        option: flags.contains(NSEventModifierFlags::Option),
+        command: flags.contains(NSEventModifierFlags::Command),
+        bare: bare_of(event),
+    }
+}
+
+/// Whether a key that went down is a repeat of it.
+fn phase_of(event: &NSEvent) -> KeyPhase {
+    if event.isARepeat() {
+        KeyPhase::Repeat
+    } else {
+        KeyPhase::Press
+    }
+}
+
+/// A keyboard event as the kitty keyboard protocol hears it: which physical key, what it is in
+/// the layout and in the standard one, what Shift makes of it and the state of Caps Lock.
+/// `legacy` is what [`encode_key`] says the key sends where nobody asked for more.
+fn key_event_of(
+    event: &NSEvent,
+    phase: KeyPhase,
+    press: KeyPress<'_>,
+    legacy: Option<KeyInput>,
+) -> KeyEvent {
+    key_event(
+        Stroke {
+            code: event.keyCode(),
+            phase,
+            press,
+            caps_lock: event
+                .modifierFlags()
+                .contains(NSEventModifierFlags::CapsLock),
+            shifted: event
+                .charactersByApplyingModifiers(NSEventModifierFlags::Shift)
+                .and_then(|shifted| only_char(&shifted.to_string())),
+        },
+        legacy,
+    )
+}
+
+/// Whether the keyboard in use is a layout, whose keys are keys, and not an input method, whose
+/// keys are the composition's: the one has to go through the text stack.
+fn types_with_a_layout(view: &BateriView) -> bool {
+    view.inputContext()
+        .and_then(|context| context.selectedKeyboardInputSource())
+        .is_none_or(|source| source.to_string().starts_with("com.apple.keylayout."))
 }
 
 /// A key [`encode_key`] gave, on its way to the PTY - the keyboard's and the
