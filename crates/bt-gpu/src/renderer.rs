@@ -6,6 +6,8 @@
 //! `caret` (background quads; the caret's SDF, also used by the dock's
 //! buttons), `cell` and `emoji` (glyphs and rules from the atlas's two
 //! planes), `selection` (the mouse selection and the search highlights),
+//! `wave` (the dock's top line while it ripples, and the shadow and fill of
+//! its plate), `dots` (the dust of the dock's arrival),
 //! `image` (the pictures programs send, one texture each),
 //! `glyph_fx` (the dock's typing effects) and `shrink` (the reduction a still
 //! of the pane is brought to a tile by, `shrink.rs`) — and two more that paint
@@ -1038,8 +1040,10 @@ pub(crate) struct Gpu {
     selection: wgpu::RenderPipeline,
     /// The dock's wave line (`wave_fragment`): `cell_bg`'s vertex again, its
     /// own fragment — the curve's edge wants coverage computed per pixel,
-    /// which a flat quad's fragment does not do. One quad per frame, and only
-    /// while an arrival scene gives the top line a wave.
+    /// which a flat quad's fragment does not do. The same fragment draws the
+    /// shadow the dock's plate casts on the content above it, whenever the
+    /// dock has an input row, and the plate's fill under the curve; the line
+    /// itself only while an arrival scene gives the top line a wave.
     wave: wgpu::RenderPipeline,
     /// The dust scene's soft dots (`dot_fragment`): its own vertex, since the
     /// quad is a little larger than the dot. At most 122 instances, only while

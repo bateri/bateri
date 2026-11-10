@@ -1475,15 +1475,16 @@ smoothing = false
   its own (a bitmap-only font does not count): that is how a monospaced font
   macOS does not flag, such as Obel Mono, is listed and opens without a
   warning.
-- **A character the chosen font lacks comes from the system.** As long as it
-  fits in one cell, it is drawn from macOS's own font chain; you do not need
-  to change your font or define a fallback list. The measure is the
-  character's **advance**: if it is wider than the cell, it is not drawn and
-  **stays a box**. This is deliberate — emoji, CJK (`漢`) and Braille (the
-  `⠋⠙⠹` of spinners) exceed the cell's width, and a half-drawn glyph would be
+- **A character the chosen font lacks comes from the system.** It is drawn
+  from macOS's own font chain; you do not need to change your font or define
+  a fallback list. The measure is the character's **ink**, what it actually
+  paints: a glyph that fits its cell is drawn whole, a two-column character
+  (`漢`, emoji) is drawn across its two cells, and one that is a little too
+  large is drawn **shrunk** just enough to fit — an emoji in a single column
+  comes out small rather than as a box. Past 2.2 times it would shrink to a
+  dot, so it **stays a box**. This is deliberate: a half-drawn glyph would be
   a silent corruption; a box is a visible gap, that is, it tells you what
-  could not be drawn. Drawing these characters properly is a separate piece of
-  work.
+  could not be drawn.
 - **Symbols come with the app too.** A character of the private use area that
   the chosen font lacks — the git branch `U+E0A0`, a folder, the powerline
   separators, the Material Design icons above `U+F0000` — is drawn from the
@@ -1492,15 +1493,21 @@ smoothing = false
   and, where it has no glyph, the system's chain goes on as before. A font that
   carries these symbols itself (a Nerd Font) is never asked to give way: its
   own are drawn.
-- The measure being the **advance** has a cost: a glyph that advances narrow
-  but paints wide passes the gate and its overflow is clipped. No such
-  character has been met in today's font chain, but the promise is not "never
-  clipped" but "whatever does not fit by its advance is never drawn".
-- **Box and block drawing characters are outside this** (`─ │ ┌ █ ▀ ▄`): they
-  are already in the font and never go to the fallback. If you see a thin
-  strip between two blocks stacked on top of each other, this is not the
-  cause — the font's glyph does not fill the cell completely, and fixing that
-  is a separate piece of work.
+- The measure is the ink and not the **advance**, in both directions: a glyph
+  that advances wider than the cell but paints inside it is drawn (the `⏺`
+  some programs mark their steps with is one), and a glyph that advances
+  narrow but paints wide is shrunk to fit or left a box, never clipped at the
+  cell's edge.
+  The promise is "a box, the whole glyph, or the glyph shrunk just enough to
+  fit". The fit is measured across the cell; no character that passes it in
+  today's font chain overflows the cell from top to bottom.
+- **Box drawing, block and Braille characters are outside this**
+  (`─ │ ┌ █ ▀ ▄ ⠋`): bateri draws them itself from the cell's measurements
+  and never asks a font. A font's own glyph does not fill the cell
+  completely, which would leave a thin strip between two blocks stacked on
+  top of each other; drawn by bateri they join, and a spinner's Braille dots
+  are never a box. The three diagonals (`╱ ╲ ╳`) are the exception: they come
+  from the font.
 - `family = ""`, or the key being absent, means the default font and gives no
   warning.
 - **`smoothing = true` draws the text heavier**, the way macOS thickens it in
