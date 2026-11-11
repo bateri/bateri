@@ -12,16 +12,18 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-11
+
 ### Added
 
+- **Command-click a file or a folder to open it in textpen.** It opens in a floating pane over the tab, in the editor on the same computer as the file: in an `ssh` terminal that is the server, and nothing is copied to your Mac. `path:12` opens at line 12, and the pane closes when you quit the editor. On your Mac the editor starts with the environment your shell has in a new tab, so it finds the same tools. It needs textpen 0.7.0, which bateri fetches by itself.
+- **Choose the program in Settings ▸ Apps ▸ Open with** (`[apps] open_with`): textpen, another followed program that opens files, or Nothing. A path is underlined and clickable only where that program is installed.
 - **More of kitty's keyboard protocol.** A program that asks for it now hears when a key is released or repeated, modifier keys on their own, and the text a key typed. Programs that do not ask get the same bytes as before.
 - **Animated and edited images in kitty's graphics protocol.** A program can add and change the frames of an image, and bateri plays an animation itself while it is on screen; it stops when the pane is hidden and keeps still with Reduce Motion on. When a small part of an image changes, only that part goes to the graphics card.
 - **Images inside tmux and editors.** Images sent with Unicode placeholders (`kitten icat --unicode-placeholder`, `U=1`) show in the text and scroll with it.
 - **Images placed relative to another image** (`P=`, `Q=`): they move, scroll and go away with the image they hang on.
 - **Images in the theme's colours** (`f=8`, `f=16`): they are drawn again when the theme or the palette changes.
 - A program can ask which of these graphics features bateri supports (`a=q` with `e=`).
-- **Command-click a file or a folder to open it in textpen.** It opens in a floating pane over the tab, in the editor on the same computer as the file: in an `ssh` terminal that is the server, and nothing is copied to your Mac. `path:12` opens at line 12, and the pane closes when you quit the editor. On your Mac the editor starts with the environment your shell has in a new tab, so it finds the same tools.
-- **Choose the program in Settings ▸ Apps ▸ Open with** (`[apps] open_with`): textpen, another followed program that opens files, or Nothing. A path is underlined and clickable only where that program is installed.
 
 ### Removed
 
