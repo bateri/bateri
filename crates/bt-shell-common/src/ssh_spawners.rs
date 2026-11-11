@@ -48,8 +48,8 @@ const ALLOWED: [(&str, &str, &str); 9] = [
     ),
     (
         "bt-shell-common/src/child.rs",
-        "query_login_path",
-        "asks this computer's login shell for its `PATH`",
+        "query_login_env",
+        "asks this computer's login shell for its environment",
     ),
     (
         "bt-shell-common/src/program.rs",

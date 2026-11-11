@@ -898,6 +898,9 @@ fn a_program_opened_for_a_path_runs_in_a_real_kablo_in_its_folder_and_ends_the_t
   for word in "$@"; do printf 'ARG:%s\n' "$word"; done
   printf 'TERM:%s\n' "$TERM"
   printf 'PWD:%s\n' "$(pwd -P)"
+  printf 'NOTE:%s\n' "$BT_NOTE"
+  printf 'LARGE:%s\n' "$(printf %s "$BT_LARGE_0$BT_LARGE_1$BT_LARGE_2$BT_LARGE_3" | wc -c | tr -d ' ')"
+  printf 'SEEN:%s\n' "$(ps -axww -o args= 2>/dev/null | grep -c "$BT_SEEK")"
 } > "$BT_RECORD"
 exit 7
 "#,
@@ -920,6 +923,15 @@ exit 7
     let directory = open_with::directory(open_with::Thing::File, &path);
     assert_eq!(directory, folder_text);
 
+    // A value that is carried, of this run alone: no other process of the machine has it in
+    // its words by chance (a command line that names this test would).
+    let mark = format!(
+        "carried-{}-{}-7",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos())
+    );
     let ways = [
         ("here", here, "7C3A4F5E-6D7C-4B9A-AFB1-C7D6E5F40312"),
         ("server", server, "8D4B5A6F-7E8D-4CAB-B0C2-D8E7F6A51423"),
@@ -938,6 +950,27 @@ exit 7
             "BT_RECORD".to_owned(),
             record.to_str().expect("text").to_owned(),
         );
+        // What the person's shell has, given to a program that reads no startup file: a value
+        // a shell would take apart or run is one value, and nothing of it is run. And what is
+        // said of the pane itself is not the shell's to say.
+        options.env.insert(
+            "BT_NOTE".to_owned(),
+            format!("a b $(touch pwned) 'q' \"d\" {mark}"),
+        );
+        // What the program looks for among the words of every process: the mark, written so
+        // that the search's own words do not hold it.
+        options.env.insert(
+            "BT_SEEK".to_owned(),
+            format!("{}[7]", &mark[..mark.len() - 1]),
+        );
+        options.env.insert("TERM".to_owned(), "dumb".to_owned());
+        // As much as is ever carried (256 KiB, no variable over 64 KiB): the request holds it
+        // and the program starts with it.
+        for at in 0..4 {
+            options
+                .env
+                .insert(format!("BT_LARGE_{at}"), "x".repeat(60 * 1024));
+        }
         let (mut spec, size) = new_session(&options.child_launch(), 100);
         if way == "server" {
             // What the service asks of kablo for a pane that was opened for a program.
@@ -995,9 +1028,37 @@ exit 7
                 format!("ARG:{path}"),
                 "TERM:xterm-256color".to_owned(),
                 format!("PWD:{}", physical.display()),
+                format!("NOTE:a b $(touch pwned) 'q' \"d\" {mark}"),
+                format!("LARGE:{}", 4 * 60 * 1024),
+                // What was carried is the program's environment and no process's words: the
+                // values are the person's, and a process's words are for every account to read.
+                "SEEN:0".to_owned(),
             ],
             "{way}"
         );
+    }
+    // And kablo keeps nothing of it in a file: not in its sockets' folder, not under the home.
+    let mut folders = vec![ground.root.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            if kind.is_dir() {
+                folders.push(path);
+            } else if kind.is_file() && !name.to_string_lossy().starts_with("record-") {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                assert!(
+                    !bytes
+                        .windows(mark.len())
+                        .any(|window| window == mark.as_bytes()),
+                    "{} holds a value that was carried",
+                    path.display()
+                );
+            }
+        }
     }
     // Nothing of the file's name was run, here or on a server.
     assert!(!folder.join("pwned").exists());

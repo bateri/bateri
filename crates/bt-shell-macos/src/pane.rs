@@ -3768,6 +3768,13 @@ impl TerminalPane {
             .filter(|_| held.is_none())
             .and_then(|program| program.argv.split_first())
             .map(|(program, args)| (program.clone(), args.to_vec()));
+        // What the person's shell has, for a program that reads no startup file of its own:
+        // under everything else that is added to the child, which is said of this pane.
+        let program_env = program
+            .as_ref()
+            .filter(|_| held.is_none())
+            .map(|program| program.env.clone())
+            .unwrap_or_default();
         self.ivars()
             .program
             .replace(program.filter(|_| held.is_some()));
@@ -3834,6 +3841,11 @@ impl TerminalPane {
         // no dock but has marks, i.e. it cannot be derived from `dock`). Before
         // the environment is moved into `env` below.
         let shell_marks = !integration.is_empty();
+        let system_locale = child::locale_env(locale::system_locale()).filter(|_| {
+            !program_env.iter().any(|(name, value)| {
+                matches!(name.as_str(), "LC_ALL" | "LC_CTYPE" | "LANG") && !value.is_empty()
+            })
+        });
         let options = SessionOptions {
             command,
             // Directory and locale follow the same rule in **every**
@@ -3857,9 +3869,13 @@ impl TerminalPane {
             // same answer also determines the dock's existence (`start`)
             // and if it were asked a second time here the two decisions
             // could diverge.
-            env: extra_env
+            // What the person's shell has comes first, so that everything said of this pane
+            // is written over it; and where their shell names a locale, the system's is not
+            // added over theirs (the rule of the locale: only where there is none).
+            env: program_env
                 .into_iter()
-                .chain(child::locale_env(locale::system_locale()))
+                .chain(extra_env)
+                .chain(system_locale)
                 .chain(integration)
                 .collect(),
             cols: grid.cols,
@@ -8966,6 +8982,41 @@ mod tests {
         assert!(body.contains("pencere_view::content_size(self.bounds())"));
         // The parent is the one the command was chosen with, in the same branch.
         assert!(pane.contains("views: self.view_options(shell_parent, no_shell),"));
+    }
+
+    /// The program a click opens a path in reads no startup file: it is started in a shell's
+    /// place. So it is given what the person's shell has, as the shell last said, under
+    /// everything that is said of the pane itself; the click takes the last answer and asks
+    /// again behind the start, and waits for nothing. With no answer the program starts as it
+    /// did before: with what keeps its terminal has.
+    #[test]
+    fn a_program_started_in_a_shells_place_is_given_what_the_persons_shell_has() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane
+            .find("let program_env = program")
+            .expect("the program's environment");
+        let chosen = &pane[at..at + pane[at..].find(";\n").expect("its end")];
+        // This computer's program alone: a server's shell is not this computer's.
+        assert!(chosen.contains(".filter(|_| held.is_none())"));
+        let at = pane
+            .find("env: program_env")
+            .expect("the session's environment");
+        let chain = &pane[at..at + pane[at..].find(".collect()").expect("its end")];
+        let place = |word: &str| chain.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(place("program_env") < place(".chain(extra_env)"));
+        assert!(place(".chain(extra_env)") < place(".chain(system_locale)"));
+        assert!(place(".chain(system_locale)") < place(".chain(integration)"));
+
+        let app = include_str!("app.rs");
+        let app = &app[..app.find("#[cfg(test)]").unwrap_or(app.len())];
+        let at = app
+            .find("let env = child::login_env()")
+            .expect("the click's environment");
+        let start = &app[at..at + app[at..].find("..Start::default()").expect("the start")];
+        assert!(start.contains(".unwrap_or_default();"));
+        assert!(start.contains("child::refresh_login_env();"));
+        assert!(start.contains("runs: PaneRuns::Program { keep_open: false },"));
     }
 
     /// The program a click opens a path in is started in the shell's place, as the pane's own

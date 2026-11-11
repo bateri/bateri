@@ -6299,6 +6299,8 @@ impl AppDelegate {
                 program: Some(launch::ProgramStart {
                     argv,
                     directory: Some(directory),
+                    // The shell that was asked is this computer's, not the server's.
+                    env: Vec::new(),
                 }),
                 runs: PaneRuns::UserShell,
                 ..Start::default()
@@ -6313,11 +6315,19 @@ impl AppDelegate {
             let Some(argv) = bt_shell_common::open_with::argv_here(&bin, &name, line, &path) else {
                 return;
             };
+            // The program starts as it would typed in a new tab: with what the person's shell
+            // has, as it last said. The shell is asked again behind this start, so that a
+            // startup file changed since shows in the next one; nothing here waits for it.
+            let env = child::login_env()
+                .map(|env| env.to_vec())
+                .unwrap_or_default();
+            child::refresh_login_env();
             Start {
                 directory: Some(PathBuf::from(directory)),
                 program: Some(launch::ProgramStart {
                     argv,
                     directory: None,
+                    env,
                 }),
                 runs: PaneRuns::Program { keep_open: false },
                 ..Start::default()

@@ -518,13 +518,29 @@ pub struct OpenProgram {
 /// The program a pane was opened for — the file or folder a ⌘-click opened — and what it runs
 /// with. Born with the pane and kept by it: nothing of it is written to the session's layout or
 /// sent to a holder, and a restored pane is a shell ([`PaneRuns::Program`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ProgramStart {
     /// The words, the program first ([`bt_shell_common::open_with`]).
     pub(crate) argv: Vec<String>,
     /// The folder it starts in on the machine it runs on, when that is a server: this Mac's is
     /// the pane's [`Launch::working_directory`].
     pub(crate) directory: Option<String>,
+    /// The environment the person's shell has on the machine the program runs on, added to the
+    /// program's own ([`bt_shell_common::child::login_env`]): started in a shell's place, the
+    /// program reads no startup file. Empty when the shell was not asked or gave no answer.
+    pub(crate) env: Vec<(String, String)>,
+}
+
+/// Printed without the environment: its values are the person's, secrets among them, and a
+/// record that ends up in a message says how many variables it has and no more.
+impl std::fmt::Debug for ProgramStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgramStart")
+            .field("argv", &self.argv)
+            .field("directory", &self.directory)
+            .field("env", &self.env.len())
+            .finish()
+    }
 }
 
 /// A pane whose **first program** is the pipe to a terminal a server keeps

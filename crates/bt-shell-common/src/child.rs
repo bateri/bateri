@@ -594,51 +594,117 @@ fn parse_bash_version(text: &str) -> Option<BashVersion> {
 /// ([`crate::ssh_route::command`]); our own environment does not change.
 ///
 /// Never waits: the answer comes from a thread, and an ssh started before it — a restored pane's
-/// connection at launch — runs with the inherited `PATH`, as every ssh did before.
+/// connection at launch — runs with the inherited `PATH`, as every ssh did before. It is the
+/// answer of the launch for the life of the process: a later answer ([`refresh_login_env`])
+/// does not move it.
 pub fn login_path() -> Option<&'static std::ffi::OsStr> {
     LOGIN_PATH.get().and_then(Option::as_deref)
 }
 
 static LOGIN_PATH: std::sync::OnceLock<Option<OsString>> = std::sync::OnceLock::new();
 
-/// How long [`learn_login_path`] waits for the shell's answer. A feel threshold, not a measured
-/// number: an interactive login shell with a heavy startup takes a second or two, and the
-/// question runs on a thread of its own, so a shell that hangs costs nothing but the answer.
-const LOGIN_PATH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Asks the user's shell for its `PATH` on a thread of its own; the answer is [`login_path`]'s,
-/// for the life of the process. The application calls it once at launch, the subcommands never:
-/// `ssh-hold` and the rest run in a pane and inherit the pane shell's `PATH` already.
-pub fn learn_login_path() {
-    let _ = std::thread::Builder::new()
-        .name("login PATH".into())
-        .spawn(|| {
-            let path = shell().and_then(|shell| query_login_path(&shell, LOGIN_PATH_LIMIT));
-            let _ = LOGIN_PATH.set(path);
-        });
+/// The environment the user's shell has, as it last said ([`learn_login_path`] at launch,
+/// [`refresh_login_env`] after it): what a program gets that the application starts for the
+/// person in a pane of its own (the program a clicked path opens in), so that it starts as it
+/// would typed in a new tab — with the tools, and the settings, the person's startup files
+/// name. Such a program is started directly, in the place of a shell, and so reads no startup
+/// file itself; and what it would inherit otherwise is the environment of whatever keeps its
+/// terminal, which was started once, by whoever was first.
+///
+/// `None` while the shell has not answered, and when it never was asked: the program then
+/// starts as it did before. What the shell keeps for itself or says of its own terminal is
+/// left out ([`carried`]). The values are the person's, secrets among them: they go to the
+/// program and nowhere else, and are not logged or shown.
+pub fn login_env() -> Option<LoginEnv> {
+    LOGIN_ENV
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
-/// What the shell prints its `PATH` between: an interactive shell's startup files may print
-/// anything (a greeting, a prompt's escape sequences), the answer is what stands between two
-/// of these.
-const PATH_MARK: &str = "_BATERI_PATH_";
+/// What [`login_env`] gives: the variables, sorted by name, shared with whoever took the answer
+/// before the shell was asked again.
+pub type LoginEnv = std::sync::Arc<Vec<(String, String)>>;
+
+static LOGIN_ENV: std::sync::Mutex<Option<LoginEnv>> = std::sync::Mutex::new(None);
+
+/// A question to the shell is under way: there is one at a time.
+static LOGIN_ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long the shell is given to answer. A feel threshold, not a measured number: an
+/// interactive login shell with a heavy startup takes a second or two, and the question runs on
+/// a thread of its own, so a shell that hangs costs nothing but the answer.
+const LOGIN_PATH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Asks the user's shell for its environment on a thread of its own; the `PATH` of the answer
+/// is [`login_path`]'s for the life of the process, the whole of it [`login_env`]'s until it is
+/// asked again. The application calls it once at launch, the subcommands never: `ssh-hold` and
+/// the rest run in a pane and inherit the pane shell's environment already.
+pub fn learn_login_path() {
+    ask_login_shell(true);
+}
+
+/// Asks the shell again, on a thread of its own and only when no question is under way: called
+/// when a program was started with [`login_env`], so that a startup file the person changed
+/// shows in the next one without the application being started again. An answer replaces the
+/// last; no answer leaves it.
+pub fn refresh_login_env() {
+    ask_login_shell(false);
+}
+
+fn ask_login_shell(at_launch: bool) {
+    use std::sync::atomic::Ordering;
+    if LOGIN_ASKING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let asked = std::thread::Builder::new()
+        .name("login environment".into())
+        .spawn(move || {
+            let env = shell().and_then(|shell| query_login_env(&shell, LOGIN_PATH_LIMIT));
+            if at_launch {
+                let _ = LOGIN_PATH.set(env.as_deref().and_then(login_path_of));
+            }
+            if let Some(env) = env.and_then(carried) {
+                *LOGIN_ENV
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(std::sync::Arc::new(env));
+            }
+            LOGIN_ASKING.store(false, Ordering::Release);
+        });
+    if asked.is_err() {
+        LOGIN_ASKING.store(false, Ordering::Release);
+    }
+}
+
+/// What the shell prints its environment between: an interactive shell's startup files may
+/// print anything (a greeting, a prompt's escape sequences), the answer is what stands between
+/// two of these.
+const ENV_MARK: &str = "_BATERI_ENV_";
+
+/// The command the shell is asked with, the same text for every shell: `printf`, `;` and a
+/// program named by its path read alike in sh, bash, zsh and fish. `env -0` writes each
+/// variable as `NAME=value` and a NUL after it, so that a value with a newline in it is one
+/// value; it is named by its path so that no alias or function of the person's stands in.
+fn login_question() -> String {
+    format!(r"printf '\n{ENV_MARK}'; /usr/bin/env -0; printf '{ENV_MARK}\n'")
+}
 
 /// The question of [`learn_login_path`]: the shell as an **interactive login** shell — the shell
-/// a pane runs, so the `PATH` is the one the user has in a terminal, `~/.zshrc`'s additions
-/// included — prints its `PATH` between two marks. `printf` and `"$PATH"` read the same in sh,
-/// bash, zsh and fish (fish joins a path variable with colons).
+/// a pane runs, so the environment is the one the user has in a terminal, `~/.zshrc`'s
+/// additions included — prints its environment between two marks ([`login_question`]).
 ///
 /// No stdin, no stderr. The shell leads a process group of its own and the group is killed once
 /// the answer is in or the time is up, so the question ends where the answer does: an agent a
 /// startup file started in the background holds nothing open past it. (One that left the group
 /// with its own `setsid` and kept the pipe keeps the reading thread until it exits.)
-fn query_login_path(shell: &Path, limit: std::time::Duration) -> Option<OsString> {
+fn query_login_env(shell: &Path, limit: std::time::Duration) -> Option<Vec<(OsString, OsString)>> {
     use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     let mut child = Command::new(shell)
         .args(["-i", "-l", "-c"])
-        .arg(format!(r#"printf '\n{PATH_MARK}%s{PATH_MARK}\n' "$PATH""#))
+        .arg(login_question())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -648,30 +714,31 @@ fn query_login_path(shell: &Path, limit: std::time::Duration) -> Option<OsString
     let (done, answer) = std::sync::mpsc::channel();
     let reader = child.stdout.take().and_then(|mut stdout| {
         std::thread::Builder::new()
-            .name("login PATH reads".into())
+            .name("login environment reads".into())
             .spawn(move || {
                 let mut seen = Vec::new();
                 let mut buffer = [0u8; 4096];
                 while let Ok(n @ 1..) = stdout.read(&mut buffer) {
                     seen.extend_from_slice(&buffer[..n]);
-                    if let Some(path) = parse_login_path(&seen) {
-                        let _ = done.send(path);
+                    if let Some(env) = parse_login_env(&seen) {
+                        let _ = done.send(env);
                         return;
                     }
                 }
             })
             .ok()
     });
-    let path = reader.and_then(|_| answer.recv_timeout(limit).ok());
+    let env = reader.and_then(|_| answer.recv_timeout(limit).ok());
     crate::program::end_group(&mut child);
-    path
+    env
 }
 
-/// The `PATH` between the last pair of marks in what the shell printed; `None` while the pair is
-/// not complete, and for an empty or relative-only answer.
-fn parse_login_path(printed: &[u8]) -> Option<OsString> {
+/// The variables between the last pair of marks in what the shell printed, in the order it
+/// gave them; `None` while the pair is not complete, and when nothing stands between it (an
+/// `env` that does not know `-0` says nothing there).
+fn parse_login_env(printed: &[u8]) -> Option<Vec<(OsString, OsString)>> {
     use std::os::unix::ffi::OsStrExt as _;
-    let mark = PATH_MARK.as_bytes();
+    let mark = ENV_MARK.as_bytes();
     let marks: Vec<usize> = printed
         .windows(mark.len())
         .enumerate()
@@ -681,10 +748,84 @@ fn parse_login_path(printed: &[u8]) -> Option<OsString> {
     let [.., open, close] = marks[..] else {
         return None;
     };
-    let path = &printed[open + mark.len()..close];
-    path.split(|&byte| byte == b':')
+    let env: Vec<(OsString, OsString)> = printed[open + mark.len()..close]
+        .split(|&byte| byte == 0)
+        .filter_map(|entry| {
+            let at = entry.iter().position(|&byte| byte == b'=')?;
+            (at > 0).then(|| {
+                (
+                    std::ffi::OsStr::from_bytes(&entry[..at]).to_owned(),
+                    std::ffi::OsStr::from_bytes(&entry[at + 1..]).to_owned(),
+                )
+            })
+        })
+        .collect();
+    (!env.is_empty()).then_some(env)
+}
+
+/// The `PATH` of an answer; `None` for none, an empty one, or one with no absolute entry: not
+/// one to give an ssh.
+fn login_path_of(env: &[(OsString, OsString)]) -> Option<OsString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = &env.iter().rev().find(|(name, _)| name == "PATH")?.1;
+    path.as_bytes()
+        .split(|&byte| byte == b':')
         .any(|entry| entry.starts_with(b"/"))
-        .then(|| std::ffi::OsStr::from_bytes(path).to_owned())
+        .then(|| path.clone())
+}
+
+/// The variables that are the shell's own or say what terminal it was in, not what the person
+/// set up: the place and the depth of the shell that answered, the size and kind of a terminal
+/// it did not have. (What bateri says of the pane itself — `TERM`, its identity — is written
+/// over whatever comes here, where the program is started.)
+const NOT_CARRIED: [&str; 12] = [
+    "_",
+    "SHLVL",
+    "PWD",
+    "OLDPWD",
+    "COLUMNS",
+    "LINES",
+    "TERM",
+    "COLORTERM",
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERM_SESSION_ID",
+    "WINDOWID",
+];
+
+/// The most the carried environment may be, names and values together: far above what a person
+/// has (a few KiB), and with room to spare in the request that starts a terminal (1 MiB) and in
+/// what a program may be started with (1 MiB of words and environment on macOS). One that is
+/// larger is not carried at all, rather than in part.
+const LOGIN_ENV_LIMIT: usize = 256 * 1024;
+
+/// The most one variable may be, name and value: one that is larger is left out and the rest
+/// is carried. (Linux starts no program with a single word longer than 128 KiB.)
+const LOGIN_VARIABLE_LIMIT: usize = 64 * 1024;
+
+/// What of an answer a program is given ([`login_env`]): every variable but the shell's own
+/// ([`NOT_CARRIED`], bash's exported functions), those that are not text and those too large
+/// for one word ([`LOGIN_VARIABLE_LIMIT`]), sorted by name. `None` for an answer that is too
+/// large to carry ([`LOGIN_ENV_LIMIT`]).
+fn carried(env: Vec<(OsString, OsString)>) -> Option<Vec<(String, String)>> {
+    let mut kept: Vec<(String, String)> = env
+        .into_iter()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, value)| {
+            !NOT_CARRIED.contains(&name.as_str())
+                && !name.starts_with("BASH_FUNC_")
+                && name.len() + value.len() <= LOGIN_VARIABLE_LIMIT
+        })
+        .collect();
+    // The shell's last word on a name stands, as it does in an environment.
+    kept.reverse();
+    kept.sort_by(|a, b| a.0.cmp(&b.0));
+    kept.dedup_by(|later, first| later.0 == first.0);
+    let size: usize = kept
+        .iter()
+        .map(|(name, value)| name.len() + value.len())
+        .sum();
+    (size <= LOGIN_ENV_LIMIT).then_some(kept)
 }
 
 /// The `XDG_DATA_DIRS` entry that makes fish read the wrapper in `wrapper` (the directory
@@ -1183,58 +1324,171 @@ pub(crate) mod tests {
         }
     }
 
+    fn os(text: &str) -> OsString {
+        OsString::from(text)
+    }
+
     #[test]
-    fn the_login_path_is_what_stands_between_the_last_two_marks() {
-        let printed = |text: &str| parse_login_path(text.as_bytes());
-        let path = |text: &str| Some(OsString::from(text));
+    fn the_login_environment_is_what_stands_between_the_last_two_marks() {
+        let printed = |text: &str| parse_login_env(text.as_bytes());
         assert_eq!(
-            printed("\n_BATERI_PATH_/opt/homebrew/bin:/usr/bin_BATERI_PATH_\n"),
-            path("/opt/homebrew/bin:/usr/bin")
+            printed("\n_BATERI_ENV_PATH=/opt/homebrew/bin:/usr/bin\0HOME=/Users/a\0_BATERI_ENV_\n"),
+            Some(vec![
+                (os("PATH"), os("/opt/homebrew/bin:/usr/bin")),
+                (os("HOME"), os("/Users/a")),
+            ])
         );
-        // A startup file's greeting and a prompt's escape sequences around the answer.
+        // A startup file's greeting and a prompt's escape sequences around the answer; a value
+        // with `=`, with a newline, with what a shell would run, and an empty one: each as it is.
         assert_eq!(
             printed(
-                "Welcome!\n\x1b]7;file:///Users\x07\n_BATERI_PATH_/usr/bin:/bin_BATERI_PATH_\n\x1b[?2004l"
+                "Welcome!\n\x1b]7;file:///Users\x07\n_BATERI_ENV_A=b=c\0B=two\nlines\0C=a b $(touch x)\0D=\0_BATERI_ENV_\n\x1b[?2004l"
             ),
-            path("/usr/bin:/bin")
+            Some(vec![
+                (os("A"), os("b=c")),
+                (os("B"), os("two\nlines")),
+                (os("C"), os("a b $(touch x)")),
+                (os("D"), os("")),
+            ])
         );
-        // Half an answer is no answer yet.
-        assert_eq!(printed("\n_BATERI_PATH_/usr/bin:/b"), None);
-        // An empty `PATH`, or one with no absolute entry, is not one to give an ssh.
-        assert_eq!(printed("\n_BATERI_PATH__BATERI_PATH_\n"), None);
-        assert_eq!(printed("\n_BATERI_PATH_bin:.:_BATERI_PATH_\n"), None);
+        // Half an answer is no answer yet; nothing between the marks (an `env` that does not
+        // know `-0`) is none; an entry without a name is not a variable.
+        assert_eq!(printed("\n_BATERI_ENV_PATH=/usr/bin\0HO"), None);
+        assert_eq!(printed("\n_BATERI_ENV__BATERI_ENV_\n"), None);
+        assert_eq!(printed("\n_BATERI_ENV_=x\0noequals\0_BATERI_ENV_\n"), None);
         assert_eq!(printed("no answer at all"), None);
     }
 
     #[test]
+    fn the_login_path_is_the_answers_path_when_it_names_a_place() {
+        let path =
+            |value: &str| login_path_of(&[(os("HOME"), os("/Users/a")), (os("PATH"), os(value))]);
+        assert_eq!(path("/usr/bin:/bin"), Some(os("/usr/bin:/bin")));
+        // An empty `PATH`, or one with no absolute entry, is not one to give an ssh.
+        assert_eq!(path(""), None);
+        assert_eq!(path("bin:.:"), None);
+        assert_eq!(login_path_of(&[(os("HOME"), os("/Users/a"))]), None);
+    }
+
+    /// What a program started for the person gets of the shell's answer: what the person set
+    /// up, each value as it is, and nothing of the shell that answered or of a terminal.
+    #[test]
+    fn a_program_is_given_what_the_person_set_up_and_not_the_shells_own() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let answer = vec![
+            (os("PATH"), os("/opt/homebrew/bin:/usr/bin")),
+            (os("XDG_CONFIG_HOME"), os("/Users/a/.cfg")),
+            (os("NOTE"), os("a b $(touch x) 'q' \"d\"")),
+            (os("_"), os("/usr/bin/env")),
+            (os("SHLVL"), os("2")),
+            (os("PWD"), os("/somewhere")),
+            (os("OLDPWD"), os("/before")),
+            (os("TERM"), os("dumb")),
+            (os("TERM_PROGRAM"), os("Apple_Terminal")),
+            (os("BASH_FUNC_greet%%"), os("() {  echo hi\n}")),
+            (os("BYTES"), OsString::from_vec(vec![0xff, 0xfe])),
+            // Said twice: the last word stands.
+            (os("EDITOR"), os("vi")),
+            (os("EDITOR"), os("nano")),
+        ];
+        let text = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        assert_eq!(
+            carried(answer),
+            Some(vec![
+                text("EDITOR", "nano"),
+                text("NOTE", "a b $(touch x) 'q' \"d\""),
+                text("PATH", "/opt/homebrew/bin:/usr/bin"),
+                text("XDG_CONFIG_HOME", "/Users/a/.cfg"),
+            ])
+        );
+        // A variable too large for one word is left out, and the rest is carried.
+        let one = vec![
+            (os("BIG"), os(&"x".repeat(LOGIN_VARIABLE_LIMIT))),
+            (os("SMALL"), os("s")),
+        ];
+        assert_eq!(carried(one), Some(vec![text("SMALL", "s")]));
+        // An environment too large to carry is not carried in part.
+        let each = LOGIN_VARIABLE_LIMIT - 8;
+        let many: Vec<(OsString, OsString)> = (0..=LOGIN_ENV_LIMIT / each)
+            .map(|at| (os(&format!("BIG{at}")), os(&"x".repeat(each - 8))))
+            .collect();
+        assert_eq!(carried(many), None);
+    }
+
+    #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn the_login_path_is_asked_of_an_interactive_login_shell() {
+    fn the_login_environment_is_asked_of_an_interactive_login_shell() {
         let root = TempRoot::new("login-path");
         let limit = std::time::Duration::from_secs(10);
-        // The stand-in answers only to the flags a pane's shell is started with, and prints
-        // the `PATH` its startup would build.
+        // The stand-in answers only to the flags a pane's shell is started with, and has the
+        // environment its startup would build: a variable set nowhere but there, with a value a
+        // shell would take apart or run.
         let shell = stand_in(
             &root.0,
             "shell",
             "[ \"$1 $2 $3\" = '-i -l -c' ] || exit 1\n\
              echo 'a greeting'\n\
+             export FROM_STARTUP='a b $(touch never) x'\n\
              PATH=/from/login/bin:/usr/bin:/bin exec /bin/sh -c \"$4\"",
         );
+        let env = query_login_env(&shell, limit).expect("an answer");
         assert_eq!(
-            query_login_path(&shell, limit),
+            login_path_of(&env),
             Some(OsString::from("/from/login/bin:/usr/bin:/bin"))
         );
+        let given = carried(env).expect("an environment to carry");
+        assert!(
+            given.contains(&("FROM_STARTUP".to_owned(), "a b $(touch never) x".to_owned())),
+            "{:?}",
+            given.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+        assert!(given.iter().all(|(name, _)| name != "SHLVL" && name != "_"));
         // A shell that prints nothing and ends is no answer, at once.
         let silent = stand_in(&root.0, "silent", "exit 0");
         let started = std::time::Instant::now();
-        assert_eq!(query_login_path(&silent, limit), None);
+        assert_eq!(query_login_env(&silent, limit), None);
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
-        assert_eq!(query_login_path(&root.0.join("missing"), limit), None);
+        assert_eq!(query_login_env(&root.0.join("missing"), limit), None);
+    }
+
+    /// The question is one text for every shell: each shell of this computer that a person
+    /// may have as theirs reads it and answers with the same variable, its value as it was set.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn the_question_reads_the_same_in_every_shell() {
+        let root = TempRoot::new("login-env-shells");
+        let mut asked = 0;
+        for real in [
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/opt/homebrew/bin/fish",
+            "/usr/bin/fish",
+        ] {
+            if !Path::new(real).is_file() {
+                continue;
+            }
+            // The real shell, without the startup files of whoever runs the test.
+            let name = real.replace('/', "_");
+            let shell = stand_in(
+                &root.0,
+                &name,
+                &format!("export SAID='two words $(touch never)'\nexec {real} -c \"$4\""),
+            );
+            let env = query_login_env(&shell, std::time::Duration::from_secs(10))
+                .unwrap_or_else(|| panic!("{real} gave no answer"));
+            assert!(
+                env.contains(&(os("SAID"), os("two words $(touch never)"))),
+                "{real}"
+            );
+            asked += 1;
+        }
+        assert!(asked >= 3, "sh, bash and zsh are on every Mac");
     }
 
     #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn the_login_path_question_ends_where_its_answer_does() {
+    fn the_login_environment_question_ends_where_its_answer_does() {
         let root = TempRoot::new("login-path-ends");
         // A startup file that leaves an agent behind holding the pipe: the answer is taken
         // when it is complete, not when the pipe closes, and the agent goes with the group.
@@ -1245,7 +1499,9 @@ pub(crate) mod tests {
         );
         let started = std::time::Instant::now();
         assert_eq!(
-            query_login_path(&agent, std::time::Duration::from_secs(10)),
+            query_login_env(&agent, std::time::Duration::from_secs(10))
+                .as_deref()
+                .and_then(login_path_of),
             Some(OsString::from("/usr/bin:/bin"))
         );
         assert!(
@@ -1257,7 +1513,7 @@ pub(crate) mod tests {
         let hang = stand_in(&root.0, "hang", "exec sleep 30");
         let started = std::time::Instant::now();
         assert_eq!(
-            query_login_path(&hang, std::time::Duration::from_millis(200)),
+            query_login_env(&hang, std::time::Duration::from_millis(200)),
             None
         );
         assert!(

@@ -2772,6 +2772,15 @@ not rule. A value that is not a program's name keeps the value in use, with a wa
 `http`, `https`, `ftp` and `mailto` addresses and the links a program writes (OSC 8) are links as ever, and
 nothing is handed to another application.
 
+The program is started by itself, in the place of a shell: no shell reads the path, and the program reads none of
+your shell's startup files. On this computer it is given what your shell has all the same, so that it finds the tools and
+the settings it would find typed in a new tab: bateri asks your shell for its environment (as an interactive login shell,
+at launch and again behind each such start) and adds it to the program's. So what the program gets is what a new tab
+has, not what you changed by hand in the terminal you clicked in; a startup file you edited shows from the second click
+after the edit; and when your shell gave no answer the program starts with what bateri's terminals were started with. The
+values go to the program and nowhere else. On a server the program starts with what the server's terminals were started
+with, and the server's shell is not asked.
+
 **What bateri does with a source.** At launch and once a day it fetches the source's `app.json` and the signature
 beside it (`app.json.sig`), and takes the newest release this version of bateri can open (a release lists the
 protocol and the kinds of view it needs; one it cannot open waits for a bateri update, and an earlier one that opens is
