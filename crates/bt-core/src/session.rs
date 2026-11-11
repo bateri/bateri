@@ -10355,32 +10355,38 @@ impl Session {
         if term.grid()[at].flags.contains(Flags::WIDE_CHAR_SPACER) && at.column.0 > 0 {
             at.column -= 1;
         }
-        let (first, last, target, kind, hyperlink) =
-            if let Some((first, last, link)) = hyperlink_run(&term, at) {
-                let pair = (link.id().to_owned(), link.uri().to_owned());
-                (first, last, pair.1.clone(), LinkKind::Osc8, Some(pair))
-            } else {
-                let links = text_links(&term, at);
-                let (first, last, head) = links.first()?.clone();
-                let candidates =
-                    path_candidates(links.into_iter().map(|(first, last, found)| {
-                        (found, link_spans(&term, first, last, offset))
-                    }));
-                let kind = link_kind(head.kind);
-                return self
-                    .link_allowed(&kind, &head.target, remote)
-                    .then(|| LinkHit {
-                        spans: link_spans(&term, first, last, offset),
-                        target: head.target,
-                        remote: remote_path(&kind, remote),
-                        kind,
-                        stamp: LinkStamp(Stamped::Screen {
-                            mark: self.ledger_now(&term),
-                            hyperlink: None,
-                        }),
-                        candidates,
-                    });
-            };
+        // A link a program wrote that is not one here — a `file://` in a remote session, or of
+        // another machine — leaves its text: read as any text is, so a path a program made a
+        // link of (an agent's, GNU `ls --hyperlink`'s) is no less a link than the same path
+        // written plain, and on a server it is checked on the server's disk as that one is.
+        let written = hyperlink_run(&term, at)
+            .filter(|(_, _, link)| self.link_allowed(&LinkKind::Osc8, link.uri(), remote));
+        let (first, last, target, kind, hyperlink) = if let Some((first, last, link)) = written {
+            let pair = (link.id().to_owned(), link.uri().to_owned());
+            (first, last, pair.1.clone(), LinkKind::Osc8, Some(pair))
+        } else {
+            let links = text_links(&term, at);
+            let (first, last, head) = links.first()?.clone();
+            let candidates = path_candidates(
+                links
+                    .into_iter()
+                    .map(|(first, last, found)| (found, link_spans(&term, first, last, offset))),
+            );
+            let kind = link_kind(head.kind);
+            return self
+                .link_allowed(&kind, &head.target, remote)
+                .then(|| LinkHit {
+                    spans: link_spans(&term, first, last, offset),
+                    target: head.target,
+                    remote: remote_path(&kind, remote),
+                    kind,
+                    stamp: LinkStamp(Stamped::Screen {
+                        mark: self.ledger_now(&term),
+                        hyperlink: None,
+                    }),
+                    candidates,
+                });
+        };
         if !self.link_allowed(&kind, &target, remote) {
             return None;
         }
@@ -31122,6 +31128,62 @@ e\\314\\201.'; sleep 5";
         let narrowed = hit.choose(0).expect("the first candidate");
         assert!(narrowed.remote, "narrowing keeps the mark");
         assert_eq!(kind(30), None, "no `file://` in a remote session");
+        session.shutdown();
+    }
+
+    /// A path a program wrote as a link (`file://`, the way an agent or GNU `ls --hyperlink`
+    /// does) is that link on this computer. In a remote session a `file://` is no link (which
+    /// disk it names is not known), and its text is then read as the plain path it is: a
+    /// candidate of the server's disk, as it would be had the program written no link at all.
+    #[test]
+    fn a_file_link_a_program_wrote_falls_back_to_its_text_in_a_remote_session() {
+        let wake = Arc::new(TestWake::default());
+        let options = test_options(
+            sh(&format!(
+                "stty -echo; printf '{}'; read _; \
+                 printf '\\033]133;C\\007see \\033]8;;file:///srv/app/main.rs\\033\\\\/srv/app/main.rs\\033]8;;\\033\\\\ \
+                 and \\033]8;;https://r.dev/x\\033\\\\the docs\\033]8;;\\033\\\\ END'; sleep 5",
+                anchored_prompt(1),
+            )),
+            80,
+        );
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_ink(&session, &wake, "$");
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        wait_ink(&session, &wake, "END");
+        // `$ ` 0–1, `see ` 2–5, the path 6–21, ` and ` 22–26, `the docs` 27–34.
+        let local = session.link_at(screen(0, 10)).expect("the link, here");
+        assert_eq!(local.kind, LinkKind::Osc8);
+        assert_eq!(local.target, "file:///srv/app/main.rs");
+        assert!(!local.remote);
+
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        let remote = session
+            .link_at(screen(0, 10))
+            .expect("its text, on a server");
+        assert_eq!(
+            remote.kind,
+            LinkKind::Path {
+                line: None,
+                col: None
+            }
+        );
+        assert!(remote.remote, "checked on the server's disk");
+        assert!(
+            remote
+                .candidates
+                .iter()
+                .any(|candidate| candidate.target == "/srv/app/main.rs"
+                    && candidate.spans == [span(0, 6, 21)]),
+            "{:?}",
+            remote.candidates
+        );
+        // A link that is one everywhere stays the link, whatever its text.
+        let docs = session.link_at(screen(0, 30)).expect("the other link");
+        assert_eq!(docs.kind, LinkKind::Osc8);
+        assert_eq!(docs.target, "https://r.dev/x");
         session.shutdown();
     }
 

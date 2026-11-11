@@ -29,6 +29,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A path a program writes as a link is a link on a server too.** A program can write a file's path as a `file://` link (an agent does when it is told the terminal shows links, GNU `ls --hyperlink` does). In an `ssh` terminal bateri takes no `file://` for a link, since which computer it names is not known, and such a path was then no link at all, though the same path written plain was. Its text is read as the plain path now and checked on the server.
 - **Command-click finds a name written between quotes, and a long path with many spaces.** A file or a folder that a program writes as `'My Drive'` or `'src/main.rs'` (GNU `ls` does, for a name with a space) was not a link: the quote was taken for part of the name. And a path with more than some five words after or before the word you pointed at (`/Users/you/Library/Application Support/Some App Name/…`) was found from none of its words. Both are links now, wherever in them you click; what was a link before opens what it opened before.
 - **`kitten icat` works.** It gave up after ten seconds, because bateri's answer to the device attributes question (`CSI c`) was shorter than it expects. bateri now answers the way kitty and Ghostty do.
 - **An image printed right below a command shows whole**, instead of going under the input line.
