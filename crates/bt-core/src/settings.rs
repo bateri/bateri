@@ -1794,6 +1794,11 @@ pub struct Settings {
     /// is not the person's whole one must not do that: a typed address with a mistake in it would
     /// otherwise delete the program it was meant to be, with the key approved for it.
     pub apps_sources_whole: bool,
+    /// `[apps] open_with`: the program that opens a file or a folder clicked in a terminal, by its
+    /// name (what `pencere_host::apps::is_name` says a name is); `"textpen"` unless the file writes
+    /// the key. Empty is `Nothing`: no path is a link. A value that is neither is not accepted and
+    /// the previous one stays ([`app_open_with`]).
+    pub apps_open_with: String,
     /// `[keys]`: the shortcuts the file gives the commands, by the command's fixed name, in the
     /// file's order. A command that has no entry has its default; the names are the shell
     /// layer's, and an entry for a name it does not know is kept here and reported there.
@@ -1863,6 +1868,7 @@ impl Default for Settings {
                 .map(|source| (*source).to_owned())
                 .collect(),
             apps_sources_whole: true,
+            apps_open_with: DEFAULT_APP_OPEN_WITH.to_owned(),
             keys: Vec::new(),
         }
     }
@@ -2043,6 +2049,8 @@ pub enum SettingsEdit {
     /// added, one taken out). Written as given; the entries are the window's to have checked
     /// ([`app_source_address`] reads them back).
     AppsSources(Vec<String>),
+    /// Settings ▸ Apps ▸ Files ▸ Open with: the program's name, or the empty text for `Nothing`.
+    AppsOpenWith(String),
 }
 
 impl SettingsEdit {
@@ -2135,6 +2143,7 @@ impl SettingsEdit {
             }
             Self::RemoteIntegration(_) => ("remote", "integration", "remote.integration"),
             Self::AppsSources(_) => ("apps", "sources", "apps.sources"),
+            Self::AppsOpenWith(_) => ("apps", "open_with", "apps.open_with"),
             Self::PreviewMaxSize(_) => ("remote", "preview_max_size", "remote.preview_max_size"),
             Self::PreviewReadOnly(_) => ("remote", "preview_read_only", "remote.preview_read_only"),
             Self::PreviewDir(_) => ("remote", "preview_dir", "remote.preview_dir"),
@@ -2227,6 +2236,7 @@ impl SettingsEdit {
             | Self::DarkTheme(name)
             | Self::FontFamily(name)
             | Self::PreviewDir(name)
+            | Self::AppsOpenWith(name)
             | Self::DownloadDir(name) => name.as_str().into(),
         }
     }
@@ -2610,6 +2620,11 @@ stats_interval = 3
 # An entry taken out of this file by hand only leaves the list: the copy that
 # runs here stays until bateri package remove.
 sources = ["bateri/textpen"]
+# The program that opens a file or a folder you Command-click in a terminal,
+# in a floating pane, on the computer the path is on: the name of a program
+# from the list above that opens files, or "" for none. Where the program is
+# not installed, or with "", a path is not a link.
+open_with = "textpen"
 
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
@@ -3301,6 +3316,14 @@ sources = ["bateri/textpen"]
                     parsed.settings.apps_sources = list;
                     parsed.settings.apps_sources_whole = whole;
                 }
+                if let Some(item) = apps.get("open_with") {
+                    parsed.settings.apps_open_with = app_open_with(
+                        text,
+                        item,
+                        &fallback.apps_open_with,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("apps") => {
                 parsed
@@ -3308,6 +3331,10 @@ sources = ["bateri/textpen"]
                     .apps_sources
                     .clone_from(&fallback.apps_sources);
                 parsed.settings.apps_sources_whole = false;
+                parsed
+                    .settings
+                    .apps_open_with
+                    .clone_from(&fallback.apps_open_with);
             }
             None => {}
         }
@@ -4822,6 +4849,44 @@ fn folder(
 /// `[apps] sources` when the file does not write the key.
 pub const DEFAULT_APP_SOURCES: &[&str] = &["bateri/textpen"];
 
+/// `[apps] open_with` when the file does not write the key.
+pub const DEFAULT_APP_OPEN_WITH: &str = "textpen";
+
+/// `apps.open_with`: the name of a program, or the empty text. Anything else (another kind of
+/// value, a name no program can have) is rejected with a diagnostic and `fallback` stays; no
+/// other key of the section is touched by it.
+fn app_open_with(
+    text: &str,
+    item: &Item,
+    fallback: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> String {
+    const KEY: &str = "apps.open_with";
+    let line = item.span().and_then(|span| line_of(text, span.start));
+    let Some(name) = item.as_str() else {
+        diagnostics.push(Diagnostic {
+            key: Some(KEY),
+            line,
+            message: format!(
+                "`{KEY}` must be the name of a program or \"\", found {}; keeping the previous value",
+                kind(item)
+            ),
+        });
+        return fallback.to_owned();
+    };
+    if !name.is_empty() && !pencere_host::apps::is_name(name) {
+        diagnostics.push(Diagnostic {
+            key: Some(KEY),
+            line,
+            message: format!(
+                "`{KEY}` is the name of a program (lowercase letters, digits and `-`) or \"\", found {name:?}; keeping the previous value"
+            ),
+        });
+        return fallback.to_owned();
+    }
+    name.to_owned()
+}
+
 /// The address of the `app.json` an `[apps] sources` entry names, or `None` if it names none.
 ///
 /// Three spellings: `user/repo`, a GitHub project (its **latest release**'s `app.json`), a full
@@ -5192,6 +5257,7 @@ mod tests {
             ("remote", "stats_interval"),
             ("remote", "integration"),
             ("apps", "sources"),
+            ("apps", "open_with"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -5425,6 +5491,7 @@ mod tests {
             remote_integration: true,
             apps_sources: Settings::default().apps_sources,
             apps_sources_whole: true,
+            apps_open_with: Settings::default().apps_open_with,
             keys: Vec::new(),
         };
         let parsed = Settings::parse_keeping(
@@ -8327,6 +8394,89 @@ hosts = [
     }
 
     #[test]
+    fn the_program_that_opens_a_path_is_textpen_until_the_file_says_another() {
+        assert_eq!(Settings::default().apps_open_with, "textpen");
+        assert_eq!(clean("").apps_open_with, "textpen");
+        // The section alone, and the other key of it, say nothing of it.
+        assert_eq!(clean("[apps]\n").apps_open_with, "textpen");
+        assert_eq!(clean("[apps]\nsources = []\n").apps_open_with, "textpen");
+        assert_eq!(
+            clean("[apps]\nopen_with = \"notes\"\n").apps_open_with,
+            "notes"
+        );
+        // Written empty it is Nothing, which is not the default.
+        assert_eq!(clean("[apps]\nopen_with = \"\"\n").apps_open_with, "");
+        // Neither key changes the other.
+        let both = clean("[apps]\nsources = [\"acme/tool\"]\nopen_with = \"tool\"\n");
+        assert_eq!(both.apps_sources, ["acme/tool"]);
+        assert_eq!(both.apps_open_with, "tool");
+    }
+
+    #[test]
+    fn a_name_no_program_has_keeps_the_given_one_and_changes_nothing_else() {
+        let current = Settings {
+            apps_open_with: "notes".to_owned(),
+            apps_sources: vec!["acme/tool".to_owned()],
+            ..Settings::default()
+        };
+        for (value, line) in [
+            ("\"Not A Name\"", Some(3)),
+            ("\"-tool\"", Some(3)),
+            ("\"a/b\"", Some(3)),
+            ("\" \"", Some(3)),
+            ("3", Some(3)),
+            ("[\"textpen\"]", Some(3)),
+        ] {
+            let text = format!("[apps]\nsources = [\"other/tool\"]\nopen_with = {value}\n");
+            let parsed = Settings::parse_keeping(&text, &current).expect("parseable text");
+            assert_eq!(parsed.settings.apps_open_with, "notes", "{value}");
+            // The key beside it is read as ever.
+            assert_eq!(parsed.settings.apps_sources, ["other/tool"], "{value}");
+            let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
+                .unwrap_or_else(|got| panic!("a single diagnostic expected: {got:?}"));
+            assert_eq!(diagnostic.key, Some("apps.open_with"), "{value}");
+            assert_eq!(diagnostic.line, line, "{value}");
+            assert!(
+                diagnostic.message.ends_with("keeping the previous value"),
+                "{value}: {}",
+                diagnostic.message
+            );
+        }
+        // At startup the same text is the default.
+        let (settings, _) = rejected("[apps]\nopen_with = \"Not A Name\"\n");
+        assert_eq!(settings.apps_open_with, "textpen");
+        // A section of the wrong type keeps it too.
+        let parsed = Settings::parse_keeping("apps = 1\n", &current).expect("parseable");
+        assert_eq!(parsed.settings.apps_open_with, "notes");
+    }
+
+    #[test]
+    fn the_writer_of_open_with_writes_that_key_and_leaves_the_rest_of_the_file() {
+        let text = "[apps]\n# mine\nsources = [\"acme/tool\"]\nfuture = 1\n";
+        let edited = Settings::with_edit(text, &SettingsEdit::AppsOpenWith("tool".to_owned()))
+            .expect("edits");
+        assert!(edited.contains("# mine"), "{edited}");
+        assert!(edited.contains("future = 1"), "{edited}");
+        assert!(edited.contains("sources = [\"acme/tool\"]"), "{edited}");
+        assert!(edited.contains("open_with = \"tool\""), "{edited}");
+        let read = clean(&edited);
+        assert_eq!(read.apps_open_with, "tool");
+        assert_eq!(read.apps_sources, ["acme/tool"]);
+        // Nothing is written as the empty text, not as a missing key.
+        let nothing = Settings::with_edit(&edited, &SettingsEdit::AppsOpenWith(String::new()))
+            .expect("edits");
+        assert!(nothing.contains("open_with = \"\""), "{nothing}");
+        assert_eq!(clean(&nothing).apps_open_with, "");
+        // A file with no [apps] gets the section with the one key.
+        let fresh = Settings::with_edit(
+            "[font]\nsize = 14\n",
+            &SettingsEdit::AppsOpenWith("x".to_owned()),
+        )
+        .expect("edits");
+        assert_eq!(clean(&fresh).apps_open_with, "x");
+    }
+
+    #[test]
     fn a_remote_hosts_change_is_its_own_field() {
         let before = clean("");
         let after = clean("[remote]\nhosts = [{ host = \"prod\", mark = \"production\" }]\n");
@@ -8644,6 +8794,7 @@ cursor = \"spring\"
             ),
             SettingsEdit::RemoteIntegration(on) => settings.remote_integration = on,
             SettingsEdit::AppsSources(sources) => settings.apps_sources = sources,
+            SettingsEdit::AppsOpenWith(name) => settings.apps_open_with = name,
             SettingsEdit::PreviewMaxSize(bytes) => settings.remote_files.preview_max_size = bytes,
             SettingsEdit::PreviewReadOnly(on) => settings.remote_files.preview_read_only = on,
             SettingsEdit::PreviewDir(path) => settings.remote_files.preview_dir = path,
@@ -8760,6 +8911,8 @@ cursor = \"spring\"
                 "acme/tool".to_owned(),
                 "https://example.com/tool/app.json".to_owned(),
             ]),
+            SettingsEdit::AppsOpenWith("notes".to_owned()),
+            SettingsEdit::AppsOpenWith(String::new()),
             SettingsEdit::ShellPorts(false),
             SettingsEdit::ShellPythonEnv(false),
             SettingsEdit::ShellNodeVersion(false),

@@ -160,6 +160,8 @@ pub struct Release {
     pub views: String,
     /// The `previous` list, as JSON.
     pub previous: String,
+    /// The `opens` list, as JSON; the member is not written when there is none.
+    pub opens: Option<String>,
     pub targets: Vec<&'static str>,
     /// What the program of every target says, so that two releases differ.
     pub body: String,
@@ -175,6 +177,7 @@ impl Release {
             protocol: "[1]".to_owned(),
             views: r#"[{"kind":"lua","versions":["0.1"]}]"#.to_owned(),
             previous: "[]".to_owned(),
+            opens: None,
             targets: vec![TARGET, OTHER_TARGET],
             body: format!("#!/bin/sh\necho {name} {version}\n"),
             files_at: None,
@@ -193,6 +196,12 @@ impl Release {
 
     pub fn previous(mut self, previous: &str) -> Self {
         self.previous = previous.to_owned();
+        self
+    }
+
+    /// Says, as `app.json`'s `opens` (a JSON list), what the program opens.
+    pub fn opens(mut self, opens: &str) -> Self {
+        self.opens = Some(opens.to_owned());
         self
     }
 
@@ -223,8 +232,12 @@ impl Release {
                 format!(r#""{target}":{{"url":"{url}","sha256":"{sum}"}}"#)
             })
             .collect();
+        let opens = self
+            .opens
+            .as_ref()
+            .map_or_else(String::new, |opens| format!(r#","opens":{opens}"#));
         let json = format!(
-            r#"{{"name":"{}","version":"{}","protocol":{},"views":{},"key":"{}","files":{{{}}},"previous":{}}}"#,
+            r#"{{"name":"{}","version":"{}","protocol":{},"views":{},"key":"{}","files":{{{}}},"previous":{}{opens}}}"#,
             self.name,
             self.version,
             self.protocol,

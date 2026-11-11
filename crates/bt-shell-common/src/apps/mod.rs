@@ -37,6 +37,7 @@ pub mod card;
 mod check;
 pub mod fetch;
 pub mod followed;
+pub mod opens;
 pub mod package;
 pub mod page;
 pub mod store;

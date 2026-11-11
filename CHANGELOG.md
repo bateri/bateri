@@ -20,6 +20,7 @@ of every installed copy. A version without a section is not released.
 - **Images placed relative to another image** (`P=`, `Q=`): they move, scroll and go away with the image they hang on.
 - **Images in the theme's colours** (`f=8`, `f=16`): they are drawn again when the theme or the palette changes.
 - A program can ask which of these graphics features bateri supports (`a=q` with `e=`).
+- **The program a clicked file or folder opens in is a setting.** Settings ▸ Apps starts with a Files section and one row, Open with: textpen, another followed program that opens files, or Nothing (`[apps] open_with` in `settings.toml`). A program says that it opens files in its `app.json`, and only those are offered.
 
 ### Fixed
 

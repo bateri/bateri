@@ -2805,6 +2805,7 @@ fn a_release_of_the_lua_kit_opens_by_the_list_a_pane_offers() {
         key: String::new(),
         files: std::collections::BTreeMap::new(),
         previous: Vec::new(),
+        opens: Vec::new(),
     };
     let opens = |kind: &str, version: &str| {
         matches!(

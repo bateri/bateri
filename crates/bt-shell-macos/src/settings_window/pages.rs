@@ -219,11 +219,20 @@ const AGENTS: &[Group] = &[group(
     ],
 )];
 
+fn files_aside(_: &Settings) -> Option<&'static str> {
+    Some("⌘-click a file or a folder in a terminal")
+}
+
 fn following_aside(_: &Settings) -> Option<&'static str> {
     Some("kept on this computer; a server gets one when you ask")
 }
 
 const APPS: &[Group] = &[
+    Group {
+        title: Some("Files"),
+        aside: files_aside,
+        items: &[row(Key::OpenWith)],
+    },
     Group {
         title: Some("Following"),
         aside: following_aside,
@@ -265,6 +274,7 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::Scrollbar => "Scroll bar",
         Key::ResizeInSteps => "Resize a whole cell at a time",
         Key::Font => "Font",
+        Key::OpenWith => "Open with",
         Key::Size => "Size",
         Key::LineHeight => "Line height",
         Key::LetterSpacing => "Letter spacing",

@@ -28,7 +28,8 @@ use super::{Category, Key, Resolved, choice_labels, pages, row_description};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Entry {
     pub(super) page: Category,
-    /// The row's key; `None` for the Keyboard page's one entry.
+    /// The row's key; `None` for the Keyboard page's one entry and the Apps page's list of
+    /// sources, which are not rows of the table.
     pub(super) key: Option<Key>,
     pub(super) name: String,
     /// What the row says about the value it has now.
@@ -65,7 +66,6 @@ pub(super) fn entries(settings: &Settings, resolved: Resolved) -> Vec<Entry> {
                 options: "programs textpen follow source add remove review key signed".to_owned(),
                 file_key: "apps.sources",
             });
-            continue;
         }
         for group in pages::groups(page) {
             for item in group.items {
@@ -413,5 +413,17 @@ mod tests {
             .collect();
         assert!(blink.contains(&Some(Key::Blink)));
         assert!(blink.contains(&Some(Key::BlinkSpeed)));
+        // The Apps page's Open with row is found by its name and by its key, next to the page's
+        // own entry.
+        for query in ["open with", "open_with"] {
+            let found: Vec<_> = hits(query, &all)
+                .into_iter()
+                .map(|entry| (entry.page, entry.key))
+                .collect();
+            assert!(
+                found.contains(&(Category::Apps, Some(Key::OpenWith))),
+                "{query:?} does not find the Open with row"
+            );
+        }
     }
 }

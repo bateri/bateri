@@ -335,11 +335,12 @@ enum Key {
     NodeVersion,
     CommandLevel,
     ClaudeIntegration,
+    OpenWith,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 57] = [
+    const ALL: [Key; 58] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -397,6 +398,7 @@ impl Key {
         Key::NodeVersion,
         Key::CommandLevel,
         Key::ClaudeIntegration,
+        Key::OpenWith,
     ];
 
     fn tag(self) -> NSInteger {
@@ -469,6 +471,7 @@ impl Key {
             Key::NodeVersion => "shell.node_version",
             Key::CommandLevel => "commands.level",
             Key::ClaudeIntegration => "agents.claude_integration",
+            Key::OpenWith => "apps.open_with",
         }
     }
 }
@@ -982,6 +985,7 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         },
         Key::StatsInterval => Some("Pauses in hidden tabs and while idle."),
         Key::PreviewReadOnly => Some("A preview you change is kept, never cleaned up."),
+        Key::OpenWith => Some(open_with_description(&settings.apps_open_with)),
         Key::PreviewLimit => Some("Oldest go first, when bateri starts."),
         Key::DownloadNotify => Some("Only while bateri is in the background."),
         Key::Theme if settings.theme == SYSTEM_THEME => {
@@ -1529,6 +1533,92 @@ fn missing_font_title(name: &str, notice: Option<FontNotice>) -> String {
     }
 }
 
+/// An item of the Open with popup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OpenItem {
+    /// A followed program that opens files.
+    Program(String),
+    Separator,
+    /// `open_with = ""`: no path is a link.
+    Nothing,
+    /// The program the file names, which is not among the programs that open files; choosing it
+    /// writes nothing (it already is the value).
+    Missing(String),
+}
+
+/// The Open with popup's items and the selected one's index: the programs that open files, a
+/// separator, Nothing; a name the file gives that is not among the programs comes last, after a
+/// separator, selected.
+fn open_with_items(current: &str, programs: &[String]) -> (Vec<OpenItem>, usize) {
+    let mut items: Vec<OpenItem> = programs.iter().cloned().map(OpenItem::Program).collect();
+    if !items.is_empty() {
+        items.push(OpenItem::Separator);
+    }
+    items.push(OpenItem::Nothing);
+    if current.is_empty() {
+        let index = items.len() - 1;
+        return (items, index);
+    }
+    if let Some(index) = items
+        .iter()
+        .position(|item| matches!(item, OpenItem::Program(name) if name == current))
+    {
+        return (items, index);
+    }
+    items.push(OpenItem::Separator);
+    items.push(OpenItem::Missing(current.to_owned()));
+    let index = items.len() - 1;
+    (items, index)
+}
+
+/// What choosing the item at `index` writes: the program's name, or the empty text for Nothing;
+/// nothing for a separator and for the name that already is the value.
+fn open_with_edit(items: &[OpenItem], index: NSInteger) -> Option<String> {
+    match items.get(usize::try_from(index).ok()?)? {
+        OpenItem::Program(name) => Some(name.clone()),
+        OpenItem::Nothing => Some(String::new()),
+        OpenItem::Separator | OpenItem::Missing(_) => None,
+    }
+}
+
+/// The followed programs that say they open files, by name: what the Open with popup lists.
+fn programs_that_open_files() -> Vec<String> {
+    let root = crate::apps_root().unwrap_or_default();
+    bt_shell_common::apps::opens::openers(&root)
+        .into_iter()
+        .map(|opener| opener.name)
+        .collect()
+}
+
+/// What the Open with row says of a value that is in the list: what a click does.
+fn open_with_description(open_with: &str) -> &'static str {
+    if open_with.is_empty() {
+        "A path is not a link."
+    } else {
+        "In a floating pane, on the computer the file is on. Where the program is not installed, a path is not a link."
+    }
+}
+
+/// The warning under the Open with row when the value names a program that is not among the ones
+/// that open files; the row says what a click does in every other state.
+fn open_with_warning(items: &[OpenItem]) -> Option<String> {
+    items.iter().find_map(|item| match item {
+        OpenItem::Missing(name) => Some(format!(
+            "{name} is not a followed program that opens files. A path is not a link."
+        )),
+        _ => None,
+    })
+}
+
+fn fill_open_with(popup: &NSPopUpButton, items: &[OpenItem], selected: usize) {
+    let entries = items.iter().map(|item| match item {
+        OpenItem::Program(name) | OpenItem::Missing(name) => Entry::item(name.clone()),
+        OpenItem::Separator => Entry::Separator,
+        OpenItem::Nothing => Entry::item("Nothing"),
+    });
+    fill_popup(popup, entries, selected);
+}
+
 /// An item of a size popup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SizeItem {
@@ -1736,6 +1826,8 @@ struct Controls {
     light_theme: Retained<ThemeGallery>,
     dark_theme: Retained<ThemeGallery>,
     font: Retained<NSPopUpButton>,
+    /// Apps ▸ Files ▸ Open with: the followed programs that open files, and Nothing.
+    open_with: Retained<NSPopUpButton>,
     /// The switches of the options the selected font offers.
     font_options: font_options::Options,
     size: Number,
@@ -1983,6 +2075,7 @@ pub(crate) struct Ivars {
     /// The popups' item lists — the meaning of the selected index. Rebuilt on
     /// every `refresh`.
     fonts: RefCell<Vec<FontItem>>,
+    open_withs: RefCell<Vec<OpenItem>>,
     /// The options the Options row shows, in the order of the switches' tags.
     /// Rebuilt on every `refresh`.
     font_options: RefCell<Vec<FontOption>>,
@@ -2627,6 +2720,7 @@ impl SettingsWindow {
             apps: OnceCell::new(),
             controls: OnceCell::new(),
             fonts: RefCell::new(Vec::new()),
+            open_withs: RefCell::new(Vec::new()),
             font_options: RefCell::new(Vec::new()),
             max_sizes: RefCell::new(Vec::new()),
             contrasts: RefCell::new(Vec::new()),
@@ -2788,6 +2882,7 @@ impl SettingsWindow {
             fill_fonts(&c.font, &items, index);
         }
         self.ivars().fonts.replace(items);
+        self.sync_open_with(&settings.apps_open_with);
         set_number(
             &c.size,
             settings.font.size,
@@ -2903,6 +2998,12 @@ impl SettingsWindow {
                 .iter()
                 .find(|(row_key, _)| *row_key == key)
                 .map(|(_, message)| message.as_str());
+            // A program the file names that does not open files: the row says so in the warning's
+            // colour, which a diagnostic of the file's own takes the place of.
+            let unlisted = (key == Key::OpenWith)
+                .then(|| open_with_warning(&self.ivars().open_withs.borrow()))
+                .flatten();
+            let diagnostic = diagnostic.or(unlisted.as_deref());
             row.set_note(
                 diagnostic,
                 leans.reason.or(forced.map(|forced| forced.note)),
@@ -2977,10 +3078,52 @@ impl SettingsWindow {
     pub(crate) fn refresh_apps(
         &self,
         sources: &[String],
+        open_with: &str,
         tracked: Option<&bt_shell_common::apps::page::Tracked>,
     ) {
         if let Some(apps) = self.ivars().apps.get() {
             apps.refresh(self, sources, tracked);
+        }
+        // The programs that open files change with the list (Add, Remove) and with a release.
+        self.sync_open_with(open_with);
+        self.set_open_with_note(open_with);
+    }
+
+    /// Fills the Open with popup from the programs that open files (the folder of the followed
+    /// programs says which) and selects the value.
+    fn sync_open_with(&self, open_with: &str) {
+        self.apply_open_with(open_with, &programs_that_open_files());
+    }
+
+    /// Fills the Open with popup from `programs` and selects the value, which the popup's items
+    /// keep the meaning of ([`open_with_edit`]).
+    fn apply_open_with(&self, open_with: &str, programs: &[String]) {
+        let Some(c) = self.ivars().controls.get() else {
+            return;
+        };
+        let (items, index) = open_with_items(open_with, programs);
+        if *self.ivars().open_withs.borrow() == items {
+            c.open_with.selectItemAtIndex(index as NSInteger);
+        } else {
+            fill_open_with(&c.open_with, &items, index);
+        }
+        self.ivars().open_withs.replace(items);
+    }
+
+    /// The note under the Open with row, from what the popup was filled with: what a click does,
+    /// or the warning when the value is not among the programs.
+    fn set_open_with_note(&self, open_with: &str) {
+        let Some(c) = self.ivars().controls.get() else {
+            return;
+        };
+        if let Some(row) = c.rows.iter().find(|row| row.key == Some(Key::OpenWith)) {
+            let warning = open_with_warning(&self.ivars().open_withs.borrow());
+            row.set_note(
+                warning.as_deref(),
+                None,
+                Some(open_with_description(open_with)),
+                c.open_with.isEnabled(),
+            );
         }
     }
 
@@ -3211,6 +3354,8 @@ impl SettingsWindow {
             Key::Font => {
                 font_edit(&self.ivars().fonts.borrow(), index).map(SettingsEdit::FontFamily)
             }
+            Key::OpenWith => open_with_edit(&self.ivars().open_withs.borrow(), index)
+                .map(SettingsEdit::AppsOpenWith),
             Key::MinimumContrast => contrast_edit(&self.ivars().contrasts.borrow(), index)
                 .map(SettingsEdit::MinimumContrast),
             Key::PreviewMaxSize => {
@@ -4022,6 +4167,7 @@ impl SettingsWindow {
         let dark_theme = self.theme_gallery(Key::DarkTheme);
         let minimum_contrast = self.string_popup(Key::MinimumContrast);
         let font = self.string_popup(Key::Font);
+        let open_with = self.string_popup(Key::OpenWith);
         // Half a point a step: the size is a decimal, and a whole point is a large step at the
         // sizes a terminal is read at.
         let size = self.number(Key::Size, MIN_SIZE, MAX_SIZE, 0.5, NUMBER_WIDTH);
@@ -4118,6 +4264,7 @@ impl SettingsWindow {
             light_theme,
             dark_theme,
             font,
+            open_with,
             font_options,
             size,
             line_height,
@@ -4666,6 +4813,7 @@ impl Controls {
             Key::LightTheme => Parts::of(&self.light_theme),
             Key::DarkTheme => Parts::of(&self.dark_theme),
             Key::Font => Parts::of(&self.font),
+            Key::OpenWith => Parts::of(&self.open_with),
             Key::FontFeatures => Parts {
                 view: self.font_options.view(),
                 controls: Vec::new(),
@@ -5733,6 +5881,7 @@ mod tests {
                     [agents]\nclaude_integration = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
                     [commands]\nlevel = []\n\
+                    [apps]\nopen_with = []\n\
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
                     preview_dir = []\npreview_keep = []\npreview_limit = []\n\
                     download_dir = []\ndownload_conflict = []\ndownload_notify = []\n\
@@ -5798,6 +5947,7 @@ mod tests {
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
                 Key::ClaudeIntegration => SettingsEdit::AgentsClaudeIntegration(true),
                 Key::CommandLevel => SettingsEdit::CommandLevel(CommandLevel::Off),
+                Key::OpenWith => SettingsEdit::AppsOpenWith(String::new()),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
                 Key::FocusFrame => SettingsEdit::FocusFrame(true),
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),
@@ -6030,6 +6180,71 @@ mod tests {
             assert_eq!(size_title(bytes).replace(' ', ""), written);
             assert_eq!(bt_core::parse_size(&written), Some(bytes));
         }
+    }
+
+    /// The Open with popup lists the programs that open files, then Nothing; the file's value
+    /// stays visible and selected whether it is one of them, Nothing, or a program the list lacks.
+    #[test]
+    fn the_open_with_popup_keeps_the_file_value_visible() {
+        let programs = ["notes".to_owned(), "textpen".to_owned()];
+        let (items, index) = open_with_items("textpen", &programs);
+        assert_eq!(
+            items,
+            [
+                OpenItem::Program("notes".into()),
+                OpenItem::Program("textpen".into()),
+                OpenItem::Separator,
+                OpenItem::Nothing,
+            ]
+        );
+        assert_eq!(index, 1);
+        assert_eq!(open_with_edit(&items, 1), Some("textpen".to_owned()));
+        assert_eq!(open_with_edit(&items, 3), Some(String::new()));
+        assert_eq!(
+            open_with_edit(&items, 2),
+            None,
+            "a separator writes nothing"
+        );
+        assert_eq!(open_with_edit(&items, -1), None);
+        assert_eq!(open_with_edit(&items, 9), None);
+        assert_eq!(open_with_warning(&items), None);
+
+        let (items, index) = open_with_items("", &programs);
+        assert_eq!(items[index], OpenItem::Nothing);
+        assert_eq!(open_with_warning(&items), None);
+
+        // A name the list lacks comes last, selected; choosing it writes nothing, and the row
+        // warns, because that value opens nothing.
+        let (items, index) = open_with_items("sketch", &programs);
+        assert_eq!(index, items.len() - 1);
+        assert_eq!(items[index], OpenItem::Missing("sketch".into()));
+        assert_eq!(items[index - 1], OpenItem::Separator);
+        assert_eq!(open_with_edit(&items, index as NSInteger), None);
+        assert_eq!(
+            open_with_warning(&items).as_deref(),
+            Some("sketch is not a followed program that opens files. A path is not a link.")
+        );
+
+        // With no program that opens files, the list is Nothing alone.
+        let (items, index) = open_with_items("textpen", &[]);
+        assert_eq!(
+            items,
+            [
+                OpenItem::Nothing,
+                OpenItem::Separator,
+                OpenItem::Missing("textpen".into()),
+            ]
+        );
+        assert_eq!(index, 2);
+        let (items, index) = open_with_items("", &[]);
+        assert_eq!((items, index), (vec![OpenItem::Nothing], 0));
+    }
+
+    /// The row says what a click does, and says it differently for Nothing.
+    #[test]
+    fn the_open_with_row_says_what_a_click_does() {
+        assert_eq!(open_with_description(""), "A path is not a link.");
+        assert!(open_with_description("textpen").starts_with("In a floating pane"));
     }
 
     /// A chosen folder is written the way the parser accepts it: under the

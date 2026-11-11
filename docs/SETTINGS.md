@@ -113,8 +113,8 @@ goes with them.
   two keys of the load indicator (`stats`, `stats_interval`) and the eight
   preview and download keys of `[remote]`.
 - **Apps**, under Servers — the programs bateri keeps up to date (see
-  [`[apps]`](#apps) below): the list of what it follows, and a field to add to
-  it.
+  [`[apps]`](#apps) below): which of them opens a file or a folder you
+  Command-click, the list of what it follows, and a field to add to it.
 
 Choices that change how something looks are shown as pictures drawn in the
 colours of the theme you have on screen (where the tabs sit, how split panes
@@ -598,6 +598,11 @@ stats_interval = 3
 # An entry taken out of this file by hand only leaves the list: the copy that
 # runs here stays until bateri package remove.
 sources = ["bateri/textpen"]
+# The program that opens a file or a folder you Command-click in a terminal,
+# in a floating pane, on the computer the path is on: the name of a program
+# from the list above that opens files, or "" for none. Where the program is
+# not installed, or with "", a path is not a link.
+open_with = "textpen"
 
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
@@ -2766,11 +2771,13 @@ _bt_osc7() { printf '\033]7;file://%s%s\007' "$HOST" "$PWD"; }; precmd_functions
 ```toml
 [apps]
 sources = ["bateri/textpen"]
+open_with = "textpen"
 ```
 
 | key | type | default | meaning |
 |---|---|---|---|
 | `sources` | array of strings | `["bateri/textpen"]` | where the programs bateri keeps up to date publish their releases; written, even as `[]`, the file's list is the list |
+| `open_with` | string | `"textpen"` | the program that opens a file or a folder you Command-click in a terminal; `""` for none |
 
 An entry is `user/repo`, a GitHub project (bateri reads the `app.json` of its latest release), or a full
 `https://…` or `file:///…` address of an `app.json`. An entry that is none of these is dropped with a warning and the
@@ -2779,6 +2786,15 @@ its folder in bateri's own store deleted (the copies on this computer's machine 
 dropped, or was not accepted: a mistake in a typed address does not delete the program it was meant to be. The warning
 stays until the line is mended, and the Apps page of Settings cannot add, review or remove anything until then (a
 change it wrote would write the list without that entry).
+
+**Open with.** Command-click on the path of a file or a folder in a terminal opens it in the program `open_with`
+names, in a floating pane over the tab, on the computer the path is on: the program is started there with the
+path (and `+LINE` before it, when the text said `path:line`) and the pane closes when it ends. Each click opens a
+pane of its own. `open_with` is the name of a program bateri follows that says in its `app.json` that it opens files
+(`opens`); where that program is not installed, or when the value is `""`, a path in that terminal is not a link: it is
+not underlined and a click does nothing. A value that is not a program's name keeps the value in use, with a warning;
+`http`, `https`, `ftp` and `mailto` addresses and the links a program writes (OSC 8) are links as ever, and
+nothing is handed to another application.
 
 **What bateri does with a source.** At launch and once a day it fetches the source's `app.json` and the signature
 beside it (`app.json.sig`), and takes the newest release this version of bateri can open (a release lists the
@@ -2842,7 +2858,9 @@ turned shell integration on for by hand) starts with `auto off`: bateri says so 
 there, and `bateri package auto on` turns updating on; it stays on while the machine keeps a program (a machine left with
 none and installed to again starts over).
 
-**The Apps page** (Settings ▸ Apps) is this list as rows, under Following, and a field under Add. A row has the
+**The Apps page** (Settings ▸ Apps) begins with Files, a single row, Open with, whose choices are the followed programs
+that open files, and Nothing; when the program the file names is not among them the row says so in orange. Then
+this list as rows, under Following, and a field under Add. A row has the
 program's name and version, the source it came from, and at the right a mark and a trash can, with a button left of
 the mark when the row has something to do. The mark is all the row says of its state: a green dot when the release in
 use is the newest, a grey dot when the release has no file for this computer (its author has not built it for this kind of

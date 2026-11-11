@@ -564,6 +564,74 @@ impl SettingsWindow {
                 }
                 super::apps::hide_tip();
             }
+            // The Files row in each of its three states: the program is in the list, Nothing, a
+            // program the list lacks (the warning, which is the longest note). The row stands in
+            // its box, its text clear of its control, and says what the state calls for.
+            let followed = ["textpen".to_owned(), "notes".to_owned()];
+            for (name, value, says) in [
+                ("open-in-list", "textpen", "In a floating pane"),
+                ("open-nothing", "", "A path is not a link."),
+                (
+                    "open-gone",
+                    "sketch",
+                    "sketch is not a followed program that opens files.",
+                ),
+            ] {
+                self.apply_open_with(value, &followed);
+                self.set_open_with_note(value);
+                let (Some(content), Some(controls)) = (window.contentView(), ivars.controls.get())
+                else {
+                    continue;
+                };
+                content.layoutSubtreeIfNeeded();
+                let Some(row) = controls
+                    .rows
+                    .iter()
+                    .find(|row| row.key == Some(Key::OpenWith))
+                else {
+                    problems.push(format!("Apps ({name}): the Open with row is not built"));
+                    continue;
+                };
+                let note = row.note.stringValue().to_string();
+                if row.note.isHidden() || !note.starts_with(says) {
+                    problems.push(format!(
+                        "Apps ({name}): the note says {note:?}, not {says:?}"
+                    ));
+                }
+                let boxed = controls
+                    .groups
+                    .iter()
+                    .find(|group| group.spec.title == Some("Files"))
+                    .and_then(|group| group.view.arrangedSubviews().lastObject());
+                let frame = in_window(&row.view);
+                match boxed.map(|boxed| in_window(&boxed)) {
+                    Some(boxed) if contains(boxed, frame) => {}
+                    _ => problems.push(format!("Apps ({name}): the Open with row leaves its box")),
+                }
+                let inner: Vec<NSRect> = row
+                    .view
+                    .subviews()
+                    .iter()
+                    .filter(|view| !view.isHidden())
+                    .map(|view| view.alignmentRectForFrame(view.frame()))
+                    .collect();
+                for (i, part) in inner.iter().enumerate() {
+                    if !contains(row.view.bounds(), *part) {
+                        problems.push(format!("Apps ({name}): part {i} of the row spills out"));
+                    }
+                }
+                if let [_, text, control] = inner[..]
+                    && overlap(text, control)
+                {
+                    problems.push(format!("Apps ({name}): the text runs under the control"));
+                }
+                if let Some(dir) = shots {
+                    picture(
+                        &content,
+                        &dir.join(format!("apps-{name}{suffix}-window.png")),
+                    );
+                }
+            }
             // The Add field typed in, refused, and looking.
             let first = scenes[0].2.as_ref().map(|all| Tracked {
                 statuses: all.statuses[..1].to_vec(),

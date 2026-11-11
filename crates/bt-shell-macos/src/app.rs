@@ -6223,8 +6223,10 @@ impl AppDelegate {
             return;
         };
         if window.is_open() {
+            let file = self.file_settings();
             window.refresh_apps(
-                &self.file_settings().apps_sources,
+                &file.apps_sources,
+                &file.apps_open_with,
                 self.apps_tracked().as_ref(),
             );
         }
