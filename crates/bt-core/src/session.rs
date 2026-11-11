@@ -4622,7 +4622,7 @@ pub struct LinkHit {
     pub target: String,
     pub kind: LinkKind,
     pub stamp: LinkStamp,
-    /// A path query's candidates (`link::path_candidates`, at most 100); empty
+    /// A path query's candidates (`link::path_candidates`, at most 160); empty
     /// for a URL, an OSC 8 link and a hit already narrowed by [`LinkHit::choose`].
     pub candidates: Vec<PathCandidate>,
     /// A plain-text path found in a remote session: its
@@ -30892,6 +30892,70 @@ e\\314\\201.'; sleep 5";
         assert_eq!(chosen.stamp, hit.stamp);
         assert_eq!(hit.choose(hit.candidates.len()), None);
         session.shutdown();
+    }
+
+    /// The shapes that were not links on the grid: GNU `ls`'s names between single
+    /// quotes, a quoted name in a sentence, and a path with more spaces than the
+    /// chunk search reaches, which the terminal wrapped onto a second row as well.
+    #[test]
+    fn a_quoted_name_and_a_long_path_with_spaces_are_candidates_on_the_grid() {
+        let shown = |text: &str| {
+            let wake = Arc::new(TestWake::default());
+            let options = test_options(
+                (
+                    "/bin/sh".into(),
+                    vec![
+                        "-c".into(),
+                        "printf '%s' \"$1\"; sleep 5".into(),
+                        "sh".into(),
+                        text.to_owned(),
+                    ],
+                ),
+                80,
+            );
+            let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+            let last = text.split_whitespace().last().expect("a word");
+            wait_ink(&session, &wake, last.trim_matches('\''));
+            session
+        };
+        let candidate = |session: &Session, row: i32, col: u16, target: &str| {
+            let hit = session.link_at(screen(row, col)).expect("a path query");
+            hit.candidates
+                .iter()
+                .find(|candidate| candidate.target == target)
+                .unwrap_or_else(|| panic!("{target:?} at ({row},{col})"))
+                .spans
+                .clone()
+        };
+
+        let ls = shown("'My Drive'   nltk_data  'Screen Studio Projects'   Postman");
+        // The name's own cells are what is underlined, not its quotes.
+        for col in [1, 4, 8] {
+            assert_eq!(candidate(&ls, 0, col, "My Drive"), [span(0, 1, 8)]);
+        }
+        for col in [25, 32, 39] {
+            assert_eq!(
+                candidate(&ls, 0, col, "Screen Studio Projects"),
+                [span(0, 25, 46)]
+            );
+        }
+        ls.shutdown();
+
+        let prose = shown("error in 'src/main.rs' at line");
+        assert_eq!(candidate(&prose, 0, 14, "src/main.rs"), [span(0, 10, 20)]);
+        prose.shutdown();
+
+        // 5 + 92 chars: the path starts at column 5 and ends on the second row.
+        let path = "/Users/x/Library/Application Support/Some App Name/With Many Words In It/file name final.txt";
+        let long = shown(&format!("open {path} now"));
+        for (row, col) in [(0, 5), (0, 34), (0, 61), (0, 75), (1, 3), (1, 8)] {
+            assert_eq!(
+                candidate(&long, row, col, path),
+                [span(0, 5, 79), span(1, 0, 16)],
+                "({row},{col})"
+            );
+        }
+        long.shutdown();
     }
 
     #[test]

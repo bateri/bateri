@@ -29,6 +29,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **Command-click finds a name written between quotes, and a long path with many spaces.** A file or a folder that a program writes as `'My Drive'` or `'src/main.rs'` (GNU `ls` does, for a name with a space) was not a link: the quote was taken for part of the name. And a path with more than some five words after or before the word you pointed at (`/Users/you/Library/Application Support/Some App Name/…`) was found from none of its words. Both are links now, wherever in them you click; what was a link before opens what it opened before.
 - **`kitten icat` works.** It gave up after ten seconds, because bateri's answer to the device attributes question (`CSI c`) was shorter than it expects. bateri now answers the way kitty and Ghostty do.
 - **An image printed right below a command shows whole**, instead of going under the input line.
 

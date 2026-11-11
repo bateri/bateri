@@ -11,7 +11,12 @@
 //! iTerm2's semantic history finds it ([`path_candidates`]): the text around the
 //! point is cut into chunks at `\t ():",`, and growing combinations of chunks —
 //! rightwards first, then one more chunk to the left — are the candidates, shortest
-//! first. The first one that **exists** wins.
+//! first. The first one that **exists** wins. Two more groups follow those, so that
+//! nothing that was found before them is found differently: what stands between the
+//! quotes around the point (`'My Drive'`, the way GNU `ls` writes a name with a
+//! space), and, from a word that starts like a path (`/`, `~/`, `./`, `../`), the
+//! longest names first — a long path with many spaces is past the reach of the
+//! chunk search from every word of it.
 //!
 //! **Syntax only:** whether a path exists is not asked here (no file I/O in
 //! `bt-core`); the shell layer resolves the candidates off the main thread.
@@ -62,6 +67,21 @@ const MAX_CANDIDATES: usize = 100;
 /// How many chunks the right side grows by before one more is taken from the
 /// left — iTerm2's "do not starve the leftward search".
 const MAX_RIGHT_CHUNKS: usize = 10;
+
+/// How many candidates the two later groups (quoted, anchored) may add after the
+/// chunk search's own, whose list is often full: each is `stat`ed too.
+const MAX_LATER_CANDIDATES: usize = 60;
+
+/// How many quotes on each side of the point are tried as a pair: the nearest is
+/// the name's own unless the name holds one (`it's.txt`).
+const MAX_QUOTES: usize = 2;
+
+/// How many words that start like a path, to the left of the point, a long name is
+/// tried from (the nearest first).
+const MAX_ANCHORS: usize = 3;
+
+/// How many words to the right of the point an anchored name may end at.
+const MAX_ANCHORED_WORDS: usize = 24;
 
 /// The trailing text a program may print after a file name (`see foo.txt.`):
 /// each is tried stripped too, the unstripped form first — iTerm2's
@@ -213,8 +233,21 @@ fn chunks(chars: &[char], range: Range<usize>) -> Vec<Range<usize>> {
 /// - **The stripped bracket form is the last variant**: `[src/x.rs]` keeps
 ///   working (`[`/`]` are file-name chars, `(`/`)` are separators already).
 ///
-/// At most [`MAX_CANDIDATES`] come back, a target never twice (an earlier
-/// equal one would already have won).
+/// Two groups of our own come **after** those, with a budget of their own
+/// ([`MAX_LATER_CANDIDATES`]), so whatever the search above finds it still finds
+/// first:
+/// - **Quoted** ([`quoted_spans`]): the text between a pair of equal quotes
+///   around the point, whole. `'` is a file-name char (`it's.txt`), so a name
+///   written `'My Drive'` or `'src/main.rs'` is in no chunk without its quote.
+/// - **Anchored** ([`starts_like_a_path`]): from each of the nearest words to the
+///   left that start like a path, to the end of each word to the right, the
+///   **longest first**. The chunk search reaches some five words each way; a path
+///   with more spaces than that is found from here, and whole — a click on a
+///   word in the middle of a path opens the path, as it does in one without
+///   spaces.
+///
+/// At most [`MAX_CANDIDATES`] + [`MAX_LATER_CANDIDATES`] come back, a target never
+/// twice (an earlier equal one would already have won).
 pub(crate) fn path_candidates(chars: &[char], at: usize) -> Vec<Found> {
     let Some(&under) = chars.get(at) else {
         return Vec::new();
@@ -244,6 +277,7 @@ pub(crate) fn path_candidates(chars: &[char], at: usize) -> Vec<Found> {
         found: Vec::new(),
         targets: HashSet::new(),
         at,
+        cap: MAX_CANDIDATES,
     };
     let mut seen = HashSet::new();
     let mut tries = MAX_TRIES;
@@ -267,7 +301,83 @@ pub(crate) fn path_candidates(chars: &[char], at: usize) -> Vec<Found> {
             }
         }
     }
+    // The later groups, behind everything above and with room of their own.
+    out.cap = out.found.len() + MAX_LATER_CANDIDATES;
+    for span in quoted_spans(chars, at) {
+        // What follows the closing quote, or the quote itself (Python's `"x.py", line 12`).
+        let rest = &chars[span.end..];
+        let suffix = line_col(rest).or_else(|| {
+            line_col(rest.get(1..).unwrap_or_default()).map(|suffix| Suffix {
+                len: suffix.len + 1,
+                ..suffix
+            })
+        });
+        if !out.variants(chars, span, suffix) {
+            return out.found;
+        }
+    }
+    // A word's end to the right of the point: never a blank's, which names nothing more.
+    let ends: Vec<usize> = after
+        .iter()
+        .enumerate()
+        .filter(|(_, chunk)| !chunk.is_empty() && !is_separator(chars[chunk.start]))
+        .map(|(j, _)| j)
+        .take(MAX_ANCHORED_WORDS)
+        .collect();
+    let anchors = std::iter::once(split)
+        .chain(before.iter().rev().map(|chunk| chunk.start))
+        .filter(|&left| starts_like_a_path(&chars[left..end]))
+        .take(MAX_ANCHORS);
+    for left in anchors {
+        for &j in ends.iter().rev() {
+            let right = after[j].end;
+            if !seen.insert((left, right)) {
+                continue;
+            }
+            let suffix = (j + 1 < after.len())
+                .then(|| line_col(&chars[right..end]))
+                .flatten();
+            if !out.variants(chars, left..right, suffix) {
+                return out.found;
+            }
+        }
+    }
     out.found
+}
+
+/// Whether `c` is a quote a name may stand between.
+fn is_quote(c: char) -> bool {
+    matches!(c, '\'' | '"' | '`')
+}
+
+/// The texts between a pair of equal quotes around `at`, the nearest pair first:
+/// the [`MAX_QUOTES`] nearest quotes to the left, each with the nearest quotes of
+/// its own kind to the right. More than one pair, because a quote may be the
+/// name's own (`'it's here.txt'`); a pair that names nothing is a candidate that
+/// does not exist, as every wrong guess here is.
+fn quoted_spans(chars: &[char], at: usize) -> Vec<Range<usize>> {
+    let floor = at.saturating_sub(CONTEXT);
+    let ceiling = (at + CONTEXT).min(chars.len());
+    let mut spans = Vec::new();
+    let opens = (floor..at)
+        .rev()
+        .filter(|&open| is_quote(chars[open]))
+        .take(MAX_QUOTES);
+    for open in opens {
+        let closes = (at + 1..ceiling)
+            .filter(|&close| chars[close] == chars[open])
+            .take(MAX_QUOTES);
+        spans.extend(closes.map(|close| open + 1..close));
+    }
+    spans
+}
+
+/// Whether a word starts the way a path does when it is written from its root, the
+/// home folder or the folder one is in: `/…`, `~/…`, `./…`, `../…`.
+fn starts_like_a_path(word: &[char]) -> bool {
+    ["/", "~/", "./", "../"]
+        .iter()
+        .any(|start| word.starts_with(&start.chars().collect::<Vec<_>>()))
 }
 
 /// The candidate list being built: the point every range must cover and the
@@ -276,6 +386,8 @@ struct Candidates {
     found: Vec<Found>,
     targets: HashSet<String>,
     at: usize,
+    /// How many candidates the list may hold.
+    cap: usize,
 }
 
 impl Candidates {
@@ -339,7 +451,7 @@ impl Candidates {
         line: Option<u32>,
         col: Option<u32>,
     ) -> bool {
-        if self.found.len() >= MAX_CANDIDATES {
+        if self.found.len() >= self.cap {
             return false;
         }
         if range.contains(&self.at)
@@ -352,7 +464,7 @@ impl Candidates {
                 kind: FoundKind::Path { line, col },
             });
         }
-        self.found.len() < MAX_CANDIDATES
+        self.found.len() < self.cap
     }
 }
 
@@ -735,6 +847,138 @@ mod tests {
         assert!(under(line, "Studio").iter().all(|f| f.range.contains(&at)));
     }
 
+    /// GNU `ls` writes a name with a space between single quotes, and `'` is a
+    /// file-name char: no chunk of `'My Drive'` is the name. What stands between
+    /// the quotes around the point is a candidate, whole, with the name's own
+    /// cells as what is underlined.
+    #[test]
+    fn a_name_between_quotes_is_a_candidate_without_them() {
+        let line = "'My Drive'   nltk_data  'Screen Studio Projects'   Postman";
+        for word in ["My", "Drive"] {
+            assert_eq!(
+                covering(line, word, "My Drive"),
+                ("My Drive".to_owned(), PLAIN),
+                "{word}"
+            );
+        }
+        for word in ["Screen", "Studio", "Projects"] {
+            assert_eq!(
+                covering(line, word, "Screen Studio Projects"),
+                ("Screen Studio Projects".to_owned(), PLAIN),
+                "{word}"
+            );
+        }
+        // A word outside the quotes is between a closing and an opening one: that
+        // "pair" is tried too and names nothing; the word itself is found as ever.
+        assert_eq!(targets(line, "nltk_data")[0], "nltk_data");
+        assert_eq!(targets(line, "Postman")[0], "Postman");
+
+        // In a sentence, with a line after the quote and with one inside it.
+        let prose = "error in 'src/main.rs' at";
+        assert_eq!(
+            covering(prose, "src", "src/main.rs"),
+            ("src/main.rs".to_owned(), PLAIN)
+        );
+        let after = "see 'src/my file.rs':12 now";
+        assert_eq!(
+            covering(after, "file", "src/my file.rs"),
+            (
+                "src/my file.rs':12".to_owned(),
+                FoundKind::Path {
+                    line: Some(12),
+                    col: None
+                }
+            )
+        );
+        let inside = "see `src/my file.rs:12:3` now";
+        assert_eq!(
+            covering(inside, "file", "src/my file.rs"),
+            (
+                "src/my file.rs:12:3".to_owned(),
+                FoundKind::Path {
+                    line: Some(12),
+                    col: Some(3)
+                }
+            )
+        );
+        // A quote that is the name's own: the next pair out is the name.
+        let own = "open 'it's here.txt' now";
+        assert!(targets(own, "here").contains(&"it's here.txt".to_owned()));
+        // Python's line keeps its number, from the chunk search as before.
+        let python = "  File \"src/my app.py\", line 12, in <module>";
+        assert!(
+            under(python, "app")
+                .iter()
+                .any(|f| f.target == "src/my app.py"
+                    && f.kind
+                        == FoundKind::Path {
+                            line: Some(12),
+                            col: None
+                        })
+        );
+    }
+
+    /// The quoted name comes after everything the chunk search gives: what was
+    /// found before is found first, and the same.
+    #[test]
+    fn the_later_groups_stand_behind_the_chunk_search() {
+        let quoted = "'My Drive'   nltk_data";
+        let plain = "My Drive'   nltk_data";
+        let with = targets(quoted, "Drive");
+        let without = targets(plain, "Drive");
+        // The same first candidates as without the opening quote's group…
+        assert_eq!(with[0], "Drive'");
+        assert_eq!(without[0], "Drive'");
+        // …and the name between the quotes after every one of the chunk search's.
+        let name = position(&with, "My Drive");
+        assert!(with[..name].iter().all(|t| t.contains('\'')), "{with:?}");
+
+        let long = "see /Users/x/My Drive/a b.txt now";
+        let list = targets(long, "b.txt");
+        assert_eq!(list[0], "b.txt", "the shortest first, as before");
+        let whole = position(&list, "/Users/x/My Drive/a b.txt");
+        assert!(whole > 0);
+    }
+
+    /// A path with more spaces than the chunk search reaches: from the word that
+    /// starts like a path, the longest name first, whichever of its words is
+    /// under the point.
+    #[test]
+    fn a_long_path_with_many_spaces_is_found_from_where_it_starts() {
+        let path = "/Users/x/Library/Application Support/Some App Name/With Many Words In It/file name final.txt";
+        let line = format!("open {path} now and then some more words after it");
+        for word in ["/Users", "Support", "Name", "Many", "It", "name", "final"] {
+            assert_eq!(
+                covering(&line, word, path),
+                (path.to_owned(), PLAIN),
+                "{word}"
+            );
+        }
+        // Longest first from the start: of two names the chunk search does not reach,
+        // the longer is tried before the shorter, so a click on a word of a path opens
+        // the path and not a folder on the way that happens to end at a word.
+        let list = targets(&line, "/Users");
+        let shorter =
+            "/Users/x/Library/Application Support/Some App Name/With Many Words In It/file name";
+        assert!(position(&list, path) < position(&list, shorter), "{list:?}");
+        // The other starts: the home folder, the folder one is in, the one above.
+        for start in ["~/", "./", "../"] {
+            let path = format!("{start}a b c d e f g h i j k l m.txt");
+            let line = format!("see {path} now");
+            assert!(targets(&line, "g").contains(&path), "{start}");
+            assert!(targets(&line, "a").contains(&path), "{start}");
+        }
+        // A word that does not start like a path starts no long name: the chunk
+        // search alone, as before.
+        let bare = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+        assert!(!targets(bare, "a").contains(&bare.to_owned()));
+        // Two paths on a line: each from its own start, and the nearer start first.
+        let two = "cp /a/My Old Drive Folder Name Here Now /b/My New Drive Folder Name Here Now";
+        assert!(targets(two, "New").contains(&"/b/My New Drive Folder Name Here Now".to_owned()));
+        let old = targets(two, "Old");
+        assert!(old.contains(&"/a/My Old Drive Folder Name Here Now".to_owned()));
+    }
+
     #[test]
     fn a_dated_file_name_is_one_candidate() {
         let line = "4.04.2022 06.29.36.pklg  notes.txt";
@@ -883,7 +1127,7 @@ mod tests {
     fn the_search_is_bounded() {
         let line = vec!["w"; 400].join(" ");
         let hits = links_at(&line, line.chars().count() / 2);
-        assert!(!hits.is_empty() && hits.len() <= MAX_CANDIDATES);
+        assert!(!hits.is_empty() && hits.len() <= MAX_CANDIDATES + MAX_LATER_CANDIDATES);
         let long = "x".repeat(5000);
         let hits = links_at(&long, 2500);
         assert_eq!(hits.len(), 1);
