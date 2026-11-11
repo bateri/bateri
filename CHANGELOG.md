@@ -23,6 +23,10 @@ of every installed copy. A version without a section is not released.
 - **The program a clicked file or folder opens in is a setting.** Settings ▸ Apps starts with a Files section and one row, Open with: textpen, another followed program that opens files, or Nothing (`[apps] open_with` in `settings.toml`). A program says that it opens files in its `app.json`, and only those are offered.
 - **Command-click on a file or a folder opens it in that program, on the computer the path is on.** The program starts in a floating pane over the tab, with the path (and the line, for `path:12`); the pane closes when it ends, and each click opens a pane of its own. In an `ssh` terminal the program runs on the server and opens the server's file, so nothing is copied to this Mac. A path is a link, with the underline, only where the program is installed and takes that kind of path; with Nothing chosen, or where the program is not installed, it is not a link and a click does nothing. The menu on a path has Open in the program as well.
 
+### Removed
+
+- **A path no longer opens in another application, and a file on a server no longer downloads a preview copy.** Command-click opens the path in the followed program you chose (the item above) and in nothing else: a document is not handed to its default application, a folder does not open in Finder, and the menu's Open and Open Preview are gone. Reveal in Finder, Copy Path and the downloads stay in the right-click menu, and Shell ▸ Show Folder in Finder stays. The preview settings (`preview_max_size`, `preview_read_only`, `preview_dir`, `preview_keep` and `preview_limit` under `[remote]`) and the Previews group in Settings ▸ Servers are gone; a `settings.toml` that still has those lines is read without a warning and keeps them. bateri does not clean the preview folder any more and never deletes anything in it, so the copies that are there are yours to remove.
+
 ### Fixed
 
 - **`kitten icat` works.** It gave up after ten seconds, because bateri's answer to the device attributes question (`CSI c`) was shorter than it expects. bateri now answers the way kitty and Ghostty do.

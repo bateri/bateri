@@ -10,8 +10,7 @@
 //! disk delete the temporary folder. Only the expected item leaves it, and only
 //! as a file or a folder ([`land`]) — anything else a hostile archive carries is
 //! deleted with the folder (local tar already refuses `..`, absolute paths and
-//! extracting through a link). tar keeps the remote mtime: the local half of
-//! the preview cache's "did it change" question.
+//! extracting through a link). tar keeps the remote mtime.
 //!
 //! On a background thread, like the upload; the queue is `upload::Transfers`.
 
@@ -47,8 +46,8 @@ pub enum Conflict {
 /// unique across processes.
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// The prefix of the hidden temporary folder an item unpacks into (the preview
-/// cache's sweep skips such folders: they are a stream in flight).
+/// The prefix of the hidden temporary folder an item unpacks into (such a folder is a
+/// stream in flight).
 pub const TEMP_PREFIX: &str = ".bateri-download-";
 
 /// Downloads the remote absolute path `remote` to `landing`: `tar c` on the server,
@@ -240,10 +239,10 @@ fn stream(
 ///
 /// **Only a regular file or a folder lands.** The stream is the remote's: a
 /// correct server dereferences a linked item (`download_script`'s `tar -h`), but
-/// a hostile one can send the item as a link with an absolute target — `seal`
-/// (the preview's `chmod 0444`) and the preview's open would then act on a path
-/// of this Mac the server chose, `~` or `~/.ssh`. A link, a FIFO, a socket or a
-/// device is refused before `seal` sees it, and the temporary folder takes it
+/// a hostile one can send the item as a link with an absolute target — whatever
+/// acts on the landed path afterwards (a `chmod`, the quarantine mark, an open)
+/// would then act on a path of this Mac the server chose, `~` or `~/.ssh`. A link,
+/// a FIFO, a socket or a device is refused before anything sees it, and the temporary folder takes it
 /// away. A folder's inner links stay links: the local tar refuses to extract
 /// through one, so nothing lands outside the folder by them.
 fn land(
@@ -296,8 +295,8 @@ fn land(
 }
 
 /// Replaces `landing` with `item` when a `rename` cannot do it in one step: the
-/// old item goes to a hidden sibling (the download's temporary prefix, so the
-/// preview sweep skips it), the new one takes its name, then the old one is
+/// old item goes to a hidden sibling (the download's temporary prefix),
+/// the new one takes its name, then the old one is
 /// removed. If the new one cannot take the name the old one comes back — a
 /// failure never leaves the user with neither.
 fn replace_aside(item: &Path, landing: &Path, old_dir: bool) -> Result<PathBuf, String> {
@@ -522,7 +521,7 @@ mod tests {
                 Conflict::Replace,
                 &Arc::new(Shared::default()),
                 || {},
-                // What the preview's seal does to the landed path.
+                // What a step run on the landed path does (the quarantine mark).
                 |item| {
                     sealed.set(true);
                     let _ = fs::set_permissions(item, fs::Permissions::from_mode(0o444));
@@ -738,8 +737,8 @@ mod tests {
         fs::create_dir_all(&remote).unwrap();
         let source = remote.join("app.log");
         fs::write(&source, b"line\n").unwrap();
-        // The preview's `{dir}/{host}/{remote path}`: none of it exists yet.
-        let landing = root.join("Previews/prod/var/log/app.log");
+        // A landing place several folders deep: none of it exists yet.
+        let landing = root.join("Downloads/prod/var/log/app.log");
         let (outcome, landed) = transfer(
             &local_ssh(),
             source.to_str().unwrap(),

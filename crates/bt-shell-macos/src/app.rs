@@ -58,8 +58,6 @@ use crate::moves::{self, Joins, Move, Plan, Refusal, Slot, Step};
 use crate::notices::{Notices, Source};
 use crate::pane::TerminalPane;
 use crate::pane_drag::Session;
-use crate::preview_cache;
-use crate::remote_files::Sweep;
 use crate::restore::{self, Frame, Saved, SavedKept, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
 use crate::split::{Axis, Direction, Tree};
@@ -745,10 +743,6 @@ fn shell_integration_env(
     launch::integration_env(setting, shell, script_dir, bash_version, process)
 }
 
-/// The daily preview sweep's period — "once a day", a design
-/// constant.
-const DAILY_SWEEP: Duration = Duration::from_secs(24 * 60 * 60);
-
 /// The application's delegate — the way back from a window to the app level.
 ///
 /// A window does **not** hold a reference to the app delegate: the delegate
@@ -998,10 +992,10 @@ pub(crate) struct Ivars {
     /// ([`bt_shell_common::apps`]): started once the settings are read
     /// ([`AppDelegate::start_apps`]), never in a timed run.
     apps: OnceCell<bt_shell_common::apps::Tracker>,
-    /// The followed programs that open files and folders, as last read from their folders and
-    /// when: read on the main thread by the first ⌘-hover over a path, then kept for a few
-    /// seconds and dropped when the programs change ([`AppDelegate::open_choice`]).
-    openers: RefCell<Option<(Instant, Rc<Vec<bt_shell_common::apps::opens::Opener>>)>>,
+    /// The followed programs that open files and folders, as last read from their folders: read
+    /// by the first ⌘-hover over a path, then kept and dropped when the programs change
+    /// ([`AppDelegate::openers`]).
+    openers: RefCell<Option<Rc<Vec<bt_shell_common::apps::opens::Opener>>>>,
     /// The Shell menu's delegate ([`crate::menu::install`]): the menu holds it
     /// weakly, this is what keeps it alive.
     shell_menu: OnceCell<Retained<ShellMenuDelegate>>,
@@ -1180,11 +1174,6 @@ define_class!(
             self.apply_keys(&self.settings());
             // Quit and End Programs is there only under `keep_running = "quit"`.
             crate::menu::set_end_programs_visible(mtm, self.settings().keep_running);
-            // The preview cache's launch sweep and the daily one:
-            // on their own thread and the main queue's timer, never the frame
-            // path; a timed run never touches the user's cache.
-            self.sweep_previews(Sweep::Launch);
-            self.schedule_daily_sweep();
             NSApplication::sharedApplication(mtm).activate();
             // `"quit"`'s reminder needs the permission to notify: asked now,
             // while bateri is in front, never at the quit itself.
@@ -3084,19 +3073,6 @@ impl AppDelegate {
         self.window_owning(&key)
     }
 
-    /// The window a window-wide question of the application goes on: the
-    /// key window — a terminal window when the key one is a sheet in it, a
-    /// tab's question included, so the report never opens on a sheet; any
-    /// other key window (the settings window) as it is.
-    fn question_window(&self) -> Option<Retained<NSWindow>> {
-        let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
-        let key = key.sheetParent().unwrap_or(key);
-        match self.window_owning(&key) {
-            Some(window) => Some(window.ns_window().retain()),
-            None => Some(key),
-        }
-    }
-
     /// The active tab: the key window's selected tab.
     pub(crate) fn key_tab(&self) -> Option<Retained<TerminalTab>> {
         Some(self.key_window()?.selected_tab())
@@ -3538,7 +3514,7 @@ impl AppDelegate {
         start: Option<&Start>,
     ) -> Result<(), String> {
         if !window.selection_free() {
-            crate::preview::beep();
+            crate::sheets::beep();
             return Ok(());
         }
         let mtm = self.mtm();
@@ -3585,7 +3561,7 @@ impl AppDelegate {
                 self.carry_out(plan)
             }
             Err(Refusal::Beep | Refusal::Stale) => {
-                crate::preview::beep();
+                crate::sheets::beep();
                 false
             }
             Err(Refusal::Quiet) => false,
@@ -4048,10 +4024,10 @@ impl AppDelegate {
                 self.carry_out(plan);
             }
             Err(Refusal::Beep) => {
-                crate::preview::beep();
+                crate::sheets::beep();
                 self.ivars().undo.replace(Some(record));
             }
-            Err(Refusal::Stale) => crate::preview::beep(),
+            Err(Refusal::Stale) => crate::sheets::beep(),
             Err(Refusal::Quiet) => {}
         }
     }
@@ -5388,7 +5364,7 @@ impl AppDelegate {
             }
             Go::OpenHost(name) | Go::SplitHost(name) => {
                 let Some(line) = rules::ssh_line(&name) else {
-                    crate::preview::beep();
+                    crate::sheets::beep();
                     return;
                 };
                 let start = Start {
@@ -5436,7 +5412,7 @@ impl AppDelegate {
                     .find(|found| found.account == account && found.terminal.as_str() == terminal);
                 let Some(start) = found.as_ref().and_then(|found| self.held_background(found))
                 else {
-                    crate::preview::beep();
+                    crate::sheets::beep();
                     return;
                 };
                 if let Some(found) = &found {
@@ -5460,7 +5436,7 @@ impl AppDelegate {
                     .find(|found| found.account == account && found.terminal.as_str() == terminal);
                 let Some(start) = found.as_ref().and_then(|found| self.held_background(found))
                 else {
-                    crate::preview::beep();
+                    crate::sheets::beep();
                     return;
                 };
                 if let Some(found) = &found {
@@ -5534,7 +5510,7 @@ impl AppDelegate {
             .filter_map(|found| self.held_background(&found).map(|start| (found, start)))
             .unzip();
         if starts.is_empty() || !window.selection_free() {
-            crate::preview::beep();
+            crate::sheets::beep();
             return;
         }
         for found in &found {
@@ -5920,16 +5896,16 @@ impl AppDelegate {
                         session.paste(line.into_bytes());
                     }
                 } else {
-                    crate::preview::beep();
+                    crate::sheets::beep();
                 }
             }
             Use::NewTab => match start() {
                 Some(start) => self.new_tab_started(window.id(), Seat::Beside, Some(&start)),
-                None => crate::preview::beep(),
+                None => crate::sheets::beep(),
             },
             Use::SplitRight => {
                 let (Some(tab), Some(start)) = (on_screen, start()) else {
-                    crate::preview::beep();
+                    crate::sheets::beep();
                     return;
                 };
                 if !tab.split_with_line(&start) {
@@ -5949,10 +5925,10 @@ impl AppDelegate {
                     Some((tab, pane, window)) => {
                         window.bring_to_front(&tab, &pane);
                         if !pane.show_command(origin.id) {
-                            crate::preview::beep();
+                            crate::sheets::beep();
                         }
                     }
-                    None => crate::preview::beep(),
+                    None => crate::sheets::beep(),
                 }
             }
             Use::CopyCommand => {
@@ -5967,7 +5943,7 @@ impl AppDelegate {
                     Some(text) if !text.is_empty() => {
                         crate::clipboard::copy(&pasteboard(), Some(text));
                     }
-                    _ => crate::preview::beep(),
+                    _ => crate::sheets::beep(),
                 }
             }
         }
@@ -6241,14 +6217,13 @@ impl AppDelegate {
         }
     }
 
-    /// How long what was read of the followed programs' folders is kept for a click's rule.
-    const OPENERS_KEPT: Duration = Duration::from_secs(10);
-
     /// The followed programs that open files and folders ([`bt_shell_common::apps::opens`]).
+    /// Read once and kept until the folders change ([`AppDelegate::apps_changed`], which every
+    /// check of the sources and every approval ends in): a hover asks on every move, and the
+    /// reading (a release's `app.json` and its signature, for each program) is not for the main
+    /// queue to repeat.
     fn openers(&self) -> Rc<Vec<bt_shell_common::apps::opens::Opener>> {
-        if let Some((read, openers)) = self.ivars().openers.borrow().as_ref()
-            && read.elapsed() < Self::OPENERS_KEPT
-        {
+        if let Some(openers) = self.ivars().openers.borrow().as_ref() {
             return Rc::clone(openers);
         }
         let openers = Rc::new(
@@ -6256,9 +6231,7 @@ impl AppDelegate {
                 .map(|root| bt_shell_common::apps::opens::openers(&root))
                 .unwrap_or_default(),
         );
-        self.ivars()
-            .openers
-            .replace(Some((Instant::now(), Rc::clone(&openers))));
+        self.ivars().openers.replace(Some(Rc::clone(&openers)));
         openers
     }
 
@@ -6331,7 +6304,10 @@ impl AppDelegate {
                 ..Start::default()
             }
         } else {
-            let Some(bin) = crate::apps_root().map(|root| root.join("bin")) else {
+            // The link is where the installer of a machine puts it, under the home folder; the
+            // folder of what this copy follows has none.
+            let Some(bin) = child::home().map(|home| bt_shell_common::open_with::bin_here(&home))
+            else {
                 return;
             };
             let Some(argv) = bt_shell_common::open_with::argv_here(&bin, &name, line, &path) else {
@@ -6401,116 +6377,6 @@ impl AppDelegate {
         if let Some(tracker) = self.ivars().apps.get() {
             tracker.set_sources(sources.to_vec(), whole);
         }
-    }
-
-    /// Sweeps the preview cache on a background thread with
-    /// the settings as they are now: `Launch` at startup, `Daily` from
-    /// [`AppDelegate::schedule_daily_sweep`] and `ClearNow` — the single method
-    /// the settings window's Clear Now calls. Edited copies it moved to
-    /// the download folder are reported on the main thread
-    /// ([`crate::preview::report_rescued`]) and the settings window's usage is
-    /// measured again ([`AppDelegate::measure_preview_usage`]). Nothing in a timed run.
-    pub(crate) fn sweep_previews(&self, sweep: Sweep) {
-        if !matches!(self.inputs(), Inputs::User { .. }) {
-            return;
-        }
-        let files = self.ivars().settings.borrow().remote_files.clone();
-        let home = child::home();
-        let (Some(dir), Some(downloads)) = (
-            bt_core::expand_home(&files.preview_dir, home.as_deref()),
-            bt_core::expand_home(&files.download_dir, home.as_deref()),
-        ) else {
-            return;
-        };
-        let _ = std::thread::Builder::new()
-            .name("preview sweep".into())
-            .spawn(move || {
-                let report = preview_cache::sweep(
-                    &dir,
-                    &downloads,
-                    sweep,
-                    files.preview_keep,
-                    files.preview_limit,
-                    preview_cache::now(),
-                );
-                DispatchQueue::main().exec_async(move || {
-                    // audit: a block running on the main queue is by definition on the main thread.
-                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                    if let Some(app) = delegate(mtm) {
-                        app.measure_preview_usage();
-                    }
-                    if report.rescued.is_empty() {
-                        return;
-                    }
-                    // The application's own report: a window-wide seat, the key window's.
-                    let key = delegate(mtm).and_then(|app| app.question_window());
-                    let seat = key
-                        .as_deref()
-                        .and_then(|key| crate::sheets::seat(crate::sheets::Asker::Window(key)));
-                    crate::preview::report_rescued(mtm, seat, &report.rescued, || {});
-                });
-            });
-    }
-
-    /// Measures the preview folder for the settings window's "In use" row on a
-    /// background thread (the scan blocks on the disk) and shows the answer on
-    /// the main thread — only while the window is open; a closed window is
-    /// measured again when it opens ([`AppDelegate::refresh_settings_window`]).
-    fn measure_preview_usage(&self) {
-        let Some(window) = self.ivars().settings_window.borrow().clone() else {
-            return;
-        };
-        if !window.is_open() {
-            return;
-        }
-        let generation = window.next_usage_generation();
-        let text = self
-            .ivars()
-            .settings
-            .borrow()
-            .remote_files
-            .preview_dir
-            .clone();
-        let Some(dir) = bt_core::expand_home(&text, child::home().as_deref()) else {
-            window.show_usage(generation, None);
-            return;
-        };
-        let _ = std::thread::Builder::new()
-            .name("preview usage".into())
-            .spawn(move || {
-                let usage = preview_cache::usage(&dir);
-                DispatchQueue::main().exec_async(move || {
-                    // audit: a block running on the main queue is by definition on the main thread.
-                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                    let window =
-                        delegate(mtm).and_then(|app| app.ivars().settings_window.borrow().clone());
-                    if let Some(window) = window.filter(|window| window.is_open()) {
-                        window.show_usage(generation, Some(usage));
-                    }
-                });
-            });
-    }
-
-    /// The daily sweep (once a day, only what outlived `preview_keep`):
-    /// one delayed block on the main queue that sweeps and sets up the next —
-    /// a timer, not a frame; idle frames stay at zero. Nothing in a timed run.
-    fn schedule_daily_sweep(&self) {
-        if !matches!(self.inputs(), Inputs::User { .. }) {
-            return;
-        }
-        let Ok(when) = DispatchTime::try_from(DAILY_SWEEP) else {
-            return;
-        };
-        // The error arm is not represented today (the link clock's rationale): if
-        // it drops, the next launch sweeps.
-        let _ = DispatchQueue::main().after(when, || {
-            // audit: a block running on the main queue is by definition on the main thread.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            if let Some(app) = delegate(mtm) {
-                app.sweep_previews(Sweep::Daily);
-                app.schedule_daily_sweep();
-            }
-        });
     }
 
     /// The theme of a window born while no window exists: the theme the settings select,
@@ -7156,9 +7022,6 @@ impl AppDelegate {
             dark_appearance: dark,
         };
         window.refresh(&settings, resolved, &state, &write, &themes);
-        // On every refresh, not only on open: a changed `preview_dir` is
-        // another folder. The scan is off the main thread.
-        self.measure_preview_usage();
     }
 
     /// Re-sets up the settings directory's sources. The new one is set up before the old one is dropped

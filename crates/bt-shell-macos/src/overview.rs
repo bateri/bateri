@@ -920,7 +920,7 @@ impl OverviewView {
         };
         match (act, self.terminal_window()) {
             (Some(act), Some(window)) => window.overview_go(act),
-            _ => crate::preview::beep(),
+            _ => crate::sheets::beep(),
         }
     }
 
@@ -930,7 +930,7 @@ impl OverviewView {
         let host = self.ivars().state.borrow().open_all_host();
         match (host, self.terminal_window()) {
             (Some(host), Some(window)) => window.overview_open_all(&host),
-            _ => crate::preview::beep(),
+            _ => crate::sheets::beep(),
         }
     }
 

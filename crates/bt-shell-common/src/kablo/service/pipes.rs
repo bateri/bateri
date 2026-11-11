@@ -92,7 +92,7 @@ pub struct Streams {
 impl Streams {
     /// The same, for what a person asked for (a command they ran, a file they dropped): a
     /// connection that is waiting out the pause of a failure dials now for it, and one that wants
-    /// a login is tried once more. What nobody asked for (a preview, a listing, the load
+    /// a login is tried once more. What nobody asked for (a listing, the load
     /// indicator) waits for the connection as it is and does not dial it: every attempt that
     /// fails is a login the server counts.
     pub fn of_a_person(&self) -> Streams {

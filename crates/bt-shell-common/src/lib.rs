@@ -11,9 +11,8 @@
 //! (`quote`), key encoding (`keys`), what a ⌘-clicked link resolves to and
 //! what opening it does (`links`), the remote upload rules, processes and the
 //! two-way transfer queue (`upload`), the download's stream (`download`), the
-//! rules of previewing and downloading a remote file (`remote_files`), its
-//! helper ssh session (`remote_helper`), the preview cache on disk
-//! (`preview_cache`), the remote host's load sampling (`remote_stats`), which
+//! rules of downloading a remote file (`remote_files`), its
+//! helper ssh session (`remote_helper`), the remote host's load sampling (`remote_stats`), which
 //! ssh connection a remote job rides on and the askpass wire (`ssh_route`), the host names of
 //! `~/.ssh/config` (`ssh_hosts`), whether
 //! the user's `ssh` gets the remote shell integration (`ssh_wrap`), the folder bateri keeps on
@@ -75,7 +74,6 @@ pub mod overview;
 pub mod palette;
 pub mod port_forward;
 pub mod ports;
-pub mod preview_cache;
 pub mod program;
 pub mod quote;
 pub mod remote_files;

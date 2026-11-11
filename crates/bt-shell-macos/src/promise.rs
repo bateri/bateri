@@ -284,8 +284,7 @@ pub(crate) struct FinderDrops {
 
 /// The remote name's content type identifier: `public.folder` for a folder,
 /// the extension's type for a file (`public.data` when it has none known).
-/// Read through the runtime (`AnyClass::get`, `hyperlink::extension_content`'s
-/// precedent) — no `UTType` flag.
+/// Read through the runtime (`AnyClass::get`) — no `UTType` flag.
 fn content_type(name: &str, dir: bool) -> Retained<NSString> {
     let fallback = || NSString::from_str(if dir { "public.folder" } else { "public.data" });
     if dir {

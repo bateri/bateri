@@ -14,17 +14,15 @@
 //!   own name says nothing about what opening it opens.
 //! - [`resolve_first`] — a path query's candidates (`My Drive`'s `Drive`, …, `My Drive`) →
 //!   the first that exists, iTerm2's semantic history.
-//! - [`action`] — the policy table: a **white list**, the
-//!   [`quote::shell_quote`](crate::quote::shell_quote) precedent — a document of a known
-//!   content type without the `x` bit opens in its default application, a directory opens in
-//!   Finder, **everything else** is revealed in Finder; an OSC 8 scheme off the common list
-//!   asks first; `bateri://` is swallowed on every path. The error's direction is safe: an
-//!   unknown file is shown, never run.
+//! - [`action`] — the policy for a link that is not a path: `http`, `https`, `ftp` and `mailto`
+//!   open, an OSC 8 scheme off the common list asks first, `bateri://` is swallowed on every
+//!   path. **A path has no action here**: a click on it opens in the program the person chose
+//!   (`open_with`, decided in [`crate::open_with`]), on the computer the path is on, and
+//!   nothing of it is handed to the system to open.
 //!
-//! "Is this a known content type" and "is this directory a package" are AppKit's questions
-//! (UTType, `NSWorkspace`), so they come in as an argument ([`Content`]); this module has no
-//! queue, no `dispatch2` and no AppKit (`make audit`). The background queue and the return to
-//! the main queue are the platform shell's, the `pane::RemoteProbe` precedent.
+//! This module has no queue, no `dispatch2` and no AppKit (`make audit`). The background queue
+//! and the return to the main queue are the platform shell's, the `pane::RemoteProbe`
+//! precedent.
 //! [`hostname`] reads the machine's name for `SessionOptions::hostname` — `child`'s precedent
 //! of a thin system read next to the policy.
 
@@ -38,7 +36,7 @@ use bt_core::LinkKind;
 /// What a file-system object is — the answer of the injected `stat`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Entry {
-    /// A directory (a package such as `.app` too: telling it apart is [`Content`]'s job).
+    /// A directory (a package such as `.app` too).
     Dir,
     /// Anything else that exists; `executable` is any of the three `x` bits.
     File { executable: bool },
@@ -53,28 +51,13 @@ pub struct Resolved {
     /// What [`Resolved::target`] is.
     pub entry: Entry,
     /// The object `path` names once every symlink (and `..`) on it is followed — `realpath`,
-    /// read by the same background `stat` as `entry`. **What a click would open is judged
-    /// here and opened from here**, never from `path`: `isFilePackageAtPath` does not follow
-    /// a symlink and a name's extension is the link's own, so `docs -> Evil.app` would pass
-    /// for a folder and `README.txt -> payload.terminal` for a text file — and Launch
-    /// Services, handed the link, follows it and launches or runs the target. The macOS
-    /// shell's `stat` resolves a **Finder alias** before this one runs — an alias is a
-    /// regular file `canonicalize` does not follow, which Launch Services does. `path`
-    /// itself when nothing on it is a link, an alias or a `..`.
+    /// read by the same background `stat` as `entry`. **What a click opens is judged here and
+    /// opened from here**, never from `path`: the program is handed the object the path names,
+    /// and whether it is a file or a folder is that object's. The macOS shell's `stat`
+    /// resolves a **Finder alias** before this one runs — an alias is a regular file
+    /// `canonicalize` does not follow. `path` itself when nothing on it is a link, an alias
+    /// or a `..`.
     pub target: PathBuf,
-}
-
-/// The platform's answer about a resolved path's content (UTType on macOS).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Content {
-    /// A known document type that is safe to open in its default application: text and
-    /// source code, image, PDF, audio/video.
-    Document,
-    /// A package — a directory the system treats as one file (`.app`, `.pkg`, `.workflow`, …).
-    /// Opening it would launch or install something, so it is revealed instead.
-    Package,
-    /// Anything else.
-    Other,
 }
 
 /// What a ⌘-click does.
@@ -82,12 +65,6 @@ pub enum Content {
 pub enum LinkAction {
     /// Hand the URL to its default application (`http`, `https`, `ftp`, `mailto`).
     OpenUrl(String),
-    /// Open the document in its default application.
-    OpenFile(PathBuf),
-    /// Show the item selected in Finder — the default for every file off the white list.
-    Reveal(PathBuf),
-    /// Open the directory in Finder.
-    OpenDir(PathBuf),
     /// An OSC 8 URI with an uncommon scheme: ask with the whole target before opening.
     Confirm(String),
     /// `bateri://`: our own scheme is never opened from a click (sending it to ourselves
@@ -243,21 +220,13 @@ pub fn stat(path: &Path) -> Option<(Entry, PathBuf)> {
     Some((entry, target))
 }
 
-/// The policy table. `resolved` is [`resolve`]'s answer for a link that
-/// names a local path ([`local_path`]); `content` is asked only for a resolved path, and
-/// about its [`Resolved::target`] — **the object judged is the object opened**: a document
-/// or a directory opens at the target, while a revealed link is shown as itself (the user
-/// sees the link they clicked; revealing is safe whatever it points to).
+/// The policy for a link that is not a path.
 ///
 /// | link | action |
 /// |---|---|
 /// | `bateri:` anything | [`LinkAction::Swallow`] |
-/// | local path / `file://`, not found | `None` — not a link |
+/// | local path / `file://` | `None` — a path has no action here: it opens in the program the person chose |
 /// | `file:` without a `//` authority | [`LinkAction::Swallow`] |
-/// | directory, not a package | [`LinkAction::OpenDir`] |
-/// | package | [`LinkAction::Reveal`] |
-/// | file without `x`, known document | [`LinkAction::OpenFile`] |
-/// | any other file | [`LinkAction::Reveal`] |
 /// | `http`/`https`/`ftp`/`mailto` | [`LinkAction::OpenUrl`] |
 /// | OSC 8, any other scheme (or none) | [`LinkAction::Confirm`] |
 ///
@@ -265,31 +234,14 @@ pub fn stat(path: &Path) -> Option<(Entry, PathBuf)> {
 /// not hand `bateri://` out today, the row is a one-line defence in depth.
 ///
 /// A `file:` URL [`local_path`] cannot read (`file:/x`, no authority) is swallowed too:
-/// handed to `NSWorkspace` as a URL it would **run** a `.command` or launch an `.app` — the
-/// very thing the file rows refuse — and the hit test's remote/authority gate does not see it.
-pub fn action(
-    target: &str,
-    kind: &LinkKind,
-    resolved: Option<&Resolved>,
-    content: impl FnOnce(&Path) -> Content,
-) -> Option<LinkAction> {
+/// handed to `NSWorkspace` as a URL it would **run** a `.command` or launch an `.app`, and the
+/// hit test's remote/authority gate does not see it.
+pub fn action(target: &str, kind: &LinkKind) -> Option<LinkAction> {
     if has_scheme(target, "bateri") {
         return Some(LinkAction::Swallow);
     }
     if local_path(target, kind).is_some() {
-        let Resolved {
-            path,
-            entry,
-            target: real,
-        } = resolved?;
-        return Some(match (entry, content(real)) {
-            (Entry::Dir, Content::Package) => LinkAction::Reveal(path.clone()),
-            (Entry::Dir, _) => LinkAction::OpenDir(real.clone()),
-            (Entry::File { executable: false }, Content::Document) => {
-                LinkAction::OpenFile(real.clone())
-            }
-            (Entry::File { .. }, _) => LinkAction::Reveal(path.clone()),
-        });
+        return None;
     }
     if has_scheme(target, "file") {
         return Some(LinkAction::Swallow);
@@ -372,18 +324,8 @@ mod tests {
         }
     }
 
-    /// The content oracle the macOS shell answers with UTType.
-    fn content(path: &Path) -> Content {
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("rs" | "md") => Content::Document,
-            Some("app") => Content::Package,
-            _ => Content::Other,
-        }
-    }
-
     fn act(target: &str, kind: LinkKind) -> Option<LinkAction> {
-        let resolved = local_path(target, &kind).and_then(|path| res(path.to_str()?));
-        action(target, &kind, resolved.as_ref(), content)
+        action(target, &kind)
     }
 
     #[test]
@@ -501,15 +443,11 @@ mod tests {
 
     #[test]
     fn the_suffix_is_bt_cores_and_is_not_stripped_again() {
-        // `bt-core` hands `src/main.rs` with `line: 12, col: 3` — the file opens, the suffix
-        // is only recognized (no jump; out of scope).
-        let kind = LinkKind::Path {
-            line: Some(12),
-            col: Some(3),
-        };
+        // `bt-core` hands `src/main.rs` with `line: 12, col: 3`: the path resolves without the
+        // suffix, which is not stripped again here.
         assert_eq!(
-            act("src/main.rs", kind),
-            Some(LinkAction::OpenFile("/work/proj/src/main.rs".into()))
+            res("src/main.rs").map(|r| r.path),
+            Some("/work/proj/src/main.rs".into())
         );
         // A name that really ends in `:12` still resolves as written.
         assert_eq!(res("a:12").map(|r| r.path), Some("/work/proj/a:12".into()));
@@ -534,14 +472,9 @@ mod tests {
             local_path("file:///%ff", &LinkKind::Osc8),
             Some(PathBuf::from(OsString::from_vec(vec![b'/', 0xff])))
         );
-        assert_eq!(
-            act("file:///tmp/a%20b", LinkKind::Osc8),
-            Some(LinkAction::Reveal("/tmp/a b".into()))
-        );
-        assert_eq!(
-            act("file://localhost/work/proj/src", LinkKind::Url),
-            Some(LinkAction::OpenDir("/work/proj/src".into()))
-        );
+        // A `file://` URL that names a path is a path: it has no action here.
+        assert_eq!(act("file:///tmp/a%20b", LinkKind::Osc8), None);
+        assert_eq!(act("file://localhost/work/proj/src", LinkKind::Url), None);
     }
 
     #[test]
@@ -557,31 +490,16 @@ mod tests {
             assert_eq!(act(url, LinkKind::Url), open_url(url), "{url}");
             assert_eq!(act(url, LinkKind::Osc8), open_url(url), "{url}");
         }
-        // A known document without `x` opens.
-        assert_eq!(
-            act("src/main.rs", path_kind()),
-            Some(LinkAction::OpenFile("/work/proj/src/main.rs".into()))
-        );
-        // An executable is revealed, never run.
-        assert_eq!(
-            act("run.sh", path_kind()),
-            Some(LinkAction::Reveal("/work/proj/run.sh".into()))
-        );
-        // An unknown type is revealed (the white list's complement).
-        assert_eq!(
-            act("/tmp/a b", path_kind()),
-            Some(LinkAction::Reveal("/tmp/a b".into()))
-        );
-        // A directory opens in Finder.
-        assert_eq!(
-            act("src", path_kind()),
-            Some(LinkAction::OpenDir("/work/proj/src".into()))
-        );
-        // A package is a directory that would launch: revealed.
-        assert_eq!(
-            act("/Applications/Foo.app", path_kind()),
-            Some(LinkAction::Reveal("/Applications/Foo.app".into()))
-        );
+        // A path has no action: it opens in the program the person chose, or it is no link.
+        for path in [
+            "src/main.rs",
+            "run.sh",
+            "/tmp/a b",
+            "src",
+            "/Applications/Foo.app",
+        ] {
+            assert_eq!(act(path, path_kind()), None, "{path}");
+        }
         // An uncommon OSC 8 scheme asks with the whole target.
         for uri in [
             "vscode://file/x",
@@ -616,47 +534,51 @@ mod tests {
     }
 
     /// `ls` in a cloned repo lists `docs -> .x/Evil.app` and `README.md -> payload.terminal`:
-    /// the policy reads what the link points to, so neither launches nor runs anything.
+    /// a link resolves to the object it points to, and stays itself as the path.
     #[test]
-    fn a_symlink_is_judged_by_its_target_and_revealed_as_itself() {
-        // A link to a package is a directory by `stat`, a package by its target: revealed.
+    fn a_symlink_resolves_to_its_target_and_stays_itself_as_the_path() {
+        let link = |name: &str| res(name).map(|r| (r.path, r.entry, r.target));
         assert_eq!(
-            act("docs", path_kind()),
-            Some(LinkAction::Reveal("/work/proj/docs".into()))
-        );
-        // A document's name over a target that is not one: revealed, never opened.
-        assert_eq!(
-            act("README.md", path_kind()),
-            Some(LinkAction::Reveal("/work/proj/README.md".into()))
-        );
-        // A link to a real document or folder still opens — at its target, the object
-        // that was judged.
-        assert_eq!(
-            act("latest.md", path_kind()),
-            Some(LinkAction::OpenFile("/work/proj/notes/2024.md".into()))
+            link("docs"),
+            Some((
+                "/work/proj/docs".into(),
+                Entry::Dir,
+                "/work/proj/.x/Evil.app".into()
+            ))
         );
         assert_eq!(
-            act("current", path_kind()),
-            Some(LinkAction::OpenDir("/work/proj/src".into()))
+            link("README.md"),
+            Some((
+                "/work/proj/README.md".into(),
+                Entry::File { executable: false },
+                "/work/proj/payload.terminal".into()
+            ))
         );
-        // The content oracle hears only the target, never the link's own name.
-        let asked = std::cell::RefCell::new(Vec::new());
-        let resolved = res("docs");
-        action("docs", &path_kind(), resolved.as_ref(), |path: &Path| {
-            asked.borrow_mut().push(path.to_path_buf());
-            content(path)
-        });
-        assert_eq!(*asked.borrow(), [PathBuf::from("/work/proj/.x/Evil.app")]);
+        assert_eq!(
+            link("latest.md"),
+            Some((
+                "/work/proj/latest.md".into(),
+                Entry::File { executable: false },
+                "/work/proj/notes/2024.md".into()
+            ))
+        );
+        assert_eq!(
+            link("current"),
+            Some((
+                "/work/proj/current".into(),
+                Entry::Dir,
+                "/work/proj/src".into()
+            ))
+        );
     }
 
     #[test]
-    fn content_is_asked_only_for_a_resolved_path() {
-        let ask = |_: &Path| -> Content { panic!("asked for a URL") };
+    fn only_a_url_has_an_action() {
         assert_eq!(
-            action("https://x.dev", &LinkKind::Url, None, ask),
+            action("https://x.dev", &LinkKind::Url),
             Some(LinkAction::OpenUrl("https://x.dev".into()))
         );
-        assert_eq!(action("missing", &path_kind(), None, ask), None);
+        assert_eq!(action("missing", &path_kind()), None);
     }
 
     #[test]

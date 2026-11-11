@@ -10,7 +10,7 @@
 //! question whether to trust a server's key are asked and answered where they
 //! always were; the connection goes to the background once it is made. It lives
 //! at the socket the rest of bateri already looks for
-//! ([`crate::ssh_route::socket_path`]): the file jobs, the preview and the rest
+//! ([`crate::ssh_route::socket_path`]): the file jobs and the rest
 //! find it there and ride it, and the steps here ride it too — the `uname`, the
 //! install ([`crate::kablo::install`]) and the bridge (`kablo attach`) are
 //! channels of that connection, started with `ControlMaster=no` and

@@ -58,11 +58,9 @@ use crate::child;
 use crate::download::{self, Conflict};
 use crate::pane::{PaneLookup, TerminalPane};
 use crate::password_sheet::Job as SheetJob;
-use crate::preview::beep;
-use crate::preview_cache;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{Answer, Dial, Query, Request};
-use crate::sheets::{self, Asker};
+use crate::sheets::{self, Asker, beep};
 use crate::ssh_route;
 use crate::upload::{
     self, Direction, Ended, Job, Lane, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared,
@@ -79,7 +77,7 @@ struct Asked {
     result: Result<(Vec<Local>, ProbeReply), String>,
 }
 
-/// The confirmed drop (or download, or preview): the items that will enter the
+/// The confirmed drop (or download): the items that will enter the
 /// queue.
 pub(crate) struct Confirmed {
     pub(crate) command: u64,
@@ -130,6 +128,33 @@ pub(crate) fn on_pane(
 }
 
 impl TerminalPane {
+    /// A remote job's error sheet — title, the reason, OK — through the
+    /// pane's sheet gate; a beep when another sheet is up.
+    pub(crate) fn failure_sheet(&self, title: &str, text: &str) {
+        let Some(seat) =
+            sheets::seat(Asker::Pane(self)).filter(|seat| !seat.is_taken() && self.accepts_drop())
+        else {
+            beep();
+            return;
+        };
+        let alert = NSAlert::new(self.mtm());
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(text));
+        alert.addButtonWithTitle(ns_string!("OK"));
+        self.uploads().borrow_mut().set_asking(true);
+        let (id, lookup) = (self.id(), self.lookup());
+        let answered = RcBlock::new(move |_: NSModalResponse| {
+            // audit: the sheet's completion block runs on AppKit's main thread.
+            let mtm = MainThreadMarker::new().expect("the sheet block is on the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                drop(pane.upload_alert().take());
+                pane.uploads().borrow_mut().set_asking(false);
+            }
+        });
+        self.upload_alert().replace(Some(alert.clone()));
+        seat.begin(&alert, &answered);
+    }
+
     /// A Finder drop in a remote session: local measurement and
     /// remote probe in the background, then the confirmation sheet. `false` →
     /// the drop was refused (local session, or another sheet is in progress -
@@ -275,7 +300,7 @@ impl TerminalPane {
         seat.begin(&alert, &answered);
     }
 
-    /// Confirmation (an upload's, a download's or a preview's): the items go to
+    /// Confirmation (an upload's or a download's): the items go to
     /// the end of the queue, the first starts if the queue is idle — a lingering
     /// result line ends with it. `false` if they could not enter:
     /// the remote session ended, or the queue is still stopping (its half-written
@@ -514,7 +539,7 @@ impl TerminalPane {
     }
 
     /// Starts every item that may start on its own background thread: the
-    /// queue's next item (no-op while one flows) and every preview and Finder
+    /// queue's next item (no-op while one flows) and every Finder
     /// item, which never wait.
     /// Whether anything started (the line was refreshed then).
     fn start_transfers(&self) -> bool {
@@ -539,15 +564,6 @@ impl TerminalPane {
             job,
             shared,
         } = started;
-        // A preview's ticket: sealed on this thread when it lands,
-        // opened on the main thread after its row is updated.
-        let ticket = match job.way {
-            Way::Down {
-                lane: Lane::Preview,
-                ..
-            } => self.previews().borrow().get(job.landing()).cloned(),
-            _ => None,
-        };
         // A Finder drop's promise follows this item from now on.
         if let Way::Down {
             lane: Lane::Finder, ..
@@ -576,23 +592,8 @@ impl TerminalPane {
                         |landed: &Path| quarantine(landed, &agent),
                     ),
                 };
-                let open = match (&outcome, &landed, ticket) {
-                    (Outcome::Done, Some(landed), Some(ticket)) => {
-                        preview_cache::seal(
-                            &ticket.dir,
-                            landed,
-                            ticket.read_only,
-                            preview_cache::now(),
-                        );
-                        Some(landed.clone())
-                    }
-                    _ => None,
-                };
                 on_pane(lookup, id, move |pane| {
                     pane.upload_finished(item, outcome, landed);
-                    if let Some(path) = open {
-                        pane.open_preview(&path);
-                    }
                 });
             }
         });
@@ -866,8 +867,7 @@ impl TerminalPane {
 
     /// A popover row's button (`tag` is the item's id): `Cancel` on a flowing
     /// item (asks first if past 30 s), `Remove` on a waiting one (does not
-    /// ask), `Show in Finder` on a finished download, `Open` on a finished
-    /// preview.
+    /// ask), `Show in Finder` on a finished download.
     pub(crate) fn upload_row_action(&self, id: u64) {
         let action = self.uploads().borrow().list().and_then(|list| {
             list.rows
@@ -887,12 +887,6 @@ impl TerminalPane {
                     NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(
                         &NSArray::from_retained_slice(&[file_url(&path)]),
                     );
-                }
-            }
-            // Through the preview's open policy: a script opens as text.
-            Some(RowAction::Open) => {
-                if let Some(path) = landed() {
-                    self.open_preview(&path);
                 }
             }
             None => {}
@@ -1105,7 +1099,6 @@ impl TerminalPane {
                     RowAction::Cancel => ns_string!("Cancel"),
                     RowAction::Remove => ns_string!("Remove"),
                     RowAction::ShowInFinder => ns_string!("Show in Finder"),
-                    RowAction::Open => ns_string!("Open"),
                 };
                 // SAFETY: the selector is this class's `uploadRowAction:` and
                 // takes a single `Option<&AnyObject>`; the target is this pane
@@ -1411,8 +1404,7 @@ pub(crate) fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
 }
 
 /// [`notify`] without the background gate: the caller decided a notification is
-/// the right channel (an edited preview kept while no window can show a
-/// sheet). Never in an unbundled process.
+/// the right channel (no window can show a sheet). Never in an unbundled process.
 pub(crate) fn deliver_notification(title: &str, body: &str) {
     deliver(None, title, body);
 }

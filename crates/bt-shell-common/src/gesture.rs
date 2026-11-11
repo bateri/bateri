@@ -642,7 +642,7 @@ mod tests {
         gesture.pressed_link(Some(HERE));
         let (x, y) = HERE;
         assert_eq!(gesture.dragged(LEFT, (x + 1.0, y + 1.0)), Drag::Ignore);
-        // The release is the link's: the view opens (previews) it.
+        // The release is the link's: the view opens it.
         assert_eq!(gesture.released(LEFT), Release::Link);
         assert_eq!(gesture.released(LEFT), Release::Done);
     }

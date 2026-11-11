@@ -1659,7 +1659,7 @@ impl PaletteCard {
         if id.starts_with(Kind::History.prefix()) {
             // A command without the use this key stands for (no output to go to): the key does
             // nothing, and the palette stays.
-            crate::preview::beep();
+            crate::sheets::beep();
             self.refresh();
             return;
         }

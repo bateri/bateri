@@ -70,7 +70,6 @@ mod pane_files;
 mod password_sheet;
 mod pencere_view;
 mod pointer;
-mod preview;
 mod promise;
 mod remote_ports;
 #[cfg(debug_assertions)]
@@ -98,9 +97,8 @@ mod window;
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
     child, download, environment, focus, font_options, gesture, grid, groups, icon, ids, jobs,
-    keys, links, moves, notices, port_forward, ports, preview_cache, program, quote, remote_files,
-    remote_helper, restore, retired_holders, settings, split, ssh_route, tabs, undo, upload, watch,
-    zoom,
+    keys, links, moves, notices, port_forward, ports, program, quote, remote_files, remote_helper,
+    restore, retired_holders, settings, split, ssh_route, tabs, undo, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};

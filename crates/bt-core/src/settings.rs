@@ -1389,47 +1389,6 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
     pattern[p..].iter().all(|&c| c == '*')
 }
 
-/// `[remote] preview_keep`: how long a remote file's preview copy stays in the
-/// preview folder after it was last opened. Checked at launch and
-/// once a day; nothing is removed at quit, so [`Self::UntilLaunch`] removes this
-/// session's previews at the **next** launch.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PreviewKeep {
-    /// Until bateri starts again.
-    UntilLaunch,
-    Day,
-    #[default]
-    Week,
-    Month,
-}
-
-impl PreviewKeep {
-    /// The single list of spellings in the settings file.
-    pub const NAMES: &'static [(&'static str, Self)] = &[
-        ("launch", Self::UntilLaunch),
-        ("1d", Self::Day),
-        ("7d", Self::Week),
-        ("30d", Self::Month),
-    ];
-
-    /// The spelling in the settings file.
-    pub fn name(self) -> &'static str {
-        name_in(Self::NAMES, self)
-    }
-
-    /// How long a preview stays after its last opening; `None` for
-    /// [`Self::UntilLaunch`] — its age does not matter, the launch does.
-    pub fn max_age(self) -> Option<std::time::Duration> {
-        let days = match self {
-            Self::UntilLaunch => return None,
-            Self::Day => 1,
-            Self::Week => 7,
-            Self::Month => 30,
-        };
-        Some(std::time::Duration::from_secs(days * 24 * 60 * 60))
-    }
-}
-
 /// `[remote] download_conflict`: what a download does when its name already
 /// exists in the target folder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1457,41 +1416,6 @@ impl DownloadConflict {
     }
 }
 
-/// The size units of the settings file — **decimal**, Finder's units (the
-/// transfer line's `format_bytes` speaks the same ones). The single table:
-/// [`parse_size`] reads it and [`format_size`] writes it.
-pub const SIZE_UNITS: &[(&str, u64)] = &[
-    ("B", 1),
-    ("KB", 1_000),
-    ("MB", 1_000_000),
-    ("GB", 1_000_000_000),
-    ("TB", 1_000_000_000_000),
-];
-
-/// `"100MB"` → bytes: a whole number and one of [`SIZE_UNITS`], an optional
-/// space between them; case-sensitive like every value of the file (`"100mb"`
-/// is a typo, not a size). `None` for anything else and for an overflow.
-pub fn parse_size(text: &str) -> Option<u64> {
-    let digits = text.find(|c: char| !c.is_ascii_digit())?;
-    let (number, unit) = text.split_at(digits);
-    let unit = unit.strip_prefix(' ').unwrap_or(unit);
-    let (_, scale) = SIZE_UNITS.iter().find(|(name, _)| *name == unit)?;
-    number.parse::<u64>().ok()?.checked_mul(*scale)
-}
-
-/// Bytes → the file's spelling, in the largest unit that divides them exactly
-/// (`100_000_000` → `"100MB"`, `1_500_000` → `"1500KB"`) — so the value read
-/// back is the very value written.
-pub fn format_size(bytes: u64) -> String {
-    let (unit, scale) = SIZE_UNITS
-        .iter()
-        .rev()
-        .find(|(_, scale)| bytes.is_multiple_of(*scale) && (bytes > 0 || *scale == 1))
-        .copied()
-        .unwrap_or(("B", 1));
-    format!("{}{unit}", bytes / scale)
-}
-
 /// A folder key's text (`"~/Downloads"`) → the path, `~` expanded to `home`.
 /// `None` if the text names no absolute folder (the parser already rejected it)
 /// or it starts with `~` and there is no home directory.
@@ -1506,24 +1430,10 @@ pub fn expand_home(text: &str, home: Option<&std::path::Path>) -> Option<std::pa
         .then(|| std::path::PathBuf::from(text))
 }
 
-/// `[remote]`'s remote file keys: previewing a remote file (⌘-click),
-/// cleaning the preview folder and downloading. The numbers are design
-/// constants' starting values, not measured.
+/// `[remote]`'s remote file keys: downloading. (The keys of the preview a ⌘-click used to
+/// make, `preview_*`, are no longer read: a file that still has them keeps them, silently.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteFiles {
-    /// `preview_max_size`, bytes: a larger file asks before its preview downloads.
-    pub preview_max_size: u64,
-    /// `preview_read_only`: a preview copy is made read-only (`0444`) — a hint,
-    /// an application can unlock it.
-    pub preview_read_only: bool,
-    /// `preview_dir`: the preview folder, as written (`~` unexpanded,
-    /// [`expand_home`]).
-    pub preview_dir: String,
-    /// `preview_keep`: how long a preview stays.
-    pub preview_keep: PreviewKeep,
-    /// `preview_limit`, bytes: the preview folder's size limit, applied at launch
-    /// only, oldest first.
-    pub preview_limit: u64,
     /// `download_dir`: where "Download to Downloads" puts an item, as written.
     pub download_dir: String,
     /// `download_conflict`: an existing name in the target folder.
@@ -1536,11 +1446,6 @@ pub struct RemoteFiles {
 impl Default for RemoteFiles {
     fn default() -> Self {
         Self {
-            preview_max_size: 100_000_000,
-            preview_read_only: true,
-            preview_dir: "~/Library/Caches/bateri/Previews".to_owned(),
-            preview_keep: PreviewKeep::default(),
-            preview_limit: 2_000_000_000,
             download_dir: "~/Downloads".to_owned(),
             download_conflict: DownloadConflict::default(),
             download_notify: true,
@@ -1773,7 +1678,7 @@ pub struct Settings {
     /// `[remote] hosts`: the remote hosts' mark patterns, in the file's order
     /// (matching is [`host_mark`]). Empty by default.
     pub remote_hosts: Vec<HostRule>,
-    /// `[remote]`'s preview and download keys ([`RemoteFiles`]).
+    /// `[remote]`'s download keys ([`RemoteFiles`]).
     pub remote_files: RemoteFiles,
     /// `[remote] stats` and `stats_interval` ([`RemoteStatsSettings`]).
     pub remote_stats: RemoteStatsSettings,
@@ -2009,14 +1914,6 @@ pub enum SettingsEdit {
         host: String,
         on: bool,
     },
-    /// Bytes; written in the largest exact unit ([`format_size`]).
-    PreviewMaxSize(u64),
-    PreviewReadOnly(bool),
-    /// As written in the file (`~` unexpanded).
-    PreviewDir(String),
-    PreviewKeep(PreviewKeep),
-    /// Bytes; written in the largest exact unit ([`format_size`]).
-    PreviewLimit(u64),
     /// As written in the file (`~` unexpanded).
     DownloadDir(String),
     DownloadConflict(DownloadConflict),
@@ -2144,11 +2041,6 @@ impl SettingsEdit {
             Self::RemoteIntegration(_) => ("remote", "integration", "remote.integration"),
             Self::AppsSources(_) => ("apps", "sources", "apps.sources"),
             Self::AppsOpenWith(_) => ("apps", "open_with", "apps.open_with"),
-            Self::PreviewMaxSize(_) => ("remote", "preview_max_size", "remote.preview_max_size"),
-            Self::PreviewReadOnly(_) => ("remote", "preview_read_only", "remote.preview_read_only"),
-            Self::PreviewDir(_) => ("remote", "preview_dir", "remote.preview_dir"),
-            Self::PreviewKeep(_) => ("remote", "preview_keep", "remote.preview_keep"),
-            Self::PreviewLimit(_) => ("remote", "preview_limit", "remote.preview_limit"),
             Self::DownloadDir(_) => ("remote", "download_dir", "remote.download_dir"),
             Self::DownloadConflict(_) => {
                 ("remote", "download_conflict", "remote.download_conflict")
@@ -2201,7 +2093,6 @@ impl SettingsEdit {
             Self::RemoteHostMark { mark, .. } => mark.written().into(),
             // Not the array itself, but the written entry's `integration`.
             Self::RemoteHostIntegration { on, .. } => (*on).into(),
-            Self::PreviewKeep(keep) => keep.name().into(),
             Self::DownloadConflict(conflict) => conflict.name().into(),
             Self::RemoteStats(mode) => mode.name().into(),
             Self::StatsInterval(seconds) => i64::from(*seconds).into(),
@@ -2211,9 +2102,7 @@ impl SettingsEdit {
             Self::AppsSources(sources) => sources_value(sources),
             // The line's value; a removal writes none and never asks.
             Self::FontFeature { on, .. } => on.unwrap_or_default().into(),
-            Self::PreviewMaxSize(bytes) | Self::PreviewLimit(bytes) => format_size(*bytes).into(),
-            Self::PreviewReadOnly(on)
-            | Self::DownloadNotify(on)
+            Self::DownloadNotify(on)
             | Self::RemoteIntegration(on)
             | Self::ShellPorts(on)
             | Self::ShellPythonEnv(on)
@@ -2235,7 +2124,6 @@ impl SettingsEdit {
             | Self::LightTheme(name)
             | Self::DarkTheme(name)
             | Self::FontFamily(name)
-            | Self::PreviewDir(name)
             | Self::AppsOpenWith(name)
             | Self::DownloadDir(name) => name.as_str().into(),
         }
@@ -2577,22 +2465,7 @@ hosts = []
 # there once. A host marked "production" stays plain unless its entry says
 # integration = true; integration = false in an entry turns one host off.
 integration = true
-# Sizes are written like "100MB" or "2GB" (B, KB, MB, GB, TB); folders start
-# with / or ~/.
-# A file larger than this asks before its preview downloads (cmd-click on a
-# remote file name).
-preview_max_size = "100MB"
-# true | false. Previews open read-only. It is a hint: an app can unlock one,
-# and a preview you changed is moved to the download folder, never deleted.
-preview_read_only = true
-# Where previews are kept.
-preview_dir = "~/Library/Caches/bateri/Previews"
-# "launch" | "1d" | "7d" | "30d". How long a preview stays after you last
-# opened it; checked when bateri starts and once a day. launch keeps previews
-# until bateri starts again.
-preview_keep = "7d"
-# The preview folder's size limit, applied when bateri starts, oldest first.
-preview_limit = "2GB"
+# Folders start with / or ~/.
 # Where "Download to Downloads" puts a remote file or folder.
 download_dir = "~/Downloads"
 # "ask" | "keep_both" | "replace". What a download does when the name already
@@ -4620,52 +4493,6 @@ fn remote_files(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> RemoteFiles {
     let mut files = RemoteFiles::default();
-    if let Some(item) = remote.get("preview_max_size") {
-        files.preview_max_size = size(
-            text,
-            item,
-            "remote.preview_max_size",
-            fallback.preview_max_size,
-            diagnostics,
-        );
-    }
-    if let Some(item) = remote.get("preview_read_only") {
-        files.preview_read_only = boolean(
-            text,
-            item,
-            "remote.preview_read_only",
-            fallback.preview_read_only,
-            diagnostics,
-        );
-    }
-    if let Some(item) = remote.get("preview_dir") {
-        files.preview_dir = folder(
-            text,
-            item,
-            "remote.preview_dir",
-            &fallback.preview_dir,
-            diagnostics,
-        );
-    }
-    if let Some(item) = remote.get("preview_keep") {
-        files.preview_keep = named_enum(
-            text,
-            item,
-            "remote.preview_keep",
-            PreviewKeep::NAMES,
-            fallback.preview_keep,
-            diagnostics,
-        );
-    }
-    if let Some(item) = remote.get("preview_limit") {
-        files.preview_limit = size(
-            text,
-            item,
-            "remote.preview_limit",
-            fallback.preview_limit,
-            diagnostics,
-        );
-    }
     if let Some(item) = remote.get("download_dir") {
         files.download_dir = folder(
             text,
@@ -4765,33 +4592,6 @@ fn ranged_integer(
             fallback
         }
     }
-}
-
-/// A size key: a string like `"100MB"` ([`parse_size`]). An integer is not
-/// accepted either — a bare number would leave the unit to guesswork.
-fn size(
-    text: &str,
-    item: &Item,
-    key: &'static str,
-    fallback: u64,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> u64 {
-    if let Some(bytes) = item.as_str().and_then(parse_size) {
-        return bytes;
-    }
-    let found = item
-        .as_str()
-        .map_or_else(|| kind(item).to_owned(), |value| format!("{value:?}"));
-    diagnostics.push(Diagnostic {
-        key: Some(key),
-        line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!(
-            "`{key}` must be a size like \"100MB\" (B, KB, MB, GB or TB), found {found}; \
-             using \"{}\"",
-            format_size(fallback)
-        ),
-    });
-    fallback
 }
 
 /// A switch key: `true` or `false` — a TOML boolean, not the string `"true"`.
@@ -5245,11 +5045,6 @@ mod tests {
             ("shell", "python_env"),
             ("shell", "node_version"),
             ("remote", "hosts"),
-            ("remote", "preview_max_size"),
-            ("remote", "preview_read_only"),
-            ("remote", "preview_dir"),
-            ("remote", "preview_keep"),
-            ("remote", "preview_limit"),
             ("remote", "download_dir"),
             ("remote", "download_conflict"),
             ("remote", "download_notify"),
@@ -8795,11 +8590,6 @@ cursor = \"spring\"
             SettingsEdit::RemoteIntegration(on) => settings.remote_integration = on,
             SettingsEdit::AppsSources(sources) => settings.apps_sources = sources,
             SettingsEdit::AppsOpenWith(name) => settings.apps_open_with = name,
-            SettingsEdit::PreviewMaxSize(bytes) => settings.remote_files.preview_max_size = bytes,
-            SettingsEdit::PreviewReadOnly(on) => settings.remote_files.preview_read_only = on,
-            SettingsEdit::PreviewDir(path) => settings.remote_files.preview_dir = path,
-            SettingsEdit::PreviewKeep(keep) => settings.remote_files.preview_keep = keep,
-            SettingsEdit::PreviewLimit(bytes) => settings.remote_files.preview_limit = bytes,
             SettingsEdit::DownloadDir(path) => settings.remote_files.download_dir = path,
             SettingsEdit::DownloadConflict(conflict) => {
                 settings.remote_files.download_conflict = conflict;
@@ -8916,12 +8706,6 @@ cursor = \"spring\"
             SettingsEdit::ShellPorts(false),
             SettingsEdit::ShellPythonEnv(false),
             SettingsEdit::ShellNodeVersion(false),
-            // Written as "250MB" and "1500KB": the largest exact unit.
-            SettingsEdit::PreviewMaxSize(250_000_000),
-            SettingsEdit::PreviewReadOnly(false),
-            SettingsEdit::PreviewDir("/Volumes/Scratch/previews".to_owned()),
-            SettingsEdit::PreviewKeep(PreviewKeep::UntilLaunch),
-            SettingsEdit::PreviewLimit(1_500_000),
             SettingsEdit::DownloadDir("~/Desktop".to_owned()),
             SettingsEdit::DownloadConflict(DownloadConflict::KeepBoth),
             SettingsEdit::DownloadNotify(false),
@@ -9561,13 +9345,6 @@ cursor = \"spring\"
             |s| s.shell_integration,
         );
         check(
-            PreviewKeep::NAMES,
-            PreviewKeep::name,
-            "remote",
-            "preview_keep",
-            |s| s.remote_files.preview_keep,
-        );
-        check(
             DownloadConflict::NAMES,
             DownloadConflict::name,
             "remote",
@@ -9584,67 +9361,123 @@ cursor = \"spring\"
     }
 
     #[test]
-    fn sizes_read_and_write_in_the_unit_table() {
-        assert_eq!(parse_size("100MB"), Some(100_000_000));
-        assert_eq!(parse_size("2 GB"), Some(2_000_000_000));
-        assert_eq!(parse_size("0B"), Some(0));
-        assert_eq!(parse_size("1500KB"), Some(1_500_000));
-        assert_eq!(parse_size("3TB"), Some(3_000_000_000_000));
-        for bad in [
-            "", "MB", "100", "100mb", "1.5GB", "-1MB", "100  MB", " 100MB", "100MiB",
-        ] {
-            assert_eq!(parse_size(bad), None, "{bad:?}");
-        }
-        assert_eq!(parse_size("99999999999TB"), None, "an overflow is no size");
-        assert_eq!(format_size(100_000_000), "100MB");
-        assert_eq!(format_size(2_000_000_000), "2GB");
-        assert_eq!(format_size(1_500_000), "1500KB");
-        assert_eq!(format_size(1), "1B");
-        assert_eq!(format_size(0), "0B");
-        for bytes in [0, 1, 999, 1_000, 1_500_000, 100_000_000, 7_000_000_000_000] {
-            assert_eq!(parse_size(&format_size(bytes)), Some(bytes), "{bytes}");
-        }
-    }
-
-    #[test]
     fn the_remote_file_keys_are_read() {
         let settings = clean(
-            "[remote]\npreview_max_size = \"5MB\"\npreview_read_only = false\n\
-             preview_dir = \"/tmp/p\"\npreview_keep = \"30d\"\npreview_limit = \"10 GB\"\n\
-             download_dir = \"~\"\ndownload_conflict = \"replace\"\ndownload_notify = false\n",
+            "[remote]\ndownload_dir = \"~\"\ndownload_conflict = \"replace\"\ndownload_notify = false\n",
         );
         assert_eq!(
             settings.remote_files,
             RemoteFiles {
-                preview_max_size: 5_000_000,
-                preview_read_only: false,
-                preview_dir: "/tmp/p".to_owned(),
-                preview_keep: PreviewKeep::Month,
-                preview_limit: 10_000_000_000,
                 download_dir: "~".to_owned(),
                 download_conflict: DownloadConflict::Replace,
                 download_notify: false,
             }
         );
         // A key left out keeps its default; the hosts array is untouched.
-        let one = clean("[remote]\npreview_keep = \"launch\"\n");
-        assert_eq!(one.remote_files.preview_keep, PreviewKeep::UntilLaunch);
-        assert_eq!(one.remote_files.preview_max_size, 100_000_000);
+        let one = clean("[remote]\ndownload_notify = false\n");
+        assert!(!one.remote_files.download_notify);
         assert_eq!(one.remote_files.download_dir, "~/Downloads");
-        assert_eq!(PreviewKeep::UntilLaunch.max_age(), None);
+    }
+
+    /// The keys of the preview a ⌘-click used to make are not read any more. A file that still
+    /// has them says nothing about them, and writing another key leaves the lines where they
+    /// are: they are the person's, and a later release may be run with the old one.
+    #[test]
+    fn the_old_preview_keys_are_silent_and_stay_in_the_file() {
+        let text = "[remote]\n\
+            # Where previews are kept.\n\
+            preview_dir = \"/tmp/p\"\n\
+            preview_max_size = \"5MB\"\n\
+            preview_read_only = false\n\
+            preview_keep = \"30d\"\n\
+            preview_limit = \"10 GB\"\n\
+            download_notify = false\n";
+        let settings = clean(text);
         assert_eq!(
-            PreviewKeep::Week.max_age(),
-            Some(std::time::Duration::from_secs(7 * 86_400))
+            settings.remote_files,
+            RemoteFiles {
+                download_notify: false,
+                ..RemoteFiles::default()
+            }
         );
+        // Even a value the old release would have refused is not looked at.
+        let odd = "[remote]\npreview_keep = \"2d\"\npreview_max_size = 100\n";
+        assert_eq!(clean(odd).remote_files, RemoteFiles::default());
+        let written = Settings::with_edit(text, &SettingsEdit::DownloadDir("~/Desktop".to_owned()))
+            .expect("writable text");
+        for line in [
+            "# Where previews are kept.",
+            "preview_dir = \"/tmp/p\"",
+            "preview_max_size = \"5MB\"",
+            "preview_read_only = false",
+            "preview_keep = \"30d\"",
+            "preview_limit = \"10 GB\"",
+            "download_dir = \"~/Desktop\"",
+        ] {
+            assert!(
+                written.lines().any(|written| written == line),
+                "{line}\n{written}"
+            );
+        }
+    }
+
+    /// The folder the preview of a ⌘-click used to be kept in was the person's to choose, and
+    /// what is in it is theirs: bateri does not sweep it, measure it or write to it any more. No
+    /// code of any crate names the key or the default folder; only this test and the docs do.
+    #[test]
+    fn nothing_in_bateri_touches_the_old_preview_folder() {
+        fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("a source folder").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for member in std::fs::read_dir(&crates).expect("the crates").flatten() {
+            let src = member.path().join("src");
+            if src.is_dir() {
+                walk(&src, &mut files);
+            }
+        }
+        assert!(
+            files.len() > 100,
+            "the walk found the sources: {}",
+            files.len()
+        );
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("a source file");
+            let code = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            for line in code
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+            {
+                for word in [
+                    "preview_dir",
+                    "bateri/Previews",
+                    "preview_keep",
+                    "preview_limit",
+                ] {
+                    assert!(
+                        !line.contains(word),
+                        "{} reads the old preview folder: {line}",
+                        file.display()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn a_rejected_remote_file_value_keeps_the_previous_one() {
         let previous = Settings {
             remote_files: RemoteFiles {
-                preview_max_size: 1_000,
-                preview_read_only: false,
-                preview_dir: "/old".to_owned(),
+                download_dir: "/old".to_owned(),
+                download_notify: false,
                 ..RemoteFiles::default()
             },
             ..Settings::default()
@@ -9652,48 +9485,28 @@ cursor = \"spring\"
         // The rejected key takes the previous value; every other key, absent from
         // the text, its default.
         let field = |files: &RemoteFiles, key: &str| match key {
-            "remote.preview_max_size" => files.preview_max_size.to_string(),
-            "remote.preview_read_only" => files.preview_read_only.to_string(),
-            "remote.preview_dir" => files.preview_dir.clone(),
-            "remote.preview_keep" => files.preview_keep.name().to_owned(),
+            "remote.download_dir" => files.download_dir.clone(),
+            "remote.download_notify" => files.download_notify.to_string(),
             "remote.download_conflict" => files.download_conflict.name().to_owned(),
             _ => String::new(),
         };
         for (text, key, message) in [
             (
-                "[remote]\npreview_max_size = 100\n",
-                "remote.preview_max_size",
-                "`remote.preview_max_size` must be a size like \"100MB\" (B, KB, MB, GB or TB), \
-                 found an integer; using \"1KB\"",
+                "[remote]\ndownload_notify = \"true\"\n",
+                "remote.download_notify",
+                "`remote.download_notify` must be true or false, found a string; using false",
             ),
             (
-                "[remote]\npreview_max_size = \"100mb\"\n",
-                "remote.preview_max_size",
-                "`remote.preview_max_size` must be a size like \"100MB\" (B, KB, MB, GB or TB), \
-                 found \"100mb\"; using \"1KB\"",
+                "[remote]\ndownload_dir = \"Downloads\"\n",
+                "remote.download_dir",
+                "`remote.download_dir` must be a folder starting with / or ~/, \
+                 found \"Downloads\"; using \"/old\"",
             ),
             (
-                "[remote]\npreview_read_only = \"true\"\n",
-                "remote.preview_read_only",
-                "`remote.preview_read_only` must be true or false, found a string; using false",
-            ),
-            (
-                "[remote]\npreview_dir = \"Previews\"\n",
-                "remote.preview_dir",
-                "`remote.preview_dir` must be a folder starting with / or ~/, \
-                 found \"Previews\"; using \"/old\"",
-            ),
-            (
-                "[remote]\npreview_dir = \"~other/x\"\n",
-                "remote.preview_dir",
-                "`remote.preview_dir` must be a folder starting with / or ~/, \
+                "[remote]\ndownload_dir = \"~other/x\"\n",
+                "remote.download_dir",
+                "`remote.download_dir` must be a folder starting with / or ~/, \
                  found \"~other/x\"; using \"/old\"",
-            ),
-            (
-                "[remote]\npreview_keep = \"2d\"\n",
-                "remote.preview_keep",
-                "`remote.preview_keep` must be \"launch\", \"1d\", \"7d\" or \"30d\", \
-                 found \"2d\"; using \"7d\"",
             ),
             (
                 "[remote]\ndownload_conflict = \"Ask\"\n",

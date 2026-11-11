@@ -1761,15 +1761,14 @@ pub enum Direction {
 }
 
 /// Where an item waits: the **queue** runs one item at a time
-/// (uploads and right-click downloads); a **preview** and a **Finder** drop start
-/// at once — the user is looking at the screen, or Finder holds a placeholder.
+/// (uploads and right-click downloads); a **Finder** drop starts
+/// at once — Finder holds a placeholder.
 /// Every lane is counted alike by the line, the totals, the list, the stop question
 /// and ⌘..
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Lane {
     #[default]
     Queue,
-    Preview,
     Finder,
 }
 
@@ -1930,7 +1929,7 @@ struct Queue {
     mark: HostMark,
     entries: Vec<Item>,
     /// The streaming items: at most one from the queue lane, any number from the
-    /// preview and Finder lanes.
+    /// Finder lane.
     running: Vec<Current>,
     /// The bar's denominator and the bytes of finished items: the unsent part of an
     /// individually stopped item is subtracted from the denominator and the sent part
@@ -1943,7 +1942,7 @@ struct Queue {
     rate: Option<f64>,
     /// No further item will start: the queue ends with this end once nothing streams.
     ending: Option<End>,
-    /// A preview or Finder lane item failed: those lanes are independent of the
+    /// A Finder lane item failed: that lane is independent of the
     /// queue lane, so the failure does not stop the waiting items — it is the
     /// queue's end once everything else finished, unless that end is already
     /// something else.
@@ -2095,8 +2094,6 @@ pub enum RowAction {
     Remove,
     /// A finished download: reveal it in Finder.
     ShowInFinder,
-    /// A finished preview: open it.
-    Open,
 }
 
 impl RowStatus {
@@ -2237,7 +2234,7 @@ impl Transfers {
         true
     }
 
-    /// Starts at `now` every item that may start: each waiting preview and Finder
+    /// Starts at `now` every item that may start: each waiting Finder
     /// item, and the queue lane's next item if none of its own streams.
     /// Empty if the queue is ending.
     pub fn start(&mut self, now: Instant) -> Vec<Started> {
@@ -2516,7 +2513,7 @@ impl Transfers {
 
     /// The streaming item `id` finished (`landed`: where a download landed); the
     /// result if the queue finished too — once **nothing** streams any more, so a
-    /// preview's report is never lost behind a failed upload. Nothing is pasted on its
+    /// Finder drop's report is never lost behind a failed upload. Nothing is pasted on its
     /// own: an upload can take minutes and the path would be typed into
     /// whatever vim or mysql is open at that moment — the result line says where it went.
     pub fn finish_item(
@@ -2602,22 +2599,7 @@ impl Transfers {
         }
     }
 
-    /// Whether a preview to `landing` is already on its way: a second ⌘-click on
-    /// the same file waits for it instead of streaming the copy twice
-    /// (the second stream's cache question could see the
-    /// first one's renamed but not yet recorded copy as edited).
-    pub fn previewing(&self, landing: &Path) -> bool {
-        self.queue.as_ref().is_some_and(|queue| {
-            queue.entries.iter().any(|entry| {
-                entry.state != EntryState::Done
-                    && entry.job.way.lane() == Lane::Preview
-                    && entry.job.landing() == landing
-            })
-        })
-    }
-
-    /// Where the finished download with `id` landed (the popover's "Show in Finder"
-    /// and "Open").
+    /// Where the finished download with `id` landed (the popover's "Show in Finder").
     pub fn landed(&self, id: u64) -> Option<PathBuf> {
         let (_, entry) = self.queue.as_ref()?.entry(id)?;
         entry.landed.clone()
@@ -2640,18 +2622,7 @@ impl Transfers {
         let mut tally = Tally::of(&queue.entries);
         tally.left = queue.left;
         let (body, tone, lead) = end_line(&end, &queue.host, &tally);
-        // A queue of previews only that succeeded opens its files: the opened
-        // window is the news, a notification would repeat it. The
-        // result line stays — it says where the copy is. A failure still notifies.
-        let previews_only = queue
-            .entries
-            .iter()
-            .all(|entry| entry.job.way.lane() == Lane::Preview);
-        let notice = if previews_only && end == End::Done {
-            None
-        } else {
-            end_notice(&end, &queue.host, &tally)
-        };
+        let notice = end_notice(&end, &queue.host, &tally);
         Some(Ended {
             line: Transfer {
                 host: queue.host,
@@ -2830,12 +2801,8 @@ impl Transfers {
                     }
                 };
                 let action = match (&status, entry.job.way, &entry.landed) {
-                    (RowStatus::Done(_), Way::Down { lane, .. }, Some(_)) => {
-                        Some(if lane == Lane::Preview {
-                            RowAction::Open
-                        } else {
-                            RowAction::ShowInFinder
-                        })
+                    (RowStatus::Done(_), Way::Down { .. }, Some(_)) => {
+                        Some(RowAction::ShowInFinder)
                     }
                     _ => status.action(),
                 };
@@ -3934,17 +3901,16 @@ mod tests {
     }
 
     #[test]
-    fn previews_and_finder_drops_start_at_once_while_the_queue_runs_one_by_one() {
+    fn finder_drops_start_at_once_while_the_queue_runs_one_by_one() {
         let mut transfers = queue_of(vec![
             job("a", false, 1, 100),
             download("b", Lane::Queue, 100),
-            download("c", Lane::Preview, 100),
             download("d", Lane::Finder, 100),
         ]);
         let now = Instant::now();
         let started = transfers.start(now);
-        assert_eq!(started_names(&started), ["a", "c", "d"]);
-        assert_eq!(started[1].job.remote_path(), "/var/log/c");
+        assert_eq!(started_names(&started), ["a", "d"]);
+        assert_eq!(started[1].job.remote_path(), "/var/log/d");
         assert!(transfers.start(now).is_empty(), "the queue waits for `a`");
         let id = |name: &str| {
             started
@@ -3956,16 +3922,16 @@ mod tests {
 
         // The line names the queue's item and leads with the summary.
         let status = transfers.status(now).expect("line");
-        assert!(status.body.starts_with("↑1 ↓3 · a  "), "{}", status.body);
-        assert_eq!(status.controls.items, 4);
+        assert!(status.body.starts_with("↑1 ↓2 · a  "), "{}", status.body);
+        assert_eq!(status.controls.items, 3);
 
-        // A preview finishing does not end the queue; it lands and offers `Open`.
-        let preview = PathBuf::from("/Users/me/Previews/prod/var/log/c");
+        // A Finder drop finishing does not end the queue; it lands and offers `Show in Finder`.
+        let landed = PathBuf::from("/Users/me/Downloads/d 2");
         assert_eq!(
-            transfers.finish_item(id("c"), Outcome::Done, Some(preview.clone())),
+            transfers.finish_item(id("d"), Outcome::Done, Some(landed.clone())),
             None
         );
-        assert_eq!(transfers.landed(id("c")), Some(preview));
+        assert_eq!(transfers.landed(id("d")), Some(landed));
         assert_eq!(transfers.finish_item(id("a"), Outcome::Done, None), None);
         let next = transfers.start(now);
         assert_eq!(started_names(&next), ["b"], "the queue's next item");
@@ -3974,7 +3940,7 @@ mod tests {
                 .status(now)
                 .unwrap()
                 .body
-                .starts_with("↑1 ↓3 · b  ")
+                .starts_with("↑1 ↓2 · b  ")
         );
 
         let list = transfers.list().expect("list");
@@ -3989,32 +3955,22 @@ mod tests {
             [
                 ("a", Direction::Up, None),
                 ("b", Direction::Down, Some(RowAction::Cancel)),
-                ("c", Direction::Down, Some(RowAction::Open)),
-                ("d", Direction::Down, Some(RowAction::Cancel)),
+                ("d", Direction::Down, Some(RowAction::ShowInFinder)),
             ]
         );
-        assert_eq!(list.rows[2].dest, "→ /Users/me/Previews/prod/var/log");
+        assert_eq!(list.rows[2].dest, "→ /Users/me/Downloads");
         assert_eq!(
             list.rows[2].status,
             RowStatus::Done("✓ Downloaded · 100 B".into())
         );
 
-        let landed = PathBuf::from("/Users/me/Downloads/d 2");
-        assert_eq!(
-            transfers.finish_item(id("d"), Outcome::Done, Some(landed)),
-            None
-        );
-        assert_eq!(
-            transfers.list().unwrap().rows[3].action,
-            Some(RowAction::ShowInFinder)
-        );
         let ended = transfers
             .finish_item(next[0].id, Outcome::Done, None)
             .unwrap();
-        assert_eq!(ended.line.body, "✓ 4 files transferred");
+        assert_eq!(ended.line.body, "✓ 3 files transferred");
         assert_eq!(
             ended.notice,
-            Some(("4 files transferred".into(), "with prod".into()))
+            Some(("3 files transferred".into(), "with prod".into()))
         );
     }
 
@@ -4048,10 +4004,10 @@ mod tests {
             ))
         );
 
-        // The arrow follows what streams: an upload joining a preview flips it to both.
+        // The arrow follows what streams: an upload joining a Finder drop flips it to both.
         let mut transfers = queue_of(vec![
             job("a", false, 1, 100),
-            download("p", Lane::Preview, 100),
+            download("p", Lane::Finder, 100),
         ]);
         let _ = transfers.start(now);
         assert!(transfers.title_percent_changed());
@@ -4059,56 +4015,19 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_preview_does_not_notify_but_a_failed_one_does() {
-        let now = Instant::now();
-        let mut transfers = queue_of(vec![download("app.log", Lane::Preview, 10)]);
-        let started = transfers.start(now);
-        let landing = PathBuf::from("/Users/me/Downloads/app.log");
-        assert!(transfers.previewing(&landing), "on its way");
-        assert!(!transfers.previewing(Path::new("/Users/me/Downloads/b.log")));
-        let ended = transfers
-            .finish_item(started[0].id, Outcome::Done, None)
-            .expect("ended");
-        assert!(!transfers.previewing(&landing), "landed");
-        assert_eq!(ended.line.body, "✓ app.log → /Users/me/Downloads");
-        assert_eq!(ended.notice, None, "the opened file is the news");
-        let mut transfers = queue_of(vec![download("app.log", Lane::Preview, 10)]);
-        let started = transfers.start(now);
-        let ended = transfers
-            .finish_item(started[0].id, Outcome::Failed("gone".into()), None)
-            .expect("ended");
-        assert!(ended.notice.is_some());
-        // A preview beside a download keeps the download's notification.
-        let mut transfers = queue_of(vec![
-            download("app.log", Lane::Preview, 10),
-            download("db.sql", Lane::Queue, 10),
-        ]);
-        let started = transfers.start(now);
-        assert!(
-            transfers
-                .finish_item(started[0].id, Outcome::Done, None)
-                .is_none()
-        );
-        let ended = transfers
-            .finish_item(started[1].id, Outcome::Done, None)
-            .expect("ended");
-        assert!(ended.notice.is_some());
-    }
-
-    #[test]
-    fn a_failed_preview_does_not_stop_the_waiting_queue() {
+    fn a_failed_finder_drop_does_not_stop_the_waiting_queue() {
         // The lanes are independent.
         let now = Instant::now();
         let mut transfers = queue_of(vec![
             download("a.log", Lane::Queue, 10),
             download("b.log", Lane::Queue, 10),
-            download("app.log", Lane::Preview, 10),
+            download("app.log", Lane::Finder, 10),
         ]);
         let started = transfers.start(now);
-        let preview = started
+        let finder = started
             .iter()
             .find(|started| started.job.local.name == "app.log")
-            .expect("the preview starts at once")
+            .expect("the Finder drop starts at once")
             .id;
         let first = started
             .iter()
@@ -4117,7 +4036,7 @@ mod tests {
             .id;
         assert!(
             transfers
-                .finish_item(preview, Outcome::Failed("denied".into()), None)
+                .finish_item(finder, Outcome::Failed("denied".into()), None)
                 .is_none()
         );
         assert!(transfers.finish_item(first, Outcome::Done, None).is_none());
@@ -4157,7 +4076,7 @@ mod tests {
             !transfers.linger_over(first),
             "the new line replaces the result"
         );
-        // So does a preview.
+        // So does a Finder drop.
         let mut transfers = queue_of(vec![download("a.log", Lane::Queue, 10)]);
         let started = transfers.start(now);
         let _ = transfers.finish_item(started[0].id, Outcome::Done, None);
@@ -4166,7 +4085,7 @@ mod tests {
             Served::none(),
             "prod".into(),
             HostMark::Production,
-            vec![download("p.log", Lane::Preview, 10)],
+            vec![download("p.log", Lane::Finder, 10)],
         ));
         assert_eq!(started_names(&transfers.start(now)), ["p.log"]);
     }
@@ -4189,7 +4108,7 @@ mod tests {
         let mut transfers = queue_of(vec![
             job("done.txt", false, 1, 10),
             job("backup.tar.gz", false, 1, 96_000_000),
-            download("p", Lane::Preview, 100),
+            download("p", Lane::Finder, 100),
             download("w", Lane::Queue, 100),
         ]);
         let first = transfers.start(start);
@@ -4215,7 +4134,7 @@ mod tests {
         };
         assert_eq!(one.title, "Stop uploading?");
         assert_eq!(one.id, second[0].id);
-        // Stopping the preview alone leaves the upload streaming.
+        // Stopping the Finder drop alone leaves the upload streaming.
         assert_eq!(transfers.stop(Some(first[1].id), false), None);
         assert!(first[1].shared.cancel.load(Ordering::Acquire));
         assert!(!second[0].shared.cancel.load(Ordering::Acquire));
@@ -4238,16 +4157,16 @@ mod tests {
         let now = Instant::now();
         let mut transfers = queue_of(vec![
             job("a", false, 1, 10),
-            download("p", Lane::Preview, 10),
+            download("p", Lane::Finder, 10),
         ]);
         let started = transfers.start(now);
         assert_eq!(
             transfers.finish_item(started[0].id, Outcome::Failed("tar: denied".into()), None),
             None,
-            "the preview still streams"
+            "the Finder drop still streams"
         );
         assert!(transfers.start(now).is_empty(), "the queue is ending");
-        // The preview alone still has a line and a title percent.
+        // The Finder drop alone still has a line and a title percent.
         assert!(
             transfers
                 .status(now)
@@ -4320,7 +4239,7 @@ mod tests {
         let mut transfers = queue_of(vec![
             job("a", false, 1, 100),
             download("b", Lane::Queue, 100),
-            download("c", Lane::Preview, 100),
+            download("c", Lane::Finder, 100),
         ]);
         let now = Instant::now();
         let _ = transfers.start(now);

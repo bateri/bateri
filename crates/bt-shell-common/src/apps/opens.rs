@@ -26,9 +26,20 @@ pub struct Opener {
 /// The followed programs of `root` that say they open a file, a folder or both, in the order of
 /// their names.
 pub fn openers(root: &Path) -> Vec<Opener> {
-    store::followed_names(root)
+    among(
+        root,
+        store::followed_names(root)
+            .into_iter()
+            .map(|(name, _)| name),
+    )
+}
+
+/// The programs of `names`, followed ones of `root`, that say they open a file, a folder or both:
+/// for a caller that has read the followed names already.
+pub fn among(root: &Path, names: impl IntoIterator<Item = String>) -> Vec<Opener> {
+    names
         .into_iter()
-        .filter_map(|(name, _)| {
+        .filter_map(|name| {
             let opens = opens_of(root, &name)?;
             Some(Opener { name, opens })
         })

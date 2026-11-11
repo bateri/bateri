@@ -206,6 +206,10 @@ struct Hold {
     /// How many bytes were put in `out` since the holder was made, a raw holder's: the position
     /// of the next in its stream.
     fed: u64,
+    /// The holder is the pane of a program the application asked a server to run
+    /// ([`Hub::for_a_program`]): the plain `ssh` it stands in for is not what was asked, so a
+    /// refusal never sends it there.
+    program: bool,
 }
 
 impl Hold {
@@ -225,6 +229,7 @@ impl Hold {
             silence: None,
             forget_past: false,
             fed: 0,
+            program: false,
         }
     }
 
@@ -278,6 +283,27 @@ impl Hold {
     }
 
     fn finish(&mut self, message: &ToHold) {
+        // The pane of a program is the program's and no more: whatever refuses it, a plain `ssh`
+        // in it would be a login nobody asked for, so it ends and says so instead.
+        if self.program
+            && let ToHold::Refused {
+                fall_back: true,
+                text,
+            } = message
+        {
+            let text = if text.is_empty() {
+                "bateri: there is no terminal on the server for the program".to_owned()
+            } else {
+                text.clone()
+            };
+            self.send(&ToHold::Refused {
+                fall_back: false,
+                text,
+            });
+            self.finished = true;
+            self.close_past();
+            return;
+        }
         self.send(message);
         self.finished = true;
         self.close_past();
@@ -1133,6 +1159,14 @@ impl Hub {
                 fall_back,
                 text: text.to_owned(),
             });
+        }
+    }
+
+    /// The holder is the pane of a program the application asked a server to run: when no
+    /// terminal can be shown, it ends and says so, and does not become a plain `ssh`.
+    pub fn for_a_program(&mut self, hold: HoldId) {
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.program = true;
         }
     }
 

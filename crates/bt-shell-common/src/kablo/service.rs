@@ -261,7 +261,7 @@ impl Shown {
     /// Whether the terminal this is serves `target`, the remote session the pane's
     /// `ssh` is in: the same server as the user typed it. **The one rule of
     /// what bateri does on a server for a pane**: file drops and downloads,
-    /// previews, the load indicator, the server's ports, the ⌘ check of a path
+    /// the load indicator, the server's ports, the ⌘ check of a path
     /// and the connection of bateri's own those ride on are offered in
     /// a pane that shows a terminal a server keeps and in no other — an `ssh`
     /// that is a plain one (the setting is off for the host, a `production`
@@ -3420,6 +3420,10 @@ impl Core {
         };
         if let Some(tab) = &pane.tab {
             self.panes.insert(hold, tab.clone());
+        }
+        if pane.program.is_some() {
+            // Whatever refuses it from here on, the pane ends: it was made for the program.
+            self.hub.for_a_program(hold);
         }
         match &open.target {
             Target::Resume { account, .. } => {

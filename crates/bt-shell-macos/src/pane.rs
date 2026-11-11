@@ -33,9 +33,8 @@
 //! includes scale and point size, and the point-size delta belongs to the pane.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::c_void;
-use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,7 +101,6 @@ use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
 use crate::pencere_view::{self, ViewHost, Waits};
 use crate::ports::Listener;
-use crate::preview::PreviewTicket;
 use crate::program;
 use crate::program::identity::{self, Kind, Seen};
 use crate::promise::FinderDrops;
@@ -2310,12 +2308,9 @@ pub struct PaneIvars {
     /// [`TerminalPane::note_interaction`]. On the sleep-counting clock, so the
     /// focus query's `idle` does not stop with the lid closed.
     last_input: Cell<Moment>,
-    /// `[remote]`'s preview and download keys: from the birth package,
+    /// `[remote]`'s download keys: from the birth package,
     /// refreshed live with the host marks ([`TerminalPane::set_host_marks`]).
     remote_files: RefCell<RemoteFiles>,
-    /// The previews this pane downloaded, by landing path: how each
-    /// opens and where its index is ([`crate::preview::PreviewTicket`]).
-    previews: RefCell<HashMap<PathBuf, PreviewTicket>>,
     /// The file promises of ⌘-dragged remote links: the delegates
     /// kept alive and the Finder downloads that fulfil them.
     finder: RefCell<FinderDrops>,
@@ -2655,7 +2650,7 @@ define_class!(
                 Some((_, text)) => {
                     clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
                 }
-                None => crate::preview::beep(),
+                None => crate::sheets::beep(),
             }
         }
 
@@ -2672,7 +2667,7 @@ define_class!(
                 Some(text) if !text.is_empty() => {
                     clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
                 }
-                _ => crate::preview::beep(),
+                _ => crate::sheets::beep(),
             }
         }
 
@@ -2961,7 +2956,6 @@ impl TerminalPane {
             stats: RefCell::new(stats_seat),
             last_input: Cell::new(Moment::now()),
             remote_files: RefCell::new(remote_files),
-            previews: RefCell::new(HashMap::new()),
             finder: RefCell::new(FinderDrops::default()),
             parked: RefCell::new(crate::sheets::ParkedQueue::new()),
             opened: RefCell::new(Vec::new()),
@@ -3263,7 +3257,7 @@ impl TerminalPane {
     /// server keeps** ([`Shown::serves`]). `None` for a local pane and for a plain
     /// `ssh` — an `ssh` the integration is off for, a `production` host, a
     /// server kablo cannot be kept on, a call that runs a command — which gets
-    /// nothing of bateri's on the server: no file drop or download, no preview,
+    /// nothing of bateri's on the server: no file drop or download,
     /// no load indicator, no ports, no ⌘ check of a path, and no
     /// connection of bateri's own to the host.
     ///
@@ -4324,8 +4318,8 @@ impl TerminalPane {
 
     /// `[remote]` changed — the `hosts` pattern list goes to the session; the
     /// active remote host's mark is re-resolved there. The tab's
-    /// dot is the window's job (`TerminalWindow::set_host_marks`). The preview
-    /// and download keys are kept here for the next download.
+    /// dot is the window's job (`TerminalWindow::set_host_marks`). The
+    /// download keys are kept here for the next download.
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
         if let Some(session) = self.ivars().session.get() {
             session.set_host_marks(&settings.remote_hosts);
@@ -4544,7 +4538,7 @@ impl TerminalPane {
             Wait::LogIn => self.log_in_to_reconnect(),
             Wait::TryNow => self.host().retry_kept_terminal(self.uuid()),
             Wait::BringBack => self.host().bring_back_kept_terminal(self.uuid()),
-            Wait::Beep => crate::preview::beep(),
+            Wait::Beep => crate::sheets::beep(),
         }
         true
     }
@@ -7834,14 +7828,9 @@ impl TerminalPane {
         &self.ivars().last_input
     }
 
-    /// `[remote]`'s preview and download keys as last read.
+    /// `[remote]`'s download keys as last read.
     pub(crate) fn remote_files(&self) -> &RefCell<RemoteFiles> {
         &self.ivars().remote_files
-    }
-
-    /// The previews this pane downloaded, by landing path.
-    pub(crate) fn previews(&self) -> &RefCell<HashMap<PathBuf, PreviewTicket>> {
-        &self.ivars().previews
     }
 
     /// The file promises of ⌘-dragged remote links ([`crate::promise`]).
@@ -8428,7 +8417,6 @@ mod tests {
     fn every_add_on_on_a_server_asks_the_one_gate() {
         let add_ons = [
             ("uploader.rs", include_str!("uploader.rs")),
-            ("preview.rs", include_str!("preview.rs")),
             ("promise.rs", include_str!("promise.rs")),
             ("stats.rs", include_str!("stats.rs")),
             ("server_card.rs", include_str!("server_card.rs")),
@@ -8466,8 +8454,10 @@ mod tests {
             );
         }
         assert!(entry(uploader, "pub(crate) fn accepts_drop(").contains("is_plain_ssh()"));
+        // The terminal a click on a server's path starts is asked of the server the pane shows.
         assert!(
-            entry(include_str!("preview.rs"), "fn preview_remote(").contains("server_target()")
+            entry(include_str!("app.rs"), "pub(crate) fn open_program(")
+                .contains("server_target()")
         );
         assert!(
             entry(
@@ -8505,7 +8495,6 @@ mod tests {
         // "shows a server's terminal" do not either.
         for (name, source) in [
             ("uploader.rs", include_str!("uploader.rs")),
-            ("preview.rs", include_str!("preview.rs")),
             ("promise.rs", include_str!("promise.rs")),
             ("stats.rs", include_str!("stats.rs")),
             ("server_card.rs", include_str!("server_card.rs")),

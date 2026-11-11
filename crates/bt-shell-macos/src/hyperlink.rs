@@ -47,15 +47,15 @@
 //!
 //! - **A right click on a link opens a menu** (mouse mode off; the band and the
 //!   dock are never the application's): "Open Link"/"Copy Link", on a path
-//!   "Open"/"Reveal in Finder"/"Copy Path". The path is verified on the same
+//!   "Open in <program>" (where the program takes it)/"Reveal in Finder"/"Copy Path",
+//!   on a server's path the downloads too. The path is verified on the same
 //!   background queue first — a missing one is no link and gets no menu.
 //!
-//! Opening — a click and the menu's "Open" alike — follows `links::action`'s
-//! white list: a URL and a document go to
-//! their default application, a directory opens in Finder, everything else is
-//! revealed in Finder, an uncommon OSC 8 scheme asks first and `bateri://` is
-//! swallowed. "Is this a known document" is UTType's answer, read through the
-//! runtime (`AnyClass::get`, the `updater` precedent) — no new crate.
+//! Opening — a click and the menu's "Open" alike — is the person's own act. **A path** (on this
+//! Mac or on a server) opens in the program `[apps] open_with` names, on the computer it is on,
+//! in a floating pane; where there is no such program it is no link, and nothing of a path is
+//! handed to the system to open. Any other link follows `links::action`'s policy: a URL goes to
+//! its default application, an uncommon OSC 8 scheme asks first and `bateri://` is swallowed.
 
 use std::cell::Cell;
 use std::path::Path;
@@ -67,8 +67,8 @@ use bt_gpu::{CellMetrics, Origin};
 use bt_shell_common::open_with::{Choice, Thing};
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{MainThreadMarker, MainThreadOnly, msg_send, sel};
+use objc2::runtime::AnyObject;
+use objc2::{MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertSecondButtonReturn, NSEvent, NSMenu, NSMenuItem, NSModalResponse,
     NSModalResponseOK, NSOpenPanel, NSPasteboard, NSWorkspace,
@@ -80,7 +80,7 @@ use objc2_foundation::{
 use crate::child;
 use crate::clipboard;
 use crate::launch::OpenProgram;
-use crate::links::{self, Content, Entry, LinkAction, Resolved};
+use crate::links::{self, Entry, LinkAction, Resolved};
 use crate::pointer;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{self, Answer, Query, Request};
@@ -393,73 +393,6 @@ fn span_rects_px(spans: &[LinkSpan], metrics: CellMetrics, origin_px: f64) -> Ve
         .collect()
 }
 
-/// The UTTypes a file conforms to to be opened in its default application
-/// (`links::Content::Document`): text and source code, image, PDF, audio/video.
-const DOCUMENT_TYPES: [&str; 6] = [
-    "public.plain-text",
-    "public.source-code",
-    "public.json",
-    "public.image",
-    "com.adobe.pdf",
-    "public.audiovisual-content",
-];
-
-/// The UTTypes that are **never** a document, even when they also conform to a
-/// text type: `public.shell-script` is `public.source-code`, and "opening" a
-/// `.command` or a `.py` runs it (Terminal, Python Launcher). Asked first.
-const NEVER_DOCUMENT: [&str; 2] = ["public.script", "public.executable"];
-
-/// The content class of a file name's extension, from UTType.
-/// `Other` without an extension, for an unknown one and if the runtime has no
-/// `UTType` class — the white list's safe side (the file is revealed).
-pub(crate) fn extension_content(ext: &str) -> Content {
-    let Some(class) = AnyClass::get(c"UTType") else {
-        return Content::Other;
-    };
-    // SAFETY: `+[UTType typeWithFilenameExtension:]` takes an `NSString` and
-    // returns a nullable `UTType`.
-    let ty: Option<Retained<AnyObject>> =
-        unsafe { msg_send![class, typeWithFilenameExtension: &*NSString::from_str(ext)] };
-    let Some(ty) = ty else {
-        return Content::Other;
-    };
-    let conforms = |identifier: &str| {
-        // SAFETY: `+[UTType typeWithIdentifier:]` takes an `NSString` and returns
-        // a nullable `UTType`; `-conformsToType:` takes a `UTType`, returns `BOOL`.
-        let target: Option<Retained<AnyObject>> =
-            unsafe { msg_send![class, typeWithIdentifier: &*NSString::from_str(identifier)] };
-        target.is_some_and(|target| unsafe { msg_send![&*ty, conformsToType: &*target] })
-    };
-    if NEVER_DOCUMENT.iter().any(|id| conforms(id)) {
-        Content::Other
-    } else if DOCUMENT_TYPES.iter().any(|id| conforms(id)) {
-        Content::Document
-    } else {
-        Content::Other
-    }
-}
-
-/// `links::action`'s content oracle: a package (`.app`, `.pkg`, a bundle) first —
-/// opening it would launch or install it —, then the extension's type.
-///
-/// **Asked about a real path only** (`links::Resolved::target`, every symlink
-/// and Finder alias followed — [`stat`]): `isFilePackageAtPath` answers `false`
-/// for a symlink to an `.app` and the extension of a link is its own name's, so
-/// asked about the link both questions would be answered about the wrong object.
-///
-/// On the main thread at click time: `isFilePackageAtPath` reads the disk, but
-/// only once per click on a path the background `stat` already found and
-/// followed.
-fn content_of(path: &Path) -> Content {
-    let text = NSString::from_str(&path.to_string_lossy());
-    if NSWorkspace::sharedWorkspace().isFilePackageAtPath(&text) {
-        return Content::Package;
-    }
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map_or(Content::Other, extension_content)
-}
-
 fn file_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
 }
@@ -494,34 +427,51 @@ fn stat(path: &Path) -> Option<(links::Entry, std::path::PathBuf)> {
 /// on a folder); a path that is not a folder beeps ([`folder_action`]).
 ///
 /// On the main thread: a few `lstat`s, an alias check and one `isFilePackageAtPath` on a
-/// folder the user picked — the `is_dir` this always read, now followed to the real folder.
+/// folder the user picked.
 pub(crate) fn show_folder(path: &Path) {
     let workspace = NSWorkspace::sharedWorkspace();
     match folder_action(path) {
-        Some(LinkAction::OpenDir(target)) => {
+        Some(Show::Open(target)) => {
             workspace.openURL(&file_url(&target));
         }
-        Some(LinkAction::Reveal(path)) => {
+        Some(Show::Reveal(path)) => {
             workspace
                 .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[file_url(&path)]));
         }
-        _ => crate::preview::beep(),
+        None => crate::sheets::beep(),
     }
 }
 
-/// [`show_folder`]'s decision, the link policy's two directory rows: a folder opens at its
-/// real path, **a package is revealed** — the folder comes from OSC 7 (a `cd Evil.app`, or
-/// any output that prints the sequence) or from the palette, and `openURL` on `Evil.app` (or
-/// on a link or an alias to it) launches it. `None` for anything that is not a folder.
-fn folder_action(path: &Path) -> Option<LinkAction> {
+/// What Show Folder in Finder does with a path.
+#[derive(Debug, PartialEq, Eq)]
+enum Show {
+    /// Open the folder in a Finder window.
+    Open(std::path::PathBuf),
+    /// Show the item selected in Finder.
+    Reveal(std::path::PathBuf),
+}
+
+/// [`show_folder`]'s decision: a folder opens at its real path, **a package is revealed** — the
+/// folder comes from OSC 7 (a `cd Evil.app`, or any output that prints the sequence) or from the
+/// palette, and `openURL` on `Evil.app` (or on a link or an alias to it) launches it. `None` for
+/// anything that is not a folder.
+fn folder_action(path: &Path) -> Option<Show> {
     let (links::Entry::Dir, target) = stat(path)? else {
         return None;
     };
-    Some(if content_of(&target) == Content::Package {
-        LinkAction::Reveal(path.to_path_buf())
+    Some(if is_package(&target) {
+        Show::Reveal(path.to_path_buf())
     } else {
-        LinkAction::OpenDir(target)
+        Show::Open(target)
     })
+}
+
+/// Whether `path` is a package (`.app`, `.pkg`, a bundle): a directory the system treats as one
+/// file. Asked about a real path only ([`stat`] followed every symlink and Finder alias):
+/// `isFilePackageAtPath` answers `false` for a symlink to an `.app`.
+fn is_package(path: &Path) -> bool {
+    let text = NSString::from_str(&path.to_string_lossy());
+    NSWorkspace::sharedWorkspace().isFilePackageAtPath(&text)
 }
 
 /// Hands a URL string to its default application; a string `NSURL` rejects does nothing.
@@ -665,6 +615,8 @@ impl BateriView {
                 .hover
                 .as_ref()
                 .filter(|shown| same_link(&shown.query, &hit))
+                // The setting may have changed under a shown path: it is verified again then.
+                .filter(|shown| self.program_stands(shown))
                 .map(|shown| shown.refresh(hit.clone()))
         };
         if let Some(link) = reuse {
@@ -725,6 +677,20 @@ impl BateriView {
             return;
         }
         self.verify(check, hit, Then::Hover);
+    }
+
+    /// Whether the program a shown path was verified for is the one the setting names now: the
+    /// hover outlives a change of `[apps] open_with`, and an underline must not promise what the
+    /// click will not do. A link that is no path has no program and stands.
+    fn program_stands(&self, shown: &Verified) -> bool {
+        if shown.resolved.is_none() && shown.remote.is_none() {
+            return true;
+        }
+        let now = self
+            .pane()
+            .and_then(|pane| pane.open_choice(shown.remote.is_some()))
+            .map(|choice| choice.name);
+        shown.program == now
     }
 
     /// How `hit` is verified ([`Check`]): a remote hit by the helper session,
@@ -898,10 +864,15 @@ impl BateriView {
             );
             // This Mac has the program when the link to it is there: looked for here, where the
             // paths are, and not in what this Mac's kablo said it has — which it does not say to a
-            // level of `off`.
+            // level of `off`. The link is under the home folder where the installer puts it
+            // (`open_with::bin_here`), not in the folder of what this copy follows.
             let here = choice.as_ref().is_some_and(|choice| {
-                crate::apps_root()
-                    .is_some_and(|root| root.join("bin").join(&choice.name).metadata().is_ok())
+                home.as_deref().is_some_and(|home| {
+                    bt_shell_common::open_with::bin_here(home)
+                        .join(&choice.name)
+                        .metadata()
+                        .is_ok()
+                })
             });
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
@@ -1121,30 +1092,15 @@ impl BateriView {
 
     /// The click's action. A path, on this Mac or on a server, opens in the program the person
     /// chose ([`BateriView::open_in_program`]); any other link is the policy's
-    /// ([`links::action`], the white list).
+    /// ([`links::action`], the policy).
     fn open_link(&self, link: &Verified) {
         // A path, here or on a server, opens in the program the person chose, and nowhere else.
         if link.resolved.is_some() || link.remote.is_some() {
             self.open_in_program(link);
             return;
         }
-        let action = links::action(
-            &link.hit.target,
-            &link.hit.kind,
-            link.resolved.as_ref(),
-            content_of,
-        );
-        let workspace = NSWorkspace::sharedWorkspace();
-        match action {
+        match links::action(&link.hit.target, &link.hit.kind) {
             Some(LinkAction::OpenUrl(url)) => open_url(&url),
-            Some(LinkAction::OpenFile(path) | LinkAction::OpenDir(path)) => {
-                workspace.openURL(&file_url(&path));
-            }
-            Some(LinkAction::Reveal(path)) => {
-                workspace.activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[
-                    file_url(&path),
-                ]));
-            }
             Some(LinkAction::Confirm(target)) => self.confirm_open(target),
             Some(LinkAction::Swallow) | None => {}
         }
@@ -1172,6 +1128,14 @@ impl BateriView {
         } else {
             return;
         };
+        // A hover or a menu can be older than the setting: what opens is what it names now, and
+        // takes what the path is.
+        if !pane
+            .open_choice(server)
+            .is_some_and(|choice| choice.name == name && choice.takes(thing))
+        {
+            return;
+        }
         pane.open_program(OpenProgram {
             name,
             thing,
@@ -1203,6 +1167,8 @@ impl BateriView {
                 .hover
                 .as_ref()
                 .filter(|shown| same_link(&shown.query, &hit))
+                // The setting may have changed under a shown path: it is verified again then.
+                .filter(|shown| self.program_stands(shown))
                 .map(|shown| shown.refresh(hit.clone()))
         };
         if let Some(link) = reuse {
@@ -1285,13 +1251,13 @@ impl BateriView {
             self.pop_menu(link, &items, at);
             return;
         }
-        let action = links::action(
-            &link.hit.target,
-            &link.hit.kind,
-            link.resolved.as_ref(),
-            |_| Content::Other,
-        );
-        if matches!(action, None | Some(LinkAction::Swallow)) {
+        // A path (found on this Mac) has its own menu; any other link has the policy's.
+        if link.resolved.is_none()
+            && matches!(
+                links::action(&link.hit.target, &link.hit.kind),
+                None | Some(LinkAction::Swallow)
+            )
+        {
             return;
         }
         let items: Vec<(&NSString, objc2::runtime::Sel, bool)> = if link.resolved.is_some() {
@@ -1526,8 +1492,41 @@ mod tests {
     /// `[commands] level` is in the code that does it (the level is the agents' and the
     /// programs' own commands). A server at `off` says nothing of what it has, which leaves no
     /// link there; that is the machine's silence, not a check of the level.
+    /// The text of the method that starts at `marker` (an indented `fn`), to the closing brace
+    /// that is indented as the `fn` is.
+    fn method<'a>(source: &'a str, marker: &str) -> &'a str {
+        let from = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("`{marker}` is in the source"));
+        let rest = &source[from..];
+        let end = rest.find("\n    }\n").map_or(rest.len(), |at| at + 6);
+        &rest[..end]
+    }
+
+    /// Where a machine has the links to its programs is one place (`open_with::bin_here`, under
+    /// the home folder, where the installer puts them): the folder this copy keeps what it
+    /// follows in has no `bin`, and a link looked for there is never found — which a test that
+    /// builds the path itself cannot tell.
+    #[test]
+    fn the_link_to_a_program_is_looked_for_where_the_installer_puts_it() {
+        let hyperlink = include_str!("hyperlink.rs");
+        let check = method(hyperlink, "    fn verify_paths(");
+        let app = include_str!("app.rs");
+        let start = method(app, "    pub(crate) fn open_program(");
+        for (name, code) in [("verify_paths", check), ("open_program", start)] {
+            assert!(code.contains("bin_here("), "{name} does not use `bin_here`");
+            assert!(
+                !code.contains("apps_root()") && !code.contains("join(\"bin\")"),
+                "{name} looks for the link in the store of what is followed"
+            );
+        }
+    }
+
     #[test]
     fn the_click_asks_no_command_level() {
+        // The code of the gate: the whole of the two files that are only the click, and the
+        // methods of the application and the pane that find the program and start it.
+        let mut parts: Vec<(String, &str)> = Vec::new();
         for (name, source) in [
             ("hyperlink.rs", include_str!("hyperlink.rs")),
             (
@@ -1536,7 +1535,37 @@ mod tests {
             ),
         ] {
             // Everything before this test module is the code.
-            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+            parts.push((
+                name.to_owned(),
+                source.split("#[cfg(test)]").next().unwrap_or(source),
+            ));
+        }
+        for (name, source, markers) in [
+            (
+                "app.rs",
+                include_str!("app.rs"),
+                [
+                    "    fn openers(",
+                    "    pub(crate) fn open_choice(",
+                    "    pub(crate) fn open_program(",
+                ]
+                .as_slice(),
+            ),
+            (
+                "pane.rs",
+                include_str!("pane.rs"),
+                [
+                    "    pub(crate) fn open_choice(",
+                    "    pub(crate) fn open_program(",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            for marker in markers {
+                parts.push((format!("{name} {}", marker.trim()), method(source, marker)));
+            }
+        }
+        for (name, code) in parts {
             for word in ["CommandLevel", "commands_level", "command_level"] {
                 assert!(!code.contains(word), "{name} reads `{word}`");
             }
@@ -1621,34 +1650,18 @@ mod tests {
         assert_eq!(at(rect[0] + rect[2] - 0.5, rect[1]), Some((0, 4)));
     }
 
-    /// Reads this Mac's Launch Services database (an application declaring an
-    /// extension can change UTType's answer): a red here is the environment's
-    /// first, then the code's — the `child` tests' real-zsh precedent.
+    /// The click's check and Show Folder in Finder on a real disk — the background `stat`, then
+    /// what the path is — for links whose own names lie: the object a link names is the one that
+    /// is judged and opened, and a package is never opened from a folder that was named by a
+    /// link to it.
     #[test]
-    fn documents_open_and_scripts_and_executables_never_do() {
-        for ext in ["txt", "md", "json", "png", "jpg", "pdf", "mp4", "c"] {
-            assert_eq!(extension_content(ext), Content::Document, ".{ext}");
-        }
-        // A script is source code too — and opening it runs it.
-        for ext in [
-            "command", "sh", "py", "tool", "app", "pkg", "terminal", "webloc",
-        ] {
-            assert_eq!(extension_content(ext), Content::Other, ".{ext}");
-        }
-        assert_eq!(extension_content("no-such-extension-xyz"), Content::Other);
-    }
-
-    /// The whole click on a real disk — the background `stat`, then the policy with
-    /// `content_of` — for links whose own names lie: `isFilePackageAtPath` does not
-    /// follow a symlink, and a name's extension is the link's, not the target's.
-    #[test]
-    fn a_symlink_is_judged_by_what_it_opens_not_by_its_own_name() {
+    fn a_symlink_is_judged_by_what_it_points_to_not_by_its_own_name() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let dir = std::env::temp_dir().join(format!("bt-hyperlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let calculator = Path::new("/System/Applications/Calculator.app");
         symlink(calculator, dir.join("docs")).expect("link to an app");
-        symlink(calculator, dir.join("Calculator.app")).expect("app-named link");
         std::fs::write(dir.join("payload.terminal"), "x").expect("write payload");
         std::fs::set_permissions(
             dir.join("payload.terminal"),
@@ -1660,60 +1673,50 @@ mod tests {
         symlink("real.md", dir.join("latest.txt")).expect("link to a doc");
         std::fs::create_dir_all(dir.join("v2")).expect("folder");
         symlink("v2", dir.join("current")).expect("link to a folder");
-        let click = |name: &str| {
-            let kind = LinkKind::Path {
-                line: None,
-                col: None,
-            };
-            let resolved = links::resolve(Path::new(name), Some(&dir), None, stat);
-            links::action(name, &kind, resolved.as_ref(), content_of)
-        };
         let real = |name: &str| std::fs::canonicalize(dir.join(name)).expect("canonical");
-        // A link to an application is revealed, whatever it is called: opening it launches.
+        let resolve = |name: &str| links::resolve(Path::new(name), Some(&dir), None, stat);
+        // The path stays the link the text names; what it is and what is opened are the
+        // object it points to.
+        let docs = resolve("docs").expect("a link to an app");
         assert_eq!(
-            click("docs"),
-            Some(LinkAction::Reveal(dir.join("docs"))),
-            "a link to an app"
+            (docs.path.clone(), docs.entry),
+            (dir.join("docs"), Entry::Dir)
         );
+        assert_eq!(docs.target, std::fs::canonicalize(calculator).expect("app"));
+        let readme = resolve("README.txt").expect("a link to a file");
+        assert_eq!(readme.entry, Entry::File { executable: false });
+        assert_eq!(readme.target, real("payload.terminal"));
         assert_eq!(
-            click("Calculator.app"),
-            Some(LinkAction::Reveal(dir.join("Calculator.app")))
+            resolve("latest.txt").map(|resolved| resolved.target),
+            Some(real("real.md"))
         );
-        // A text name over a `.terminal` is not a document: revealed, never run.
-        assert_eq!(
-            click("README.txt"),
-            Some(LinkAction::Reveal(dir.join("README.txt")))
-        );
-        // A link to a real document or folder still opens — what it points to.
-        assert_eq!(
-            click("latest.txt"),
-            Some(LinkAction::OpenFile(real("real.md")))
-        );
-        assert_eq!(click("current"), Some(LinkAction::OpenDir(real("v2"))));
-        // Shell ▸ Show Folder in Finder and the palette's ⌘⏎ take the same care with
-        // a folder that is an application (OSC 7 can name one).
+        let current = resolve("current").expect("a link to a folder");
+        assert_eq!((current.entry, current.target), (Entry::Dir, real("v2")));
+        assert!(resolve("nope").is_none());
+        // Shell ▸ Show Folder in Finder and the palette's ⌘⏎ take care with a folder that is an
+        // application (OSC 7 can name one): it is revealed, never opened.
         assert_eq!(
             folder_action(&dir.join("docs")),
-            Some(LinkAction::Reveal(dir.join("docs")))
+            Some(Show::Reveal(dir.join("docs")))
         );
         assert_eq!(
             folder_action(calculator),
-            Some(LinkAction::Reveal(calculator.to_path_buf()))
+            Some(Show::Reveal(calculator.to_path_buf()))
         );
         assert_eq!(
             folder_action(&dir.join("current")),
-            Some(LinkAction::OpenDir(real("v2")))
+            Some(Show::Open(real("v2")))
         );
         assert_eq!(folder_action(&dir.join("real.md")), None);
         assert_eq!(folder_action(&dir.join("nope")), None);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// The same click for **Finder aliases** — regular files `canonicalize` does not
-    /// follow, which a plain `tar` or a DMG delivers unquarantined and Launch Services
-    /// resolves when it opens them: `notes.md` that is an alias to an app must not open.
+    /// The same for **Finder aliases** — regular files `canonicalize` does not follow, which a
+    /// plain `tar` or a DMG delivers unquarantined: `notes.md` that is an alias to an app is a
+    /// folder to the click, and Show Folder reveals it instead of opening it.
     #[test]
-    fn a_finder_alias_is_judged_by_what_it_opens_not_by_its_own_name() {
+    fn a_finder_alias_is_judged_by_what_it_names_not_by_its_own_name() {
         use objc2_foundation::NSURLBookmarkCreationOptions;
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("bt-hyperlink-alias-{}", std::process::id()));
@@ -1754,46 +1757,43 @@ mod tests {
             links::stat(&dir.join("notes.md")).map(|(entry, _)| entry),
             Some(links::Entry::File { executable: false })
         );
-        let click = |name: &str| {
-            let kind = LinkKind::Path {
-                line: None,
-                col: None,
-            };
-            let resolved = links::resolve(Path::new(name), Some(&dir), None, stat);
-            links::action(name, &kind, resolved.as_ref(), content_of)
-        };
         let real = |name: &str| std::fs::canonicalize(dir.join(name)).expect("canonical");
-        // An alias to an application, directly or through another alias: revealed.
+        let resolve = |name: &str| links::resolve(Path::new(name), Some(&dir), None, stat);
+        // An alias to an application, directly or through another alias, is the application.
+        for name in ["notes.md", "chain.md"] {
+            let resolved = resolve(name).expect(name);
+            assert_eq!(
+                (resolved.path, resolved.entry),
+                (dir.join(name), Entry::Dir)
+            );
+            assert_eq!(
+                resolved.target,
+                std::fs::canonicalize(calculator).expect("app"),
+                "{name}"
+            );
+        }
+        // A text name over a `.terminal` is that file.
         assert_eq!(
-            click("notes.md"),
-            Some(LinkAction::Reveal(dir.join("notes.md"))),
-            "an alias to an app"
+            resolve("README.txt").map(|resolved| resolved.target),
+            Some(real("payload.terminal"))
         );
+        // An alias to a real document or folder is what it names.
         assert_eq!(
-            click("chain.md"),
-            Some(LinkAction::Reveal(dir.join("chain.md")))
+            resolve("latest.txt").map(|resolved| resolved.target),
+            Some(real("real.md"))
         );
-        // A text name over a `.terminal`: revealed, never run.
-        assert_eq!(
-            click("README.txt"),
-            Some(LinkAction::Reveal(dir.join("README.txt")))
-        );
-        // An alias to a real document or folder opens what it names.
-        assert_eq!(
-            click("latest.txt"),
-            Some(LinkAction::OpenFile(real("real.md")))
-        );
-        assert_eq!(click("current"), Some(LinkAction::OpenDir(real("v2"))));
+        let current = resolve("current").expect("an alias to a folder");
+        assert_eq!((current.entry, current.target), (Entry::Dir, real("v2")));
         // An alias that does not resolve is no link at all.
-        assert_eq!(click("dangling.md"), None);
+        assert!(resolve("dangling.md").is_none());
         // Show Folder in Finder: an alias to an app is revealed, one to a folder opens it.
         assert_eq!(
             folder_action(&dir.join("notes.md")),
-            Some(LinkAction::Reveal(dir.join("notes.md")))
+            Some(Show::Reveal(dir.join("notes.md")))
         );
         assert_eq!(
             folder_action(&dir.join("current")),
-            Some(LinkAction::OpenDir(real("v2")))
+            Some(Show::Open(real("v2")))
         );
         assert_eq!(folder_action(&dir.join("dangling.md")), None);
         std::fs::remove_dir_all(&dir).expect("cleanup");

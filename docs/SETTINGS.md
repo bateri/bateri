@@ -110,8 +110,8 @@ goes with them.
   Keyboard](#settings--keyboard)).
 - **Servers**, after a gap — `[remote] integration` ("Set up shell integration
   on servers"; see [Remote shell integration](#remote-shell-integration)), the
-  two keys of the load indicator (`stats`, `stats_interval`) and the eight
-  preview and download keys of `[remote]`.
+  two keys of the load indicator (`stats`, `stats_interval`) and the three
+  download keys of `[remote]`.
 - **Apps**, under Servers — the programs bateri keeps up to date (see
   [`[apps]`](#apps) below): which of them opens a file or a folder you
   Command-click, the list of what it follows, and a field to add to it.
@@ -144,10 +144,7 @@ with the tab bar and two panes). An example is drawn while its page is open and
 is left out where there is no GPU.
 
 On folder rows Change… opens a folder picker (a folder under your home
-directory is written as `~/…`), on the preview folder Show in Finder opens it,
-and the "In use" row shows the total size of the copies in the folder — Clear
-Now deletes the previews at once (a copy you changed is not deleted, it is
-moved to the download folder). The window only writes to `settings.toml`; what
+directory is written as `~/…`). The window only writes to `settings.toml`; what
 applies it to the screen is the same path that runs when you save the file, so
 a change made from the window also takes effect at once.
 
@@ -555,22 +552,7 @@ hosts = []
 # there once. A host marked "production" stays plain unless its entry says
 # integration = true; integration = false in an entry turns one host off.
 integration = true
-# Sizes are written like "100MB" or "2GB" (B, KB, MB, GB, TB); folders start
-# with / or ~/.
-# A file larger than this asks before its preview downloads (cmd-click on a
-# remote file name).
-preview_max_size = "100MB"
-# true | false. Previews open read-only. It is a hint: an app can unlock one,
-# and a preview you changed is moved to the download folder, never deleted.
-preview_read_only = true
-# Where previews are kept.
-preview_dir = "~/Library/Caches/bateri/Previews"
-# "launch" | "1d" | "7d" | "30d". How long a preview stays after you last
-# opened it; checked when bateri starts and once a day. launch keeps previews
-# until bateri starts again.
-preview_keep = "7d"
-# The preview folder's size limit, applied when bateri starts, oldest first.
-preview_limit = "2GB"
+# Folders start with / or ~/.
 # Where "Download to Downloads" puts a remote file or folder.
 download_dir = "~/Downloads"
 # "ask" | "keep_both" | "replace". What a download does when the name already
@@ -2355,11 +2337,6 @@ integration = true
 | key | type | default | meaning |
 |---|---|---|---|
 | `hosts` | array of `{ host, mark, integration, commands }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, a database client is connected to it, or kubectl works in that Kubernetes context; `commands` (`"off"` \| `"own"` \| `"screen"` \| `"full"`) is the level of the `bateri` command on that server ([`[commands]`](#commands)), and an entry may carry it without a mark |
-| `preview_max_size` | size | `"100MB"` | if a remote file's preview (⌘-click) is larger than this, asks before downloading |
-| `preview_read_only` | `true` \| `false` | `true` | the preview copy opens read-only (`0444`) — a hint, an app can unlock it |
-| `preview_dir` | folder | `"~/Library/Caches/bateri/Previews"` | the folder of preview copies |
-| `preview_keep` | `"launch"` \| `"1d"` \| `"7d"` \| `"30d"` | `"7d"` | how long a preview stays after it was last opened; `launch` until the next launch |
-| `preview_limit` | size | `"2GB"` | the preview folder's size limit; only at launch, oldest first |
 | `download_dir` | folder | `"~/Downloads"` | the target of "Download to Downloads" |
 | `download_conflict` | `"ask"` \| `"keep_both"` \| `"replace"` | `"ask"` | if the same name exists at the target: ask, keep both (the new one gets a number) or overwrite |
 | `download_notify` | `true` \| `false` | `true` | a transfer that ends while bateri is in the background sends a notification |
@@ -2369,10 +2346,10 @@ integration = true
 
 **Everything bateri does on a server happens in a terminal the server keeps** (a
 pane that shows one, below) **and in no other**: dropping a Finder file on the
-pane to upload it, downloading and previewing a file, the load indicator, the
+pane to upload it, downloading a file, the load indicator, the
 server's ports, the ⌘ check of a path in the output, and the
 connection of its own that these ride on. The keys of this section that name
-them (`preview_*`, `download_*`, `stats`, `stats_interval`) apply there. A plain
+them (`download_*`, `stats`, `stats_interval`) apply there. A plain
 `ssh` — `integration` off for the host, a `production` host, a server kablo
 cannot be kept on, a call that runs a command, mosh — is the `ssh` you know and
 nothing more: bateri puts nothing on that server and opens no connection to it,
@@ -2616,7 +2593,7 @@ the server's rc files.
   `integration` is off for, a `production` host, a server kablo cannot be kept
   on — gets no kept terminal, no command blocks and no remote dock, and none of
   what bateri does on a server either: no file drop (the pane refuses the file),
-  no download or preview, no load indicator, no ports, no ⌘ check of paths
+  no download, no load indicator, no ports, no ⌘ check of paths
   and no password kept in the Keychain for it; bateri opens no
   connection of its own to that host. The remote session is still detected, so
   the dock says `host`, colored by `hosts`, and the tab and the title name
@@ -2728,26 +2705,23 @@ the background* and opens beside whoever has it.
   Running*, went to sleep, or quit bateri without ending it — the terminal is
   under *Running in the background* again.
 
-#### Remote files: preview and download
+#### Remote files: download
 
-The eight preview and download keys are the settings for file names in a
-terminal on a server (a plain `ssh` has none): ⌘-click **previews** a file with
-a temporary, read-only copy, and downloading puts a permanent copy in
-`download_dir`.
+The three download keys are the settings for file names in a terminal on a
+server (a plain `ssh` has none): downloading puts a permanent copy in
+`download_dir`. A ⌘-click on such a name does not copy anything to this Mac: it
+opens the file where it is, in the program `[apps] open_with` names (see
+[`[apps]`](#apps)).
 
-- **A size** is written like `"100MB"`: an integer and one of the units `B`,
-  `KB`, `MB`, `GB`, `TB` (decimal, Finder's units; there may be a space in
-  between). It is case-sensitive: `"100mb"` is rejected. A number without a
-  unit is rejected too, because it would leave the unit to guesswork.
 - **A folder** starts with `/` or `~/`; a relative path and `~user` are
   rejected.
-- **Cleanup** runs at launch (those past the keep time and the part over
-  `preview_limit`, oldest first) and once a day (only the keep time); nothing
-  is deleted on quit, and nothing is deleted for size while bateri is open. A
-  preview that differs from what bateri wrote because you changed it is never
-  deleted by any cleanup: it is moved to `download_dir` and you are notified.
 - A value that is not accepted leaves that key at its default at launch and
   at the value on screen when saving, and a warning appears.
+- **The keys of the old preview** (`preview_max_size`, `preview_read_only`,
+  `preview_dir`, `preview_keep`, `preview_limit`) are not read any more. A file
+  that still has them is read without a warning and the lines stay where they
+  are. bateri no longer cleans the folder `preview_dir` named, and never deletes
+  what is in it: the copies there are yours.
 
 **Relative names need the server's OSC 7.** The name `backups` in `ls` output
 is relative; which directory it is in is told by the OSC 7 the remote shell

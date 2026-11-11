@@ -9,13 +9,14 @@
 //!
 //! **The click is a gate that starts a program, so the words are made here and nowhere else.**
 //! The program is never found on a `PATH`: it is the machine's link to the program that is
-//! followed under that name (`apps/bin/<name>`), and the name is a program's name
-//! ([`apps::is_name`]), so it cannot be a path or an option. The path is the one the check found,
-//! absolute, and reaches the program as an argument; it is no part of any shell text. On a
-//! server, where the home folder is not known here, the one shell line there is — a constant —
-//! finds the link by `$HOME` and runs it with the rest as arguments.
+//! followed under that name (`~/.local/share/bateri/apps/bin/<name>`, [`BIN_UNDER_HOME`] — where
+//! the installer of a machine puts it, not in the folder this copy keeps what it follows in), and
+//! the name is a program's name ([`apps::is_name`]), so it cannot be a path or an option. The
+//! path is the one the check found, absolute, and reaches the program as an argument; it is no
+//! part of any shell text. On a server, where the home folder is not known here, the one shell
+//! line there is — a constant — finds the link by `$HOME` and runs it with the rest as arguments.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bt_core::pencere::apps::{self, Opens};
 
@@ -101,15 +102,29 @@ fn arguments(line: Option<u32>, path: &str) -> Vec<String> {
     words
 }
 
+/// The folder of the links to the programs a machine has, under its home folder: the one place
+/// the installer puts them on this Mac and on a server alike (`apps/bin`, beside the programs'
+/// own folders), so both are looked for here and nowhere else. It is **not** the folder this copy
+/// keeps the programs it follows in (`~/Library/Application Support/bateri/apps` on this Mac),
+/// which has no `bin`.
+pub const BIN_UNDER_HOME: &str = ".local/share/bateri/apps/bin";
+
+/// [`BIN_UNDER_HOME`] under the home folder of this Mac.
+pub fn bin_here(home: &Path) -> PathBuf {
+    home.join(BIN_UNDER_HOME)
+}
+
 /// The one line of shell a server runs, a constant: the link of the program `$0` under the home
-/// folder, run with the other words as its arguments. Nothing of the path or the name is in it.
+/// folder ([`BIN_UNDER_HOME`]), run with the other words as its arguments. Nothing of the path or
+/// the name is in it.
 pub const SERVER_LINE: &str = r#"exec "$HOME/.local/share/bateri/apps/bin/$0" "$@""#;
 
-/// What this computer runs: the program's link under `bin` (the folder of the programs this copy
-/// follows has it), then the arguments. `None` for a name that is not a program's, or a link that
-/// is not text.
+/// What this computer runs: the program's link under `bin` ([`bin_here`]), then the arguments.
+/// `None` for a name that is not a program's, a link that is not text, or a path that is not
+/// absolute (a word that does not start with `/` could be taken for an option, or be read against
+/// the folder the program starts in).
 pub fn argv_here(bin: &Path, name: &str, line: Option<u32>, path: &str) -> Option<Vec<String>> {
-    if !apps::is_name(name) {
+    if !apps::is_name(name) || !path.starts_with('/') {
         return None;
     }
     let mut argv = vec![bin.join(name).to_str()?.to_owned()];
@@ -118,9 +133,9 @@ pub fn argv_here(bin: &Path, name: &str, line: Option<u32>, path: &str) -> Optio
 }
 
 /// What a server runs: the constant line, the name as its `$0`, then the arguments. `None` for a
-/// name that is not a program's.
+/// name that is not a program's, and for a path that is not absolute.
 pub fn argv_server(name: &str, line: Option<u32>, path: &str) -> Option<Vec<String>> {
-    if !apps::is_name(name) {
+    if !apps::is_name(name) || !path.starts_with('/') {
         return None;
     }
     let mut argv = vec![
@@ -233,7 +248,8 @@ mod tests {
     /// one word whatever is in it.
     #[test]
     fn the_words_are_the_program_a_line_and_the_path() {
-        let bin = Path::new("/Users/me/.local/share/bateri/apps/bin");
+        let bin = bin_here(Path::new("/Users/me"));
+        let bin = bin.as_path();
         assert_eq!(
             argv_here(bin, "textpen", Some(12), "/src/main.rs").expect("words"),
             [
@@ -266,6 +282,38 @@ mod tests {
             assert_eq!(argv.len(), 6, "{path:?}");
             assert_eq!(argv[5], path);
         }
+    }
+
+    /// Where a machine has the links is one place for this Mac and the server's line: the
+    /// installer's own folder, which the upload of a program writes beside the links.
+    #[test]
+    fn the_links_are_looked_for_where_the_installer_puts_them() {
+        assert_eq!(
+            BIN_UNDER_HOME,
+            format!("{}/bin", crate::apps::upload::ROOT),
+            "the links live under the folder the upload writes the programs to"
+        );
+        assert_eq!(
+            bin_here(Path::new("/Users/me")),
+            Path::new("/Users/me/.local/share/bateri/apps/bin")
+        );
+        assert!(
+            SERVER_LINE.contains(&format!("$HOME/{BIN_UNDER_HOME}/")),
+            "the server's line finds the same folder"
+        );
+    }
+
+    /// A path that is not absolute makes no words: it could be an option, or be read against the
+    /// folder the program starts in.
+    #[test]
+    fn a_path_that_is_not_absolute_makes_no_words() {
+        let bin = Path::new("/apps/bin");
+        for path in ["", "main.rs", "-rf", "+12", "./a", "../a", "~/a"] {
+            assert_eq!(argv_here(bin, "textpen", None, path), None, "{path:?}");
+            assert_eq!(argv_server("textpen", None, path), None, "{path:?}");
+        }
+        assert!(argv_here(bin, "textpen", None, "/a").is_some());
+        assert!(argv_server("textpen", None, "/a").is_some());
     }
 
     /// A name that is not a program's makes no words; the server's line is one constant.

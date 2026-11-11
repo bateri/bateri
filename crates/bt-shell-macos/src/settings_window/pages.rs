@@ -17,8 +17,6 @@ use crate::program::reply;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Item {
     Key(Key),
-    /// "In use": the preview folder's size, with Clear Now. Measured, never written.
-    Usage,
     /// What the Agents switch does, and an example of the row it adds a line to. Fixed.
     AgentAbout,
     /// Where on the screen the line shows: it follows Tab Details and the tabs' position, with
@@ -47,10 +45,6 @@ fn no_aside(_: &Settings) -> Option<&'static str> {
 fn dock_aside(settings: &Settings) -> Option<&'static str> {
     (settings.shell_integration != ShellIntegration::Auto)
         .then_some("needs Shell integration: Auto")
-}
-
-fn previews_aside(_: &Settings) -> Option<&'static str> {
-    Some("\u{2318}-click a file name on a server")
 }
 
 const fn row(key: Key) -> Item {
@@ -185,18 +179,6 @@ const SERVERS: &[Group] = &[
             row(Key::StatsInterval),
         ],
     ),
-    Group {
-        title: Some("Previews"),
-        aside: previews_aside,
-        items: &[
-            row(Key::PreviewMaxSize),
-            row(Key::PreviewReadOnly),
-            row(Key::PreviewDir),
-            row(Key::PreviewKeep),
-            row(Key::PreviewLimit),
-            Item::Usage,
-        ],
-    },
     group(
         Some("Downloads"),
         &[
@@ -311,11 +293,7 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::RemoteIntegration => "Set up shell integration on servers",
         Key::RemoteStats => "Server load",
         Key::StatsInterval => "Sample every",
-        Key::PreviewMaxSize => "Open without asking up to",
-        Key::PreviewReadOnly => "Open read-only",
-        Key::PreviewDir | Key::DownloadDir => "Folder",
-        Key::PreviewKeep => "Keep previews",
-        Key::PreviewLimit => "At most",
+        Key::DownloadDir => "Folder",
         Key::DownloadConflict => "If the name exists",
         Key::DownloadNotify => "Notify when done",
         Key::ClaudeIntegration => "Claude Code",

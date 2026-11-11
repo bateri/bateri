@@ -817,6 +817,57 @@ fn a_terminal_the_server_will_not_make_falls_back_before_it_was_shown() {
     assert_eq!(rig.hub.terminal_of(hold), None);
 }
 
+/// A holder that is the pane of a program the application asked a server to run does not become a
+/// plain `ssh` whatever refuses it: it ends, with a line to read.
+#[test]
+fn the_pane_of_a_program_is_never_let_fall_back_to_a_plain_ssh() {
+    let mut bridge = Bridge::new(Age::Current);
+    bridge.add("b-1", SIZE);
+    let mut rig = Rig::with(bridge);
+    // The server will not make the terminal (the name is taken): an ordinary pane falls back.
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(new_request("b-1")));
+    rig.requests();
+    rig.hub.for_a_program(hold);
+    rig.hub
+        .start(hold, ACCOUNT, NewSession::default(), None)
+        .expect("asked");
+    rig.pump();
+    assert!(matches!(
+        rig.heard_by(hold).last(),
+        Some(ToHold::Refused { fall_back: false, text }) if !text.is_empty()
+    ));
+    assert!(rig.hub.is_finished(hold));
+
+    // The owner refusing it says what it says, and the pane still ends.
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(new_request("b-2")));
+    rig.requests();
+    rig.hub.for_a_program(hold);
+    rig.hub.refuse(hold, true, "");
+    rig.pump();
+    assert!(matches!(
+        rig.heard_by(hold).last(),
+        Some(ToHold::Refused { fall_back: false, text }) if !text.is_empty()
+    ));
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(new_request("b-3")));
+    rig.requests();
+    rig.hub.for_a_program(hold);
+    rig.hub.refuse(hold, true, "no kablo there");
+    rig.pump();
+    assert_eq!(
+        rig.heard_by(hold).last(),
+        Some(&ToHold::Refused {
+            fall_back: false,
+            text: "no kablo there".into()
+        })
+    );
+}
+
 /// What the holder's pane shows after another computer took the terminal is the pane's: its last
 /// screen, dimmed, until ⏎ takes the terminal back. The holder is not ended (it used to be, with a
 /// line, and the prompt came back under the screen).

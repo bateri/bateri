@@ -5,10 +5,9 @@
 //! whole window — so **where a question's sheet sits** is a decision of its
 //! own, and it is made here, not by the asker. A pane's question names the
 //! pane ([`Asker::Pane`]: the password sheet, the upload and download
-//! confirmations, the stop question, the preview and remote-job errors, an
+//! confirmations, the stop question, the remote-job errors, an
 //! uncommon link's confirmation and its "Download To…" panel); a question
-//! about a window names the window ([`Asker::Window`]: the close question,
-//! the application's report of kept previews on the key window).
+//! about a window names the window ([`Asker::Window`]: the close question).
 //!
 //! **A tab's question sits on the tab's own owner.** A sheet on the terminal
 //! window would block the whole window — the tab bar too — and the user
@@ -241,6 +240,17 @@ impl Sheet {
             }
         }
     }
+}
+
+/// The system's beep: the answer to an action that cannot run now (another sheet is open, the
+/// remote session ended) — never silence.
+pub(crate) fn beep() {
+    // SAFETY: `NSBeep` is AppKit's `void NSBeep(void)`; AppKit is linked through
+    // `objc2-app-kit` and the call has no preconditions.
+    unsafe extern "C" {
+        fn NSBeep();
+    }
+    unsafe { NSBeep() };
 }
 
 /// The seat of `asker`'s sheets; `None` when the pane is not in a window

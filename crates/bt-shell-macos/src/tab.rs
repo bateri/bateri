@@ -1083,7 +1083,7 @@ impl TerminalTab {
         let mut layers = self.ivars().container.layers();
         match layers.minimize_key(focus) {
             Some(next) => self.apply_cards(layers, next, focus),
-            None => crate::preview::beep(),
+            None => crate::sheets::beep(),
         }
     }
 
@@ -1094,7 +1094,7 @@ impl TerminalTab {
         let mut layers = self.ivars().container.layers();
         match layers.hide_key(focus) {
             Some(next) => self.apply_cards(layers, next, focus),
-            None => crate::preview::beep(),
+            None => crate::sheets::beep(),
         }
     }
 
@@ -1166,7 +1166,7 @@ impl TerminalTab {
             Some(wanted) => {
                 self.relayer(wanted);
             }
-            None => crate::preview::beep(),
+            None => crate::sheets::beep(),
         }
     }
 
@@ -2763,8 +2763,8 @@ mod tests {
         assert!(body("pub(crate) fn minimize_floating(").contains("layers.minimize_key(focus)"));
         assert!(body("pub(crate) fn toggle_floating_panes(").contains("layers.hide_key(focus)"));
         // ...and a rule that does nothing is a beep.
-        assert!(body("pub(crate) fn minimize_floating(").contains("preview::beep()"));
-        assert!(body("pub(crate) fn toggle_floating_panes(").contains("preview::beep()"));
+        assert!(body("pub(crate) fn minimize_floating(").contains("sheets::beep()"));
+        assert!(body("pub(crate) fn toggle_floating_panes(").contains("sheets::beep()"));
         // The keyboard: to a pane, back to where it was before (a pane that is not in a capsule),
         // or where it is.
         let apply = body("fn apply_cards(");

@@ -25,7 +25,7 @@ use crate::kablo::served::Served;
 use crate::ssh_route::Ask;
 
 /// The apps folder on a machine, relative to its home directory.
-const ROOT: &str = ".local/share/bateri/apps";
+pub(crate) const ROOT: &str = ".local/share/bateri/apps";
 
 /// How long the connection and the machine's answer may take, for the step that writes a program.
 pub const WAIT: Duration = Duration::from_secs(60);

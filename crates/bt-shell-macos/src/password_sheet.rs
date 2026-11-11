@@ -48,9 +48,8 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 use bt_shell_common::kablo::served::Served;
 
 use crate::pane::TerminalPane;
-use crate::preview::beep;
 use crate::remote_helper::Dial;
-use crate::sheets::{self, Asker};
+use crate::sheets::{self, Asker, beep};
 use crate::ssh_route::{Answerer, Ask, Denied, Prompt, Question, Typed};
 use crate::uploader::on_pane;
 
@@ -59,9 +58,6 @@ use crate::uploader::on_pane;
 pub(crate) enum Job {
     Upload,
     Download,
-    // Nothing starts a preview any more.
-    #[allow(dead_code)]
-    Preview,
     Finder,
     /// The terminals the server keeps wait for a login: a pane's ⏎ on
     /// "Needs your password" ([`TerminalPane::log_in_to_reconnect`]).
@@ -75,7 +71,6 @@ impl Job {
         match self {
             Self::Upload => "Log in to upload the dropped items.".to_owned(),
             Self::Download => "Log in to download the file.".to_owned(),
-            Self::Preview => "Log in to preview the file.".to_owned(),
             Self::Finder => "Log in to copy the file to Finder.".to_owned(),
             Self::Reconnect => format!("Log in to reconnect the terminals on {host}."),
             Self::Command => format!("Log in so that a program in this pane can use {host}."),
