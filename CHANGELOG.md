@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-11-12
+
 ### Fixed
 
 - **Command-click in an `ssh` terminal opens the file in textpen.** In 0.28.0 it opened in `vi` (or `$EDITOR`) on the server instead: the editor asked its terminal whether it can show its page before the new pane was connected to it, and was told that it cannot. The terminal now keeps that question for the pane. On a connection so slow that the pane takes more than a second and a half to connect, the editor still opens plain.
