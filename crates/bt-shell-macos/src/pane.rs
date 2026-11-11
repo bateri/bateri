@@ -3795,6 +3795,10 @@ impl TerminalPane {
         // `login` path). The timed run's scripts are the shell itself, so
         // they are `Direct`; deciding the parent in the same branch as the
         // command is what keeps the two from disagreeing.
+        // The program a click opened the pane for is the pane's own child: there is no shell
+        // under it, and the pane's views are told so (a child taken for the shell is "the shell
+        // in front" for as long as it runs, and a program that asks for a view is not answered).
+        let no_shell = self.ivars().run.is_none() && local_program.is_some();
         let (command, shell_parent) = match self.ivars().run {
             None if local_program.is_some() => (local_program, ShellParent::Direct),
             None => {
@@ -3888,7 +3892,7 @@ impl TerminalPane {
             // shown, in every pane but a timed run's: there the program is the
             // gate's own script, the pane's reader hears no frame and nothing is
             // written to it.
-            views: self.view_options(shell_parent),
+            views: self.view_options(shell_parent, no_shell),
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // A terminal window without a shell is an empty box; what to do is the caller's call
@@ -5801,8 +5805,10 @@ impl TerminalPane {
     /// (points: `0 × 0` where the pane has no layout yet), and how the shell is found
     /// from the child (`shell_parent`, recorded where the command was chosen: `login(1)`
     /// forks the shell on macOS, and the terminal's foreground group is the shell's, not
-    /// the child's). `None` in a timed run, whose program is the gate's own script.
-    fn view_options(&self, shell_parent: ShellParent) -> Option<ViewOptions> {
+    /// the child's). `no_shell` is a pane whose child is a program started in the shell's place
+    /// (a path opened in a program): no group there is a shell's ([`ShellGroup::no_shell`]).
+    /// `None` in a timed run, whose program is the gate's own script.
+    fn view_options(&self, shell_parent: ShellParent, no_shell: bool) -> Option<ViewOptions> {
         let ivars = self.ivars();
         if ivars.run.is_some() {
             return None;
@@ -5829,9 +5835,11 @@ impl TerminalPane {
         // page of the kit, up to the size the sandbox takes.
         options.native_entry_limit =
             Some(bt_shell_common::native_view::ModuleLimits::default().component as u64);
-        options.shell_group = Some(ShellGroup::new(move |child| {
-            jobs::shell_group(shell_parent, child, &SystemTable)
-        }));
+        options.shell_group = Some(if no_shell {
+            ShellGroup::no_shell()
+        } else {
+            ShellGroup::new(move |child| jobs::shell_group(shell_parent, child, &SystemTable))
+        });
         Some(options)
     }
 
@@ -8957,7 +8965,31 @@ mod tests {
         assert!(body.contains("jobs::shell_group(shell_parent, child, &SystemTable)"));
         assert!(body.contains("pencere_view::content_size(self.bounds())"));
         // The parent is the one the command was chosen with, in the same branch.
-        assert!(pane.contains("views: self.view_options(shell_parent),"));
+        assert!(pane.contains("views: self.view_options(shell_parent, no_shell),"));
+    }
+
+    /// The program a click opens a path in is started in the shell's place, as the pane's own
+    /// child: it leads the tty's foreground group itself. A pane that took it for its shell saw
+    /// the shell in front for as long as it ran and never answered its `hello`, and the program
+    /// (textpen) fell back to the person's `$EDITOR` in the floating pane. So the pane says
+    /// there is no shell, where the command is chosen, and the views are opened with that.
+    #[test]
+    fn a_pane_whose_child_is_a_program_tells_its_views_there_is_no_shell() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        assert!(
+            pane.contains("let no_shell = self.ivars().run.is_none() && local_program.is_some();")
+        );
+        let at = pane.find("fn view_options(").expect("view_options");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("no_shell: bool"));
+        let branch = body.find("if no_shell {").expect("the branch");
+        assert!(
+            body[branch..]
+                .trim_start_matches("if no_shell {")
+                .trim_start()
+                .starts_with("ShellGroup::no_shell()")
+        );
     }
 
     /// The news that a view has something for the pane arrives on the reader's thread, possibly

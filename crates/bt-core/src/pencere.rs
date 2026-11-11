@@ -259,7 +259,8 @@ pub struct ViewOptions {
     /// ([`crate::Session::set_view_size`]) before it starts.
     pub size: Size,
     /// How to find the group the pane's shell leads ([`ShellGroup`]); `None` for a pane
-    /// whose child is the shell itself.
+    /// whose child is the shell itself, and [`ShellGroup::no_shell`] for one whose child is a
+    /// program started in a shell's place.
     pub shell_group: Option<ShellGroup>,
     /// The most bytes a view that is a Lua script may be, when the application shows such views
     /// (it runs them in a sandbox of its own and draws them): the pane then offers the kind `lua`
@@ -322,6 +323,17 @@ impl ShellGroup {
     /// A finder: `find(child)` is the group the shell of the pane whose child is `child` leads.
     pub fn new(find: impl Fn(u32) -> Option<u32> + Send + Sync + 'static) -> Self {
         Self(Arc::new(find))
+    }
+
+    /// The finder of a pane that has no shell: its child is a program started in a shell's
+    /// place, and the pane ends with it. That program leads the tty's foreground group itself,
+    /// as a shell at its prompt does, so a pane that took its child for the shell would see "the
+    /// shell in front" for as long as the program runs and never answer its `hello`. Here no
+    /// group is found, ever: whether a shell is in front stays unknown, which stops nothing,
+    /// and what tells the program from a tty that only echoes is the tty's modes, as in every
+    /// pane.
+    pub fn no_shell() -> Self {
+        Self(Arc::new(|_| None))
     }
 }
 

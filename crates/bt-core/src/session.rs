@@ -31826,6 +31826,32 @@ e\\314\\201.'; sleep 5";
         /// foreground (`read _` is the shell itself waiting on the tty): the program's end is
         /// then the tty coming back to the shell, as at a prompt.
         fn then(name: &str, after: &str) -> Self {
+            // `-isig`: a ⌃C written to the pane is a byte for the reader, not
+            // the signal that would end it.
+            let script = format!(
+                "set -m; stty -opost -icanon -echo -isig; cat \"$1\" & \
+                 sh -c 'echo $$ > \"$3\"; exec cat > \"$2\"' sh \"$1\" \"$2\" \"$3\"{after}"
+            );
+            Self::start(name, &script, None)
+        }
+
+        /// A pane whose child is the program itself, started in a shell's place: no `set -m`,
+        /// and the child becomes the reader of the tty, so the group in front is the child's
+        /// own, as it is for the program a click opens a path in. `group` is what the pane says
+        /// of its shell.
+        fn alone(name: &str, group: Option<crate::pencere::ShellGroup>) -> Self {
+            Self::start(
+                name,
+                "stty -opost -icanon -echo -isig; cat \"$1\" & echo $$ > \"$3\"; \
+                 exec cat > \"$2\"",
+                group,
+            )
+        }
+
+        /// The pane, with `script` as what its child (`sh -c`) runs: `$1` is the FIFO the test
+        /// writes the program's output to, `$2` the file the pane's input is copied to and `$3`
+        /// where the reader of the tty writes its pid.
+        fn start(name: &str, script: &str, group: Option<crate::pencere::ShellGroup>) -> Self {
             let dir = TempDir::new(name);
             let fifo_path = dir.0.join("out");
             let captured = dir.0.join("in");
@@ -31841,12 +31867,7 @@ e\\314\\201.'; sleep 5";
                     "/bin/sh".into(),
                     vec![
                         "-c".into(),
-                        // `-isig`: a ⌃C written to the pane is a byte for the reader, not
-                        // the signal that would end it.
-                        format!(
-                            "set -m; stty -opost -icanon -echo -isig; cat \"$1\" & \
-                             sh -c 'echo $$ > \"$3\"; exec cat > \"$2\"' sh \"$1\" \"$2\" \"$3\"{after}"
-                        ),
+                        script.to_owned(),
                         "sh".into(),
                         fifo_path.display().to_string(),
                         captured.display().to_string(),
@@ -31858,6 +31879,7 @@ e\\314\\201.'; sleep 5";
             let clock = crate::pencere::tests::TestClock::new();
             let mut views = ViewOptions::new("bateri-test", "0.0.0");
             views.clock = clock.clock();
+            views.shell_group = group;
             options.views = Some(views);
             let wake = Arc::new(TestWake::default());
             let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
@@ -31968,6 +31990,48 @@ e\\314\\201.'; sleep 5";
         program.session.shutdown();
     }
 
+    /// The program a click opens a path in is the pane's own child, started in the shell's
+    /// place: it leads the group in front of the tty, as a shell at its prompt does. A pane that
+    /// takes its child for the shell does not answer it (the `hello` would be one written at a
+    /// prompt), and the program falls back to what it does in a terminal that shows no views.
+    /// The pane that says it has no shell answers.
+    #[test]
+    fn a_program_that_is_the_panes_own_child_is_answered_only_in_a_pane_that_says_it_has_no_shell()
+    {
+        use crate::pencere::tests::{hello, token_of};
+        let reply: &[u8] = b"\x1b[?62;22c";
+        let asked = [hello(), b"\x1b[c".to_vec()].concat();
+        let replied = |program: &Playing| {
+            wait_until("the reply to CSI c", Duration::from_secs(10), || {
+                program
+                    .input()
+                    .windows(reply.len())
+                    .any(|window| window == reply)
+            });
+        };
+
+        // Taken for the shell: the terminal's own reply comes, a welcome does not (one would
+        // have been written before that reply).
+        let mut taken = Playing::alone("view-own-child-shell", None);
+        taken.write(&asked);
+        replied(&taken);
+        assert!(taken.written().is_empty(), "{:?}", taken.input());
+        assert_eq!(taken.state(), Some(crate::pencere::State::Idle));
+        taken.session.shutdown();
+
+        let mut alone = Playing::alone(
+            "view-own-child",
+            Some(crate::pencere::ShellGroup::no_shell()),
+        );
+        alone.write(&asked);
+        let frames = alone.wait_written(1);
+        replied(&alone);
+        assert_eq!(frames[0].kind, "welcome");
+        assert_eq!(token_of(&frames[0]).len(), 22);
+        assert_eq!(alone.state(), Some(crate::pencere::State::Offered));
+        alone.session.shutdown();
+    }
+
     #[test]
     fn a_program_opens_a_view_in_its_pane_and_the_shell_is_told_of_the_wait_and_the_view() {
         use crate::pencere::tests::{bundle_open, hello, page_file, token_of};
@@ -32018,6 +32082,37 @@ e\\314\\201.'; sleep 5";
             program.display()
         );
         program
+    }
+
+    /// The demo program as the pane's own child, started in the shell's place as the program a
+    /// click opens a path in is: with the pane saying it has no shell, the program is answered
+    /// and its view starts. (Taken for the shell it is never answered, and shows no view.)
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn the_demo_program_started_in_the_shells_place_shows_its_view() {
+        use crate::pencere::Action;
+        let program = demopen();
+        let mut options = test_options((program.display().to_string(), Vec::new()), 80);
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.native_entry_limit = Some(4 << 20);
+        views.shell_group = Some(crate::pencere::ShellGroup::no_shell());
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+
+        let mut started = None;
+        wait_until("the view to start", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::StartView(start) = action {
+                    started = Some(start);
+                }
+            }
+            started.is_some()
+        });
+        let start = started.unwrap();
+        assert_eq!(start.kind, crate::pencere::ViewKind::Lua);
+        assert_eq!(start.program.as_deref(), Some("demopen"));
+        session.shutdown();
     }
 
     /// The demo program (`examples/demopen.rs`) against a real pane: it asks
