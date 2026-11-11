@@ -2302,6 +2302,8 @@ fn a_program_session_is_the_words_and_the_folder() {
     assert_eq!(spec.argv, [b"prog".to_vec(), b"/a b".to_vec()]);
     assert_eq!(spec.cwd.as_deref(), Some(b"/srv/app".as_slice()));
     assert_eq!(program_session(&words, None).cwd, None);
+    // Its first questions are kept for the pane that asked for it.
+    assert_eq!(spec.wait_for_client, Some(crate::open_with::CLIENT_WAIT_MS));
 }
 
 /// The dock's tier is the settings' (`[shell] integration`): `"blocks"` reaches a new terminal as

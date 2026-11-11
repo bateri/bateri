@@ -114,6 +114,16 @@ pub fn bin_here(home: &Path) -> PathBuf {
     home.join(BIN_UNDER_HOME)
 }
 
+/// How long, in milliseconds, the terminal of a program keeps the terminal's questions for the
+/// pane the program was opened for (kablo's `wait_for_client`). The program is started with its
+/// terminal and asks the moment it starts (a program that shows a view asks whether the
+/// terminal shows views); the pane attaches a moment later, on a server a round trip later, and
+/// a terminal nobody is attached to answers for itself, as a plain terminal: the program then
+/// took the pane for one that shows no views and fell back to what it does without (an editor
+/// to the person's `$EDITOR`). Shorter than the two seconds such a program waits for its answer:
+/// a pane that takes longer than this to come is answered for, as before.
+pub const CLIENT_WAIT_MS: u32 = 1500;
+
 /// The one line of shell a server runs, a constant: the link of the program `$0` under the home
 /// folder ([`BIN_UNDER_HOME`]), run with the other words as its arguments. Nothing of the path or
 /// the name is in it.

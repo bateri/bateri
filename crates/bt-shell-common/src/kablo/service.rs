@@ -4151,7 +4151,9 @@ fn new_session(shared: &Shared, pane: &PaneInfo) -> NewSession {
 }
 
 /// The request for a terminal that runs `program` in `directory` (the server's home when there is
-/// none): the words as the command, nothing else.
+/// none): the words as the command, and the terminal's questions kept for the pane that asked
+/// for it ([`crate::open_with::CLIENT_WAIT_MS`]): the program asks the moment it starts, before
+/// the pane can have attached.
 pub(crate) fn program_session(program: &[String], directory: Option<&str>) -> NewSession {
     // `NewSession` is not exhaustive: it is started from its default.
     let mut spec = NewSession::default();
@@ -4160,6 +4162,7 @@ pub(crate) fn program_session(program: &[String], directory: Option<&str>) -> Ne
         .map(|word| word.as_bytes().to_vec())
         .collect();
     spec.cwd = directory.map(|directory| directory.as_bytes().to_vec());
+    spec.wait_for_client = Some(crate::open_with::CLIENT_WAIT_MS);
     spec
 }
 

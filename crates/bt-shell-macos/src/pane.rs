@@ -224,12 +224,15 @@ pub trait PaneHost {
     /// started with what `launch` says and `history` rows of scrollback. `None` — the default,
     /// an owner that keeps no terminals for its panes — leaves the pane an ordinary one: its
     /// shell is the session's own child. Asked on the main thread while the pane starts, and
-    /// it may wait there for the terminal.
+    /// it may wait there for the terminal. `program` is a terminal whose child is a program
+    /// started in a shell's place: its first questions are kept for this pane
+    /// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]).
     fn open_local_terminal(
         &self,
         _pane: &PaneUuid,
         _launch: &bt_core::ChildLaunch,
         _history: u32,
+        _program: bool,
     ) -> Option<bt_core::Stream> {
         None
     }
@@ -3701,19 +3704,25 @@ impl TerminalPane {
     /// session.
     ///
     /// The stream's ops read the pane's terminal from the outside, by the program's pid
-    /// ([`jobs::StreamTty`]): `shell_parent` says how the shell is found below it.
+    /// ([`jobs::StreamTty`]): `shell_parent` says how the shell is found below it. `program`
+    /// is a child that is a program started in the shell's place: it asks its terminal the
+    /// moment it starts, and its questions are kept for this pane.
     fn local_terminal(
         &self,
         options: &SessionOptions,
         shell_parent: ShellParent,
+        program: bool,
     ) -> Option<bt_core::Stream> {
         if self.ivars().run.is_some() {
             return None;
         }
         let history = u32::try_from(options.terminal.scrollback).unwrap_or(u32::MAX);
-        let stream =
-            self.host()
-                .open_local_terminal(self.uuid(), &options.child_launch(), history)?;
+        let stream = self.host().open_local_terminal(
+            self.uuid(),
+            &options.child_launch(),
+            history,
+            program,
+        )?;
         Some(bt_core::Stream {
             ops: Arc::new(jobs::StreamTty::new(stream.ops, shell_parent)),
             ..stream
@@ -3913,7 +3922,7 @@ impl TerminalPane {
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // A terminal window without a shell is an empty box; what to do is the caller's call
         // (first window: the process exits; later ones: that window closes).
-        let (session, shell_parent) = match self.local_terminal(&options, shell_parent) {
+        let (session, shell_parent) = match self.local_terminal(&options, shell_parent, no_shell) {
             // The shell runs in a terminal of kablo's on this Mac and the session reads its
             // bytes; the child's parent there is what it is for a shell started here.
             Some(stream) => (Session::streamed(options, wake, stream)?, shell_parent),

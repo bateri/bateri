@@ -179,8 +179,9 @@ impl PaneHost for TabHost {
         pane: &bt_core::PaneUuid,
         launch: &bt_core::ChildLaunch,
         history: u32,
+        program: bool,
     ) -> Option<bt_core::Stream> {
-        crate::hold_service::open_local(pane, launch, history)
+        crate::hold_service::open_local(pane, launch, history, program)
     }
 
     fn end_kept_terminal(&self, pane: &bt_core::PaneUuid) {

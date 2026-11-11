@@ -665,14 +665,19 @@ fn service() -> Option<&'static Service> {
 /// reads and writes: kablo's terminal, started with what the pane would have started its shell
 /// with ([`bt_core::SessionOptions::child_launch`]) and `history` rows of scrollback. `None`
 /// when there is no kablo to put it in (a build without the package, a machine kablo is not
-/// built for, a service that did not come up): the pane is an ordinary one.
+/// built for, a service that did not come up): the pane is an ordinary one. `program` is a
+/// terminal whose child is a program started in a shell's place: it asks the moment it starts,
+/// so its questions are kept for the pane, which attaches a moment later
+/// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]).
 pub(crate) fn open_local(
     pane: &PaneUuid,
     launch: &bt_core::ChildLaunch,
     history: u32,
+    program: bool,
 ) -> Option<bt_core::Stream> {
     let service = service()?;
-    let (spec, size) = local::new_session(launch, history);
+    let (mut spec, size) = local::new_session(launch, history);
+    spec.wait_for_client = program.then_some(bt_shell_common::open_with::CLIENT_WAIT_MS);
     service.open_local(pane, spec, size, LOCAL_WAIT).ok()
 }
 

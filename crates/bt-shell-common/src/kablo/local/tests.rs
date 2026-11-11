@@ -523,6 +523,43 @@ struct StandIn {
     asked: Mutex<Vec<bool>>,
     /// What the app does with what a program says to it (`kablo bateri …`): `Some` takes mail.
     mailer: Option<Arc<dyn Fn(crate::kablo::service::Letter) + Send + Sync>>,
+    /// How late what the app says reaches kablo ([`Late`]): the line of a server that is this
+    /// far away.
+    late: Option<Duration>,
+}
+
+/// A line to kablo that is as long as a network's: what is written reaches `to` after `late`,
+/// in the order it was written. Dropped, it lets go of `to` once what was written has arrived.
+struct Late {
+    line: mpsc::Sender<(Instant, Vec<u8>)>,
+}
+
+impl Late {
+    fn new(mut to: Box<dyn Write + Send>, late: Duration) -> Late {
+        let (line, arrives) = mpsc::channel::<(Instant, Vec<u8>)>();
+        thread::spawn(move || {
+            while let Ok((written, bytes)) = arrives.recv() {
+                thread::sleep((written + late).saturating_duration_since(Instant::now()));
+                if to.write_all(&bytes).and_then(|()| to.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+        Late { line }
+    }
+}
+
+impl Write for Late {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.line
+            .send((Instant::now(), bytes.to_vec()))
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Backend for RealMac {
@@ -566,7 +603,11 @@ impl Backend for RealMac {
         if let Some(shell) = &self.stand_in.shell {
             command.env("SHELL", shell);
         }
-        start(command)
+        let mut carried = start(command)?;
+        if let Some(late) = self.stand_in.late {
+            carried.writer = Box::new(Late::new(carried.writer, late));
+        }
+        Ok(carried)
     }
 
     fn reach(
@@ -1446,6 +1487,96 @@ fn demopen_options(home: &Path) -> bt_core::SessionOptions {
     options.rows = 10;
     options.views = Some(views);
     options
+}
+
+/// A pane that is opened for a program has a terminal that is started with that program, and a
+/// program that shows a view asks its terminal whether it shows views the moment it starts. On a
+/// server the pane attaches a round trip later (here the line to kablo is that long): the
+/// terminal keeps the question for the pane ([`crate::open_with::CLIENT_WAIT_MS`]), the pane
+/// answers, and the view opens. Answered by the terminal itself, which shows no views, the
+/// program takes the pane for a plain terminal.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_started_with_its_terminal_is_answered_by_the_pane_that_attaches_late() {
+    use bt_core::pencere::Action;
+    use std::sync::atomic::Ordering;
+
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("late");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+        streams: Default::default(),
+        stand_in: StandIn {
+            late: Some(Duration::from_millis(300)),
+            ..Default::default()
+        },
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+
+    // The program is the terminal's own, with no shell before it: what a pane opened for a
+    // program asks of kablo.
+    let mut options = demopen_options(&ground.home);
+    let program = options
+        .command
+        .as_ref()
+        .and_then(|(_, words)| words.last().cloned())
+        .expect("the program");
+    let words = vec![program, "--files".to_owned()];
+    options.command = Some((words[0].clone(), words[1..].to_vec()));
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    let home = ground.home.to_string_lossy().into_owned();
+    let mut asked = crate::kablo::service::program_session(&words, Some(&home));
+    asked.history = spec.history;
+    asked.env = spec.env;
+    let pane = options.pane_uuid.clone().expect("a pane");
+    let stream = service
+        .open_local(&pane, asked, size, Duration::from_secs(30))
+        .expect("a terminal of this Mac");
+    ground.made.push(ledger.terminals_of(ACCOUNT).remove(0));
+    ground.kept = Some(PathBuf::from(kablo));
+    let wake = PaneFlag::default();
+    let pending = Arc::clone(&wake.pending);
+    let session = Arc::new(
+        bt_core::Session::streamed(options, Arc::new(wake), stream)
+            .expect("a session over the stream"),
+    );
+
+    let begun = Instant::now();
+    let mut started = false;
+    while !started {
+        if pending.swap(false, Ordering::AcqRel) {
+            started = session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::StartView(_)));
+        }
+        // A program that was told of a terminal that shows no views writes its list as text
+        // and ends.
+        assert!(
+            started || (session.reader_alive() && begun.elapsed() < Duration::from_secs(20)),
+            "the program was not answered by its pane and shows no view: {:?}",
+            screen(&session)
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    drop(session);
+    service.stop();
 }
 
 /// Has the program receive `size` bytes of a file the pane gives it, and says how long it took
