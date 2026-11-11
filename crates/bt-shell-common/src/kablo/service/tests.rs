@@ -1165,6 +1165,28 @@ fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
     assert_eq!(rig.world.count("install"), 0);
 }
 
+/// The pane of a program on a server asked for that program and for no login: where the holder of
+/// an ordinary pane is let fall back to the plain `ssh` (the master connection ended some other
+/// way), this one ends, and a program that was refused is no `ssh` either.
+#[test]
+fn the_pane_of_a_program_is_not_let_fall_back_to_the_plain_ssh() {
+    let rig = Rig::new("program-master-1");
+    rig.world.info.lock().expect("lock").program = Some(vec!["prog".into(), "/srv/a".into()]);
+    *rig.world.master.lock().expect("lock") =
+        Some(vec!["/bin/sh".into(), "-c".into(), "exit 1".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    assert_eq!(rig.world.count("carry"), 0);
+    drop(rig);
+
+    // The same server and the same ending, for a pane that is not a program's: the plain `ssh`.
+    let rig = Rig::new("not-program-master-1");
+    *rig.world.master.lock().expect("lock") =
+        Some(vec!["/bin/sh".into(), "-c".into(), "exit 1".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+}
+
 #[test]
 fn what_is_not_in_a_pane_or_not_a_kablo_call_is_the_plain_ssh() {
     let rig = Rig::new("plain");
