@@ -39,7 +39,7 @@ use objc2_foundation::NSRect;
 
 use crate::Run;
 use crate::child;
-use crate::launch::{self, Held, Launch};
+use crate::launch::{self, Held, Launch, ProgramStart};
 use crate::pane::PaneLaunch;
 use bt_shell_common::child::PaneRuns;
 
@@ -100,6 +100,8 @@ pub struct Config {
     pub(crate) held: Option<Held>,
     /// What the pane runs; the integration above is for that.
     pub(crate) runs: PaneRuns,
+    /// The program the pane was opened for, run in place of a shell; `None` → a shell.
+    pub(crate) program: Option<ProgramStart>,
 }
 
 impl Config {
@@ -138,6 +140,7 @@ impl Config {
             stats: None,
             held: None,
             runs: PaneRuns::UserShell,
+            program: None,
         }
     }
 }
@@ -154,6 +157,7 @@ impl Config {
             env,
             held,
             runs,
+            program,
         } = launch;
         Self {
             working_directory,
@@ -163,6 +167,7 @@ impl Config {
             env,
             held,
             runs,
+            program,
             ..self
         }
     }
@@ -215,6 +220,7 @@ pub fn open(
         stats,
         held,
         runs,
+        program,
     } = config;
     let pane = TerminalPane::new(
         mtm,
@@ -235,6 +241,7 @@ pub fn open(
                 env,
                 held,
                 runs,
+                program,
             },
             integration,
             reduce_motion,

@@ -850,6 +850,161 @@ printf 'READY\n'; stty size; pixels; read line; printf 'GOT:%s\n' "$line"; stty 
     service.stop();
 }
 
+/// A ⌘-click that opens a path in a program, over a real kablo, the two ways the words reach it:
+/// as this Mac's own command (the link of the program, then the line and the path) and as a
+/// server's (the one constant line of shell, the program's name as its `$0`, then the same
+/// words). Either way the program is the machine's link of the program that is followed under
+/// that name, the path is one word whatever is in it and nothing of it is run, the program starts
+/// in the folder, it is told what terminal it is in, and the terminal ends with it.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_opened_for_a_path_runs_in_a_real_kablo_in_its_folder_and_ends_the_terminal_with_it() {
+    use crate::open_with;
+
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("open");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+        streams: Default::default(),
+        stand_in: Default::default(),
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+
+    // The program the machine follows under the name `demo`: it writes the words it was given,
+    // the terminal it is in and the folder it is in, and ends with 7.
+    let bin = ground.home.join(".local/share/bateri/apps/bin");
+    std::fs::create_dir_all(&bin).expect("the programs' links");
+    let program = bin.join("demo");
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+{
+  printf 'ARGS:%s\n' "$#"
+  for word in "$@"; do printf 'ARG:%s\n' "$word"; done
+  printf 'TERM:%s\n' "$TERM"
+  printf 'PWD:%s\n' "$(pwd -P)"
+} > "$BT_RECORD"
+exit 7
+"#,
+    )
+    .expect("the program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+    // A folder with a space in it and a file whose name is shell text: it is one word, and
+    // nothing of it is run.
+    let folder = ground.root.join("a b");
+    std::fs::create_dir(&folder).expect("the folder");
+    let file = folder.join("it's $(touch pwned) \"q\";x.txt");
+    std::fs::write(&file, "text").expect("the file");
+    let path = file.to_str().expect("a path of text").to_owned();
+    let folder_text = folder.to_str().expect("text").to_owned();
+    let physical = std::fs::canonicalize(&folder).expect("the folder");
+
+    let here = open_with::argv_here(&bin, "demo", Some(12), &path).expect("words");
+    let server = open_with::argv_server("demo", Some(12), &path).expect("words");
+    let directory = open_with::directory(open_with::Thing::File, &path);
+    assert_eq!(directory, folder_text);
+
+    let ways = [
+        ("here", here, "7C3A4F5E-6D7C-4B9A-AFB1-C7D6E5F40312"),
+        ("server", server, "8D4B5A6F-7E8D-4CAB-B0C2-D8E7F6A51423"),
+    ];
+    for (way, argv, pane) in ways {
+        let record = ground.root.join(format!("record-{way}"));
+        let mut options = bt_core::SessionOptions {
+            command: Some((argv[0].clone(), argv[1..].to_vec())),
+            working_directory: Some(PathBuf::from(&directory)),
+            pane_uuid: bt_core::PaneUuid::parse(pane),
+            ..plain_options("", &folder)
+        };
+        // Where the program writes: the environment the pane gives its program. On a server the
+        // link is found by `$HOME`, which here is the test's home.
+        options.env.insert(
+            "BT_RECORD".to_owned(),
+            record.to_str().expect("text").to_owned(),
+        );
+        let (mut spec, size) = new_session(&options.child_launch(), 100);
+        if way == "server" {
+            // What the service asks of kablo for a pane that was opened for a program.
+            let mut asked = crate::kablo::service::program_session(&argv, Some(&directory));
+            asked.history = spec.history;
+            asked.env = spec.env;
+            asked.env.push((
+                b"HOME".to_vec(),
+                ground.home.as_os_str().as_encoded_bytes().to_vec(),
+            ));
+            spec = asked;
+        }
+        // The words of the request are the words that were made, and nothing else.
+        assert_eq!(
+            spec.argv,
+            argv.iter()
+                .map(|word| word.as_bytes().to_vec())
+                .collect::<Vec<_>>(),
+            "{way}"
+        );
+        assert_eq!(
+            spec.cwd.as_deref(),
+            Some(directory.as_bytes()),
+            "{way}: the folder"
+        );
+
+        let pane = options.pane_uuid.clone().expect("a pane");
+        let stream = service
+            .open_local(&pane, spec, size, Duration::from_secs(30))
+            .expect("a terminal of this Mac");
+        for id in ledger.terminals_of(ACCOUNT) {
+            if !ground.made.contains(&id) {
+                ground.made.push(id);
+            }
+        }
+        ground.kept = Some(PathBuf::from(&kablo));
+        assert!(stream.pid > 1, "{way}");
+        let ends = Arc::new(Ends::default());
+        let session = bt_core::Session::streamed(
+            options,
+            Arc::clone(&ends) as Arc<dyn bt_core::Wake>,
+            stream,
+        )
+        .expect("a session over the stream");
+
+        // The terminal ends with the program, and says how it ended.
+        assert_eq!(ends.waits(), Some(Some(7)), "{way}");
+        drop(session);
+        let said = std::fs::read_to_string(&record).unwrap_or_default();
+        assert_eq!(
+            said.lines().collect::<Vec<_>>(),
+            [
+                "ARGS:2".to_owned(),
+                "ARG:+12".to_owned(),
+                format!("ARG:{path}"),
+                "TERM:xterm-256color".to_owned(),
+                format!("PWD:{}", physical.display()),
+            ],
+            "{way}"
+        );
+    }
+    // Nothing of the file's name was run, here or on a server.
+    assert!(!folder.join("pwned").exists());
+    assert!(!ground.root.join("pwned").exists());
+    service.stop();
+}
+
 /// The options of a session whose program is `script` run by `/bin/sh`, the way a pane's shell is
 /// started on this machine: behind `login(1)` on macOS (the program is its child, and `login`
 /// is root's), the program itself elsewhere.

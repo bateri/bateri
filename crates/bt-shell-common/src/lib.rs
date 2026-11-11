@@ -68,6 +68,7 @@ pub mod links;
 pub mod moves;
 pub mod native_view;
 pub mod notices;
+pub mod open_with;
 #[cfg(test)]
 mod outward_contract;
 pub mod overview;

@@ -160,6 +160,11 @@ pub struct PaneInfo {
     /// The folder the terminal's shell starts in on the server: the one a pane
     /// opened from a remote pane inherits. Used once.
     pub directory: Option<String>,
+    /// The words of the program the pane was opened for, which the terminal runs instead of a
+    /// shell ([`crate::open_with::argv_server`]); [`PaneInfo::directory`] is then the folder it
+    /// starts in. The pane says it, never the holder: it is made by the app when the pane is, and
+    /// it is no part of what the holder asks for.
+    pub program: Option<Vec<String>>,
 }
 
 /// The terminal a pane shows, as far as the application's questions go.
@@ -4113,10 +4118,19 @@ fn terminal_named(number: Option<u64>) -> Option<SessionId> {
 /// The new terminal's request: the bootstrap as the command (the shells' files are on the server
 /// already: `install::ensure` wrote them), the dock's tier as its environment, bateri's
 /// scrollback as the history.
+///
+/// A pane that was opened for a program asks for that program and the folder it starts in, and
+/// nothing of the bootstrap: there is no shell in it to take the identity or the dock's tier, and
+/// the terminal ends with the program.
 fn new_session(shared: &Shared, pane: &PaneInfo) -> NewSession {
-    let nonce = ssh_wrap::new_nonce().unwrap_or_else(|| "0".repeat(ssh_wrap::NONCE_LEN));
     // `NewSession` is not exhaustive: it is started from its default.
     let mut spec = NewSession::default();
+    if let Some(program) = &pane.program {
+        spec = program_session(program, pane.directory.as_deref());
+        spec.history = shared.backend.history();
+        return spec;
+    }
+    let nonce = ssh_wrap::new_nonce().unwrap_or_else(|| "0".repeat(ssh_wrap::NONCE_LEN));
     spec.argv = ssh_wrap::kablo_argv(
         pane.directory.as_deref(),
         pane.block,
@@ -4129,6 +4143,19 @@ fn new_session(shared: &Shared, pane: &PaneInfo) -> NewSession {
         spec.env.push((b"BATERI_DOCK".to_vec(), b"off".to_vec()));
     }
     spec.history = shared.backend.history();
+    spec
+}
+
+/// The request for a terminal that runs `program` in `directory` (the server's home when there is
+/// none): the words as the command, nothing else.
+pub(crate) fn program_session(program: &[String], directory: Option<&str>) -> NewSession {
+    // `NewSession` is not exhaustive: it is started from its default.
+    let mut spec = NewSession::default();
+    spec.argv = program
+        .iter()
+        .map(|word| word.as_bytes().to_vec())
+        .collect();
+    spec.cwd = directory.map(|directory| directory.as_bytes().to_vec());
     spec
 }
 

@@ -206,6 +206,15 @@ pub trait PaneHost {
     fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
         None
     }
+    /// The program a ⌘-click on a path opens in, for the machine the path is on: this Mac
+    /// (`None`) or the server of `account` ([`bt_shell_common::open_with::choose`], and for a
+    /// server what it said it has). The default is an owner that opens nothing: no path is a link.
+    fn open_choice(&self, _account: Option<&str>) -> Option<bt_shell_common::open_with::Choice> {
+        None
+    }
+    /// Opens the program for a ⌘-click on a path in a floating pane of the tab `from` is in, with
+    /// its own terminal. The default is an owner that does not.
+    fn open_program(&self, _from: &TerminalPane, _open: crate::launch::OpenProgram) {}
     /// What keeps the connections to the servers, and so runs a program or opens a connection
     /// on one for the pane's jobs ([`bt_shell_common::kablo::service::Backend::command`]).
     /// The default is an owner that keeps none.
@@ -2249,6 +2258,11 @@ pub struct PaneIvars {
     /// What the pane runs, from its start ([`PaneRuns`]): session restore saves it, so a pane born
     /// again after a restart is what it was.
     runs: RefCell<PaneRuns>,
+    /// The program a pane on a server was opened for ([`crate::launch::ProgramStart`]), kept for
+    /// as long as the pane is: the service asks for it when the pipe connects
+    /// ([`Self::program_start`]). Not saved, and empty for a pane of this Mac, whose program is
+    /// started by the pane itself.
+    program: RefCell<Option<crate::launch::ProgramStart>>,
     /// The remote generation this pane reported to the masters' registry
     /// ([`Masters::session_started`]); `None` locally.
     ssh_session: Cell<Option<u64>>,
@@ -2930,6 +2944,7 @@ impl TerminalPane {
             identity,
             asked_for: RefCell::new(AskedFor::default()),
             runs: RefCell::new(PaneRuns::default()),
+            program: RefCell::new(None),
             ssh_session: Cell::new(None),
             wrap_proof: RefCell::new(WrapProof::default()),
             program_memo: Cell::new(ProgramMemo::default()),
@@ -3200,6 +3215,28 @@ impl TerminalPane {
             close_at_end: asked_for.close_at_end,
             opener: asked_for.opener,
         })
+    }
+
+    /// The program a ⌘-click on a path in this pane opens in: on this Mac, or on the server whose
+    /// terminal the pane shows (`remote`). `None` is no program, and the path is no link there.
+    pub(crate) fn open_choice(&self, remote: bool) -> Option<bt_shell_common::open_with::Choice> {
+        if remote {
+            let shown = self.host().kept_terminal(self.uuid())?;
+            self.host().open_choice(Some(&shown.account))
+        } else {
+            self.host().open_choice(None)
+        }
+    }
+
+    /// Opens the program a click chose, in a floating pane of this pane's tab.
+    pub(crate) fn open_program(&self, open: crate::launch::OpenProgram) {
+        self.host().open_program(self, open);
+    }
+
+    /// The program this pane was opened for, if it was: what the terminal a server keeps for it
+    /// is asked to run, and where.
+    pub(crate) fn program_start(&self) -> Option<crate::launch::ProgramStart> {
+        self.ivars().program.borrow().clone()
     }
 
     /// Who asked for this pane, when a program on a server did ("Claude (t4)"), while the pane
@@ -3718,6 +3755,7 @@ impl TerminalPane {
             env: extra_env,
             held,
             runs,
+            program,
         } = launch;
         // Whether the pipe is started or a terminal shown again goes on, the pane is the
         // program's it was asked for by: the pipe has the flag on its own command line, and
@@ -3728,6 +3766,17 @@ impl TerminalPane {
                 opener: held.opener.clone(),
             });
         }
+        // The program a click opened the pane for: on this Mac it is what the terminal runs in
+        // place of the login shell, started directly, so the terminal ends with it; on a server
+        // the pipe's terminal is asked for it by the service ([`Self::program_start`]).
+        let local_program = program
+            .as_ref()
+            .filter(|_| held.is_none())
+            .and_then(|program| program.argv.split_first())
+            .map(|(program, args)| (program.clone(), args.to_vec()));
+        self.ivars()
+            .program
+            .replace(program.filter(|_| held.is_some()));
         let asked_shell = runs.shell().map(std::path::Path::to_path_buf);
         // The pane's own program is a shell: only then is its name what the title says at the
         // prompt. A pane asked for `fish` says `fish`, whatever the user's own shell is.
@@ -3753,6 +3802,7 @@ impl TerminalPane {
         // they are `Direct`; deciding the parent in the same branch as the
         // command is what keeps the two from disagreeing.
         let (command, shell_parent) = match self.ivars().run {
+            None if local_program.is_some() => (local_program, ShellParent::Direct),
             None => {
                 let shell = child::shell_command_for(asked_shell, &shell_args);
                 // A terminal a server keeps shown first: the program in front is the

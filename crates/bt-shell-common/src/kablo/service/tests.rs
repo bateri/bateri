@@ -2238,6 +2238,50 @@ fn a_new_terminal_starts_in_the_folder_the_pane_lookup_names() {
     assert_ne!(argv[2], ssh_wrap::boot_in(None).as_bytes());
 }
 
+/// A pane that was opened for a program: its terminal runs those words, and not the bootstrap,
+/// and a pane that was not still gets the bootstrap.
+#[test]
+fn a_new_terminal_of_a_pane_opened_for_a_program_runs_that_program() {
+    let words: Vec<String> = [
+        "sh",
+        "-c",
+        "exec \"$0\" \"$@\"",
+        "textpen",
+        "+12",
+        "/srv/app/main.rs",
+    ]
+    .iter()
+    .map(|word| (*word).to_owned())
+    .collect();
+    let rig = Rig::new("program");
+    pane_named(&rig.world);
+    {
+        let mut info = rig.world.info.lock().expect("lock");
+        info.directory = Some("/srv/app".into());
+        info.program = Some(words.clone());
+    }
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    let argv = rig
+        .world
+        .bridge()
+        .argv_of(&terminal)
+        .expect("started")
+        .to_vec();
+    let expected: Vec<Vec<u8>> = words.iter().map(|word| word.as_bytes().to_vec()).collect();
+    assert_eq!(argv, expected);
+}
+
+/// The request is the words and the folder, whatever else a pane says of itself.
+#[test]
+fn a_program_session_is_the_words_and_the_folder() {
+    let words = vec!["prog".to_owned(), "/a b".to_owned()];
+    let spec = program_session(&words, Some("/srv/app"));
+    assert_eq!(spec.argv, [b"prog".to_vec(), b"/a b".to_vec()]);
+    assert_eq!(spec.cwd.as_deref(), Some(b"/srv/app".as_slice()));
+    assert_eq!(program_session(&words, None).cwd, None);
+}
+
 /// The dock's tier is the settings' (`[shell] integration`): `"blocks"` reaches a new terminal as
 /// `BATERI_DOCK=off` in its environment, the dock leaves the environment as it is — the
 /// shells there read it, and `bateri` hands it to the terminals it opens.

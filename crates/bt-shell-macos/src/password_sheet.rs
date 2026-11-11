@@ -59,6 +59,8 @@ use crate::uploader::on_pane;
 pub(crate) enum Job {
     Upload,
     Download,
+    // Nothing starts a preview any more.
+    #[allow(dead_code)]
     Preview,
     Finder,
     /// The terminals the server keeps wait for a login: a pane's ⏎ on

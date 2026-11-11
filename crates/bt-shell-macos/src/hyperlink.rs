@@ -64,6 +64,7 @@ use std::rc::Rc;
 use block2::RcBlock;
 use bt_core::{CellHalf, LinkHit, LinkKind, LinkPoint, LinkSpan, SelectionPoint, UnderlineStyle};
 use bt_gpu::{CellMetrics, Origin};
+use bt_shell_common::open_with::{Choice, Thing};
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
@@ -78,7 +79,8 @@ use objc2_foundation::{
 
 use crate::child;
 use crate::clipboard;
-use crate::links::{self, Content, LinkAction, Resolved};
+use crate::launch::OpenProgram;
+use crate::links::{self, Content, Entry, LinkAction, Resolved};
 use crate::pointer;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{self, Answer, Query, Request};
@@ -103,6 +105,9 @@ pub(crate) struct Verified {
     query: LinkHit,
     /// Which of the query's candidates won (`0` for a non-path link).
     index: usize,
+    /// The program a click on this path opens in; `None` for a link that is no path, and for a
+    /// path the menu was asked for that no program opens (the menu has no "Open in" then).
+    program: Option<String>,
 }
 
 impl Verified {
@@ -114,29 +119,38 @@ impl Verified {
             resolved: None,
             remote: None,
             index: 0,
+            program: None,
         }
     }
 
     /// The background answer for `query`: the winning candidate and what it is.
-    fn found(query: LinkHit, index: usize, resolved: Resolved) -> Self {
+    fn found(query: LinkHit, index: usize, resolved: Resolved, program: Option<String>) -> Self {
         Verified {
             hit: narrowed(&query, index),
             resolved: Some(resolved),
             remote: None,
             query,
             index,
+            program,
         }
     }
 
     /// The helper's answer for the remote `query`: the winning candidate, its
     /// remote absolute path and what it is.
-    fn found_remote(query: LinkHit, index: usize, path: String, entry: RemoteEntry) -> Self {
+    fn found_remote(
+        query: LinkHit,
+        index: usize,
+        path: String,
+        entry: RemoteEntry,
+        program: Option<String>,
+    ) -> Self {
         Verified {
             hit: narrowed(&query, index),
             resolved: None,
             remote: Some((path, entry)),
             query,
             index,
+            program,
         }
     }
 
@@ -150,6 +164,7 @@ impl Verified {
             remote: self.remote.clone(),
             query,
             index: self.index,
+            program: self.program.clone(),
         }
     }
 }
@@ -175,6 +190,22 @@ fn local_paths(hit: &LinkHit) -> Option<Vec<std::path::PathBuf>> {
     }
 }
 
+/// What a path on this Mac is, as the rule for a click asks it.
+fn thing_of(entry: &Entry) -> Thing {
+    match entry {
+        Entry::Dir => Thing::Folder,
+        Entry::File { .. } => Thing::File,
+    }
+}
+
+/// What a path on a server is, as the rule for a click asks it.
+fn remote_thing(entry: RemoteEntry) -> Thing {
+    match entry {
+        RemoteEntry::File { .. } => Thing::File,
+        RemoteEntry::Dir(_) => Thing::Folder,
+    }
+}
+
 /// A remote hit's candidate names, in the order they are tried.
 fn remote_candidates(hit: &LinkHit) -> Vec<String> {
     if hit.candidates.is_empty() {
@@ -188,10 +219,13 @@ fn remote_candidates(hit: &LinkHit) -> Vec<String> {
 enum Check {
     /// Nothing to verify: a URL, a non-file OSC 8 link.
     None,
-    /// The local `stat`s of these paths, in order.
-    Local(Vec<std::path::PathBuf>),
-    /// The helper session's answer for these remote candidates.
-    Remote(Vec<String>),
+    /// The local `stat`s of these paths, in order, and the program a click on one that is a file or
+    /// a folder opens in ([`TerminalPane::open_choice`]): without one a path is no link, and
+    /// the menu has no "Open in" for it.
+    Local(Vec<std::path::PathBuf>, Option<Choice>),
+    /// The helper session's answer for these remote candidates, and the program as for
+    /// [`Check::Local`].
+    Remote(Vec<String>, Option<Choice>),
     /// A remote hit that cannot be one: only relative names while the remote
     /// folder is unknown — the label says why.
     CwdUnknown,
@@ -649,7 +683,8 @@ impl BateriView {
                 ));
                 return;
             }
-            Check::Gone => {
+            // A path no program opens is no link: not underlined, no hand.
+            Check::Gone | Check::Local(_, None) | Check::Remote(_, None) => {
                 let shown = {
                     let mut state = self.link_state().borrow_mut();
                     state.pending = None;
@@ -660,7 +695,7 @@ impl BateriView {
                 }
                 return;
             }
-            check @ (Check::Local(_) | Check::Remote(_)) => check,
+            check @ (Check::Local(_, Some(_)) | Check::Remote(_, Some(_))) => check,
         };
         let (in_flight, missing, shown) = {
             let mut state = self.link_state().borrow_mut();
@@ -709,10 +744,15 @@ impl BateriView {
             } else if remote_helper::cwd_unknown(&candidates, &session.remote_link_directory()) {
                 Check::CwdUnknown
             } else {
-                Check::Remote(candidates)
+                Check::Remote(
+                    candidates,
+                    self.pane().and_then(|pane| pane.open_choice(true)),
+                )
             }
         } else {
-            local_paths(hit).map_or(Check::None, Check::Local)
+            local_paths(hit).map_or(Check::None, |paths| {
+                Check::Local(paths, self.pane().and_then(|pane| pane.open_choice(false)))
+            })
         }
     }
 
@@ -720,8 +760,10 @@ impl BateriView {
     /// need no answer.
     fn verify(&self, check: Check, hit: LinkHit, then: Then) {
         match check {
-            Check::Local(paths) => self.verify_paths(paths, hit, then),
-            Check::Remote(candidates) => self.verify_remote(candidates, hit, then),
+            Check::Local(paths, choice) => self.verify_paths(paths, hit, then, choice),
+            Check::Remote(candidates, choice) => {
+                self.verify_remote(candidates, hit, then, choice);
+            }
             Check::None | Check::CwdUnknown | Check::Gone => {}
         }
     }
@@ -729,7 +771,13 @@ impl BateriView {
     /// Asks the pane's helper session which remote candidate exists; the answer returns to the main queue by pane id with the
     /// generation it was asked under — a reply from an ended ssh session is
     /// dropped ([`BateriView::link_remote_verified`]).
-    fn verify_remote(&self, candidates: Vec<String>, hit: LinkHit, then: Then) {
+    fn verify_remote(
+        &self,
+        candidates: Vec<String>,
+        hit: LinkHit,
+        then: Then,
+        choice: Option<Choice>,
+    ) {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
             return;
         };
@@ -754,7 +802,13 @@ impl BateriView {
                     // audit: a block running on the main queue is on the main thread by definition.
                     let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                     if let Some(pane) = lookup(mtm, id) {
-                        pane.view().link_remote_verified(&hit, command, found, then);
+                        pane.view().link_remote_verified(
+                            &hit,
+                            command,
+                            found,
+                            then,
+                            choice.as_ref(),
+                        );
                     }
                 });
             }),
@@ -771,6 +825,7 @@ impl BateriView {
         command: u64,
         found: Result<Option<(usize, String, RemoteEntry)>, String>,
         then: Then,
+        choice: Option<&Choice>,
     ) {
         let current = self
             .pane()
@@ -781,12 +836,32 @@ impl BateriView {
             Ok(_) => (None, None),
             Err(text) => (None, current.then_some(text)),
         };
+        // The second step of the rule: whether the program takes what the path is. The hover has
+        // a link only if it does; the menu is for any path that is there, and has "Open in" when
+        // it does.
         let found = found.map(|(index, path, entry)| {
-            move |query| Verified::found_remote(query, index, path, entry)
+            let program = choice
+                .filter(|choice| choice.takes(remote_thing(entry)))
+                .map(|choice| choice.name.clone());
+            (index, path, entry, program)
         });
         match then {
-            Then::Hover => self.settle_hover(hit, found, note),
-            Then::Menu(at) => self.settle_menu(hit, found, at),
+            Then::Hover => self.settle_hover(
+                hit,
+                found.filter(|(.., program)| program.is_some()).map(
+                    |(index, path, entry, program)| {
+                        move |query| Verified::found_remote(query, index, path, entry, program)
+                    },
+                ),
+                note,
+            ),
+            Then::Menu(at) => self.settle_menu(
+                hit,
+                found.map(|(index, path, entry, program)| {
+                    move |query| Verified::found_remote(query, index, path, entry, program)
+                }),
+                at,
+            ),
         }
     }
 
@@ -796,7 +871,13 @@ impl BateriView {
     /// returns to the main queue by pane id — to the hover
     /// ([`BateriView::settle_hover`]) or to the context menu
     /// ([`BateriView::settle_menu`]).
-    fn verify_paths(&self, paths: Vec<std::path::PathBuf>, hit: LinkHit, then: Then) {
+    fn verify_paths(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        hit: LinkHit,
+        then: Then,
+        choice: Option<Choice>,
+    ) {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
             return;
         };
@@ -815,16 +896,47 @@ impl BateriView {
                 home.as_deref(),
                 stat,
             );
+            // This Mac has the program when the link to it is there: looked for here, where the
+            // paths are, and not in what this Mac's kablo said it has — which it does not say to a
+            // level of `off`.
+            let here = choice.as_ref().is_some_and(|choice| {
+                crate::apps_root()
+                    .is_some_and(|root| root.join("bin").join(&choice.name).metadata().is_ok())
+            });
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(pane) = lookup(mtm, id) {
+                    // The second step of the rule: whether the program takes what the path is
+                    // (and a path it can be handed as text). The hover has a link only if it does;
+                    // the menu is for any path that is there, and has "Open in" when it does.
                     let found = found.map(|(index, resolved)| {
-                        move |query| Verified::found(query, index, resolved)
+                        let program = choice
+                            .as_ref()
+                            .filter(|choice| {
+                                here && choice.takes(thing_of(&resolved.entry))
+                                    && resolved.target.to_str().is_some()
+                            })
+                            .map(|choice| choice.name.clone());
+                        (index, resolved, program)
                     });
                     match then {
-                        Then::Hover => pane.view().settle_hover(&hit, found, None),
-                        Then::Menu(at) => pane.view().settle_menu(&hit, found, at),
+                        Then::Hover => pane.view().settle_hover(
+                            &hit,
+                            found.filter(|(.., program)| program.is_some()).map(
+                                |(index, resolved, program)| {
+                                    move |query| Verified::found(query, index, resolved, program)
+                                },
+                            ),
+                            None,
+                        ),
+                        Then::Menu(at) => pane.view().settle_menu(
+                            &hit,
+                            found.map(|(index, resolved, program)| {
+                                move |query| Verified::found(query, index, resolved, program)
+                            }),
+                            at,
+                        ),
                     }
                 }
             });
@@ -1007,16 +1119,13 @@ impl BateriView {
         }
     }
 
-    /// The click's action (`links::action`, the white list). A remote path has
-    /// its own policy: a file previews
-    /// ([`crate::pane::TerminalPane::preview_remote`]), a folder does nothing.
+    /// The click's action. A path, on this Mac or on a server, opens in the program the person
+    /// chose ([`BateriView::open_in_program`]); any other link is the policy's
+    /// ([`links::action`], the white list).
     fn open_link(&self, link: &Verified) {
-        if let Some((path, entry)) = &link.remote {
-            if matches!(entry, RemoteEntry::File { .. })
-                && let Some(pane) = self.pane()
-            {
-                pane.preview_remote(path.clone());
-            }
+        // A path, here or on a server, opens in the program the person chose, and nowhere else.
+        if link.resolved.is_some() || link.remote.is_some() {
+            self.open_in_program(link);
             return;
         }
         let action = links::action(
@@ -1039,6 +1148,37 @@ impl BateriView {
             Some(LinkAction::Confirm(target)) => self.confirm_open(target),
             Some(LinkAction::Swallow) | None => {}
         }
+    }
+
+    /// Opens the path of `link` in the program the check found for it, in a floating pane
+    /// ([`crate::pane::TerminalPane::open_program`]). A path that program does not take, or that
+    /// no program was found for (the menu has no "Open in" for it), opens nothing.
+    fn open_in_program(&self, link: &Verified) {
+        let (Some(name), Some(pane)) = (link.program.clone(), self.pane()) else {
+            return;
+        };
+        let line = match link.hit.kind {
+            LinkKind::Path { line, .. } => line,
+            LinkKind::Url | LinkKind::Osc8 => None,
+        };
+        let (path, thing, server) = if let Some((path, entry)) = &link.remote {
+            (path.clone(), remote_thing(*entry), true)
+        } else if let Some(resolved) = &link.resolved {
+            // What was judged is what is opened: the object the path names, not the symlink.
+            let Some(path) = resolved.target.to_str() else {
+                return;
+            };
+            (path.to_owned(), thing_of(&resolved.entry), false)
+        } else {
+            return;
+        };
+        pane.open_program(OpenProgram {
+            name,
+            thing,
+            path,
+            line,
+            server,
+        });
     }
 
     /// A right press the terminal owns — mouse mode off (or Shift, its escape)
@@ -1071,7 +1211,7 @@ impl BateriView {
         }
         match self.check(&hit) {
             Check::None => self.pop_link_menu(Verified::plain(hit), point),
-            check @ (Check::Local(_) | Check::Remote(_)) => {
+            check @ (Check::Local(..) | Check::Remote(..)) => {
                 self.link_state().borrow_mut().menu_pending = Some(hit.clone());
                 self.verify(check, hit, Then::Menu(point));
             }
@@ -1115,11 +1255,14 @@ impl BateriView {
     /// "Reveal in Finder", "Copy Path", on any other link "Open Link", "Copy
     /// Link". A link the policy has nothing for (`bateri://`) gets no menu.
     fn pop_link_menu(&self, link: Verified, at: NSPoint) {
-        if let Some((_, entry)) = &link.remote {
-            let file = matches!(entry, RemoteEntry::File { .. });
+        let open_in = link
+            .program
+            .as_ref()
+            .map(|name| NSString::from_str(&format!("Open in {name}")));
+        if link.remote.is_some() {
             let mut items: Vec<(&NSString, objc2::runtime::Sel, bool)> = Vec::new();
-            if file {
-                items.push((ns_string!("Open Preview"), sel!(openLinkFromMenu:), true));
+            if let Some(title) = &open_in {
+                items.push((title, sel!(openLinkFromMenu:), true));
             }
             items.extend([
                 (
@@ -1151,23 +1294,27 @@ impl BateriView {
         if matches!(action, None | Some(LinkAction::Swallow)) {
             return;
         }
-        let items: &[(&NSString, objc2::runtime::Sel, bool)] = if link.resolved.is_some() {
-            &[
-                (ns_string!("Open"), sel!(openLinkFromMenu:), true),
+        let items: Vec<(&NSString, objc2::runtime::Sel, bool)> = if link.resolved.is_some() {
+            let mut items = Vec::new();
+            if let Some(title) = &open_in {
+                items.push((&**title, sel!(openLinkFromMenu:), true));
+            }
+            items.extend([
                 (
                     ns_string!("Reveal in Finder"),
                     sel!(revealLinkFromMenu:),
                     true,
                 ),
                 (ns_string!("Copy Path"), sel!(copyLinkFromMenu:), true),
-            ]
+            ]);
+            items
         } else {
-            &[
+            vec![
                 (ns_string!("Open Link"), sel!(openLinkFromMenu:), true),
                 (ns_string!("Copy Link"), sel!(copyLinkFromMenu:), true),
             ]
         };
-        self.pop_menu(link, items, at);
+        self.pop_menu(link, &items, at);
     }
 
     /// Pops a menu of `(title, action, enabled)` items acting on `link` at
@@ -1357,6 +1504,43 @@ mod tests {
     /// A 10×20 px cell with an 8 px left padding.
     fn metrics() -> CellMetrics {
         CellMetrics::new(10, 20, 15, 8, 1, 1.0).expect("non-zero cell")
+    }
+
+    /// What the click's rule asks of a path is a file or a folder, on this Mac and on a server;
+    /// a package, an alias and a script are no more than that.
+    #[test]
+    fn a_path_is_a_file_or_a_folder_to_the_rule_of_the_click() {
+        assert_eq!(thing_of(&Entry::Dir), Thing::Folder);
+        assert_eq!(thing_of(&Entry::File { executable: false }), Thing::File);
+        assert_eq!(thing_of(&Entry::File { executable: true }), Thing::File);
+        let file = RemoteEntry::File {
+            size: None,
+            mtime: None,
+            executable: true,
+        };
+        assert_eq!(remote_thing(file), Thing::File);
+    }
+
+    /// The click is the person's own act, not an agent's command: what it opens and where is
+    /// decided from the setting, the followed programs and the machine, and no word of
+    /// `[commands] level` is in the code that does it (the level is the agents' and the
+    /// programs' own commands). A server at `off` says nothing of what it has, which leaves no
+    /// link there; that is the machine's silence, not a check of the level.
+    #[test]
+    fn the_click_asks_no_command_level() {
+        for (name, source) in [
+            ("hyperlink.rs", include_str!("hyperlink.rs")),
+            (
+                "open_with.rs",
+                include_str!("../../bt-shell-common/src/open_with.rs"),
+            ),
+        ] {
+            // Everything before this test module is the code.
+            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for word in ["CommandLevel", "commands_level", "command_level"] {
+                assert!(!code.contains(word), "{name} reads `{word}`");
+            }
+        }
     }
 
     #[test]

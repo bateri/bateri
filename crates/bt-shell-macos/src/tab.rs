@@ -154,6 +154,16 @@ impl PaneHost for TabHost {
         crate::hold_service::shown(pane)
     }
 
+    fn open_choice(&self, account: Option<&str>) -> Option<bt_shell_common::open_with::Choice> {
+        app::delegate(Self::mtm())?.open_choice(account)
+    }
+
+    fn open_program(&self, from: &TerminalPane, open: crate::launch::OpenProgram) {
+        if let (Some(app), Some(tab)) = (app::delegate(Self::mtm()), self.tab()) {
+            app.open_program(&tab, from, open);
+        }
+    }
+
     fn connections(&self) -> Option<std::sync::Arc<dyn bt_shell_common::kablo::service::Backend>> {
         crate::hold_service::backend()
     }

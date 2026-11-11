@@ -482,6 +482,7 @@ impl<'a> World<'a> {
                 held: None,
                 uuid: uuid.clone(),
                 runs: message::runs(place),
+                program: None,
             }
         } else {
             if !pipe_installed(&app.shell_integration().env) {
@@ -511,6 +512,7 @@ impl<'a> World<'a> {
                 }),
                 uuid: None,
                 runs: PaneRuns::UserShell,
+                program: None,
             }
         };
         let incoming = app.next_id();

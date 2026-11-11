@@ -428,6 +428,9 @@ pub(crate) struct Start {
     pub(crate) uuid: Option<PaneUuid>,
     /// What the pane runs, when a command asked ([`PaneRuns`]): its integration and its dock follow.
     pub(crate) runs: PaneRuns,
+    /// The program the pane is opened for, which its terminal runs in place of a shell: a ⌘-clicked
+    /// file or folder ([`AppDelegate::open_program`]).
+    pub(crate) program: Option<launch::ProgramStart>,
 }
 
 /// Where a command the palette lists ran, in the same order as the list the palette was handed
@@ -619,6 +622,9 @@ fn restored_launch(
         held,
         // What it comes back as is asked with what became of its terminal ([`PaneRuns::after_restart`]).
         runs: PaneRuns::UserShell,
+        // A program a click opened a pane for is not saved: it comes back as the terminal it
+        // showed (a server's, by its name), or not at all.
+        program: None,
     }
 }
 
@@ -992,6 +998,10 @@ pub(crate) struct Ivars {
     /// ([`bt_shell_common::apps`]): started once the settings are read
     /// ([`AppDelegate::start_apps`]), never in a timed run.
     apps: OnceCell<bt_shell_common::apps::Tracker>,
+    /// The followed programs that open files and folders, as last read from their folders and
+    /// when: read on the main thread by the first ⌘-hover over a path, then kept for a few
+    /// seconds and dropped when the programs change ([`AppDelegate::open_choice`]).
+    openers: RefCell<Option<(Instant, Rc<Vec<bt_shell_common::apps::opens::Opener>>)>>,
     /// The Shell menu's delegate ([`crate::menu::install`]): the menu holds it
     /// weakly, this is what keeps it alive.
     shell_menu: OnceCell<Retained<ShellMenuDelegate>>,
@@ -2739,6 +2749,7 @@ impl AppDelegate {
             settings_window: RefCell::new(None),
             settings_state: RefCell::new(settings::FileState::Missing),
             apps: OnceCell::new(),
+            openers: RefCell::new(None),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
             masters,
@@ -3021,6 +3032,9 @@ impl AppDelegate {
                 == Some(device);
             (in_it, pane.is_closed())
         })?;
+        // The program a click opened the pane for, and the folder it starts in: the terminal the
+        // pipe asks for runs that and not a shell.
+        let program = pane.program_start();
         Some(bt_shell_common::kablo::service::PaneInfo {
             tab: Some(pane.uuid().clone()),
             // A pane's own first program is the `ssh` that stood in for the command the shell
@@ -3035,7 +3049,11 @@ impl AppDelegate {
             }),
             // The folder a pane opened from a pane on a server asks to start in,
             // once ([`crate::hold_service::expect_directory`]).
-            directory: crate::hold_service::take_directory(pane.id()),
+            directory: program
+                .as_ref()
+                .and_then(|program| program.directory.clone())
+                .or_else(|| crate::hold_service::take_directory(pane.id())),
+            program: program.map(|program| program.argv),
         })
     }
 
@@ -4325,7 +4343,9 @@ impl AppDelegate {
         );
         let initial = if let Some(held) = &held {
             // A terminal that exists starts where it is; only a new one is asked for a folder.
+            // A program's pane has its folder with it ([`ProgramStart::directory`]).
             if held.resume.is_none()
+                && start.is_none_or(|start| start.program.is_none())
                 && let Some(dir) =
                     session.and_then(|session| start_directory(session.remote_link_directory()))
             {
@@ -4361,6 +4381,7 @@ impl AppDelegate {
             held,
             env: launch::shell_env(&runs),
             runs,
+            program: start.and_then(|start| start.program.clone()),
         };
         (config, theme)
     }
@@ -5361,6 +5382,7 @@ impl AppDelegate {
                     held: None,
                     uuid: None,
                     runs: PaneRuns::UserShell,
+                    program: None,
                 };
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
@@ -5376,6 +5398,7 @@ impl AppDelegate {
                     held: None,
                     uuid: None,
                     runs: PaneRuns::UserShell,
+                    program: None,
                 };
                 let split = beside
                     && window
@@ -5491,6 +5514,7 @@ impl AppDelegate {
             }),
             uuid: None,
             runs: PaneRuns::UserShell,
+            program: None,
         })
     }
 
@@ -5886,6 +5910,7 @@ impl AppDelegate {
                 held: None,
                 uuid: None,
                 runs: PaneRuns::UserShell,
+                program: None,
             })
         };
         match how {
@@ -6216,9 +6241,129 @@ impl AppDelegate {
         }
     }
 
+    /// How long what was read of the followed programs' folders is kept for a click's rule.
+    const OPENERS_KEPT: Duration = Duration::from_secs(10);
+
+    /// The followed programs that open files and folders ([`bt_shell_common::apps::opens`]).
+    fn openers(&self) -> Rc<Vec<bt_shell_common::apps::opens::Opener>> {
+        if let Some((read, openers)) = self.ivars().openers.borrow().as_ref()
+            && read.elapsed() < Self::OPENERS_KEPT
+        {
+            return Rc::clone(openers);
+        }
+        let openers = Rc::new(
+            crate::apps_root()
+                .map(|root| bt_shell_common::apps::opens::openers(&root))
+                .unwrap_or_default(),
+        );
+        self.ivars()
+            .openers
+            .replace(Some((Instant::now(), Rc::clone(&openers))));
+        openers
+    }
+
+    /// The program a ⌘-click on a path opens in on this Mac (`account` `None`) or on the server of
+    /// `account`: the setting's, when it is a followed program that opens files and, on a server,
+    /// one the server said it has. `None`: the path is no link. **This is no command of an
+    /// agent**: the click is the person's, so `[commands] level` has no say in it.
+    pub(crate) fn open_choice(
+        &self,
+        account: Option<&str>,
+    ) -> Option<bt_shell_common::open_with::Choice> {
+        let setting = self.settings().apps_open_with.clone();
+        let choice = bt_shell_common::open_with::choose(&setting, &self.openers())?;
+        let Some(account) = account else {
+            // This Mac's own link is looked for where the path is stat'ed, not asked of the
+            // machine's report, which a level of `off` never lets arrive.
+            return Some(choice);
+        };
+        let said = crate::apps_answerer()?.machine(account)?;
+        choice.is_on(Some(&said.installed)).then_some(choice)
+    }
+
+    /// A ⌘-click on a file or a folder, which the program the person chose opens: in a floating
+    /// pane of `tab`, next to `from`. On this Mac the pane's terminal starts the program itself;
+    /// on a server it is a new terminal of the server `from` shows, which runs it. The pane ends
+    /// with the program. Nothing is typed to any shell: the words are made by
+    /// [`bt_shell_common::open_with`].
+    pub(crate) fn open_program(
+        &self,
+        tab: &TerminalTab,
+        from: &TerminalPane,
+        open: launch::OpenProgram,
+    ) {
+        let launch::OpenProgram {
+            name,
+            thing,
+            path,
+            line,
+            server,
+        } = open;
+        let directory = bt_shell_common::open_with::directory(thing, &path);
+        let start = if server {
+            // The terminal is asked for on the server the pane shows one of, as ⌘D would, with the
+            // program as what it runs and the folder it starts in.
+            let Some((_, target, _)) = from.server_target() else {
+                return;
+            };
+            let Some((program, args)) = target.argv.split_first() else {
+                return;
+            };
+            if target.kind != RemoteKind::Ssh || program != "ssh" || args.is_empty() {
+                return;
+            }
+            let Some(argv) = bt_shell_common::open_with::argv_server(&name, line, &path) else {
+                return;
+            };
+            Start {
+                held: Some(Held {
+                    args: args.to_vec(),
+                    resume: None,
+                    // The pane is the program's and no more: it goes when the program does.
+                    close_at_end: true,
+                    opener: None,
+                }),
+                program: Some(launch::ProgramStart {
+                    argv,
+                    directory: Some(directory),
+                }),
+                runs: PaneRuns::UserShell,
+                ..Start::default()
+            }
+        } else {
+            let Some(bin) = crate::apps_root().map(|root| root.join("bin")) else {
+                return;
+            };
+            let Some(argv) = bt_shell_common::open_with::argv_here(&bin, &name, line, &path) else {
+                return;
+            };
+            Start {
+                directory: Some(PathBuf::from(directory)),
+                program: Some(launch::ProgramStart {
+                    argv,
+                    directory: None,
+                }),
+                runs: PaneRuns::Program { keep_open: false },
+                ..Start::default()
+            }
+        };
+        let (launch, _) = self.pane_launch(tab.id(), Some(from), Opening::Split, Some(&start));
+        // Without the pipe to a server (the shell integration), the pane would be a shell of this
+        // Mac that was never asked for the program.
+        if server && launch.held.is_none() {
+            eprintln!("bateri: there is no pipe to a server in this process");
+            return;
+        }
+        if let Err(e) = tab.add_floating(self.mtm(), launch, None, None) {
+            eprintln!("bateri: {e}");
+        }
+    }
+
     /// A check ended: the Apps page, when it is open, shows what it found. Only that page is drawn
     /// again; the rest of the window has not changed.
     fn apps_changed(&self) {
+        // What a click opens in is read from the same folders.
+        self.ivars().openers.replace(None);
         let Some(window) = self.ivars().settings_window.borrow().clone() else {
             return;
         };
@@ -9330,6 +9475,7 @@ mod tests {
             held: None,
             uuid: None,
             runs: PaneRuns::UserShell,
+            program: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&folder)),
@@ -9342,6 +9488,7 @@ mod tests {
             held: None,
             uuid: None,
             runs: PaneRuns::UserShell,
+            program: None,
         };
         let (input, inherited) = first_input(Opening::Tab, remote(), Some(&history));
         assert_eq!(input, Some(InitialInput::ready("make test")));
@@ -9359,6 +9506,7 @@ mod tests {
             held: None,
             uuid: None,
             runs: PaneRuns::UserShell,
+            program: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&server)),
@@ -9423,6 +9571,7 @@ mod tests {
             held: None,
             uuid: None,
             runs: PaneRuns::UserShell,
+            program: None,
         };
         assert_eq!(
             held(Opening::Tab, Some(&folder), true, Some(&target), &installed),

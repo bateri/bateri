@@ -2792,7 +2792,9 @@ names, in a floating pane over the tab, on the computer the path is on: the prog
 path (and `+LINE` before it, when the text said `path:line`) and the pane closes when it ends. Each click opens a
 pane of its own. `open_with` is the name of a program bateri follows that says in its `app.json` that it opens files
 (`opens`); where that program is not installed, or when the value is `""`, a path in that terminal is not a link: it is
-not underlined and a click does nothing. A value that is not a program's name keeps the value in use, with a warning;
+not underlined and a click does nothing. A server whose `[commands] level` is `"off"` never says what it has installed,
+so no path there is a link; that is the server's silence, and the click itself is the person's own act that the level does
+not rule. A value that is not a program's name keeps the value in use, with a warning;
 `http`, `https`, `ftp` and `mailto` addresses and the links a program writes (OSC 8) are links as ever, and
 nothing is handed to another application.
 

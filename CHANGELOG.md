@@ -21,6 +21,7 @@ of every installed copy. A version without a section is not released.
 - **Images in the theme's colours** (`f=8`, `f=16`): they are drawn again when the theme or the palette changes.
 - A program can ask which of these graphics features bateri supports (`a=q` with `e=`).
 - **The program a clicked file or folder opens in is a setting.** Settings ▸ Apps starts with a Files section and one row, Open with: textpen, another followed program that opens files, or Nothing (`[apps] open_with` in `settings.toml`). A program says that it opens files in its `app.json`, and only those are offered.
+- **Command-click on a file or a folder opens it in that program, on the computer the path is on.** The program starts in a floating pane over the tab, with the path (and the line, for `path:12`); the pane closes when it ends, and each click opens a pane of its own. In an `ssh` terminal the program runs on the server and opens the server's file, so nothing is copied to this Mac. A path is a link, with the underline, only where the program is installed and takes that kind of path; with Nothing chosen, or where the program is not installed, it is not a link and a click does nothing. The menu on a path has Open in the program as well.
 
 ### Fixed
 

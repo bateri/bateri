@@ -23,6 +23,10 @@
 //! A folder does nothing. A refused action is never silent: a beep, or
 //! a sheet that says why.
 
+// Nothing opens a preview any more: a click on a path opens it in a program. What is here has no
+// caller until it is taken out.
+#![allow(dead_code)]
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::thread;

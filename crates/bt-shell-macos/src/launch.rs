@@ -494,6 +494,37 @@ pub(crate) struct Launch {
     pub(crate) held: Option<Held>,
     /// What the pane runs ([`PaneRuns`]).
     pub(crate) runs: PaneRuns,
+    /// The program the pane was opened for, run in place of a shell ([`ProgramStart`]); `None` →
+    /// the pane's first program is a shell, or the pipe to a terminal.
+    pub(crate) program: Option<ProgramStart>,
+}
+
+/// A ⌘-click on a file or a folder, which the program the person chose opens in a floating pane
+/// ([`bt_shell_common::open_with`]): what the pane that was clicked asks its owner for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenProgram {
+    /// The program's name.
+    pub(crate) name: String,
+    /// Whether the path is a file or a folder.
+    pub(crate) thing: bt_shell_common::open_with::Thing,
+    /// The absolute path, as the check found it: this Mac's, or the server's.
+    pub(crate) path: String,
+    /// The line the click named (`path:12`), when it did.
+    pub(crate) line: Option<u32>,
+    /// Whether the path is on the server the pane shows a terminal of, and not on this Mac.
+    pub(crate) server: bool,
+}
+
+/// The program a pane was opened for — the file or folder a ⌘-click opened — and what it runs
+/// with. Born with the pane and kept by it: nothing of it is written to the session's layout or
+/// sent to a holder, and a restored pane is a shell ([`PaneRuns::Program`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgramStart {
+    /// The words, the program first ([`bt_shell_common::open_with`]).
+    pub(crate) argv: Vec<String>,
+    /// The folder it starts in on the machine it runs on, when that is a server: this Mac's is
+    /// the pane's [`Launch::working_directory`].
+    pub(crate) directory: Option<String>,
 }
 
 /// A pane whose **first program** is the pipe to a terminal a server keeps

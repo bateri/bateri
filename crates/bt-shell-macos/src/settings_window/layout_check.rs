@@ -564,20 +564,27 @@ impl SettingsWindow {
                 }
                 super::apps::hide_tip();
             }
-            // The Files row in each of its three states: the program is in the list, Nothing, a
-            // program the list lacks (the warning, which is the longest note). The row stands in
-            // its box, its text clear of its control, and says what the state calls for.
-            let followed = ["textpen".to_owned(), "notes".to_owned()];
+            // The Files row in each of its four states: the program is in the list, Nothing, a
+            // program the list lacks and one the list has that opens nothing (the warnings, the
+            // longest notes). The row stands in its box, its text clear of its control, and says
+            // what the state calls for.
+            let opening = ["textpen".to_owned(), "notes".to_owned()];
+            let followed = [
+                "textpen".to_owned(),
+                "notes".to_owned(),
+                "viewer".to_owned(),
+            ];
             for (name, value, says) in [
                 ("open-in-list", "textpen", "In a floating pane"),
                 ("open-nothing", "", "A path is not a link."),
+                ("open-gone", "sketch", "sketch is not in the list below."),
                 (
-                    "open-gone",
-                    "sketch",
-                    "sketch is not a followed program that opens files.",
+                    "open-unfit",
+                    "viewer",
+                    "viewer is not a followed program that opens files.",
                 ),
             ] {
-                self.apply_open_with(value, &followed);
+                self.apply_open_with(value, &opening, &followed);
                 self.set_open_with_note(value);
                 let (Some(content), Some(controls)) = (window.contentView(), ivars.controls.get())
                 else {

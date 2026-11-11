@@ -1541,15 +1541,23 @@ enum OpenItem {
     Separator,
     /// `open_with = ""`: no path is a link.
     Nothing,
-    /// The program the file names, which is not among the programs that open files; choosing it
-    /// writes nothing (it already is the value).
+    /// The program the file names, which is not followed at all (not in the list on this page);
+    /// choosing it writes nothing (it already is the value).
     Missing(String),
+    /// The program the file names, which is followed and says it opens neither a file nor a
+    /// folder; choosing it writes nothing either.
+    Unfit(String),
 }
 
 /// The Open with popup's items and the selected one's index: the programs that open files, a
 /// separator, Nothing; a name the file gives that is not among the programs comes last, after a
-/// separator, selected.
-fn open_with_items(current: &str, programs: &[String]) -> (Vec<OpenItem>, usize) {
+/// separator, selected: as a program that is followed and opens neither (`followed` has it) or as
+/// one that is not followed at all.
+fn open_with_items(
+    current: &str,
+    programs: &[String],
+    followed: &[String],
+) -> (Vec<OpenItem>, usize) {
     let mut items: Vec<OpenItem> = programs.iter().cloned().map(OpenItem::Program).collect();
     if !items.is_empty() {
         items.push(OpenItem::Separator);
@@ -1566,7 +1574,11 @@ fn open_with_items(current: &str, programs: &[String]) -> (Vec<OpenItem>, usize)
         return (items, index);
     }
     items.push(OpenItem::Separator);
-    items.push(OpenItem::Missing(current.to_owned()));
+    items.push(if followed.iter().any(|name| name == current) {
+        OpenItem::Unfit(current.to_owned())
+    } else {
+        OpenItem::Missing(current.to_owned())
+    });
     let index = items.len() - 1;
     (items, index)
 }
@@ -1577,17 +1589,24 @@ fn open_with_edit(items: &[OpenItem], index: NSInteger) -> Option<String> {
     match items.get(usize::try_from(index).ok()?)? {
         OpenItem::Program(name) => Some(name.clone()),
         OpenItem::Nothing => Some(String::new()),
-        OpenItem::Separator | OpenItem::Missing(_) => None,
+        OpenItem::Separator | OpenItem::Missing(_) | OpenItem::Unfit(_) => None,
     }
 }
 
-/// The followed programs that say they open files, by name: what the Open with popup lists.
-fn programs_that_open_files() -> Vec<String> {
+/// The followed programs that say they open files or folders, by name (what the Open with popup
+/// lists), and every followed program's name (what tells a program that opens nothing from one
+/// that is not followed).
+fn programs_that_open_files() -> (Vec<String>, Vec<String>) {
     let root = crate::apps_root().unwrap_or_default();
-    bt_shell_common::apps::opens::openers(&root)
+    let opening = bt_shell_common::apps::opens::openers(&root)
         .into_iter()
         .map(|opener| opener.name)
-        .collect()
+        .collect();
+    let followed = bt_shell_common::apps::store::followed_names(&root)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    (opening, followed)
 }
 
 /// What the Open with row says of a value that is in the list: what a click does.
@@ -1600,10 +1619,15 @@ fn open_with_description(open_with: &str) -> &'static str {
 }
 
 /// The warning under the Open with row when the value names a program that is not among the ones
-/// that open files; the row says what a click does in every other state.
+/// that open files; the row says what a click does in every other state. A name that is not in
+/// the list on the page says so; one that is in it and opens no file says that instead, as the
+/// list has it.
 fn open_with_warning(items: &[OpenItem]) -> Option<String> {
     items.iter().find_map(|item| match item {
         OpenItem::Missing(name) => Some(format!(
+            "{name} is not in the list below. A path is not a link."
+        )),
+        OpenItem::Unfit(name) => Some(format!(
             "{name} is not a followed program that opens files. A path is not a link."
         )),
         _ => None,
@@ -1612,7 +1636,9 @@ fn open_with_warning(items: &[OpenItem]) -> Option<String> {
 
 fn fill_open_with(popup: &NSPopUpButton, items: &[OpenItem], selected: usize) {
     let entries = items.iter().map(|item| match item {
-        OpenItem::Program(name) | OpenItem::Missing(name) => Entry::item(name.clone()),
+        OpenItem::Program(name) | OpenItem::Missing(name) | OpenItem::Unfit(name) => {
+            Entry::item(name.clone())
+        }
         OpenItem::Separator => Entry::Separator,
         OpenItem::Nothing => Entry::item("Nothing"),
     });
@@ -3092,16 +3118,17 @@ impl SettingsWindow {
     /// Fills the Open with popup from the programs that open files (the folder of the followed
     /// programs says which) and selects the value.
     fn sync_open_with(&self, open_with: &str) {
-        self.apply_open_with(open_with, &programs_that_open_files());
+        let (programs, followed) = programs_that_open_files();
+        self.apply_open_with(open_with, &programs, &followed);
     }
 
     /// Fills the Open with popup from `programs` and selects the value, which the popup's items
     /// keep the meaning of ([`open_with_edit`]).
-    fn apply_open_with(&self, open_with: &str, programs: &[String]) {
+    fn apply_open_with(&self, open_with: &str, programs: &[String], followed: &[String]) {
         let Some(c) = self.ivars().controls.get() else {
             return;
         };
-        let (items, index) = open_with_items(open_with, programs);
+        let (items, index) = open_with_items(open_with, programs, followed);
         if *self.ivars().open_withs.borrow() == items {
             c.open_with.selectItemAtIndex(index as NSInteger);
         } else {
@@ -6187,7 +6214,7 @@ mod tests {
     #[test]
     fn the_open_with_popup_keeps_the_file_value_visible() {
         let programs = ["notes".to_owned(), "textpen".to_owned()];
-        let (items, index) = open_with_items("textpen", &programs);
+        let (items, index) = open_with_items("textpen", &programs, &programs);
         assert_eq!(
             items,
             [
@@ -6209,24 +6236,38 @@ mod tests {
         assert_eq!(open_with_edit(&items, 9), None);
         assert_eq!(open_with_warning(&items), None);
 
-        let (items, index) = open_with_items("", &programs);
+        let (items, index) = open_with_items("", &programs, &programs);
         assert_eq!(items[index], OpenItem::Nothing);
         assert_eq!(open_with_warning(&items), None);
 
         // A name the list lacks comes last, selected; choosing it writes nothing, and the row
         // warns, because that value opens nothing.
-        let (items, index) = open_with_items("sketch", &programs);
+        let (items, index) = open_with_items("sketch", &programs, &programs);
         assert_eq!(index, items.len() - 1);
         assert_eq!(items[index], OpenItem::Missing("sketch".into()));
         assert_eq!(items[index - 1], OpenItem::Separator);
         assert_eq!(open_with_edit(&items, index as NSInteger), None);
         assert_eq!(
             open_with_warning(&items).as_deref(),
-            Some("sketch is not a followed program that opens files. A path is not a link.")
+            Some("sketch is not in the list below. A path is not a link.")
+        );
+
+        // A program that is in the list on the page but opens neither says what is true of it.
+        let followed = [
+            "notes".to_owned(),
+            "textpen".to_owned(),
+            "viewer".to_owned(),
+        ];
+        let (items, index) = open_with_items("viewer", &programs, &followed);
+        assert_eq!(items[index], OpenItem::Unfit("viewer".into()));
+        assert_eq!(open_with_edit(&items, index as NSInteger), None);
+        assert_eq!(
+            open_with_warning(&items).as_deref(),
+            Some("viewer is not a followed program that opens files. A path is not a link.")
         );
 
         // With no program that opens files, the list is Nothing alone.
-        let (items, index) = open_with_items("textpen", &[]);
+        let (items, index) = open_with_items("textpen", &[], &[]);
         assert_eq!(
             items,
             [
@@ -6236,7 +6277,7 @@ mod tests {
             ]
         );
         assert_eq!(index, 2);
-        let (items, index) = open_with_items("", &[]);
+        let (items, index) = open_with_items("", &[], &[]);
         assert_eq!((items, index), (vec![OpenItem::Nothing], 0));
     }
 
