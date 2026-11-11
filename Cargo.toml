@@ -271,15 +271,15 @@ kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "e775664a6eeb6c7
 # All of pencere is Apache-2.0 (GPL-3 compatible), and `rev` must be a commit at or after the
 # relicensing (`75a78e3`). `make audit` fails if `rev` is not a full hash or does not resolve,
 # and if any of them comes from anywhere else.
-pencere-host = { git = "https://github.com/bateri/pencere", rev = "02b59c336724a6010b042518d49400a077381708" }
-pencere-view = { git = "https://github.com/bateri/pencere", rev = "02b59c336724a6010b042518d49400a077381708" }
-pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "02b59c336724a6010b042518d49400a077381708" }
-pencere-drive = { git = "https://github.com/bateri/pencere", rev = "02b59c336724a6010b042518d49400a077381708" }
+pencere-host = { git = "https://github.com/bateri/pencere", rev = "f44070e241d18695a2b0f52ef0ca97782ef16058" }
+pencere-view = { git = "https://github.com/bateri/pencere", rev = "f44070e241d18695a2b0f52ef0ca97782ef16058" }
+pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "f44070e241d18695a2b0f52ef0ca97782ef16058" }
+pencere-drive = { git = "https://github.com/bateri/pencere", rev = "f44070e241d18695a2b0f52ef0ca97782ef16058" }
 # And the program's side of the same protocol (`pencere`, the library of pencere's `program/`),
 # at the same `rev`, as a **dev**-dependency of `bt-core` alone: the program the end-to-end tests
 # of a pane run in it (`crates/bt-core/examples/demopen.rs`). It ships nowhere. It brings no crate
 # the build does not have already (`serde`, `serde_json`, `libc` and `pencere-wire`).
-pencere = { git = "https://github.com/bateri/pencere", rev = "02b59c336724a6010b042518d49400a077381708" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "f44070e241d18695a2b0f52ef0ca97782ef16058" }
 serde_json = "1"
 
 bt-core = { path = "crates/bt-core" }
