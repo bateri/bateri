@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "git+https://github.com/bateri/kablo?rev=2eb7e7db175ad07c3bffcc1a2c3d52964421f184#2eb7e7db175ad07c3bffcc1a2c3d52964421f184"
+source = "git+https://github.com/bateri/kablo?rev=ca765dcbe5efd42c18e5bef516259ce2411e02f9#ca765dcbe5efd42c18e5bef516259ce2411e02f9"
 dependencies = [
  "base64",
  "bitflags",
@@ -738,7 +738,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1213,16 +1213,16 @@ dependencies = [
 
 [[package]]
 name = "kablo-bateri"
-version = "0.9.0"
-source = "git+https://github.com/bateri/kablo?rev=2eb7e7db175ad07c3bffcc1a2c3d52964421f184#2eb7e7db175ad07c3bffcc1a2c3d52964421f184"
+version = "0.9.1"
+source = "git+https://github.com/bateri/kablo?rev=ca765dcbe5efd42c18e5bef516259ce2411e02f9#ca765dcbe5efd42c18e5bef516259ce2411e02f9"
 dependencies = [
  "kablo-proto",
 ]
 
 [[package]]
 name = "kablo-proto"
-version = "0.9.0"
-source = "git+https://github.com/bateri/kablo?rev=2eb7e7db175ad07c3bffcc1a2c3d52964421f184#2eb7e7db175ad07c3bffcc1a2c3d52964421f184"
+version = "0.9.1"
+source = "git+https://github.com/bateri/kablo?rev=ca765dcbe5efd42c18e5bef516259ce2411e02f9#ca765dcbe5efd42c18e5bef516259ce2411e02f9"
 
 [[package]]
 name = "kurbo"
@@ -1359,7 +1359,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2126,7 +2126,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2631,7 +2631,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "git+https://github.com/bateri/kablo?rev=2eb7e7db175ad07c3bffcc1a2c3d52964421f184#2eb7e7db175ad07c3bffcc1a2c3d52964421f184"
+source = "git+https://github.com/bateri/kablo?rev=ca765dcbe5efd42c18e5bef516259ce2411e02f9#ca765dcbe5efd42c18e5bef516259ce2411e02f9"
 dependencies = [
  "arrayvec",
  "bitflags",
@@ -3127,7 +3127,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
