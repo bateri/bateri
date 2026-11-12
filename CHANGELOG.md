@@ -14,6 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Right-click to copy and paste.** Right-click the text or the input box for Copy, Paste and Select All, and Cut for text selected in the input box. On a link, the link's own items come first. In a program that uses the mouse, like vim or htop, hold Shift for the menu.
 - **Zoom Pane: any pane can fill the tab.** Every pane's bar has a new button left of Close, and Window ▸ Zoom Pane (⌥⌘.) does the same for the pane that has the keyboard. The other panes slide out of the way, and the same button or key brings them back. Floating panes stay over a zoomed split pane. A floating pane can be zoomed too: it fills the tab over the splits and returns to the place and size it had. Giving the keyboard to a pane the zoom hides ends the zoom.
 - **Drag things out of a program's page.** Drag a file from textpen or an issue from linearpen onto a terminal pane and its path or text is typed at the prompt. Drop it on another app to give it the text.
 - **Pinch and zoom in programs' pages.** Programs like textpen can now use pinch, a two-finger double tap and the mouse's side buttons, and can show their text larger without changing the terminal's.

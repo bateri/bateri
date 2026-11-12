@@ -52,6 +52,7 @@ mod card;
 mod card_gesture;
 mod carry;
 mod clipboard;
+mod context_menu;
 pub mod embed;
 mod footer;
 mod hold_service;

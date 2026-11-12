@@ -1282,10 +1282,10 @@ define_class!(
         }
 
         /// Right button: the report path, and where the terminal owns the press
-        /// (mouse mode off, the fill band, the dock) the link's context menu
-        /// ([`BateriView::link_menu`]). Off a link a right click does
-        /// nothing - no general context menu, and no selection either: it would
-        /// produce an unexpected highlight.
+        /// (mouse mode off, the fill band, the dock) the terminal's context menu
+        /// ([`BateriView::context_menu`]): Copy, Paste and Select All, headed by
+        /// the link's items on a link. The press selects nothing - it would
+        /// produce an unexpected highlight, and Copy is for the selection already there.
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
             self.note_interaction();
@@ -1297,8 +1297,18 @@ define_class!(
             self.button_event(event, MouseButton::Right, false);
         }
 
-        /// The link context menu's items ([`BateriView::link_menu`]): the menu's
-        /// link is parked in the link state and taken by the item.
+        /// The context menu's Paste ([`crate::context_menu`]): the pane right-clicked takes
+        /// the keyboard first, then Edit ▸ Paste's own path - pasted text waits for a Return,
+        /// which must reach the pane it was pasted into.
+        #[unsafe(method(pasteFromMenu:))]
+        fn paste_from_menu(&self, sender: Option<&AnyObject>) {
+            if let Some(pane) = self.pane() {
+                pane.focus();
+            }
+            // The method's Rust form takes the selector it answers first.
+            self.paste_clipboard(sel!(paste:), sender);
+        }
+
         /// An entry of the menu a debug page asked for was picked: its index is the item's tag.
         #[unsafe(method(pageMenuPicked:))]
         fn page_menu_picked(&self, sender: Option<&AnyObject>) {
@@ -1309,6 +1319,8 @@ define_class!(
             }
         }
 
+        /// The link context menu's items ([`BateriView::link_menu`]): the menu's
+        /// link is parked in the link state and taken by the item.
         #[unsafe(method(openLinkFromMenu:))]
         fn open_link_from_menu(&self, _sender: Option<&AnyObject>) {
             self.menu_open_link();
@@ -3239,19 +3251,19 @@ impl BateriView {
         let Some(pointer) = self.window_point_pointer(event.locationInWindow(), OutOfGrid::Reject)
         else {
             // The fill band and the dock are never the application's screen: a
-            // right click there is the terminal's, the link menu's.
+            // right click there is the terminal's, its context menu.
             if button == MouseButton::Right {
-                self.link_menu(event);
+                self.context_menu(event);
             }
             return;
         };
         let cell = pointer.cell;
         let answer = self.report_button(session, button, true, pointer, event);
         // Mouse mode off (or Shift, the mode's escape): the right click is the
-        // terminal's — the link menu. `pressed` sets no bit for a right
+        // terminal's — its context menu. `pressed` sets no bit for a right
         // `Select`, so the menu swallowing `rightMouseUp:` leaves nothing stale.
         if button == MouseButton::Right && answer == Click::Select {
-            self.link_menu(event);
+            self.context_menu(event);
         }
         let shift = modifiers(event).shift;
         let clicks = event.clickCount();

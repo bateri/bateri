@@ -45,11 +45,12 @@
 //!   verified hover is locked at the press and the release opens it if the
 //!   pointer is still over the locked range and the click count is one.
 //!
-//! - **A right click on a link opens a menu** (mouse mode off; the band and the
-//!   dock are never the application's): "Open Link"/"Copy Link", on a path
-//!   "Open in <program>" (where the program takes it)/"Reveal in Finder"/"Copy Path",
-//!   on a server's path the downloads too. The path is verified on the same
-//!   background queue first — a missing one is no link and gets no menu.
+//! - **A right click on a link heads the terminal's context menu with the link's items**
+//!   ([`crate::context_menu`]; mouse mode off; the band and the dock are never the
+//!   application's): "Open Link"/"Copy Link", on a path "Open in <program>" (where the program
+//!   takes it)/"Reveal in Finder"/"Copy Path", on a server's path the downloads too. The path is
+//!   verified on the same background queue first, for [`MENU_WAIT`] at most — a missing one is
+//!   no link, and its menu has the edit items alone.
 //!
 //! Opening — a click and the menu's "Open" alike — is the person's own act. **A path** (on this
 //! Mac or on a server) opens in the program `[apps] open_with` names, on the computer it is on,
@@ -60,12 +61,13 @@
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::Duration;
 
 use block2::RcBlock;
 use bt_core::{CellHalf, LinkHit, LinkKind, LinkPoint, LinkSpan, SelectionPoint, UnderlineStyle};
 use bt_gpu::{CellMetrics, Origin};
 use bt_shell_common::open_with::{Choice, Thing};
-use dispatch2::{DispatchQueue, DispatchRetained};
+use dispatch2::{DispatchQueue, DispatchRetained, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
@@ -319,6 +321,12 @@ fn hover_style(hit: &LinkHit, command: bool) -> Option<UnderlineStyle> {
         None
     }
 }
+
+/// How long a right click waits for its path's verification ([`BateriView::wait_for_menu`])
+/// before the menu pops without the link's items: the bound for a `stat` hanging on a network
+/// disk and for a server whose helper is still connecting. A choice, not a measurement — short
+/// enough that the menu still answers the click.
+pub(crate) const MENU_WAIT: Duration = Duration::from_millis(300);
 
 /// What a verification is for: the hover, or the context menu popping at a
 /// point of the view.
@@ -1145,22 +1153,20 @@ impl BateriView {
         });
     }
 
-    /// A right press the terminal owns — mouse mode off (or Shift, its escape)
-    /// in the grid, always on the fill band and the dock's input line (never the
-    /// application's screen): the context menu if a link is under it.
-    /// No ⌘ needed. A link the hover already verified pops at once; a path
-    /// candidate is `stat`ed on the background queue first and pops on its
-    /// return ([`BateriView::settle_menu`]) — a missing path is no link and
-    /// gets no menu. Without a link nothing happens, as before.
-    pub(crate) fn link_menu(&self, event: &NSEvent) {
-        let in_window = event.locationInWindow();
+    /// The link's part of the terminal's context menu ([`BateriView::context_menu`]): a
+    /// link under `in_window` puts its items at the head of the menu popped at `point`
+    /// (view points). No ⌘ needed. A link the hover already verified pops at once; a path
+    /// candidate is `stat`ed on the background queue first and pops on its return
+    /// ([`BateriView::settle_menu`]), or without the link's items once [`MENU_WAIT`] has
+    /// passed ([`BateriView::wait_for_menu`]). `false` when there is no link there — the
+    /// caller pops the menu without link items.
+    pub(crate) fn link_menu(&self, in_window: NSPoint, point: NSPoint) -> bool {
         let (Some(at), Some(session)) = (self.link_cell(in_window), self.session()) else {
-            return;
+            return false;
         };
         let Some(hit) = session.link_at(at.point()) else {
-            return;
+            return false;
         };
-        let point = self.convertPoint_fromView(in_window, None);
         let reuse = {
             let state = self.link_state().borrow();
             state
@@ -1173,16 +1179,20 @@ impl BateriView {
         };
         if let Some(link) = reuse {
             self.pop_link_menu(link, point);
-            return;
+            return true;
         }
         match self.check(&hit) {
             Check::None => self.pop_link_menu(Verified::plain(hit), point),
             check @ (Check::Local(..) | Check::Remote(..)) => {
                 self.link_state().borrow_mut().menu_pending = Some(hit.clone());
+                self.wait_for_menu(hit.clone(), point);
                 self.verify(check, hit, Then::Menu(point));
             }
-            Check::CwdUnknown | Check::Gone => {}
+            // A relative name without the folder it is in, or a path gone from the link: the
+            // menu has no link items.
+            Check::CwdUnknown | Check::Gone => return false,
         }
+        true
     }
 
     /// A press forgets the menu still waiting for its `stat` — it would pop
@@ -1191,9 +1201,39 @@ impl BateriView {
         self.link_state().borrow_mut().menu_pending = None;
     }
 
-    /// The right click's verification came back: the menu pops at the click's
-    /// point if this is still the waited-for candidate, the path exists and the
-    /// window is still key.
+    /// The menu waits for a path's verification no longer than [`MENU_WAIT`]: past it the menu
+    /// pops without the link's items ([`BateriView::settle_menu`] with nothing found) if the
+    /// answer is still out. A `stat` hanging on a network disk, or a server whose helper takes
+    /// seconds to connect, must not keep Copy and Paste away. The answer arriving later finds
+    /// nothing pending and pops nothing; one arriving first takes the pending candidate, and
+    /// this finds nothing.
+    fn wait_for_menu(&self, hit: LinkHit, at: NSPoint) {
+        let Some(pane) = self.pane() else {
+            return;
+        };
+        let (id, lookup) = (pane.id(), pane.lookup());
+        let Ok(when) = DispatchTime::try_from(MENU_WAIT) else {
+            return;
+        };
+        // The error arm is not represented today (the uploader's linger has the same); if it
+        // drops, the menu waits for the answer as it did before the wait was bounded.
+        let _ = DispatchQueue::main().after(when, move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.view()
+                    .settle_menu(&hit, None::<fn(LinkHit) -> Verified>, at);
+            }
+        });
+    }
+
+    /// The right click's verification came back, or [`MENU_WAIT`] passed first: the menu pops at
+    /// the click's point if this is still the waited-for candidate — with the link's items if the
+    /// path exists, without them if it does not or the answer is not back yet.
+    ///
+    /// Whether the window is key is not asked: a right click on a window in the background opens
+    /// the menu there too, and the candidate is forgotten when the user moves on — a press, the
+    /// window resigning key, the pane leaving the screen ([`BateriView::clear_link`]).
     fn settle_menu(
         &self,
         hit: &LinkHit,
@@ -1211,15 +1251,16 @@ impl BateriView {
             }
             state.menu_pending.take()
         };
-        let key = self.pane().is_some_and(|pane| pane.is_active());
-        if let (Some(query), Some(make), true) = (pending, found, key) {
-            self.pop_link_menu(make(query), at);
+        match (pending, found) {
+            (Some(query), Some(make)) => self.pop_link_menu(make(query), at),
+            (Some(_), None) => self.pop_menu(None, &[], at),
+            (None, _) => {}
         }
     }
 
-    /// The context menu at `at` (view points): on a path that exists "Open",
-    /// "Reveal in Finder", "Copy Path", on any other link "Open Link", "Copy
-    /// Link". A link the policy has nothing for (`bateri://`) gets no menu.
+    /// The context menu at `at` (view points), headed by the link's items: on a path that exists
+    /// "Open", "Reveal in Finder", "Copy Path", on any other link "Open Link", "Copy Link". A
+    /// link the policy has nothing for (`bateri://`) has no items of its own.
     fn pop_link_menu(&self, link: Verified, at: NSPoint) {
         let open_in = link
             .program
@@ -1248,16 +1289,17 @@ impl BateriView {
                     true,
                 ),
             ]);
-            self.pop_menu(link, &items, at);
+            self.pop_menu(Some(link), &items, at);
             return;
         }
-        // A path (found on this Mac) has its own menu; any other link has the policy's.
+        // A path (found on this Mac) has its own items; any other link has the policy's.
         if link.resolved.is_none()
             && matches!(
                 links::action(&link.hit.target, &link.hit.kind),
                 None | Some(LinkAction::Swallow)
             )
         {
+            self.pop_menu(None, &[], at);
             return;
         }
         let items: Vec<(&NSString, objc2::runtime::Sel, bool)> = if link.resolved.is_some() {
@@ -1280,15 +1322,17 @@ impl BateriView {
                 (ns_string!("Copy Link"), sel!(copyLinkFromMenu:), true),
             ]
         };
-        self.pop_menu(link, &items, at);
+        self.pop_menu(Some(link), &items, at);
     }
 
-    /// Pops a menu of `(title, action, enabled)` items acting on `link` at
-    /// `at` (view points). Items are enabled by hand (`autoenablesItems` off):
-    /// a targeted item would otherwise always be enabled.
-    fn pop_menu(
+    /// Pops the terminal's context menu at `at` (view points): the `(title, action, enabled)`
+    /// items acting on `link`, a separator, then the edit items
+    /// ([`BateriView::add_edit_items`]). With no link and no items it is the edit items alone.
+    /// Items are enabled by hand (`autoenablesItems` off): a targeted item would otherwise
+    /// always be enabled.
+    pub(crate) fn pop_menu(
         &self,
-        link: Verified,
+        link: Option<Verified>,
         items: &[(&NSString, objc2::runtime::Sel, bool)],
         at: NSPoint,
     ) {
@@ -1296,24 +1340,14 @@ impl BateriView {
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
         for &(title, action, enabled) in items {
-            // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s
-            // and a selector the target implements (`BateriView`'s link menu
-            // selectors); `setTarget:` keeps the target weakly and the view
-            // outlives the menu's modal tracking.
-            let item = unsafe {
-                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    title,
-                    Some(action),
-                    ns_string!(""),
-                );
-                item.setTarget(Some(self));
-                item
-            };
-            item.setEnabled(enabled);
-            menu.addItem(&item);
+            menu.addItem(&self.menu_item(title, action, enabled));
         }
-        self.link_state().borrow_mut().menu = Some(link);
+        if !items.is_empty() {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        self.add_edit_items(&menu);
+        // Without a link the slot is emptied: an item of an earlier menu finds nothing.
+        self.link_state().borrow_mut().menu = link;
         menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
     }
 
