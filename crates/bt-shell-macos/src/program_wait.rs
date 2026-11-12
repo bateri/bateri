@@ -24,9 +24,16 @@
 //! pane that waits costs what a tab's ring costs. Under Reduce Motion the ring does not turn; it
 //! stands with its head at the top.
 //!
-//! **It goes once** ([`ProgramWait::end`]), when there is something to see — the program's view,
-//! or anything the terminal has drawn (a program that shows no view, the line that says why the
-//! terminal could not be had) — and fades as it goes. A pane that closes takes it along.
+//! **It goes once** ([`ProgramWait::end`]), when there is something to see — the first page of
+//! the program's view, a web view, or anything the terminal has drawn (a program that shows no
+//! view, the line that says why the terminal could not be had) — and fades as it goes. A pane
+//! that closes takes it along.
+//!
+//! **Every view that is starting wears it**, not only a pane that was born for its program: a
+//! view the pane draws itself has no page until its module hands one out, and a pane that has no
+//! cover when such a view starts (the program was typed in a shell, or started by a command) is
+//! given one for that stretch. One sign stands where a page will be, however the pane was
+//! opened.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};

@@ -2127,6 +2127,9 @@ pub struct PaneIvars {
     /// program and what it opens, with the way out a view has. There and gone with
     /// [`PaneIvars::program_wait`].
     wait_words: RefCell<Option<pencere_view::Words>>,
+    /// The cover waits for the first page of a view that has started
+    /// ([`TerminalPane::wait_for_page`]), and no longer for what the terminal draws.
+    page_wait: Cell<bool>,
     /// How the connection stands for the terminal the pane shows, as the
     /// application's bridge last said (`Live` for a pane that shows its own
     /// shell). Passive states ([`PaneLink::is_passive`]) take the keys.
@@ -2938,6 +2941,7 @@ impl TerminalPane {
             link_veil: link_veil.clone(),
             program_wait: RefCell::new(program_wait.clone()),
             wait_words: RefCell::new(wait_words),
+            page_wait: Cell::new(false),
             connection: Cell::new(PaneLink::Live),
             card_frame: card_frame.clone(),
             headed: Cell::new(false),
@@ -4804,7 +4808,9 @@ impl TerminalPane {
     /// or the line that says why the terminal could not be had. `true` when there is nothing to
     /// see yet and the next output is to ask again.
     fn probe_program_wait(&self) -> bool {
-        if self.ivars().program_wait.borrow().is_none() {
+        // Not while the wait is for a view's first page: the page ends that one, and a terminal
+        // that has drawn before the view (a shell's screen under it) says nothing about it.
+        if self.ivars().program_wait.borrow().is_none() || self.ivars().page_wait.get() {
             return false;
         }
         if self.session().is_none_or(|session| session.shows_nothing()) {
@@ -4828,7 +4834,49 @@ impl TerminalPane {
         };
         wait.end();
         self.ivars().wait_words.replace(None);
+        self.ivars().page_wait.set(false);
         true
+    }
+
+    /// A view the pane draws itself has started and has no page yet: the pane waits for the
+    /// first under the cover — the one it was born with, when it was opened for the program, or
+    /// one put on now, in a pane the program was started in by hand or by a command. So what
+    /// stands where the page will be is one sign, however the pane was opened, and never the
+    /// kit's own line for a page that is starting. The header says the view's own words from
+    /// here on, and the cover goes with the first page ([`TerminalPane::page_drew`]) or with
+    /// the view ([`TerminalPane::view_gone`]).
+    fn wait_for_page(&self) {
+        let ivars = self.ivars();
+        ivars.wait_words.replace(None);
+        ivars.page_wait.set(true);
+        if ivars.program_wait.borrow().is_some() {
+            return;
+        }
+        let Some(session) = self.session() else {
+            return;
+        };
+        let wait = ProgramWait::new(self.mtm(), &session.theme(), ivars.reduce_motion.get());
+        wait.setFrame(self.bounds());
+        self.addSubview_positioned_relativeTo(
+            &wait,
+            NSWindowOrderingMode::Below,
+            Some(&ivars.link_veil),
+        );
+        ivars.program_wait.replace(Some(wait));
+    }
+
+    /// The page said something: when the pane waits for a view's first page and the module has
+    /// handed it out, the wait is over.
+    fn page_drew(&self) {
+        if !self.ivars().page_wait.get() {
+            return;
+        }
+        let handed = self
+            .page_handle()
+            .is_some_and(|handle| handle.page().root().is_some());
+        if handed {
+            self.end_program_wait();
+        }
     }
 
     /// Whether the pane is a card now.
@@ -6536,6 +6584,8 @@ impl TerminalPane {
         // may tell the page more (a menu picked from, the keyboard put in a field).
         let drained = handle.page().drain();
         drained.deliver(&mut PageHost(self));
+        // A pane that waited for this view's first page has it now, if the module handed it out.
+        self.page_drew();
         self.wake_unseen_page();
     }
 
@@ -7030,16 +7080,21 @@ impl TerminalPane {
     /// block tip, the jump button) and under the veils, so a pane that is not the keyboard's
     /// dims over its view as it does over its terminal.
     fn start_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
-        // The program the pane was opened for is here: the header is read again below, with
-        // the view's own words in it, or here when the view could not be started.
-        let waited = self.end_program_wait();
         if start.kind.is_native() {
             self.start_native_view(session, start);
-            if waited && !self.program_page_up() {
+            if self.program_page_up() {
+                // The page is not drawn yet: the pane waits for its first under the cover.
+                self.wait_for_page();
+            } else if self.end_program_wait() {
+                // It could not be started: the terminal's own header again.
                 self.host().program_changed(self.ivars().id);
             }
             return;
         }
+        // A web view covers the pane from its start: the program the pane was opened for is
+        // here, and the header is read again below, with the view's own words in it, or here
+        // when the view could not be started.
+        let waited = self.end_program_wait();
         // The crate has one view at a time; a stale one goes first.
         self.end_view();
         self.sync_view_size();
@@ -7132,6 +7187,11 @@ impl TerminalPane {
     /// What was the view's goes with it: the question it asked about a link is taken down — its
     /// answer would open a link for a view that is not there and shut the next view's out.
     fn view_gone(&self) {
+        // A view that goes before its first page takes the wait for it along: the terminal is
+        // what there is to see.
+        if self.ivars().page_wait.get() {
+            self.end_program_wait();
+        }
         pencere_view::ask::view_ended(self);
         // And the bytes it had in a pipe: the transfers stop and take their pipes and parts.
         if let Some(files) = self.view_files() {
@@ -9156,18 +9216,25 @@ mod tests {
         assert!(
             born.contains("if program_wait.is_some() {\n                        probe.rearm();")
         );
-        assert_eq!(pane.matches("ProgramWait::new(").count(), 1);
+        assert_eq!(pane.matches("ProgramWait::new(").count(), 2);
         // Under the veils, which dim it as they dim a view.
         let place = |word: &str| born.find(word).unwrap_or_else(|| panic!("{word}"));
         assert!(place("this.addSubview(wait);") < place("this.addSubview(&link_veil);"));
-        // The view of either kind takes it off, before anything else.
+        // A web view takes it off at its start; a view the pane draws keeps it on, or puts one
+        // on, until its first page — in every pane, however it was opened.
         let view = body_of("    fn start_view(");
         let place = |word: &str| view.find(word).unwrap_or_else(|| panic!("{word}"));
-        assert!(
-            place("let waited = self.end_program_wait();") < place("if start.kind.is_native() {")
-        );
+        assert!(place("self.wait_for_page();") < place("let waited = self.end_program_wait();"));
+        let page = body_of("    fn wait_for_page(");
+        assert!(page.contains("ivars.page_wait.set(true);"));
+        assert!(page.contains("ProgramWait::new("));
+        // The first page ends it, asked where the page is drained; so does the view's end.
+        assert!(body_of("    fn page_drew(").contains("handle.page().root().is_some()"));
+        assert!(body_of("    pub(crate) fn drain_page(").contains("self.page_drew();"));
+        assert!(body_of("    fn view_gone(").contains("self.end_program_wait();"));
         // So does what the terminal draws, and only that: output that draws nothing asks again.
         let probe = body_of("    fn probe_program_wait(");
+        assert!(probe.contains("|| self.ivars().page_wait.get()"));
         assert!(probe.contains("session.shows_nothing()"));
         assert!(probe.contains("if self.end_program_wait() {"));
         // Once: the cover is taken, not read, and the header's words go with it.
