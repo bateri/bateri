@@ -1330,6 +1330,41 @@ fn a_card_stays_on_screen_over_a_zoom_and_goes_with_its_tab() {
 }
 
 #[test]
+fn a_card_that_fills_the_tab_is_the_only_thing_of_it_on_screen() {
+    // Two cards over two flat panes; the first card's pane is zoomed.
+    let mut scene = floated(vec![card_of(&leaf(3), false), card_of(&leaf(4), false)]);
+    let tab = &mut scene.windows.as_mut().expect("windows")[0].tabs[0];
+    tab.zoomed = Some(terminal("p9"));
+    let text = scene.text(NOW);
+    assert!(text.contains("zoomed on p9"), "{text}");
+    // The flat panes are under it and the other card behind it.
+    assert!(text.contains("pane id:p4\n"), "{text}");
+    assert!(text.contains("pane id:p5\n"), "{text}");
+    assert!(text.contains("pane id:p9 (on screen) (floating)"), "{text}");
+    assert!(text.contains("pane id:p10 (floating)\n"), "{text}");
+    let parsed = Json::parse(&scene.json());
+    let tab = &parsed.get("windows").items()[0].get("tabs").items()[0];
+    assert_eq!(tab.get("zoomed").get("id").string(), "p9");
+    let cards = tab.get("cards").items();
+    assert_eq!(cards[0].get("on_screen"), &Json::Bool(true));
+    assert_eq!(cards[1].get("on_screen"), &Json::Bool(false));
+    assert_eq!(
+        tab.get("tree").get("first").get("on_screen"),
+        &Json::Bool(false)
+    );
+    // Every pane of a split card that fills the tab is on screen.
+    let shape = pair(Axis::Vertical, 0.5, leaf(3), leaf(4));
+    let mut scene = floated(vec![card_of(&shape, false)]);
+    scene.windows.as_mut().expect("windows")[0].tabs[0].zoomed = Some(terminal("p10"));
+    let text = scene.text(NOW);
+    assert!(text.contains("pane id:p9 (on screen) (floating)"), "{text}");
+    assert!(
+        text.contains("pane id:p10 (on screen) (floating)"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_card_with_several_panes_marks_each_of_them() {
     let shape = pair(Axis::Vertical, 0.5, leaf(3), leaf(4));
     let text = floated(vec![card_of(&shape, false)]).text(NOW);

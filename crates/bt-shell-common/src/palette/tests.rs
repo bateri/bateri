@@ -116,6 +116,41 @@ fn every_word_of_the_query_must_hit_and_their_order_does_not_matter() {
 }
 
 #[test]
+fn a_rows_first_keyword_ranks_it_over_the_rows_the_word_finds_alike() {
+    // The Window menu's order: the commands that move the keyboard, then Zoom Pane. All are
+    // found by "focus" through a keyword; it is Zoom Pane's first, so it comes first, and the
+    // others keep the menu's order after it.
+    let rows: Vec<Row> = [
+        ("selectPreviousSplit", "Select Previous Split"),
+        ("selectNextSplit", "Select Next Split"),
+        ("selectSplit", "Left"),
+        ("equalizeSplits", "Equalize Splits"),
+        ("toggleSplitZoom", "Zoom Pane"),
+    ]
+    .into_iter()
+    .map(|(selector, title)| {
+        Row::new(Kind::Command, selector, title).keywords(command_words(selector))
+    })
+    .collect();
+    let found = search(&rows, "focus", Nearness::None);
+    assert_eq!(
+        titles(&found),
+        [
+            "Zoom Pane",
+            "Select Previous Split",
+            "Select Next Split",
+            "Left"
+        ]
+    );
+    // A word in the title still beats any keyword, a first one too: "pane" is in Zoom Pane's
+    // title and the first keyword of the commands that select a split.
+    assert_eq!(
+        titles(&search(&rows, "pane", Nearness::None))[0],
+        "Zoom Pane"
+    );
+}
+
+#[test]
 fn keywords_and_second_lines_find_what_the_title_does_not_say() {
     let zoom = search(&everything(), "zoom", Nearness::None);
     let found = titles(&zoom);

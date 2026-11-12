@@ -1092,7 +1092,7 @@ fn windows_of(
                         minimized: card.minimized,
                     })
                     .collect(),
-                zoomed: tab.zoomed().map(named),
+                zoomed: tab.filling().map(named),
             });
         }
         windows.push(Window {

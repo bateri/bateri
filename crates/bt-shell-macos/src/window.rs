@@ -1039,11 +1039,12 @@ define_class!(
             } else if action == Some(sel!(splitDown:)) {
                 tab.can_split(Axis::Vertical)
             } else if action == Some(sel!(toggleSplitZoom:)) {
-                let zoomed = tab.zoomed().is_some();
-                item.setState(if zoomed {
-                    NSControlStateValueOn
+                // The title says which way the pane goes, as Float Pane's does. The flat area's
+                // only pane fills it already.
+                item.setTitle(if tab.focused_zoomed() {
+                    ns_string!("Unzoom Pane")
                 } else {
-                    NSControlStateValueOff
+                    ns_string!("Zoom Pane")
                 });
                 tab.can_zoom()
             } else if action == Some(sel!(moveFloatingPane:)) {
@@ -1230,7 +1231,7 @@ define_class!(
             self.selected_tab().equalize_splits();
         }
 
-        /// Window ▸ Zoom Split (⇧⌘↩).
+        /// Window ▸ Zoom Pane (⌥⌘.).
         #[unsafe(method(toggleSplitZoom:))]
         fn toggle_split_zoom_action(&self, _sender: Option<&AnyObject>) {
             self.selected_tab().toggle_split_zoom();

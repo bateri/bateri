@@ -60,12 +60,25 @@
 //! container goes in **below** it. It takes no part in hit testing
 //! ([`Hairline`]): a click on that pixel row reaches the pane under it.
 //!
-//! **Zoom** (⇧⌘↩): the zoomed pane takes the whole area
+//! **Zoom** (⌥⌘.): the zoomed pane takes the whole area
 //! ([`Tree::layout_zoomed_spaced`]), the other panes are **hidden** and their
 //! frames (and so their grids) stay as they were; there are no dividers or
 //! handles, and the zoomed pane stands like a tab's only one — a card under
 //! cards, the whole area under lines. A hidden pane's link sleeps like
 //! that of an occluded window ([`SplitView::apply_visibility`]).
+//!
+//! **A floating card zooms too** ([`SplitView::set_card_zoomed`]): it is shown at the whole of
+//! the room the cards' margins leave ([`floating::Ground::zoomed`]) — the zoomed flat pane's
+//! place under cards — over the flat area, the other cards hidden behind it. Its own area is
+//! not touched, so it comes back where it stood, and it is neither carried nor sized while it
+//! fills the tab. The two zooms are apart: each layer has one of its own.
+//!
+//! **A zoom asked for moves** ([`SplitView::zoom_begins`], [`SplitView::zoom_plays`]; the tool,
+//! the key, the keyboard going to a pane the zoom hides): the pane's edges go out to the room it
+//! takes and push the others of its layer away — a flat pane by the edge it stands at, cut where
+//! the splits end, a card out of the tab — and come back the same way. It plays on pictures
+//! ([`crate::zoom_motion`]) after the one layout. A zoom that ends because the layout changes
+//! (a split, a float, a swap, a close) does not: that change has a slide of its own.
 
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
@@ -95,6 +108,7 @@ use crate::split::{
 };
 use crate::tab_bar::{Capsule, HeadLook, PaneHead};
 use crate::window::RootView;
+use crate::zoom_motion::{self, Hold, Run, Stage, Still, Way};
 
 /// Half of the least width of a divider's hit area, in points. A design
 /// constant, not a measured one: a band under six points is hard to grab with
@@ -702,8 +716,16 @@ pub(crate) struct SplitIvars {
     /// What the content does at the top edge (`[appearance] content_edge`):
     /// the hairline's half of it.
     edge: Cell<ContentEdge>,
-    /// The zoomed pane (⇧⌘↩); `None` → the splits are visible.
+    /// The zoomed pane (⌥⌘.); `None` → the splits are visible.
     zoomed: Cell<Option<u64>>,
+    /// A pane of the floating card that fills the tab ([`floating::Ground::zoomed`]); `None` →
+    /// every card stands where its area says.
+    card_zoomed: Cell<Option<u64>>,
+    /// The zoom's motion that is playing ([`SplitView::zoom_plays`]): its stages and the live
+    /// views that wait unseen under its pictures.
+    zoom_motion: RefCell<Option<ZoomMotion>>,
+    /// Counts the zoom motions begun: the timer of one that a newer one replaced ends nothing.
+    zoom_round: Cell<u64>,
     /// The panes' headers (`pane_head`): one over each pane in view,
     /// above the panes, laid out with them.
     heads: RefCell<Vec<Retained<PaneHead>>>,
@@ -789,6 +811,9 @@ impl SplitView {
             hairline: hairline.clone(),
             edge: Cell::new(ContentEdge::default()),
             zoomed: Cell::new(None),
+            card_zoomed: Cell::new(None),
+            zoom_motion: RefCell::new(None),
+            zoom_round: Cell::new(0),
             heads: RefCell::new(Vec::new()),
             handles: RefCell::new(Vec::new()),
             focus_ring: focus_ring.clone(),
@@ -875,6 +900,7 @@ impl SplitView {
             min,
             margins: self.card_margins(),
             loose: self.ivars().loose.get(),
+            zoomed: self.ivars().card_zoomed.get(),
         }
     }
 
@@ -1336,10 +1362,9 @@ impl SplitView {
             .unwrap_or_default()
     }
 
-    /// A picture of the card holding `pane` as it stands now, and its frame: the card's ground
-    /// with its corners, each pane's picture (`TerminalPane::snapshot`, the terminal drawn off
-    /// screen) and each header as AppKit draws it, where they stand in the card. What a card
-    /// flies into its capsule and out of it as ([`card::fly`]). `None` for a card not shown.
+    /// A picture of the card holding `pane` as it stands now, and its frame ([`Self::picture`]).
+    /// What a card flies into its capsule and out of it as ([`card::fly`]). `None` for a card
+    /// not shown.
     fn card_picture(&self, pane: u64) -> Option<(NSRect, Retained<NSImage>)> {
         let iv = self.ivars();
         let leaves = {
@@ -1356,34 +1381,26 @@ impl SplitView {
             .iter()
             .find(|(id, _)| leaves.contains(id))
             .map(|(_, rect)| *rect)?;
-        let theme = iv.ring_theme.get()?;
-        let scale = self.scale();
+        let picture = self.picture(&leaves, outline)?;
         let frame = NSRect::new(
             NSPoint::new(outline.x, outline.y),
             NSSize::new(outline.width, outline.height),
         );
+        Some((frame, picture))
+    }
+
+    /// A picture of what stands in `outline` (this view's space) of panes `leaves`, as it
+    /// stands now: the panes' ground, each pane's picture (`TerminalPane::snapshot`, the
+    /// terminal drawn off screen) and each header as AppKit draws it, where they stand. A
+    /// floating card whole, or one flat pane under its header.
+    fn picture(&self, leaves: &[u64], outline: Rect) -> Option<Retained<NSImage>> {
+        let iv = self.ivars();
+        let theme = iv.ring_theme.get()?;
+        let scale = self.scale();
         let mut pieces: Vec<(NSRect, Retained<NSImage>)> = Vec::new();
-        for id in &leaves {
-            let Some(view) = self.pane(*id) else {
-                continue;
-            };
-            let at = view.frame();
-            if let Some(still) = view.snapshot((at.size.width, at.size.height), scale) {
-                pieces.push((
-                    at,
-                    NSImage::initWithCGImage_size(NSImage::alloc(), &still, at.size),
-                ));
-            }
-            view.release_snapshot();
-            if let Some(head) = iv.heads.borrow().iter().find(|head| head.pane() == *id) {
-                let bounds = head.bounds();
-                if let Some(rep) = head.bitmapImageRepForCachingDisplayInRect(bounds) {
-                    head.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
-                    let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
-                    image.addRepresentation(&rep);
-                    pieces.push((head.frame(), image));
-                }
-            }
+        for id in leaves {
+            pieces.extend(self.pane_picture(*id, scale));
+            pieces.extend(self.head_picture(*id));
         }
         let [r, g, b] = [
             (theme.background >> 16) & 0xff,
@@ -1391,7 +1408,7 @@ impl SplitView {
             theme.background & 0xff,
         ]
         .map(|byte| f64::from(byte) / 255.0);
-        let origin = frame.origin;
+        let origin = NSPoint::new(outline.x, outline.y);
         let draw = RcBlock::new(move |bounds: NSRect| -> objc2::runtime::Bool {
             NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0).setFill();
             NSBezierPath::fillRect(bounds);
@@ -1403,8 +1420,37 @@ impl SplitView {
             }
             objc2::runtime::Bool::YES
         });
-        let picture = NSImage::imageWithSize_flipped_drawingHandler(frame.size, true, &draw);
-        Some((frame, picture))
+        Some(NSImage::imageWithSize_flipped_drawingHandler(
+            NSSize::new(outline.width, outline.height),
+            true,
+            &draw,
+        ))
+    }
+
+    /// Pane `id`'s picture as it stands now and its frame: the terminal drawn off screen at its
+    /// own size. The pane lets go of what the picture took.
+    fn pane_picture(&self, id: u64, scale: f64) -> Option<(NSRect, Retained<NSImage>)> {
+        let view = self.pane(id)?;
+        let at = view.frame();
+        let still = view.snapshot((at.size.width, at.size.height), scale);
+        view.release_snapshot();
+        let still = still?;
+        Some((
+            at,
+            NSImage::initWithCGImage_size(NSImage::alloc(), &still, at.size),
+        ))
+    }
+
+    /// The header over pane `id` as AppKit draws it now, and its frame.
+    fn head_picture(&self, id: u64) -> Option<(NSRect, Retained<NSImage>)> {
+        let heads = self.ivars().heads.borrow();
+        let head = heads.iter().find(|head| head.pane() == id)?;
+        let bounds = head.bounds();
+        let rep = head.bitmapImageRepForCachingDisplayInRect(bounds)?;
+        head.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+        let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+        image.addRepresentation(&rep);
+        Some((head.frame(), image))
     }
 
     /// The pill of the capsule of the card holding `pane`, in this view's space; `None` when
@@ -1455,6 +1501,12 @@ impl SplitView {
     /// the caller first moves the keyboard, then calls [`SplitView::detach`] (a window whose view
     /// carrying the first responder is removed would be left without a responder).
     pub(crate) fn remove_pane(&self, id: u64) -> Gone {
+        // The card that fills the tab is named by one of its panes: when that one closes the
+        // card goes on filling it by another.
+        if self.ivars().card_zoomed.get() == Some(id) {
+            let next = self.card_leaves(id).into_iter().find(|leaf| *leaf != id);
+            self.ivars().card_zoomed.set(next);
+        }
         let mut layers = self.layers();
         let gone = layers.remove(id);
         if matches!(gone, Gone::Closed { .. } | Gone::Landed { .. }) {
@@ -1509,6 +1561,16 @@ impl SplitView {
         }
         if wanted.is_empty() {
             return;
+        }
+        // The pictures of a zoom of the cards move over every card and under the grips and the
+        // capsules; those of the flat area's zoom are among its own views, under the cards.
+        if let Some(motion) = iv.zoom_motion.borrow().as_ref()
+            && motion.over_cards
+        {
+            for stage in &motion.stages {
+                let view: &NSView = stage;
+                wanted.push(view.retain());
+            }
         }
         // The grips stand over every card: a press on an edge is the front card's or the one
         // behind it, never a pane's.
@@ -1883,6 +1945,416 @@ impl SplitView {
         self.layout_panes();
     }
 
+    /// A pane of the floating card that fills the tab; `None` → every card stands where its
+    /// area says. A card that became a capsule, or went, fills nothing.
+    pub(crate) fn card_zoomed(&self) -> Option<u64> {
+        let zoomed = self.ivars().card_zoomed.get();
+        self.layers().filling(zoomed).and(zoomed)
+    }
+
+    /// The card holding `pane` fills the tab, or (`None`) the one that does gives the room back,
+    /// and the panes are laid out again. The links' visibility is the caller's, as with
+    /// [`SplitView::set_zoomed`].
+    pub(crate) fn set_card_zoomed(&self, pane: Option<u64>) {
+        self.ivars().card_zoomed.set(pane);
+        self.layout_panes();
+    }
+
+    /// Where the card of `pane` stands now, header and all (this view's space): a floating
+    /// pane's whole card, a flat pane's own. `None` when it is not in view.
+    fn zoom_frame(&self, pane: u64) -> Option<Rect> {
+        if self.floating(pane) {
+            let leaves = self.card_leaves(pane);
+            return self
+                .ivars()
+                .outlines
+                .borrow()
+                .iter()
+                .find(|(id, _)| leaves.contains(id))
+                .map(|(_, rect)| *rect);
+        }
+        let view = self.pane(pane).filter(|view| !view.isHidden())?;
+        let frame = self.card_frame(&view);
+        Some(Rect::new(
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        ))
+    }
+
+    /// The others of `pane`'s layer that are in view, each by its panes and its card's frame:
+    /// the other shown cards for a floating pane, the other flat panes for a flat one. What a
+    /// zoom of `pane` pushes out, or lets back.
+    fn zoom_others(&self, pane: u64) -> Vec<(Vec<u64>, Rect)> {
+        if self.floating(pane) {
+            let own = self.card_leaves(pane);
+            return self
+                .outlines()
+                .into_iter()
+                .filter(|(id, _)| !own.contains(id))
+                .map(|(id, rect)| (self.card_leaves(id), rect))
+                .collect();
+        }
+        self.flat_panes()
+            .iter()
+            .filter(|view| view.id() != pane && !view.isHidden())
+            .map(|view| {
+                let frame = self.card_frame(view);
+                (
+                    vec![view.id()],
+                    Rect::new(
+                        frame.origin.x,
+                        frame.origin.y,
+                        frame.size.width,
+                        frame.size.height,
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// The views that show the card of `pane`: a floating card's shadow, panes and headers, a
+    /// flat pane and its header. They wait unseen while a picture of them moves.
+    fn zoom_views(&self, pane: u64) -> Vec<Retained<NSView>> {
+        if self.floating(pane) {
+            return self.card_views(pane);
+        }
+        let mut views: Vec<Retained<NSView>> = Vec::new();
+        if let Some(view) = self.pane(pane) {
+            let view: &NSView = &view;
+            views.push(view.retain());
+        }
+        if let Some(head) = self
+            .ivars()
+            .heads
+            .borrow()
+            .iter()
+            .find(|head| head.pane() == pane)
+        {
+            let view: &NSView = head;
+            views.push(view.retain());
+        }
+        views
+    }
+
+    /// The pictures of the card of `pane` as it stands now, in the parts that hold to different
+    /// corners of it while its edges move ([`Hold`]): a card of one pane as its body, its header
+    /// and — `tools` — the header's tools; a split card whole, as its body.
+    fn zoom_parts(&self, pane: u64, tools: bool) -> Option<ZoomParts> {
+        let leaves = if self.floating(pane) {
+            self.card_leaves(pane)
+        } else {
+            vec![pane]
+        };
+        let rect = |frame: NSRect| {
+            Rect::new(
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+            )
+        };
+        if let [only] = leaves[..] {
+            let (at, image) = self.pane_picture(only, self.scale())?;
+            let body = Still {
+                frame: rect(at),
+                image,
+            };
+            let Some((head_at, head_image)) = self.head_picture(only) else {
+                return Some(ZoomParts {
+                    body,
+                    head: None,
+                    tools: None,
+                });
+            };
+            // The tools' end of the band, cut out of its picture: it goes with the right edge.
+            let cut = self
+                .ivars()
+                .heads
+                .borrow()
+                .iter()
+                .find(|head| head.pane() == only)
+                .map(|head| head.tools_frame())
+                .filter(|cut| tools && cut.size.width > 0.0);
+            let tools = cut.map(|cut| {
+                let from = cut.origin.x;
+                let size = NSSize::new(head_at.size.width - from, head_at.size.height);
+                let whole = head_image.clone();
+                let full = head_at.size;
+                let draw = RcBlock::new(move |_bounds: NSRect| -> objc2::runtime::Bool {
+                    whole.drawInRect(NSRect::new(NSPoint::new(-from, 0.0), full));
+                    objc2::runtime::Bool::YES
+                });
+                Still {
+                    frame: Rect::new(
+                        head_at.origin.x + from,
+                        head_at.origin.y,
+                        size.width,
+                        size.height,
+                    ),
+                    image: NSImage::imageWithSize_flipped_drawingHandler(size, true, &draw),
+                }
+            });
+            return Some(ZoomParts {
+                body,
+                head: Some(Still {
+                    frame: rect(head_at),
+                    image: head_image,
+                }),
+                tools,
+            });
+        }
+        let outline = self.zoom_frame(pane)?;
+        Some(ZoomParts {
+            body: Still {
+                frame: outline,
+                image: self.picture(&leaves, outline)?,
+            },
+            head: None,
+            tools: None,
+        })
+    }
+
+    /// A zoom of `pane` is about to change (`way`): what its motion starts from, taken while the
+    /// panes still stand as they did — the place of `pane`'s card and, going in, pictures of the
+    /// others of its layer; coming out, its own picture as it filled the tab. `None` when
+    /// nothing is to play: the window is not seen, the tab is not the one on screen, Reduce
+    /// Motion is on, or the pane is not in view. The change itself and the looks that follow
+    /// are the caller's, between this and [`SplitView::zoom_plays`].
+    pub(crate) fn zoom_begins(&self, pane: u64, way: Way) -> Option<ZoomStart> {
+        // A motion still playing ends where it was going: the next starts from the layout.
+        self.zoom_ends();
+        let visible = self.window().is_some_and(|window| {
+            window
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible)
+        });
+        let still = !visible
+            || self.isHidden()
+            || crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        if still {
+            return None;
+        }
+        let frame = self.zoom_frame(pane)?;
+        let (others, own) = match way {
+            Way::In => (
+                self.zoom_others(pane)
+                    .into_iter()
+                    .filter_map(|(leaves, outline)| {
+                        Some(Still {
+                            frame: outline,
+                            image: self.picture(&leaves, outline)?,
+                        })
+                    })
+                    .collect(),
+                None,
+            ),
+            Way::Out => (Vec::new(), Some(self.zoom_parts(pane, false)?)),
+        };
+        Some(ZoomStart {
+            pane,
+            way,
+            frame,
+            others,
+            own,
+        })
+    }
+
+    /// Plays the motion of the zoom that changed since `start` was taken
+    /// ([`SplitView::zoom_begins`]), now that the panes are laid out as they will stay and
+    /// their headers look as they will: the pane's edges go between the place it had and the
+    /// one it has, and the others of its layer are pushed out or come back
+    /// ([`crate::zoom_motion`]). The live views wait unseen under the pictures until
+    /// [`SplitView::zoom_ends`], [`zoom_motion::ZOOM_SECS`] on.
+    pub(crate) fn zoom_plays(&self, start: ZoomStart) {
+        let iv = self.ivars();
+        let mtm = self.mtm();
+        // One motion at a time: one that began since `start` was taken ends first.
+        self.zoom_ends();
+        let Some(now) = self.zoom_frame(start.pane) else {
+            return;
+        };
+        let (small, big) = match start.way {
+            Way::In => (start.frame, now),
+            Way::Out => (now, start.frame),
+        };
+        // The zoom did not change (it was refused): nothing to play.
+        if small == big {
+            return;
+        }
+        let floating = self.floating(start.pane);
+        let own = match start.way {
+            Way::In => self.zoom_parts(start.pane, true),
+            Way::Out => start.own,
+        };
+        let Some(own) = own else {
+            return;
+        };
+        let full = self.full_rect();
+        let scale = self.scale();
+        let carded = floating || self.carded();
+        let corner = if carded { card::corner_pt() } else { 0.0 };
+        let begin = CACurrentMediaTime();
+        let mut unseen = self.zoom_views(start.pane);
+        // The pane that grows or comes back: its picture's parts, each holding to its corner,
+        // seen through the edges that move.
+        let edges = Stage::new(mtm, full);
+        let run = match start.way {
+            Way::In => Run::Arrives,
+            Way::Out => Run::Leaves,
+        };
+        // Put on the stage before anything of it is placed: a picture reads the window's scale.
+        let stages = [
+            Stage::new(mtm, self.zoom_seen(floating, big, full, scale)),
+            edges,
+        ];
+        let [push, edges] = &stages;
+        if floating {
+            for stage in &stages {
+                self.addSubview(stage);
+            }
+        } else {
+            // Under the cards, which stand over a zoom of the flat area: right below the lowest
+            // of their views, where the flat area's own views end.
+            let lowest = iv.shades.borrow().first().cloned();
+            for stage in &stages {
+                match &lowest {
+                    Some(shade) => self.addSubview_positioned_relativeTo(
+                        stage,
+                        NSWindowOrderingMode::Below,
+                        Some(shade),
+                    ),
+                    None => self.addSubview(stage),
+                }
+            }
+        }
+        for (still, hold) in [
+            (Some(&own.body), Hold::BottomLeft),
+            (own.head.as_ref(), Hold::TopLeft),
+            (own.tools.as_ref(), Hold::TopRight),
+        ] {
+            if let Some(still) = still {
+                let ghost = edges.add(still, 0.0);
+                zoom_motion::travel(&ghost, hold.shift(small, big), run, begin);
+            }
+        }
+        let (from, to) = match start.way {
+            Way::In => (small, big),
+            Way::Out => (big, small),
+        };
+        zoom_motion::uncover(edges, from, to, corner, begin);
+        // The others of its layer: pushed out as they stood, or back to where they stand.
+        let others: Vec<Still> = match start.way {
+            Way::In => start.others,
+            Way::Out => self
+                .zoom_others(start.pane)
+                .into_iter()
+                .filter_map(|(leaves, outline)| {
+                    let image = self.picture(&leaves, outline)?;
+                    unseen.extend(self.zoom_views(leaves[0]));
+                    Some(Still {
+                        frame: outline,
+                        image,
+                    })
+                })
+                .collect(),
+        };
+        let run = match start.way {
+            Way::In => Run::Leaves,
+            Way::Out => Run::Arrives,
+        };
+        for still in &others {
+            let by = if floating {
+                floating::pushed_out(still.frame, small, full, zoom_motion::CLEAR_PT)
+            } else {
+                split::pushed(still.frame, small, big)
+            };
+            let ghost = push.add(still, corner);
+            zoom_motion::travel(&ghost, by, run, begin);
+        }
+        for view in &unseen {
+            view.setAlphaValue(0.0);
+        }
+        // The focus frame and the window's shade stand at the final places already: they wait
+        // the motion out.
+        iv.focus_ring.setAlphaValue(0.0);
+        if !floating && let Some(root) = self.root() {
+            root.hold_shade(zoom_motion::ZOOM_SECS);
+        }
+        let round = iv.zoom_round.get() + 1;
+        iv.zoom_round.set(round);
+        iv.zoom_motion.replace(Some(ZoomMotion {
+            round,
+            stages: stages.to_vec(),
+            over_cards: floating,
+            unseen,
+        }));
+        if floating {
+            self.restack();
+        }
+        let this = self.retain();
+        let ended = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+            // A newer motion took the stage: this one's end is not its end.
+            if this.ivars().zoom_round.get() == round {
+                this.zoom_ends();
+            }
+        });
+        // SAFETY: a one-shot timer on the main run loop with a block that takes it.
+        let _ = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                zoom_motion::ZOOM_SECS,
+                false,
+                &ended,
+            )
+        };
+    }
+
+    /// What the pictures a zoom pushes are seen in: the whole container for the cards, which
+    /// leave through the tab's edges; for the flat panes the place the zoomed pane takes and
+    /// the gap round it ([`split::pushed_room`]), so a pane pushed all the way is out of sight
+    /// and none of it is left in the capsules' strip.
+    fn zoom_seen(&self, floating: bool, big: Rect, full: Rect, scale: f64) -> Rect {
+        if floating {
+            return full;
+        }
+        let gap = spacing(scale, self.style(), self.beside_tabs()).between_px() / scale;
+        split::pushed_room(big, gap, full)
+    }
+
+    /// The zoom's motion is over, or is cut short: its pictures go and the live views show
+    /// where the layout has them. Safe to call when none plays.
+    pub(crate) fn zoom_ends(&self) {
+        let iv = self.ivars();
+        let Some(motion) = iv.zoom_motion.take() else {
+            return;
+        };
+        for stage in &motion.stages {
+            stage.removeFromSuperview();
+        }
+        for view in &motion.unseen {
+            view.setAlphaValue(1.0);
+        }
+        iv.focus_ring.setAlphaValue(1.0);
+        debug_assert!(motion.round <= iv.zoom_round.get());
+    }
+
+    /// Whether `pane` fills the tab: the flat area's zoomed pane, or a pane of the floating card
+    /// that does. What its header's Zoom tool and the menu's item say.
+    pub(crate) fn fills(&self, pane: u64) -> bool {
+        let layers = self.layers();
+        match layers.card_of(pane) {
+            Some(card) => layers.filling(self.ivars().card_zoomed.get()) == Some(card),
+            None => self.zoomed() == Some(pane),
+        }
+    }
+
+    /// Whether the keyboard going to `pane` ends the zoom of the cards ([`Layers::leaves_zoom`]).
+    pub(crate) fn leaves_card_zoom(&self, pane: u64) -> bool {
+        self.layers()
+            .leaves_zoom(pane, self.ivars().card_zoomed.get())
+    }
+
     /// The panes' visibility: the window is visible **and** the pane is not
     /// hidden — neither itself (left behind the zoom) nor through an
     /// ancestor (this container, when its tab is not the selected one). One
@@ -2205,11 +2677,15 @@ impl SplitView {
     /// Two or more panes in view: not one pane, not a zoomed one. The focus
     /// frame and the lines' divider fill show only then.
     pub(crate) fn shows_split(&self) -> bool {
+        let layers = self.layers();
+        let zoomed = self.ivars().card_zoomed.get();
+        // A card that fills the tab is all there is to see: its own panes.
+        if let Some(filling) = layers.filling(zoomed) {
+            return layers.cards[filling].tree.leaves().len() > 1;
+        }
         let flat = if self.flat_split() { 2 } else { 1 };
-        let floating: usize = self
-            .ivars()
+        let floating: usize = layers
             .cards
-            .borrow()
             .iter()
             .filter(|card| !card.minimized)
             .map(|card| card.tree.leaves().len())
@@ -2338,6 +2814,11 @@ impl SplitView {
     /// or zoomed too, is laid out as a card ([`spacing`]); every pane is told
     /// so, which also gives it the scale its one-pixel frame needs.
     pub(crate) fn layout_panes(&self) {
+        // A card that is a capsule now, or gone, fills nothing: the zoom of the cards ends
+        // with it.
+        if self.card_zoomed().is_none() {
+            self.ivars().card_zoomed.set(None);
+        }
         let panes = self.ivars().panes.borrow().clone();
         let scale = self.scale();
         let zoomed = {
@@ -2448,14 +2929,17 @@ impl SplitView {
         let mut placed = Vec::new();
         let mut outlines = Vec::new();
         let mut heads = Vec::new();
+        let zoomed = iv.card_zoomed.get();
         for (index, (card, (rect, inner))) in layers.cards.iter().zip(&arranged).enumerate() {
+            // Out of view: a capsule, or behind the card that fills the tab.
+            let shown = layers.in_view(index, zoomed);
             let mut focused = false;
             let mut last: Option<Retained<NSView>> = None;
             for (id, frame) in &inner.panes {
                 let Some(pane) = self.pane(*id) else {
                     continue;
                 };
-                pane.setHidden(card.minimized);
+                pane.setHidden(!shown);
                 pane.set_headed(true);
                 pane.set_card(true);
                 focused |= pane.shows_focus();
@@ -2473,7 +2957,7 @@ impl SplitView {
                     left,
                     right,
                 );
-                if !card.minimized {
+                if shown {
                     placed.push((*id, *frame));
                 }
                 let view: &NSView = &pane;
@@ -2488,17 +2972,15 @@ impl SplitView {
                 // The shade is not flipped and the container is: the card's frame goes through
                 // the conversion, as the window's shade takes the flat cards' (`sync_ground`).
                 let at = shade.convertRect_fromView(outline, Some(self));
-                shade.set_cards(if card.minimized {
-                    Vec::new()
-                } else {
+                shade.set_cards(if shown {
                     vec![(at, focused)]
+                } else {
+                    Vec::new()
                 });
             }
-            let dividers: &[Divider] = if card.minimized { &[] } else { &inner.dividers };
+            let dividers: &[Divider] = if shown { &inner.dividers } else { &[] };
             self.sync_card_handles(index, dividers, last.as_deref());
-            if !card.minimized
-                && let Some(pane) = card.tree.leaves().first()
-            {
+            if shown && let Some(pane) = card.tree.leaves().first() {
                 outlines.push((*pane, *rect));
             }
         }
@@ -2512,7 +2994,8 @@ impl SplitView {
     /// rects follow the cards.
     fn sync_grips(&self) {
         let iv = self.ivars();
-        let shown = !iv.outlines.borrow().is_empty();
+        // A card that fills the tab has no edge to be sized by: its edges are the tab's.
+        let shown = !iv.outlines.borrow().is_empty() && self.card_zoomed().is_none();
         let mut grips = iv.grips.borrow_mut();
         match (shown, grips.as_ref()) {
             (true, None) => {
@@ -2578,6 +3061,10 @@ impl SplitView {
         let Some(index) = layers.card_of(pane) else {
             return;
         };
+        // A card that fills the tab is neither carried nor sized: it has nowhere to go.
+        if layers.filling(self.ivars().card_zoomed.get()) == Some(index) {
+            return;
+        }
         let min = self.limits();
         // From where the card is seen, which may be inside its margins while its area is not.
         let start = self.ground(&min).shown(&layers.cards[index]);
@@ -3032,6 +3519,38 @@ impl SplitView {
     }
 }
 
+/// What a zoom's motion starts from ([`SplitView::zoom_begins`]), taken before the layout
+/// changes.
+pub(crate) struct ZoomStart {
+    /// The pane that grows or comes back (a floating pane stands for its card).
+    pane: u64,
+    way: Way,
+    /// Where its card stood.
+    frame: Rect,
+    /// Going in: the others of its layer as they stood.
+    others: Vec<Still>,
+    /// Coming out: its own picture as it filled the tab.
+    own: Option<ZoomParts>,
+}
+
+/// The picture of a pane's card in the parts that hold to different corners of it while its
+/// edges move ([`Hold`]).
+struct ZoomParts {
+    body: Still,
+    head: Option<Still>,
+    tools: Option<Still>,
+}
+
+/// A zoom's motion while it plays.
+struct ZoomMotion {
+    round: u64,
+    stages: Vec<Retained<Stage>>,
+    /// The stages stand over the cards (a zoom of the cards), not among the flat area's views.
+    over_cards: bool,
+    /// The live views that wait unseen under the pictures.
+    unseen: Vec<Retained<NSView>>,
+}
+
 /// A pane as it stood before a layout: the slide starts from it.
 struct Before {
     id: u64,
@@ -3444,6 +3963,45 @@ mod tests {
         // The slot is where the framed card's own views end, not "over everything".
         assert!(restack.contains("ring_slot = Some(wanted.len())"));
         assert!(!restack.contains("ring_over"));
+    }
+
+    #[test]
+    fn a_zooms_motion_is_asked_for_and_setting_the_zoom_alone_plays_none() {
+        // A split, a float, a swap and a close end the zoom on their way and slide by
+        // themselves: the zoom's own motion is not in the setters.
+        for setter in [
+            "pub(crate) fn set_zoomed(",
+            "pub(crate) fn set_card_zoomed(",
+        ] {
+            let body = body_of(setter);
+            assert!(!body.contains("zoom_plays"), "{body}");
+            assert!(!body.contains("Stage::new"), "{body}");
+        }
+        // One motion at a time, and its end is the same road whoever calls it.
+        let plays = body_of("pub(crate) fn zoom_plays(");
+        assert!(plays.contains("self.zoom_ends()"));
+        assert!(plays.contains("zoom_round.get() == round"));
+        let begins = body_of("pub(crate) fn zoom_begins(");
+        assert!(begins.contains("self.zoom_ends()"));
+        assert!(begins.contains("app.reduce_motion()"));
+    }
+
+    #[test]
+    fn a_card_that_fills_the_tab_is_neither_sized_nor_carried() {
+        assert!(body_of("fn sync_grips(").contains("self.card_zoomed().is_none()"));
+        let drag = body_of("pub(crate) fn begin_card_drag(");
+        let refused = drag.find("layers.filling(").expect("asks the zoom");
+        let begun = drag.find("card_drag.set(").expect("begins the drag");
+        assert!(refused < begun, "the zoom is asked before the drag begins");
+    }
+
+    #[test]
+    fn the_pushed_panes_are_cut_where_the_splits_end() {
+        // The capsules' strip is inside the container: a pane pushed down is seen no further
+        // than a gap past the zoomed pane's place, by the tree's own spacing.
+        let seen = body_of("fn zoom_seen(");
+        assert!(seen.contains("split::pushed_room(big, gap, full)"));
+        assert!(seen.contains("spacing(scale, self.style(), self.beside_tabs()).between_px()"));
     }
 
     #[test]

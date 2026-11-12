@@ -92,6 +92,7 @@ mod updater;
 mod uploader;
 mod view;
 mod window;
+mod zoom_motion;
 
 // The platform-independent half lives in `bt-shell-common`; imported
 // at the crate root so `crate::settings` and friends keep resolving.

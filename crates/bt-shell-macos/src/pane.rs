@@ -3149,7 +3149,7 @@ impl TerminalPane {
     /// container is shown; the others stay in the hierarchy, hidden.
     ///
     /// The container, not the pane itself: a pane hidden behind the zoom
-    /// (⇧⌘↩) is still in the tab on screen — its focus bit must be right
+    /// (⌥⌘.) is still in the tab on screen — its focus bit must be right
     /// the moment the zoom drops, and nothing else would send it again.
     pub(crate) fn tab_shown(&self) -> bool {
         // SAFETY: reading the superview; we are on the main thread (`MainThreadOnly`).

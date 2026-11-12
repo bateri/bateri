@@ -2,8 +2,10 @@
 //! one and a zoomed one too, so a pane can always be taken by it, whatever the program in it
 //! covers. The program's mark with no tile — a dot on its corner says the pane's own signals —,
 //! the pane's title (the focused pane's in full ink), and under the pointer the pane's tools at
-//! its right: Split Right, Split Down, Float Pane (Dock Pane while it floats) and Open in New Tab
-//! (with other panes beside it) and Close Split. A press on the band gives the pane the keyboard
+//! its right: Split Right, Split Down, Float Pane (Dock Pane while it floats), Open in New Tab
+//! (with other panes beside it), Zoom Pane (Unzoom Pane while it fills the tab) and Close Split.
+//! The tools of a pane that fills the tab stay in view, the lit one among them: nothing else on
+//! the screen says that panes are out of sight. A press on the band gives the pane the keyboard
 //! and is the start of carrying it: past the slop the pane is carried (`pane_drag`, no key
 //! held) — to a region of a pane, onto a strip, out of the window; the band of a floating pane
 //! moves its card instead, inside the tab. A press on a tool runs that command on this pane.
@@ -112,6 +114,11 @@ enum Tool {
     /// A floating pane's card becomes a capsule.
     Minimize,
     NewTab,
+    /// The pane fills the room its kind has: a flat pane the splits' area, a floating pane's
+    /// card the tab (dim on the flat area's only pane, which fills it already).
+    Zoom,
+    /// The pane that fills the tab gives the room back (lit while it does).
+    Unzoom,
     Close,
 }
 
@@ -119,22 +126,32 @@ impl Tool {
     /// The tools of a pane: Float on a flat pane and Dock on a floating one — one button, the
     /// menu item's own; Open in New Tab only on a flat pane beside other panes — a tab's only
     /// pane is the tab already, and a floating pane docks before it leaves — and is the only one
-    /// that minimizes.
-    fn of(alone: bool, floating: bool) -> &'static [Tool] {
+    /// that minimizes. Zoom stands left of Close on every pane, so it is in one place whatever
+    /// the pane is, and is Unzoom while the pane fills the tab (`zoomed`).
+    fn of(alone: bool, floating: bool, zoomed: bool) -> Vec<Tool> {
+        let zoom = if zoomed { Tool::Unzoom } else { Tool::Zoom };
         match (floating, alone) {
-            (true, _) => &[
+            (true, _) => vec![
                 Tool::SplitRight,
                 Tool::SplitDown,
                 Tool::Dock,
                 Tool::Minimize,
+                zoom,
                 Tool::Close,
             ],
-            (false, true) => &[Tool::SplitRight, Tool::SplitDown, Tool::Float, Tool::Close],
-            (false, false) => &[
+            (false, true) => vec![
+                Tool::SplitRight,
+                Tool::SplitDown,
+                Tool::Float,
+                zoom,
+                Tool::Close,
+            ],
+            (false, false) => vec![
                 Tool::SplitRight,
                 Tool::SplitDown,
                 Tool::Float,
                 Tool::NewTab,
+                zoom,
                 Tool::Close,
             ],
         }
@@ -148,6 +165,8 @@ impl Tool {
             Tool::Dock => "Dock Pane",
             Tool::Minimize => "Minimize Floating Pane",
             Tool::NewTab => "Open in New Tab",
+            Tool::Zoom => "Zoom Pane",
+            Tool::Unzoom => "Unzoom Pane",
             Tool::Close => "Close Split",
         }
     }
@@ -157,6 +176,7 @@ impl Tool {
         match self {
             Tool::Float | Tool::Dock => Some("float_pane"),
             Tool::Minimize => Some("minimize_floating_pane"),
+            Tool::Zoom | Tool::Unzoom => Some("zoom_split"),
             Tool::SplitRight | Tool::SplitDown | Tool::NewTab | Tool::Close => None,
         }
     }
@@ -169,6 +189,7 @@ impl Tool {
             Tool::Float | Tool::Dock => sel!(toggleFloatPane:),
             Tool::Minimize => sel!(minimizeFloatingPane:),
             Tool::NewTab => sel!(movePaneToNewTab:),
+            Tool::Zoom | Tool::Unzoom => sel!(toggleSplitZoom:),
             Tool::Close => sel!(closeTab:),
         }
     }
@@ -182,17 +203,58 @@ mod tests {
     fn a_flat_pane_has_float_and_a_floating_one_dock_in_the_same_place() {
         use Tool::*;
         assert_eq!(
-            Tool::of(false, false),
-            [SplitRight, SplitDown, Float, NewTab, Close]
+            Tool::of(false, false, false),
+            [SplitRight, SplitDown, Float, NewTab, Zoom, Close]
         );
         // A tab's only pane is the tab: no Open in New Tab, and Float stays — dim.
-        assert_eq!(Tool::of(true, false), [SplitRight, SplitDown, Float, Close]);
+        assert_eq!(
+            Tool::of(true, false, false),
+            [SplitRight, SplitDown, Float, Zoom, Close]
+        );
         // A floating pane docks before it leaves its tab, and minimizes.
         assert_eq!(
-            Tool::of(false, true),
-            [SplitRight, SplitDown, Dock, Minimize, Close]
+            Tool::of(false, true, false),
+            [SplitRight, SplitDown, Dock, Minimize, Zoom, Close]
         );
-        assert_eq!(Tool::of(true, true), Tool::of(false, true));
+        assert_eq!(Tool::of(true, true, false), Tool::of(false, true, false));
+    }
+
+    #[test]
+    fn zoom_stands_left_of_close_on_every_pane_and_is_unzoom_while_the_pane_fills_the_tab() {
+        for (alone, floating) in [(false, false), (true, false), (false, true), (true, true)] {
+            for (zoomed, tool) in [(false, Tool::Zoom), (true, Tool::Unzoom)] {
+                let tools = Tool::of(alone, floating, zoomed);
+                let at = tools.len() - 2;
+                assert_eq!(tools[at], tool, "{alone} {floating} {zoomed}");
+                assert_eq!(tools[at + 1], Tool::Close);
+                assert!(!tools.contains(if zoomed { &Tool::Zoom } else { &Tool::Unzoom }));
+            }
+        }
+        // One command with one key and two names, as Float and Dock are.
+        assert_eq!(Tool::Zoom.action(), Tool::Unzoom.action());
+        assert_eq!(Tool::Zoom.action(), sel!(toggleSplitZoom:));
+        assert_eq!(Tool::Zoom.name(), "Zoom Pane");
+        assert_eq!(Tool::Unzoom.name(), "Unzoom Pane");
+        let command = bt_shell_common::shortcuts::by_name("zoom_split").expect("in the table");
+        assert_eq!(Tool::Zoom.command(), Some(command.name));
+        assert_eq!(Tool::Unzoom.command(), Some(command.name));
+        // The key is one of the panes' own, ⌥⌘ and a key.
+        assert_eq!(command.defaults, ["option+cmd+."]);
+    }
+
+    #[test]
+    fn a_floating_pane_that_fills_the_tab_has_two_tools_lit_and_the_lone_flat_pane_two_dim() {
+        let lit = Marks::of(true, false, true);
+        assert!(lit.lit(Tool::Dock) && lit.lit(Tool::Unzoom));
+        assert!(!lit.lit(Tool::Close) && !lit.dim(Tool::Unzoom));
+        // The flat area's only pane can neither float nor grow: both tools stand dim.
+        let alone = Marks::of(false, true, false);
+        assert!(alone.dim(Tool::Float) && alone.dim(Tool::Zoom));
+        assert!(!alone.lit(Tool::Zoom));
+        // Beside other panes nothing is dim, and nothing lit until it floats or fills the tab.
+        let plain = Marks::of(false, false, false);
+        assert!(!plain.dim(Tool::Float) && !plain.dim(Tool::Zoom) && !plain.lit(Tool::Zoom));
+        assert!(Marks::of(false, false, true).lit(Tool::Unzoom));
     }
 
     #[test]
@@ -232,8 +294,12 @@ pub(crate) struct HeadLook {
     pub(crate) floating: bool,
     /// The tab's only pane: no Open in New Tab among its tools.
     pub(crate) alone: bool,
-    /// The flat area's only pane: it cannot float, and its Float tool is dim.
+    /// The flat area's only pane: it cannot float, and its Float tool is dim. Its Zoom tool
+    /// too: it fills the splits already.
     pub(crate) flat_alone: bool,
+    /// The pane fills the tab (Zoom Pane): its Zoom tool is Unzoom, and lit, and its tools stay
+    /// in view without the pointer.
+    pub(crate) zoomed: bool,
     /// What covers the pane, when a program's view does: its words, icon and way out stand in
     /// the band in place of the pane's title and mark.
     pub(crate) view: Option<ViewHead>,
@@ -405,6 +471,12 @@ impl PaneHead {
         self.ivars().pane.get()
     }
 
+    /// Where the tools stand in the band, in its own space: what a picture of the band is cut
+    /// at for the part that ends at the pane's right edge ([`crate::zoom_motion::Hold`]).
+    pub(crate) fn tools_frame(&self) -> NSRect {
+        self.ivars().tools.frame()
+    }
+
     /// The grid's margins under it, from the pane's corners (the container's layout).
     pub(crate) fn set_margins(&self, margins: (f64, f64)) {
         if self.ivars().margins.replace(margins) != margins {
@@ -461,12 +533,14 @@ impl PaneHead {
     /// view —, in the band's space.
     fn tool_boxes(&self) -> Vec<(Tool, NSRect)> {
         let iv = self.ivars();
-        let (alone, floating) = iv
+        let (alone, floating, zoomed) = iv
             .look
             .borrow()
             .as_ref()
-            .map_or((false, false), |look| (look.alone, look.floating));
-        let tools = Tool::of(alone, floating);
+            .map_or((false, false, false), |look| {
+                (look.alone, look.floating, look.zoomed)
+            });
+        let tools = Tool::of(alone, floating, zoomed);
         let right = self.quit_box().map_or_else(
             || self.bounds().size.width - iv.margins.get().1,
             |quit| quit.origin.x - QUIT_GAP,
@@ -475,9 +549,9 @@ impl PaneHead {
         let all = count * TOOL_WIDTH + (count - 1.0) * TOOL_GAP;
         let start = right - all;
         tools
-            .iter()
+            .into_iter()
             .enumerate()
-            .map(|(index, &tool)| {
+            .map(|(index, tool)| {
                 let x = start + index as f64 * (TOOL_WIDTH + TOOL_GAP);
                 (
                     tool,
@@ -510,10 +584,11 @@ impl PaneHead {
             return;
         };
         let width = self.bounds().size.width;
-        let hot = iv.hot.get();
+        // The tools show under the pointer, and all the while their pane fills the tab.
+        let shown = iv.hot.get() || look.zoomed;
         let boxes = self.tool_boxes();
         let x = self.mark_rect().origin.x + MARK + tabs::ICON_GAP + 2.0;
-        let end = if hot {
+        let end = if shown {
             boxes
                 .first()
                 .map_or(width, |(_, rect)| rect.origin.x - tabs::ICON_GAP)
@@ -553,16 +628,12 @@ impl PaneHead {
                 })
                 .collect(),
             palette,
-            // Dock stands lit while its pane floats; Float stands dim where nothing can float.
-            Marks {
-                lit: look.floating.then_some(Tool::Dock),
-                dim: (!look.floating && look.flat_alone).then_some(Tool::Float),
-            },
+            Marks::of(look.floating, look.flat_alone, look.zoomed),
         );
         let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
         fade(
             &iv.tools,
-            f64::from(u8::from(hot)),
+            f64::from(u8::from(shown)),
             if still { 0.0 } else { TOOLS_SECS },
         );
     }
@@ -609,7 +680,7 @@ impl PaneHead {
     }
 
     /// The part under the event's point: Quit whenever a view is up, a tool while the tools
-    /// show (the pointer is on the band).
+    /// show (the pointer is on the band, or the pane fills the tab).
     fn part_at(&self, event: &NSEvent) -> Option<Part> {
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
         let inside = |rect: NSRect| {
@@ -621,7 +692,13 @@ impl PaneHead {
         if self.quit_box().is_some_and(inside) {
             return Some(Part::Quit);
         }
-        if !self.ivars().hot.get() {
+        let zoomed = self
+            .ivars()
+            .look
+            .borrow()
+            .as_ref()
+            .is_some_and(|look| look.zoomed);
+        if !(self.ivars().hot.get() || zoomed) {
             return None;
         }
         self.tool_boxes()
@@ -901,11 +978,39 @@ fn draw_quit(rect: NSRect, lit: bool, palette: Palette) {
     ));
 }
 
-/// Which of a pane's tools stand out: one in the accent, one faded.
+/// Which of a pane's tools stand out: in the accent, or faded. Two of each at the most, since
+/// a pane's two states are apart: it floats or not, it fills the tab or not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Marks {
-    lit: Option<Tool>,
-    dim: Option<Tool>,
+    lit: [Option<Tool>; 2],
+    dim: [Option<Tool>; 2],
+}
+
+impl Marks {
+    /// Dock stands lit while its pane floats and Unzoom while it fills the tab; Float and Zoom
+    /// stand dim on the flat area's only pane, which can neither leave the splits nor grow in
+    /// them.
+    fn of(floating: bool, flat_alone: bool, zoomed: bool) -> Self {
+        let lone = !floating && flat_alone;
+        Self {
+            lit: [
+                floating.then_some(Tool::Dock),
+                zoomed.then_some(Tool::Unzoom),
+            ],
+            dim: [
+                lone.then_some(Tool::Float),
+                (lone && !zoomed).then_some(Tool::Zoom),
+            ],
+        }
+    }
+
+    fn lit(self, tool: Tool) -> bool {
+        self.lit.contains(&Some(tool))
+    }
+
+    fn dim(self, tool: Tool) -> bool {
+        self.dim.contains(&Some(tool))
+    }
 }
 
 /// A dim tool's strength: the design's 0.35.
@@ -954,8 +1059,8 @@ define_class!(
             };
             let marks = iv.marks.get();
             for &(tool, rect) in iv.boxes.borrow().iter() {
-                let dim = marks.dim == Some(tool);
-                let lit = marks.lit == Some(tool);
+                let dim = marks.dim(tool);
+                let lit = marks.lit(tool);
                 let hot = iv.hot.get() == Some(tool) && !dim;
                 let plate = if lit {
                     Some(Tint::of(palette.accent, LIT_FILL))
@@ -1128,6 +1233,32 @@ fn draw_tool(tool: Tool, rect: NSRect, color: u32, strength: f64) {
             path.lineToPoint(at(10.25, 5.1));
             path.moveToPoint(at(10.1, 1.9));
             path.lineToPoint(at(5.6, 6.4));
+        }
+        // Two arrows along one diagonal: apart, out to the corners.
+        Tool::Zoom => {
+            path.moveToPoint(at(4.9, 1.75));
+            path.lineToPoint(at(1.75, 1.75));
+            path.lineToPoint(at(1.75, 4.9));
+            path.moveToPoint(at(1.9, 1.9));
+            path.lineToPoint(at(5.1, 5.1));
+            path.moveToPoint(at(7.1, 10.25));
+            path.lineToPoint(at(10.25, 10.25));
+            path.lineToPoint(at(10.25, 7.1));
+            path.moveToPoint(at(10.1, 10.1));
+            path.lineToPoint(at(6.9, 6.9));
+        }
+        // The same two, turned to meet in the middle.
+        Tool::Unzoom => {
+            path.moveToPoint(at(5.1, 2.1));
+            path.lineToPoint(at(5.1, 5.1));
+            path.lineToPoint(at(2.1, 5.1));
+            path.moveToPoint(at(4.95, 4.95));
+            path.lineToPoint(at(1.75, 1.75));
+            path.moveToPoint(at(6.9, 9.9));
+            path.lineToPoint(at(6.9, 6.9));
+            path.lineToPoint(at(9.9, 6.9));
+            path.moveToPoint(at(7.05, 7.05));
+            path.lineToPoint(at(10.25, 10.25));
         }
         Tool::Close => {
             path.moveToPoint(at(3.4, 3.4));

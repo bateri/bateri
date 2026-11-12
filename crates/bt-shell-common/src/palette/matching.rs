@@ -10,7 +10,10 @@
 //!   and the first starts a word. "theme" finding Python Environment (t-h in "python", e in
 //!   "environment") is noise, not a hit.
 //! - **A keyword** the word begins scores 60, **the second line** containing the word 45. The
-//!   row's cluster heading counts as a keyword ("themes" finds the themes).
+//!   row's cluster heading counts as a keyword ("themes" finds the themes). The row's **first**
+//!   keyword scores 5 more: it is the word the row is most called by, so of the rows a word
+//!   finds only by keyword that one comes first ("focus" finds Zoom Pane before the commands
+//!   that move the keyboard between panes, which a cluster's few rows would otherwise fill).
 //! - A query of several words needs **every** word to hit; the scores add.
 //!
 //! Case and accents are folded ([`super::fold`]). Only the title's letters are marked: a hit
@@ -29,6 +32,7 @@ const NEXT_LETTER: f64 = 3.0;
 const OTHER_LETTER: f64 = -1.0;
 const LENGTH_COST: f64 = 0.05;
 const KEYWORD: f64 = 60.0;
+const FIRST_KEYWORD: f64 = 5.0;
 const SUBTITLE: f64 = 45.0;
 
 /// A hit: how well, and which letters of the title to mark (positions in the title as written).
@@ -137,6 +141,8 @@ fn score_with(row: &Row, query: &str, kind_words: bool) -> Option<Match> {
     let title = Folded::new(&row.title);
     let subtitle = Folded::new(&row.subtitle);
     let kind = if kind_words { row.kind.cluster() } else { "" };
+    // Whether the first of the keywords is the row's own, not its cluster's heading.
+    let called = !row.keywords.trim().is_empty();
     let keywords: Vec<Folded> = row
         .keywords
         .split_whitespace()
@@ -147,10 +153,10 @@ fn score_with(row: &Row, query: &str, kind_words: bool) -> Option<Match> {
     let mut marks = Vec::new();
     for w in &words {
         let by_title = fuzzy(w, &title);
-        let by_keyword = if keywords.iter().any(|k| k.starts_with(w)) {
-            KEYWORD
-        } else {
-            0.0
+        let by_keyword = match keywords.iter().position(|k| k.starts_with(w)) {
+            Some(0) if called => KEYWORD + FIRST_KEYWORD,
+            Some(_) => KEYWORD,
+            None => 0.0,
         };
         let by_subtitle = if subtitle.find(w).is_some() {
             SUBTITLE

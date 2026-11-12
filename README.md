@@ -34,7 +34,9 @@ brew install bateri/tap/bateri
   and animates typing and deleting (configurable, or off).
 - **Tabs and splits.** Tabs along the top or in a column down the left edge;
   split any tab right or down, move between panes, resize, equalize and
-  zoom — all from the keyboard.
+  zoom — all from the keyboard. Zoom is also a button on every pane's bar:
+  the pane grows to fill the tab and pushes the others out, and again brings
+  them back.
 - **Floating panes.** A pane can float over its tab's splits as a card you move
   and resize with the pointer or the keyboard, dock back among the splits, or
   minimize to a capsule — in a strip under the splits or at the tab's top right
@@ -99,7 +101,8 @@ curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
 | Previous / next split | ⌘[ / ⌘] |
 | Select split in a direction | ⌥⌘ + arrow |
 | Resize split | ⌃⌘ + arrow |
-| Equalize splits / zoom split | ⌃⌘= / ⇧⌘↩ |
+| Equalize splits | ⌃⌘= |
+| Zoom pane (a split pane or a floating one fills the tab) / unzoom | ⌥⌘. |
 | Float pane / dock pane | ⌥⌘↩ |
 | Move floating pane | ⌃⌥⌘ + arrow |
 | Minimize floating pane (or open the last one minimized) | ⌥⌘M |
@@ -236,7 +239,8 @@ goes with no side, `--ratio`, `--new-tab`, `--group` or `--window`. `move pane
 p9 --beside p3 --right`, `--tab t3` (another tab) and `--new-tab` take a floating
 pane too and put it flat where they say; `--dock` sets it back in its own tab.
 `resize p9 --right` or `--left` changes the card's width and `--below` or
-`--above` its height, as ⌃⌘ + arrow does. `zoom p9` of a floating pane, `swap`
+`--above` its height, as ⌃⌘ + arrow does. `zoom p9` of a floating pane makes its
+card fill the tab over the other panes, and again gives the room back. `swap`
 of two panes that are not in one layer, a plain `split` or `move --beside` beside
 a floating pane, `--dock` or `--at` of a flat pane are mistakes (64). `minimize
 p9` turns a floating pane's card into a capsule, or opens the capsule again where

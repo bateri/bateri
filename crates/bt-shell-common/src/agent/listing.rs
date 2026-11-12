@@ -89,7 +89,30 @@ pub enum Node {
     },
 }
 
+impl Tab {
+    /// The card that fills the tab: the one holding the zoomed pane, when the zoom is a
+    /// floating pane's.
+    fn filling_card(&self) -> Option<usize> {
+        let zoomed = self.zoomed.as_ref()?;
+        self.cards.iter().position(|card| card.tree.holds(zoomed))
+    }
+
+    /// Whether card `index` is in view of the tab: over a zoom of the flat area every card is,
+    /// and with a card filling the tab only that one — the others are behind it.
+    fn card_in_view(&self, index: usize) -> bool {
+        self.filling_card().is_none_or(|filling| filling == index)
+    }
+}
+
 impl Node {
+    /// Whether `pane` is one of the node's panes.
+    fn holds(&self, pane: &Pane) -> bool {
+        match self {
+            Node::Pane(own) => own == pane,
+            Node::Split { first, second, .. } => first.holds(pane) || second.holds(pane),
+        }
+    }
+
     /// The tree of a tab with each pane told by `pane`: the real tree, its shares as they are,
     /// with a side that is other machines throughout folded into one node.
     pub fn of(tree: &Tree, pane: &dyn Fn(u64) -> Pane) -> Node {
@@ -158,7 +181,8 @@ pub struct Tab {
     /// itself.
     pub title: Option<String>,
     pub selected: bool,
-    /// The pane filling the tab, when one is zoomed.
+    /// The pane filling the tab, when one is zoomed: the flat area's zoomed pane, or a pane of
+    /// the floating card that fills the tab over it.
     pub zoomed: Option<Pane>,
     /// The flat area.
     pub tree: Node,
@@ -722,13 +746,14 @@ impl Scene {
                     .is_none_or(|zoomed| *zoomed == Pane::Terminal(name.to_owned()))
         };
         self.json_node(out, &tab.tree.folded(), &on_screen, Layer::FLAT);
-        // A card is over the zoom: it is on screen wherever its tab is, unless it is a capsule.
-        let over = |_: &str| window.visible && tab.selected;
+        // A card is over the flat area's zoom: it is on screen wherever its tab is, unless it
+        // is a capsule or behind the card that fills the tab.
         out.push_str(",\"cards\":[");
         for (c, card) in tab.cards.iter().enumerate() {
             if c > 0 {
                 out.push(',');
             }
+            let over = |_: &str| window.visible && tab.selected && tab.card_in_view(c);
             self.json_node(out, &card.tree.folded(), &over, Layer::of(card));
         }
         out.push_str("]}");
@@ -964,8 +989,8 @@ fn write_tab(
             label_of,
         );
         // The cards are told after the flat area, back to front, each pane marked as floating.
-        let over = |_: &str| window.visible && tab.selected;
-        for card in &tab.cards {
+        for (c, card) in tab.cards.iter().enumerate() {
+            let over = |_: &str| window.visible && tab.selected && tab.card_in_view(c);
             write_node(
                 out,
                 &card.tree.folded(),

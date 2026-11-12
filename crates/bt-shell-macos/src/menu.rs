@@ -10,7 +10,7 @@
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
 //! Page Down) and Window (Minimize,
 //! Zoom, Show Previous/Next Tab, Go to Tab…, Jump to Command…, Select Tab ▸, Show All Tabs, Rename Tab…, splits — Select Previous/Next
-//! Split, Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Split —, Move
+//! Split, Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Pane —, Move
 //! Tab to New Window, Merge All Windows, Bring All to Front). Settings… (⌘,) opens the settings window
 //! (`settings_window`; it used to open the file in the editor, that job is now
 //! on the window's "Open settings.toml" button); the item and shortcut are the same.
@@ -89,7 +89,7 @@
 //! (`NSHomeFunctionKey` U+F729 …). A menu shortcut, not a key encoding — plain
 //! Home/End still reach the program from `keyDown:` (`bt_core::FunctionKey`), the
 //! menu matches only the ⌘ form. The splits' shortcuts go the same way: ⌘[ / ⌘],
-//! ⌥⌘/⌃⌘ + arrow (the arrow keys' code points U+F700–U+F703), ⌃⌘= and ⇧⌘↩ —
+//! ⌥⌘/⌃⌘ + arrow (the arrow keys' code points U+F700–U+F703), ⌃⌘= and ⌥⌘. —
 //! `keyDown:`'s three-key Cmd allow-list (⌘⌫, ⌘←, ⌘→) and the dock's ⇧⏎ do not
 //! change, because the menu matches them together with their modifiers.
 //!
@@ -737,7 +737,7 @@ pub(crate) fn install(
             submenu(mtm, "Resize Split", &resize_split),
             submenu(mtm, "Swap Split", &swap_split),
             item(mtm, "Equalize Splits", sel!(equalizeSplits:)),
-            item(mtm, "Zoom Split", sel!(toggleSplitZoom:)),
+            item(mtm, "Zoom Pane", sel!(toggleSplitZoom:)),
             // A pane floating over the splits as a card: one item that floats the focused pane
             // or docks it (`validateMenuItem:` writes its title), and a new pane that floats.
             item(mtm, "Float Pane", sel!(toggleFloatPane:)),

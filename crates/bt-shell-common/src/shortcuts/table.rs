@@ -93,6 +93,12 @@ pub struct Command {
     /// other command stays the application's whatever has the keyboard. The one place that says which
     /// commands are which: a second list of "the view's keys" would drift from the table.
     pub content: bool,
+    /// Whether the command's key is the character written on it, on every keyboard. macOS
+    /// rewrites a menu's punctuation shortcut for the keyboard layout by a table of its own —
+    /// on a Turkish keyboard ⌘. is shown and pressed as ⌘Ç, though that keyboard has a full
+    /// stop —, which keeps the system's shortcuts where hands know them. A command whose key was
+    /// chosen for the key itself says so here, and its menu item is left as the table writes it.
+    pub literal: bool,
 }
 
 /// One item of a command: the id of the menu item and the chord it is bound to.
@@ -165,6 +171,7 @@ const fn command(
         defaults,
         family: None,
         content: false,
+        literal: false,
     }
 }
 
@@ -180,6 +187,15 @@ const fn family(
         defaults: modifiers,
         family: Some(family),
         content: false,
+        literal: false,
+    }
+}
+
+/// `command` with the key the table writes on every keyboard ([`Command::literal`]).
+const fn literal(command: Command) -> Command {
+    Command {
+        literal: true,
+        ..command
     }
 }
 
@@ -325,7 +341,10 @@ pub const COMMANDS: &[Command] = &[
         Family::Arrows,
     ),
     command("equalize_splits", "equalizeSplits", &["ctrl+cmd+="]),
-    command("zoom_split", "toggleSplitZoom", &["shift+cmd+return"]),
+    // Zoom Pane: ⌥⌘ is what a pane is handled with (⌥⌘ + arrow, ⌥⌘↩, ⌥⌘M), and the full stop
+    // is a key under the other hand that no program in a pane has with it — ⌥⌘F is an editor's
+    // Replace. It is the key that types a full stop, whatever the keyboard.
+    literal(command("zoom_split", "toggleSplitZoom", &["option+cmd+."])),
     command("float_pane", "toggleFloatPane", &["option+cmd+return"]),
     family(
         "move_floating_pane",
@@ -482,6 +501,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zoom_panes_key_is_the_full_stop_whatever_the_keyboard() {
+        let zoom = by_name("zoom_split").expect("in the table");
+        assert_eq!(zoom.defaults, ["option+cmd+."]);
+        assert!(zoom.literal);
+        // It is the only one: the other punctuation keys are the system's to place — ⌘] has
+        // no key of its own on many keyboards, and ⌘. is where every application has it.
+        let literal: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|command| command.literal)
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(literal, ["zoom_split"]);
+    }
+
     /// What the menu bar holds for each of today's keyed items, written out by hand from the
     /// menu's construction: the selector, the key equivalent and whether ⌘, ⌃, ⌥, ⇧ are in the
     /// mask. A key typed into the table that the menu does not have today shows here.
@@ -535,7 +569,7 @@ mod tests {
             ("selectPreviousSplit", "[", "c"),
             ("selectNextSplit", "]", "c"),
             ("equalizeSplits", "=", "ck"),
-            ("toggleSplitZoom", "\r", "cs"),
+            ("toggleSplitZoom", ".", "co"),
             ("toggleFloatPane", "\r", "co"),
             ("minimizeFloatingPane", "m", "co"),
             ("toggleFloatingPanes", "\r", "cos"),

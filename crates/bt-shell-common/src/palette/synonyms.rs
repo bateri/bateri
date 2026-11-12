@@ -68,7 +68,12 @@ const WORDS: &[(&str, &str)] = &[
     ("quitAndEndPrograms", "exit kill all"),
     ("tabsAtTop", "tab position bar horizontal"),
     ("tabsAtSide", "tab position sidebar vertical column left"),
-    ("toggleSplitZoom", "maximize pane focus"),
+    (
+        "toggleSplitZoom",
+        // "focus" first: it is what people call it, and the first word ranks a command over
+        // the others the word finds (the commands that move the keyboard between panes).
+        "focus maximize pane split fullscreen expand enlarge restore",
+    ),
     (
         "toggleFloatPane",
         "pane dock undock overlay window popup detach",
@@ -164,6 +169,23 @@ mod tests {
                     .any(|w| w.starts_with("pane")),
                 "{selector}"
             );
+        }
+    }
+
+    #[test]
+    fn zoom_pane_is_found_by_focus_and_by_the_name_it_had() {
+        // People call it focusing a pane; the menu called it Zoom Split.
+        let words = for_selector("toggleSplitZoom");
+        for word in ["focus", "split", "maximize"] {
+            assert!(words.split_whitespace().any(|w| w == word), "{word}");
+        }
+        // It is the first word there and of no other command: "focus" ranks it over the
+        // commands that move the keyboard between panes.
+        assert_eq!(words.split_whitespace().next(), Some("focus"));
+        for other in ["selectNextSplit", "selectPreviousSplit", "selectSplit"] {
+            let words = for_selector(other);
+            assert!(words.split_whitespace().any(|w| w == "focus"), "{other}");
+            assert_ne!(words.split_whitespace().next(), Some("focus"), "{other}");
         }
     }
 

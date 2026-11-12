@@ -235,7 +235,7 @@ pub struct SavedTab {
     pub cards: Vec<SavedCard>,
     /// The focused pane's index (a floating pane's too).
     pub focused: usize,
-    /// The zoomed pane's index (⇧⌘↩), if any.
+    /// The zoomed pane's index (⌥⌘.), if any.
     pub zoomed: Option<usize>,
     /// The name the user gave the tab; `None` shows the tab's own title.
     pub name: Option<String>,

@@ -67,8 +67,14 @@ fn is_copy(item: &NSMenuItem) -> bool {
         .is_some_and(|identifier| identifier.to_string() == COPY)
 }
 
-/// Writes `chord` to the item, or takes its key away.
+/// Writes `chord` to the item, or takes its key away. The key is the system's to rewrite for the
+/// keyboard layout unless the item's command says its key is the character itself
+/// ([`shortcuts::Command::literal`]).
 fn set_key(item: &NSMenuItem, chord: Option<&Chord>) {
+    let literal = id_of(item)
+        .and_then(|id| by_id(&id))
+        .is_some_and(|command| command.literal);
+    item.setAllowsAutomaticKeyEquivalentLocalization(!literal);
     match chord {
         Some(chord) => {
             let held = menu_key(chord);
@@ -273,11 +279,43 @@ fn collect(menu: &NSMenu, seen: &mut HashSet<String>, out: &mut Vec<String>) {
 /// The glyphs of the first shortcut the command `name` has, as the bar shows it (`⇧⌘D`), for
 /// the texts that name a key — a tooltip, a row of a list. `None` when the command has no key
 /// or no application object is up (an embedded pane has none).
+///
+/// **As the bar shows it**, and so read from the bar's own item where the command has one:
+/// macOS rewrites a punctuation shortcut for the keyboard layout and the item then says the
+/// key that runs it (⌘] is ⌘Ü on a Turkish keyboard). The table's glyph would name a key that
+/// does nothing there.
 pub(crate) fn glyphs_of(mtm: MainThreadMarker, name: &str) -> Option<String> {
     let app = crate::app::delegate(mtm)?;
     let keys = app.keys();
     let binding = keys.binding(name)?;
-    binding.shortcuts.iter().find_map(shortcuts::glyphs)
+    let shown = NSApplication::sharedApplication(mtm)
+        .mainMenu()
+        .and_then(|menu| shown_key(&menu, binding.command.id));
+    shown.or_else(|| binding.shortcuts.iter().find_map(shortcuts::glyphs))
+}
+
+/// The key the first item of command `id` shows in `menu` or a submenu of it, as glyphs; `None`
+/// when no item of the command has a key. The hidden copies that carry a second key are not
+/// what the bar shows.
+fn shown_key(menu: &NSMenu, id: &str) -> Option<String> {
+    menu.itemArray().iter().find_map(|item| {
+        if let Some(submenu) = item.submenu() {
+            return shown_key(&submenu, id);
+        }
+        if is_copy(&item) || id_of(&item).as_deref() != Some(id) {
+            return None;
+        }
+        let mask = item.keyEquivalentModifierMask();
+        bt_shell_common::palette::shortcut(
+            &item.keyEquivalent().to_string(),
+            Modifiers {
+                control: mask.contains(NSEventModifierFlags::Control),
+                option: mask.contains(NSEventModifierFlags::Option),
+                shift: mask.contains(NSEventModifierFlags::Shift),
+                command: mask.contains(NSEventModifierFlags::Command),
+            },
+        )
+    })
 }
 
 /// The modifiers the family `name` (`select_tab`, `select_group`) has now: its items' keys, the

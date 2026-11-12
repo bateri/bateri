@@ -37,7 +37,7 @@
 //! and in the last pane the tab. Its card's frame is the stronger one — the
 //! other panes sit under the dim veil only with `dim_unfocused_splits`
 //! ([`TerminalTab::refresh_look`]). Split, navigation, resizing, equalizing
-//! and pane closing drop the zoom (⇧⌘↩) — resizing and equalizing because the
+//! and pane closing drop the zoom (⌥⌘.) — resizing and equalizing because the
 //! user asked for a layout change, and silently changing a hidden layout
 //! would be an invisible effect.
 
@@ -75,6 +75,7 @@ use crate::tabs::{self, Card, CardCommand, CardPane, Finish, Indicator, Signals,
 use crate::upload;
 use crate::uploader;
 use crate::window::{TerminalWindow, initial_rect};
+use crate::zoom_motion::Way;
 
 /// Saved scrollback, `(tab id, VT bytes)` per pane (`restore::save`'s input).
 pub(crate) type Histories = Vec<(PaneUuid, Vec<u8>)>;
@@ -713,6 +714,9 @@ impl TerminalTab {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(tab) = app::delegate(mtm).and_then(|app| app.tab(tab)) {
+                // A press can reach a pane the card that fills the tab does not cover (under
+                // lines the flat panes show round it): the card gives the room back.
+                tab.leave_card_zoom(id);
                 tab.raise_card_of(id);
                 tab.refresh_title();
                 tab.refresh_look();
@@ -741,12 +745,29 @@ impl TerminalTab {
     /// `bateri://tab/`).
     ///
     /// A floating pane stands over a zoom (the zoom is the flat area's) and its card comes to
-    /// the front first, opening if it was a capsule.
+    /// the front first, opening if it was a capsule. A card that fills the tab gives the room
+    /// back when the keyboard goes anywhere but into it ([`Self::leave_card_zoom`]).
     pub(crate) fn focus_pane(&self, pane: &TerminalPane) {
         let container = &self.ivars().container;
         let floating = container.floating(pane.id());
-        if focus_ends_zoom(container.zoomed(), pane.id(), floating) {
+        // The zoom the keyboard's going ends gives its room back with its motion, which plays
+        // once the panes look as they will: the pictures are of the new focus. A card that
+        // fills the tab covers the flat area, so of two zooms that end its motion is the one.
+        let flat = container
+            .zoomed()
+            .filter(|_| focus_ends_zoom(container.zoomed(), pane.id(), floating));
+        let card = container
+            .card_zoomed()
+            .filter(|_| container.leaves_card_zoom(pane.id()));
+        let start = card
+            .or(flat)
+            .and_then(|zoomed| container.zoom_begins(zoomed, Way::Out));
+        if flat.is_some() {
             self.set_zoom(None);
+        }
+        if card.is_some() {
+            self.set_card_zoom(None);
+            self.layout_changed();
         }
         if floating && container.reveal(pane.id()) {
             self.layout_changed();
@@ -756,6 +777,9 @@ impl TerminalTab {
         let _ = pane.focus();
         self.pane_focused(pane.id());
         self.refresh_look();
+        if let Some(start) = start {
+            container.zoom_plays(start);
+        }
     }
 
     /// What tells the focused pane from the others: its card's frame is
@@ -817,6 +841,7 @@ impl TerminalTab {
                         floating: container.floating(pane.id()),
                         alone,
                         flat_alone,
+                        zoomed: container.fills(pane.id()),
                         view: pane.view_head(),
                     },
                 )
@@ -828,6 +853,13 @@ impl TerminalTab {
     /// The zoomed pane; `None` → the splits are visible.
     pub(crate) fn zoomed(&self) -> Option<u64> {
         self.ivars().container.zoomed()
+    }
+
+    /// The pane that fills the tab, as a listing tells it: a pane of the floating card that
+    /// does, which covers the rest, else the flat area's zoomed pane.
+    pub(crate) fn filling(&self) -> Option<u64> {
+        let container = &self.ivars().container;
+        container.card_zoomed().or_else(|| container.zoomed())
     }
 
     /// The pane that fills the tab's whole area, if one does: the lone pane,
@@ -853,6 +885,45 @@ impl TerminalTab {
         container.set_zoomed(zoomed);
         container.apply_visibility(self.window_visible());
         self.refresh_look();
+    }
+
+    /// The card holding `pane` fills the tab, or (`None`) the one that does gives the room back;
+    /// the links of the cards it hides sleep, those of returning ones ask for a frame.
+    fn set_card_zoom(&self, pane: Option<u64>) {
+        let container = &self.ivars().container;
+        if container.card_zoomed().is_none() && pane.is_none() {
+            return;
+        }
+        container.set_card_zoomed(pane);
+        container.apply_visibility(self.window_visible());
+        self.refresh_look();
+    }
+
+    /// The keyboard went to pane `to` by a press: a card that fills the tab gives the room back
+    /// unless `to` is one of its own panes — every other pane is behind it or under it.
+    fn leave_card_zoom(&self, to: u64) {
+        let container = &self.ivars().container;
+        if !container.leaves_card_zoom(to) {
+            return;
+        }
+        let Some(zoomed) = container.card_zoomed() else {
+            return;
+        };
+        self.zoom_moved(zoomed, Way::Out, || self.set_card_zoom(None));
+        self.layout_changed();
+    }
+
+    /// Changes a zoom of `pane` (`change`) with its motion ([`SplitView::zoom_begins`],
+    /// [`SplitView::zoom_plays`]): what was asked for by the tool, the key or a command. A zoom
+    /// that ends because the layout changes goes through [`Self::set_zoom`] alone: that change
+    /// has a slide of its own.
+    fn zoom_moved(&self, pane: u64, way: Way, change: impl FnOnce()) {
+        let container = &self.ivars().container;
+        let start = container.zoom_begins(pane, way);
+        change();
+        if let Some(start) = start {
+            container.zoom_plays(start);
+        }
     }
 
     /// The window's visibility reached the tab (occlusion, miniaturizing):
@@ -909,8 +980,10 @@ impl TerminalTab {
     pub(crate) fn resize_split(&self, direction: Direction) {
         let pane = self.focused_pane();
         // A floating pane's card has edges of its own: the right and bottom ones move, over the
-        // zoom, by a step of the tab ([`SplitView::resize_card`]).
+        // zoom, by a step of the tab ([`SplitView::resize_card`]). A card that fills the tab
+        // comes back to its own size first: the step is from there.
         if self.ivars().container.floating(pane.id()) {
+            self.set_card_zoom(None);
             if self.ivars().container.resize_card(pane.id(), direction) {
                 self.layout_changed();
             }
@@ -932,6 +1005,9 @@ impl TerminalTab {
     /// it ([`SplitView::move_card`]); nothing for a flat pane.
     pub(crate) fn move_floating(&self, direction: Direction) {
         let pane = self.focused_pane();
+        if self.ivars().container.floating(pane.id()) {
+            self.set_card_zoom(None);
+        }
         if self.ivars().container.move_card(pane.id(), direction) {
             self.layout_changed();
         }
@@ -946,6 +1022,7 @@ impl TerminalTab {
         // A floating pane's card has edges of its own (⌃⌘ + arrow: the right and bottom ones move
         // by a step of the tab each), and the zoom, which is the flat area's, stays.
         if self.ivars().container.floating(pane.id()) {
+            self.set_card_zoom(None);
             // Each step is one more nudge of the edge; the first that moves nothing is the tab's
             // edge or the card's least, and the ones after it would not move either.
             let mut moved = false;
@@ -975,22 +1052,35 @@ impl TerminalTab {
 
     /// `bateri zoom p9`: `pane` fills the tab and, when `take_keyboard`, takes the keyboard (a tab
     /// that is not on screen has none to take), or gives the tab back if it filled it already. A
-    /// no-op with a single pane.
+    /// floating pane's card fills it over the splits. A no-op on the flat area's only pane.
     pub(crate) fn zoom_pane(&self, pane: &TerminalPane, take_keyboard: bool) {
-        // The zoom is the flat area's: a floating pane has none, and the flat area's only pane
-        // fills it already.
-        if self.ivars().container.flat_panes().len() < 2
-            || self.ivars().container.floating(pane.id())
-        {
+        if self.ivars().container.floating(pane.id()) {
+            let fills = self.ivars().container.fills(pane.id());
+            // The keyboard first: going into the card it ends the zoom of another one.
+            if !fills && take_keyboard {
+                self.focus_pane(pane);
+            }
+            let way = if fills { Way::Out } else { Way::In };
+            self.zoom_moved(pane.id(), way, || {
+                self.set_card_zoom((!fills).then_some(pane.id()));
+            });
+            self.layout_changed();
+            return;
+        }
+        // The flat area's only pane fills it already.
+        if self.ivars().container.flat_panes().len() < 2 {
             return;
         }
         if self.ivars().container.zoomed() == Some(pane.id()) {
-            self.set_zoom(None);
+            self.zoom_moved(pane.id(), Way::Out, || self.set_zoom(None));
         } else {
-            self.set_zoom(Some(pane.id()));
+            // The keyboard first, as for a card: it ends the zoom of another pane, and the
+            // pictures are of the focus the pane will have.
+            self.set_zoom(None);
             if take_keyboard {
                 self.focus_pane(pane);
             }
+            self.zoom_moved(pane.id(), Way::In, || self.set_zoom(Some(pane.id())));
         }
         self.layout_changed();
     }
@@ -1013,21 +1103,35 @@ impl TerminalTab {
         self.layout_changed();
     }
 
-    /// ⇧⌘↩: zooms the focused pane or undoes the zoom. A no-op
-    /// with a single pane.
+    /// Zoom Pane (⌥⌘.): the focused pane fills the room its kind has, or gives it back. A
+    /// flat pane fills the splits' area and the other flat panes wait hidden; a floating pane's
+    /// card fills the tab over them and the other cards wait behind it. A no-op on the flat
+    /// area's only pane.
     pub(crate) fn toggle_split_zoom(&self) {
         let container = &self.ivars().container;
+        let pane = self.focused_pane().id();
+        if container.floating(pane) {
+            let fills = container.fills(pane);
+            let way = if fills { Way::Out } else { Way::In };
+            self.zoom_moved(pane, way, || {
+                self.set_card_zoom((!fills).then_some(pane));
+            });
+            self.layout_changed();
+            return;
+        }
         if !self.can_zoom() {
             return;
         }
-        let zoomed = match container.zoomed() {
-            Some(_) => None,
-            // A floating pane has no zoom to turn on; one that is on ends.
-            None if container.floating(self.focused_pane().id()) => return,
-            None => Some(self.focused_pane().id()),
-        };
-        self.set_zoom(zoomed);
+        match container.zoomed() {
+            Some(zoomed) => self.zoom_moved(zoomed, Way::Out, || self.set_zoom(None)),
+            None => self.zoom_moved(pane, Way::In, || self.set_zoom(Some(pane))),
+        }
         self.layout_changed();
+    }
+
+    /// Whether the focused pane fills the tab: what the menu item's and the tool's name says.
+    pub(crate) fn focused_zoomed(&self) -> bool {
+        self.ivars().container.fills(self.focused_pane().id())
     }
 
     /// Whether Float Pane / Dock Pane has something to do for the focused pane: a floating pane
@@ -1041,14 +1145,12 @@ impl TerminalTab {
         )
     }
 
-    /// Whether Zoom Split has something to do: the flat area holds several panes and the focus
-    /// is in one of them — a floating pane has no zoom to turn on, and a zoom that is on ends
-    /// from anywhere.
+    /// Whether Zoom Pane has something to do for the focused pane: a floating pane's card can
+    /// always fill the tab, a flat pane only with others beside it.
     pub(crate) fn can_zoom(&self) -> bool {
         let container = &self.ivars().container;
         zoom_available(
             container.flat_panes().len(),
-            container.zoomed().is_some(),
             container.floating(self.focused_pane().id()),
         )
     }
@@ -1189,6 +1291,8 @@ impl TerminalTab {
     /// keyboard is in, or was in before it went to a card.
     fn dock_move(&self, pane: u64) -> Option<Move> {
         let container = &self.ivars().container;
+        // A card that fills the tab docks from the place it has, not from the tab's whole.
+        self.set_card_zoom(None);
         let focused = self.focused_pane().id();
         let beside = if container.floating(focused) {
             self.ivars().back.get()
@@ -1242,6 +1346,7 @@ impl TerminalTab {
     /// tab: `pane` docks beside `leaf`, on `side` ([`Layers::dock_beside`]). `false` when there
     /// is no room there.
     pub(crate) fn dock_pane_beside(&self, pane: u64, leaf: u64, side: Direction) -> bool {
+        self.set_card_zoom(None);
         let Some(layers) = self.ivars().container.docked_beside(pane, leaf, side) else {
             return false;
         };
@@ -1256,6 +1361,7 @@ impl TerminalTab {
         at: Option<(f64, f64)>,
         size: Option<(f64, f64)>,
     ) -> bool {
+        self.set_card_zoom(None);
         let changed = self.ivars().container.reframe_card(pane, at, size);
         if changed {
             self.layout_changed();
@@ -2629,11 +2735,11 @@ fn focus_ends_zoom(zoomed: Option<u64>, target: u64, floating: bool) -> bool {
     !floating && zoomed.is_some_and(|zoomed| zoomed != target)
 }
 
-/// Whether Zoom Split has something to do in a tab whose flat area holds `flat` panes, zoomed
-/// or not (`zoomed`), with the focus on a floating pane or not: a zoom that is on ends from
-/// anywhere, one that is off starts only from a flat pane that has others beside it.
-fn zoom_available(flat: usize, zoomed: bool, focus_floating: bool) -> bool {
-    flat > 1 && (zoomed || !focus_floating)
+/// Whether Zoom Pane has something to do in a tab whose flat area holds `flat` panes, with the
+/// focus on a floating pane or not: a floating pane's card can always fill the tab (and give
+/// it back), a flat pane fills the splits only when it has others beside it.
+fn zoom_available(flat: usize, focus_floating: bool) -> bool {
+    focus_floating || flat > 1
 }
 
 /// Whether Float Pane / Dock Pane has something to do: a floating pane docks, a flat one floats
@@ -2696,16 +2802,14 @@ mod tests {
     }
 
     #[test]
-    fn zoom_is_off_on_a_floating_pane_and_on_a_flat_area_of_several() {
+    fn a_floating_pane_always_zooms_and_a_flat_one_with_others_beside_it() {
         // Several flat panes, the focus on one of them: it zooms.
-        assert!(zoom_available(2, false, false));
-        // The focus on a floating pane: nothing to turn on...
-        assert!(!zoom_available(2, false, true));
-        // ...but a zoom that is on ends from there too.
-        assert!(zoom_available(2, true, true));
-        // The flat area's only pane fills it already, with cards over it or not.
-        assert!(!zoom_available(1, false, false));
-        assert!(!zoom_available(1, false, true));
+        assert!(zoom_available(2, false));
+        // The focus on a floating pane: its card fills the tab, however many panes are flat.
+        assert!(zoom_available(2, true));
+        assert!(zoom_available(1, true));
+        // The flat area's only pane fills it already.
+        assert!(!zoom_available(1, false));
     }
 
     #[test]

@@ -359,6 +359,52 @@ pub fn sliver(to: Rect, axis: Axis) -> Rect {
     }
 }
 
+/// How near two edges count as one, in points: frames are snapped to device pixels.
+const EDGE_EPS: f64 = 0.5;
+
+/// How far a pane at `pane` goes, in points (x, y), when the pane beside it grows from `small`
+/// to `big` (Zoom Pane): the growing pane's edge pushes it. A pane past an edge of `small` moves
+/// as far as that edge does, along each axis on its own, so the gap between the two is the same
+/// all the way and they never overlap; a pane that runs alongside an edge is not moved along
+/// it. The panes of a tree never overlap, so each stands past an edge of `small`, and when `big`
+/// is the whole area each ends past it. The same way back is how they return.
+pub fn pushed(pane: Rect, small: Rect, big: Rect) -> (f64, f64) {
+    let along = |start: f64, length: f64, from: (f64, f64), to: (f64, f64)| {
+        if start >= from.0 + from.1 - EDGE_EPS {
+            (to.0 + to.1) - (from.0 + from.1)
+        } else if start + length <= from.0 + EDGE_EPS {
+            to.0 - from.0
+        } else {
+            0.0
+        }
+    };
+    (
+        along(
+            pane.x,
+            pane.width,
+            (small.x, small.width),
+            (big.x, big.width),
+        ),
+        along(
+            pane.y,
+            pane.height,
+            (small.y, small.height),
+            (big.y, big.height),
+        ),
+    )
+}
+
+/// What a pushed pane ([`pushed`]) is seen in: the place the growing pane takes (`big`) and the
+/// `gap` round it, inside `bounds`. A pane pushed all the way stands exactly past it, so nothing
+/// of it is left over what lies beyond the splits — a strip under them, a column beside them.
+pub fn pushed_room(big: Rect, gap: f64, bounds: Rect) -> Rect {
+    let left = (big.x - gap).max(bounds.x);
+    let top = (big.y - gap).max(bounds.y);
+    let right = (big.x + big.width + gap).min(bounds.x + bounds.width);
+    let bottom = (big.y + big.height + gap).min(bounds.y + bounds.height);
+    Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+}
+
 /// From points to pixels, rounded to whole pixels.
 fn snap(rect: Rect, scale: f64) -> Rect {
     let px = rect.scaled(scale);
@@ -586,7 +632,7 @@ impl Tree {
             .collect()
     }
 
-    /// [`Tree::layout`] with a zoomed leaf (⇧⌘↩): if `zoomed` is in the tree, only it, covering
+    /// [`Tree::layout`] with a zoomed leaf (⌥⌘.): if `zoomed` is in the tree, only it, covering
     /// the whole area and without dividers; the other panes are absent from the layout (the
     /// container hides them). `None` or a leaf not in the tree gives the ordinary layout — since
     /// undoing does not change the tree, the old frames come back bit for bit.
@@ -597,7 +643,8 @@ impl Tree {
     /// [`Tree::layout_zoomed`] with the space `spacing` leaves. The zoomed pane covers the area
     /// less the spacing's margins and no gap between: a zoomed pane is meant to look like a tab
     /// of one, which is a card on the ground when the panes are cards and the whole area when
-    /// they touch.
+    /// they touch. It is laid out as a tab's only pane is, by the same road: under its header
+    /// ([`Spacing::with_head`]), which is where its tools are — the way back out of the zoom.
     pub fn layout_zoomed_spaced(
         &self,
         bounds: Rect,
@@ -606,10 +653,9 @@ impl Tree {
         spacing: Spacing,
     ) -> Layout {
         match zoomed {
-            Some(id) if self.leaves().contains(&id) => Layout {
-                panes: vec![(id, spacing.inside(snap(bounds, scale)).scaled(1.0 / scale))],
-                dividers: Vec::new(),
-            },
+            Some(id) if self.leaves().contains(&id) => {
+                Tree::Leaf(id).layout_spaced(bounds, scale, spacing)
+            }
             _ => self.layout_spaced(bounds, scale, spacing),
         }
     }
@@ -1676,7 +1722,7 @@ mod tests {
     use super::{
         Axis, Direction, Divider, Layout, MOST_PER_TAB, PANE_EDGE_SHARE, Placement, Rect, Removal,
         Room, SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict, WINDOW_EDGE_SHARE,
-        WINDOW_EDGE_STRIP, Zone, arrange, slide, sliver, solve_share,
+        WINDOW_EDGE_STRIP, Zone, arrange, pushed, pushed_room, slide, sliver, solve_share,
     };
 
     fn area(rect: &Rect) -> f64 {
@@ -3091,6 +3137,119 @@ mod tests {
         assert!((height - from.height).abs() < 1e-9);
         // A pane that does not move does not slide.
         assert_eq!(slide(to, to), Slide::NONE);
+    }
+
+    /// A pane on the left over two on the right, 8 apart and 8 from the edges of a 1000 × 600
+    /// area: the frames a zoom pushes about.
+    fn three_cards() -> (Rect, [Rect; 3]) {
+        let area = Rect::new(8.0, 8.0, 984.0, 584.0);
+        let left = Rect::new(8.0, 8.0, 488.0, 584.0);
+        let top = Rect::new(504.0, 8.0, 488.0, 288.0);
+        let bottom = Rect::new(504.0, 304.0, 488.0, 288.0);
+        (area, [left, top, bottom])
+    }
+
+    #[test]
+    fn a_growing_pane_pushes_each_other_pane_by_the_edge_it_stands_at() {
+        let (area, [left, top, bottom]) = three_cards();
+        // The left pane grows: both others stand past its right edge, and go as far as it does.
+        assert_eq!(pushed(top, left, area), (496.0, 0.0));
+        assert_eq!(pushed(bottom, left, area), (496.0, 0.0));
+        // The top right one grows: the left pane goes left, the one under it down, and neither
+        // is moved along the edge it runs beside.
+        assert_eq!(pushed(left, top, area), (-496.0, 0.0));
+        assert_eq!(pushed(bottom, top, area), (0.0, 296.0));
+        // A pane past two edges goes both ways.
+        let corner = Rect::new(504.0, 304.0, 488.0, 288.0);
+        let small = Rect::new(8.0, 8.0, 488.0, 288.0);
+        assert_eq!(pushed(corner, small, area), (496.0, 296.0));
+        // The pane itself, and a pane that does not grow, push nothing.
+        assert_eq!(pushed(top, left, left), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_gap_to_a_pushed_pane_stays_and_it_ends_out_of_sight() {
+        let (area, panes) = three_cards();
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        let seen = pushed_room(area, 8.0, bounds);
+        let toward = |a: Rect, b: Rect, share: f64| {
+            Rect::new(
+                a.x + (b.x - a.x) * share,
+                a.y + (b.y - a.y) * share,
+                a.width + (b.width - a.width) * share,
+                a.height + (b.height - a.height) * share,
+            )
+        };
+        let apart = |a: Rect, b: Rect| {
+            let x = (b.x - (a.x + a.width)).max(a.x - (b.x + b.width));
+            let y = (b.y - (a.y + a.height)).max(a.y - (b.y + b.height));
+            x.max(y)
+        };
+        for (grows, small) in panes.iter().enumerate() {
+            for (other, pane) in panes.iter().enumerate() {
+                if other == grows {
+                    continue;
+                }
+                let (dx, dy) = pushed(*pane, *small, area);
+                let at = |share: f64| {
+                    Rect::new(
+                        pane.x + dx * share,
+                        pane.y + dy * share,
+                        pane.width,
+                        pane.height,
+                    )
+                };
+                // All the way: the two keep the gap they had and never overlap.
+                for step in 0..=10 {
+                    let share = f64::from(step) / 10.0;
+                    let gap = apart(toward(*small, area, share), at(share));
+                    assert!(gap >= 8.0 - 1e-9, "{grows} {other} {share}: {gap}");
+                }
+                // At the end nothing of it is inside what is seen.
+                let end = at(1.0);
+                let out = end.x >= seen.x + seen.width
+                    || end.x + end.width <= seen.x
+                    || end.y >= seen.y + seen.height
+                    || end.y + end.height <= seen.y;
+                assert!(out, "{grows} {other}: {end:?} in {seen:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pushed_pane_is_seen_no_further_than_a_gap_past_the_splits() {
+        // A strip under the splits (the capsules') is not theirs: a pane pushed down is cut where
+        // the splits end, a gap under them, and not at the container's foot.
+        let area = Rect::new(0.0, 8.0, 992.0, 550.0);
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        assert_eq!(
+            pushed_room(area, 8.0, bounds),
+            Rect::new(0.0, 0.0, 1000.0, 566.0)
+        );
+        // Under lines the panes touch: the gap is the divider's.
+        assert_eq!(
+            pushed_room(bounds, 1.0, bounds),
+            Rect::new(0.0, 0.0, 1000.0, 600.0)
+        );
+    }
+
+    #[test]
+    fn a_zoomed_pane_stands_under_its_header_as_a_tabs_only_pane_does() {
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        let tree = pair(Axis::Horizontal, 0.5, 1, 2);
+        let headed = Spacing::gapped(8.0, 8.0, 2.0).with_head(34.0, 2.0);
+        let zoomed = tree.layout_zoomed_spaced(bounds, 2.0, Some(2), headed);
+        let alone = Tree::Leaf(2).layout_spaced(bounds, 2.0, headed);
+        assert_eq!(zoomed, alone);
+        // The header's room is over it, inside the area: the band is not cut by the area's top.
+        let (_, rect) = zoomed.panes[0];
+        assert_eq!(rect, Rect::new(8.0, 42.0, 984.0, 550.0));
+        assert!(zoomed.dividers.is_empty());
+        // A leaf that is not in the tree zooms nothing.
+        assert_eq!(
+            tree.layout_zoomed_spaced(bounds, 2.0, Some(9), headed),
+            tree.layout_spaced(bounds, 2.0, headed)
+        );
     }
 
     #[test]

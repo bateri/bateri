@@ -196,6 +196,9 @@ impl Area {
         }
     }
 
+    /// The whole content area: what a card that fills the tab asks for, before its margins.
+    pub const WHOLE: Self = Self::new(0.0, 0.0, 1.0, 1.0);
+
     /// `width` × `height` in the middle of the content area.
     pub fn centred(width: f64, height: f64) -> Self {
         Self::new((1.0 - width) / 2.0, (1.0 - height) / 2.0, width, height)
@@ -558,6 +561,33 @@ pub fn pick(cards: &[Rect], point: (f64, f64), slop: f64) -> Option<(usize, Opti
     })
 }
 
+/// How far a card at `card` goes, in points (x, y), when the card at `filling` grows to fill the
+/// tab: out of `room` through the side it stands on, by its middle from the other's — sideways
+/// when it stands more to a side than above or below. Cards overlap, so unlike a split pane
+/// ([`crate::split::pushed`]) it has no edge of the growing card to be pushed by; it goes as far
+/// as takes all of it, and `clear` points more for its shadow, past the room's edge. The same
+/// way back is how it returns.
+pub fn pushed_out(card: Rect, filling: Rect, room: Rect, clear: f64) -> (f64, f64) {
+    let (cx, cy) = card.center();
+    let (fx, fy) = filling.center();
+    let (dx, dy) = (cx - fx, cy - fy);
+    if dx.abs() >= dy.abs() {
+        let shift = if dx >= 0.0 {
+            room.x + room.width - card.x + clear
+        } else {
+            room.x - (card.x + card.width) - clear
+        };
+        (shift, 0.0)
+    } else {
+        let shift = if dy >= 0.0 {
+            room.y + room.height - card.y + clear
+        } else {
+            room.y - (card.y + card.height) - clear
+        };
+        (0.0, shift)
+    }
+}
+
 /// One floating card.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Card {
@@ -628,6 +658,10 @@ pub struct Ground<'a> {
     /// pointer carries (it goes into them, resisting: [`Area::carried`]) and the one on its way
     /// back from there.
     pub loose: Option<u64>,
+    /// A pane of the one card that fills the tab (Zoom Pane on a floating pane): that card is
+    /// shown at the whole of the room its margins leave, and its [`Area`] stays what it was, so
+    /// it comes back where it stood. A capsule fills nothing.
+    pub zoomed: Option<u64>,
 }
 
 impl<'a> Ground<'a> {
@@ -680,6 +714,13 @@ impl<'a> Ground<'a> {
     /// The share `card` is shown at: inside the tab, no smaller than its least and inside the
     /// margins — but for the [`Ground::loose`] card, which is where a pointer has it.
     pub fn shown(&self, card: &Card) -> Area {
+        if !card.minimized
+            && self
+                .zoomed
+                .is_some_and(|pane| card.tree.leaves().contains(&pane))
+        {
+            return Area::WHOLE.inside(self.margins);
+        }
         let kept = card.area.within(self.least(&card.tree));
         if self
             .loose
@@ -774,6 +815,29 @@ impl Layers {
             .iter()
             .rposition(|card| !card.minimized)
             .or_else(|| self.cards.len().checked_sub(1))
+    }
+
+    /// The card that fills the tab: the one holding `zoomed` ([`Ground::zoomed`]), while it is
+    /// shown. A capsule fills nothing, and neither does a pane that is not in a card.
+    pub fn filling(&self, zoomed: Option<u64>) -> Option<usize> {
+        let index = self.card_of(zoomed?)?;
+        (!self.cards[index].minimized).then_some(index)
+    }
+
+    /// Whether card `index` is in view: not a capsule, and not behind the card that fills the tab
+    /// (`zoomed`), which covers every other card — they wait where they stand, their programs
+    /// running, until it gives the room up.
+    pub fn in_view(&self, index: usize, zoomed: Option<u64>) -> bool {
+        self.cards.get(index).is_some_and(|card| !card.minimized)
+            && self.filling(zoomed).is_none_or(|filling| filling == index)
+    }
+
+    /// Whether the keyboard going to `pane` ends the zoom of the cards (`zoomed`): it does unless
+    /// `pane` is in the card that fills the tab. Every other pane is behind that card or under
+    /// it, and the keyboard is never left where it cannot be seen.
+    pub fn leaves_zoom(&self, pane: u64, zoomed: Option<u64>) -> bool {
+        self.filling(zoomed)
+            .is_some_and(|filling| self.card_of(pane) != Some(filling))
     }
 
     /// Where the keyboard goes when it has nowhere to go back to: the front shown card's first
@@ -1431,6 +1495,7 @@ mod tests {
             min,
             margins: Margins::NONE,
             loose: None,
+            zoomed: None,
         }
     }
 
@@ -1969,6 +2034,7 @@ mod tests {
             min: &wide,
             margins: Margins::NONE,
             loose: None,
+            zoomed: None,
         };
         let mut stack = Tree::Leaf(1);
         assert!(stack.split(1, Axis::Vertical, 2));
@@ -2005,6 +2071,7 @@ mod tests {
             min: &huge,
             margins: Margins::NONE,
             loose: None,
+            zoomed: None,
         };
         let mut layers = Layers {
             flat: Tree::Leaf(1),
@@ -2061,6 +2128,7 @@ mod tests {
             min: &huge,
             margins: Margins::NONE,
             loose: None,
+            zoomed: None,
         };
         let mut layers = Layers {
             flat: Tree::Leaf(1),
@@ -2406,6 +2474,75 @@ mod tests {
     }
 
     #[test]
+    fn a_card_that_fills_the_tab_takes_the_room_its_margins_leave_and_keeps_its_area() {
+        let margins = Margins::of_points(8.0, 8.0, 8.0, 8.0, Rect::new(0.0, 0.0, 1000.0, 600.0));
+        let g = Ground {
+            margins,
+            zoomed: Some(3),
+            ..ground(&small)
+        };
+        let layers = with_cards(vec![card(3), card(4)]);
+        let arranged = layers.layout(&g);
+        // The zoomed card: the tab less the margins. The other keeps its place (it is hidden).
+        let (filling, _) = &arranged.cards[0];
+        assert!(near(filling.x, 8.0) && near(filling.y, 8.0));
+        assert!(near(filling.width, 984.0) && near(filling.height, 584.0));
+        let (other, _) = &arranged.cards[1];
+        assert!(near(other.width, 400.0) && near(other.height, 240.0));
+        // Its own area is untouched: with the zoom off it stands where it stood.
+        assert!(same(layers.cards[0].area, card(3).area));
+        let back = layers.layout(&Ground {
+            margins,
+            ..ground(&small)
+        });
+        assert!(near(back.cards[0].0.width, 400.0));
+        // A capsule fills nothing: it opens where it was.
+        let mut asleep = with_cards(vec![card(3)]);
+        asleep.cards[0].minimized = true;
+        assert!(near(asleep.layout(&g).cards[0].0.width, 400.0));
+    }
+
+    #[test]
+    fn the_card_that_fills_the_tab_keeps_the_others_out_of_view() {
+        let mut layers = with_cards(vec![card(3), card(4), card(5)]);
+        layers.cards[2].minimized = true;
+        // No zoom: the shown cards are in view, a capsule is not.
+        assert_eq!(layers.filling(None), None);
+        assert!(layers.in_view(0, None) && layers.in_view(1, None));
+        assert!(!layers.in_view(2, None));
+        // Pane 4's card fills the tab: only it is in view, and pane 3 is behind it.
+        assert_eq!(layers.filling(Some(4)), Some(1));
+        assert!(!layers.in_view(0, Some(4)) && layers.in_view(1, Some(4)));
+        // The keyboard going anywhere but into it ends the zoom: to a card behind it, to a flat
+        // pane under it.
+        assert!(layers.leaves_zoom(3, Some(4)));
+        assert!(layers.leaves_zoom(1, Some(4)));
+        assert!(!layers.leaves_zoom(4, Some(4)));
+        assert!(!layers.leaves_zoom(3, None));
+        // A capsule and a flat pane fill nothing.
+        assert_eq!(layers.filling(Some(5)), None);
+        assert_eq!(layers.filling(Some(1)), None);
+        assert!(layers.in_view(0, Some(5)));
+    }
+
+    #[test]
+    fn a_card_pushed_out_leaves_the_tab_through_the_side_it_stands_on() {
+        let room = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        let filling = Rect::new(500.0, 300.0, 300.0, 200.0);
+        // More to the left than above: out through the left edge, all of it and its shadow.
+        let left = Rect::new(100.0, 250.0, 200.0, 150.0);
+        assert_eq!(pushed_out(left, filling, room, 24.0), (-324.0, 0.0));
+        // More above than to the side: out through the top.
+        let above = Rect::new(450.0, 20.0, 200.0, 100.0);
+        assert_eq!(pushed_out(above, filling, room, 24.0), (0.0, -144.0));
+        // To the right and below go the other ways, past the far edges.
+        let right = Rect::new(850.0, 320.0, 100.0, 100.0);
+        assert_eq!(pushed_out(right, filling, room, 24.0), (174.0, 0.0));
+        let below = Rect::new(560.0, 520.0, 100.0, 60.0);
+        assert_eq!(pushed_out(below, filling, room, 24.0), (0.0, 104.0));
+    }
+
+    #[test]
     fn a_capsule_is_as_wide_as_its_title_and_no_wider_than_the_most() {
         // 8 + 14 + 6 + 41.2 + 12 = 81.2, rounded up.
         assert!(near(capsule::width(41.2), 82.0));
@@ -2575,6 +2712,7 @@ mod tests {
         assert!(near(shown.x + shown.width, 0.99));
         let loose = Ground {
             loose: Some(7),
+            zoomed: None,
             ..ground
         };
         assert!(near(loose.shown(&layers.cards[0]).x, 0.8));

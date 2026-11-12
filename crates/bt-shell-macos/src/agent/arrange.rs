@@ -189,13 +189,7 @@ fn carry_out(
         Arrange::Focus(subject) => focus(app, server, caller.as_ref(), from, subject),
         Arrange::Zoom(named) => {
             let target = pane_or_own(app, server, from, named.as_ref())?;
-            // The zoom is the flat area's: a pane that floats has none.
-            if target.tab.container().floating(target.pane.id()) {
-                return Err(usage(format!(
-                    "{} floats: only a pane of the flat area zooms",
-                    named_or(named.as_ref(), "the pane")
-                )));
-            }
+            // A flat pane fills the splits' area, a floating pane's card the tab over them.
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
             target
                 .tab
@@ -1096,13 +1090,13 @@ mod tests {
             source.contains("\"{named} is not floating\""),
             "a flat pane is told it is not floating"
         );
-        // Zoom and swap look at the layer first; a pane goes beside a flat pane only.
-        let zoom = arm(
-            "Arrange::Zoom(named) =>",
-            "Arrange::Swap { pane, other } =>",
-        );
+        // Zoom takes a pane of either layer — a floating pane's card fills the tab over the
+        // splits — once the keyboard rule lets it. Swap looks at the layer first; a pane goes
+        // beside a flat pane only.
+        let zoom = arm("Arrange::Zoom(named) =>", "Arrange::Minimize(named) =>");
+        assert!(!zoom.contains("floating("), "{zoom}");
         assert!(
-            zoom.find("floating(").expect(zoom) < zoom.find("zoom_pane(").expect(zoom),
+            zoom.find("lays_out(").expect(zoom) < zoom.find("zoom_pane(").expect(zoom),
             "{zoom}"
         );
         // Minimize looks at the layer first, then the keyboard rule, then the tab acts.

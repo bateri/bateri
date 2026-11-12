@@ -12,8 +12,19 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Zoom Pane: any pane can fill the tab.** Every pane's bar has a new button left of Close, and Window ▸ Zoom Pane (⌥⌘.) does the same for the pane that has the keyboard. The other panes slide out of the way, and the same button or key brings them back. Floating panes stay over a zoomed split pane. A floating pane can be zoomed too: it fills the tab over the splits and returns to the place and size it had. Giving the keyboard to a pane the zoom hides ends the zoom.
+
+### Changed
+
+- **Zoom Split is now Zoom Pane, and its key is ⌥⌘. (Option-Command-full stop).** ⇧⌘↩ no longer zooms: `zoom_split = "shift+cmd+return"` under `[keys]` brings it back, and a key you had set there is kept. On a Turkish keyboard it is the full-stop key too, where macOS would otherwise make it ⌥⌘Ç. The command palette also finds it by "focus" and "maximize".
+- **`bateri zoom` takes a floating pane.** `bateri zoom p9` of a floating pane was a mistake (64); it now makes the pane fill the tab, and again gives the room back. `bateri ls` then gives it as the tab's `zoomed` pane, and the panes it covers are not `on screen`.
+
 ### Fixed
 
+- **A zoomed pane keeps its bar.** The bar, with the pane's name and buttons, was cut off above the tab while the pane was zoomed.
+- **A button's tip names the key the menu bar shows.** On a keyboard that is not a US one macOS moves some punctuation shortcuts (Show All Tabs is ⇧⌘\ on a US keyboard and ⇧⌘, on a Turkish one), and the button's tip still named the US key.
 - **A tab dragged in the side column lands where you let it go.** Under a row that shows what its agent said or asks (`tab_details`), and under an agent's rows in Activity, the rows were read as standing higher than they are drawn: the tab landed a row or more below the pointer, and the line that marks the place stood in the wrong gap. A pane dragged onto the column was misplaced the same way.
 - **`bateri split -- textpen FILE` opens the file in textpen in an `ssh` terminal.** A program started with `bateri split`, `tab` or `window` on a server asked its terminal whether it can show its page before the new pane was connected, and came up as a plain editor (`vi`). The pane now answers it.
 - **A pane that could not open a file on a server says why, and stays until you have read it.** When the program could not be started, the pane closed before its one line could be read, or turned into a plain `ssh` login. The line now names what went wrong where bateri knows it (`could not connect to rasp`), stays with `Press Enter to close` under it, and the pane never becomes an `ssh` or a shell.
