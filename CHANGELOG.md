@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tab dragged in the side column lands where you let it go.** Under a row that shows what its agent said or asks (`tab_details`), and under an agent's rows in Activity, the rows were read as standing higher than they are drawn: the tab landed a row or more below the pointer, and the line that marks the place stood in the wrong gap. A pane dragged onto the column was misplaced the same way.
+
 ## [0.28.1] - 2026-11-12
 
 ### Fixed
