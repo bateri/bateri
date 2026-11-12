@@ -4143,6 +4143,13 @@ pub(crate) mod tests {
         let session = spawn_bash_dock(&bash, &home, &[]);
         at_the_prompt(&session);
         output_without_a_final_newline_stays_on_the_grid("bash", &session);
+        // What moves to the fresh row runs at every prompt and leaves the user's last match
+        // alone.
+        session.write(b"[[ abc =~ b ]]\n");
+        session.write(b"echo \"[${BASH_REMATCH[0]}]\"\n");
+        wait_until("the prompt wrote over the user's BASH_REMATCH", || {
+            shown(&session, "[b]")
+        });
         session.shutdown();
     }
 

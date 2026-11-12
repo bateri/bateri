@@ -105,9 +105,10 @@ __bateri_dock_arm() {
 # zsh's and fish's do. `COLUMNS` is readline's, current at the prompt, and after a command where
 # `checkwinsize` is on (bash 5's default); a resize during a command under bash 4.4 can leave it
 # narrower than the row, and then the prompt stays on the output's row. Without a usable
-# `COLUMNS` nothing is printed.
+# `COLUMNS` nothing is printed. The test is a pattern, not `=~`: this runs at every prompt, and a
+# regex match would write over the `BASH_REMATCH` of the user's last command.
 __bateri_dock_fresh_line() {
-  [[ ${COLUMNS-} =~ ^[1-9][0-9]{0,4}$ ]] || return 0
+  [[ ${COLUMNS-} == [1-9]* && ${COLUMNS-} != *[!0-9]* && ${#COLUMNS} -le 5 ]] || return 0
   printf '%*s\r' "$COLUMNS" ''
 }
 
