@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-12
+
 ### Added
 
 - **Right-click to copy and paste.** Right-click the text or the input box for Copy, Paste and Select All, and Cut for text selected in the input box. On a link, the link's own items come first. In a program that uses the mouse, like vim or htop, hold Shift for the menu.
