@@ -49,6 +49,7 @@ pub(crate) mod app;
 mod apps_card;
 mod arrange;
 mod card;
+mod card_gesture;
 mod carry;
 mod clipboard;
 pub mod embed;

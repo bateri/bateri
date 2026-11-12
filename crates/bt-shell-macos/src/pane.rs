@@ -8401,9 +8401,6 @@ pub(crate) fn new_pane_uuid() -> PaneUuid {
         .expect("NSUUID's UUIDString must be a canonical UUID")
 }
 
-/// The frames' clock, the base of the link's tick stamps (`CACurrentMediaTime`, the pacer's): the
-/// clock a page of the kit is given to read between frames (`Opening::clock`), so that what the
-/// person does between frames and the frames themselves are on one clock.
 /// The most points a page's text may be said larger or smaller than the terminal's: a page that
 /// says more has said what no size can show ([`page_text_zoom`] holds the size to the range a page
 /// is drawn in), and the number stays one a person can step back from.
@@ -8418,6 +8415,9 @@ fn page_text_zoom(points: f64, extra: i32) -> f32 {
     bt_shell_common::native_view::Placement::zoom_for((points + f64::from(extra)).max(1.0))
 }
 
+/// The frames' clock, the base of the link's tick stamps (`CACurrentMediaTime`, the pacer's): the
+/// clock a page of the kit is given to read between frames (`Opening::clock`), so that what the
+/// person does between frames and the frames themselves are on one clock.
 fn frames_clock() -> f64 {
     CACurrentMediaTime()
 }

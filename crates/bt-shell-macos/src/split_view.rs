@@ -255,6 +255,9 @@ const MAGNET_PT: f64 = 24.0;
 /// How long a card let go past its margin takes to come back inside it: the motions' base.
 const SETTLE_SECS: f64 = 0.24;
 
+/// The least and the most a pinch's whole scale is held to ([`SplitView::pinch_card`]).
+const PINCH_SCALE: (f64, f64) = (0.05, 20.0);
+
 /// How far a pane's edge may stand from the container's and still be on it,
 /// in points: the frames' sub-pixel rounding, not a gap. The smallest pane is
 /// far larger than this, so no pane stands this close to an edge it is not on.
@@ -499,6 +502,25 @@ struct CardDrag {
     origin: NSPoint,
     /// The card has changed since the press: a click that moved nothing is no layout change.
     moved: bool,
+    /// How far two fingers with ⌘⌥ have carried the card since they began, in points
+    /// ([`SplitView::hold_card`]): `Some` only for that gesture, which has no pointer to
+    /// measure from. A press's drag is `None`.
+    shifted: Option<(f64, f64)>,
+}
+
+/// A pinch with ⌘⌥ over a floating card in progress ([`SplitView::begin_card_pinch`]).
+#[derive(Clone, Copy, Debug)]
+struct CardPinch {
+    /// A pane of the card.
+    pane: u64,
+    /// The card's shown share when the pinch began: every size of the pinch is the whole of
+    /// its scale from here, so a card stopped at the tab's edge grows back as the fingers
+    /// open again.
+    start: Area,
+    /// The product of the pinch's steps: what the fingers have made of the card's size.
+    scale: f64,
+    /// The card has changed since the pinch began.
+    moved: bool,
 }
 
 define_class!(
@@ -680,8 +702,11 @@ pub(crate) struct SplitIvars {
     outlines: RefCell<Vec<(u64, Rect)>>,
     /// The cards' edges and corners (made while a card is shown, [`CardGrips`]).
     grips: RefCell<Option<Retained<CardGrips>>>,
-    /// The press on a card's border or header that is being dragged.
+    /// The press on a card's border or header that is being dragged, or the two fingers with
+    /// ⌘⌥ that carry it.
     card_drag: Cell<Option<CardDrag>>,
+    /// The pinch with ⌘⌥ that is sizing a card.
+    card_pinch: Cell<Option<CardPinch>>,
     /// Counts the cards let go past their margins: a card on its way back stops when a newer
     /// drag (or way back) begins ([`SplitView::settle_card`]).
     settling: Cell<u64>,
@@ -799,6 +824,7 @@ impl SplitView {
             outlines: RefCell::new(Vec::new()),
             grips: RefCell::new(None),
             card_drag: Cell::new(None),
+            card_pinch: Cell::new(None),
             settling: Cell::new(0),
             loose: Cell::new(None),
             growing: RefCell::new(Vec::new()),
@@ -3057,13 +3083,31 @@ impl SplitView {
     /// (window coordinates): the drag that follows moves the card or the grip's edges
     /// ([`SplitView::drag_card`]). The card's shown share now is where it is measured from.
     pub(crate) fn begin_card_drag(&self, pane: u64, grip: Option<Grip>, at: NSPoint) {
+        let origin = self.convertPoint_fromView(at, None);
+        self.take_card(pane, grip, origin, None);
+    }
+
+    /// The card holding `pane` is taken for a drag measured from `origin` (container
+    /// coordinates): its shown share now is where the drag is measured from. `false` when
+    /// there is no such card, or it fills the tab.
+    fn take_card(
+        &self,
+        pane: u64,
+        grip: Option<Grip>,
+        origin: NSPoint,
+        shifted: Option<(f64, f64)>,
+    ) -> bool {
+        // The card is a pinch's while it sizes it: a press's drag would write its area as well.
+        if self.ivars().card_pinch.get().is_some() {
+            return false;
+        }
         let layers = self.layers();
         let Some(index) = layers.card_of(pane) else {
-            return;
+            return false;
         };
         // A card that fills the tab is neither carried nor sized: it has nowhere to go.
         if layers.filling(self.ivars().card_zoomed.get()) == Some(index) {
-            return;
+            return false;
         }
         let min = self.limits();
         // From where the card is seen, which may be inside its margins while its area is not.
@@ -3073,8 +3117,9 @@ impl SplitView {
             pane,
             grip,
             start,
-            origin: self.convertPoint_fromView(at, None),
+            origin,
             moved: false,
+            shifted,
         }));
         // The pointer keeps the cursor it was pressed with until the drag ends: under a moving
         // card the cursor rects of what it passes over would take it.
@@ -3083,19 +3128,28 @@ impl SplitView {
         }
         // A card still on its way back from the last drag stays where it is now.
         self.ivars().settling.set(self.ivars().settling.get() + 1);
+        true
     }
 
     /// The pointer is at `at` (window coordinates) in a card drag: the card follows, inside the
     /// tab and no smaller than its least. A drag is not undone, like a divider's.
     pub(crate) fn drag_card(&self, at: NSPoint) {
+        let point = self.convertPoint_fromView(at, None);
+        self.drag_card_to(point);
+    }
+
+    /// The drag's pointer is at `point` (container coordinates), or what stands for it.
+    fn drag_card_to(&self, point: NSPoint) {
         let Some(drag) = self.ivars().card_drag.get() else {
             return;
         };
+        if self.card_left_hands(drag.pane) {
+            return;
+        }
         let bounds = self.bounds_rect();
         if bounds.width <= 0.0 || bounds.height <= 0.0 {
             return;
         }
-        let point = self.convertPoint_fromView(at, None);
         let (dx, dy) = (
             (point.x - drag.origin.x) / bounds.width,
             (point.y - drag.origin.y) / bounds.height,
@@ -3162,6 +3216,209 @@ impl SplitView {
             && let Some(app) = crate::app::delegate(self.mtm())
         {
             app.layout_changed();
+        }
+        true
+    }
+
+    /// Whether the card holding `pane` is out of the hands of a drag or a pinch that has it: it
+    /// became a capsule, or a card fills the tab (Zoom Pane, minimize, from the keyboard in the
+    /// middle of the gesture) — it stays where it is until it is shown again, and the fingers
+    /// that go on do not write its place.
+    fn card_left_hands(&self, pane: u64) -> bool {
+        let zoomed = self.ivars().card_zoomed.get();
+        let cards = self.ivars().cards.borrow();
+        let Some(card) = cards.iter().find(|card| card.tree.leaves().contains(&pane)) else {
+            return true;
+        };
+        card.minimized
+            || zoomed.is_some_and(|zoomed| {
+                cards
+                    .iter()
+                    .any(|card| !card.minimized && card.tree.leaves().contains(&zoomed))
+            })
+    }
+
+    /// A card still carried past its margins, or on its way back inside them, is brought to where
+    /// it comes to rest at once ([`Area::rest`]) and is not loose any more: what a wheel's step or
+    /// a pinch begins from is the place the card would have come to, and the layout on disk takes
+    /// it. Nothing when no card is loose.
+    fn rest_at_once(&self) {
+        let Some(loose) = self.ivars().loose.take() else {
+            return;
+        };
+        let from = self
+            .ivars()
+            .cards
+            .borrow()
+            .iter()
+            .find(|card| card.tree.leaves().contains(&loose))
+            .map(|card| card.area);
+        let Some(from) = from else {
+            return;
+        };
+        let pull = Pull::of_points(EDGE_GAP_PT, MAGNET_PT, self.bounds_rect());
+        let to = from.rest(self.card_margins(), pull);
+        if to != from && self.set_card_area(loose, to) {
+            self.settled();
+        }
+    }
+
+    /// The pane of the floating card shown under `at` (window coordinates), whatever part of it
+    /// — inside, header or border — if there is one that does not fill the tab: what ⌘⌥ with
+    /// two fingers, a pinch or a wheel takes (`card_gesture`). A flat pane has no card, and the
+    /// gesture goes on to it.
+    pub(crate) fn floating_card_at(&self, at: NSPoint) -> Option<u64> {
+        let point = self.convertPoint_fromView(at, None);
+        let (pane, _) = self.card_at((point.x, point.y))?;
+        let layers = self.layers();
+        let index = layers.card_of(pane)?;
+        (layers.filling(self.ivars().card_zoomed.get()) != Some(index)).then_some(pane)
+    }
+
+    /// Two fingers with ⌘⌥ begin carrying the card holding `pane`: it is taken as a header's
+    /// press takes it — against its margins' spring, back inside them at the end — but with no
+    /// pointer, the fingers' own movement ([`SplitView::carry_card`]) in its place. `false` when
+    /// it is not taken: a press's drag has it, or it fills the tab.
+    pub(crate) fn hold_card(&self, pane: u64) -> bool {
+        // A gesture that never ended is replaced; a press's drag is the pointer's.
+        if self
+            .ivars()
+            .card_drag
+            .get()
+            .is_some_and(|drag| drag.shifted.is_none())
+        {
+            return false;
+        }
+        self.take_card(pane, None, NSPoint::new(0.0, 0.0), Some((0.0, 0.0)))
+    }
+
+    /// The fingers moved by `dx`, `dy` points (right and down are positive): the card held by
+    /// [`SplitView::hold_card`] follows them. Nothing when no gesture holds a card.
+    pub(crate) fn carry_card(&self, dx: f64, dy: f64) {
+        let Some(mut drag) = self.ivars().card_drag.get() else {
+            return;
+        };
+        let Some((x, y)) = drag.shifted else {
+            return;
+        };
+        let shifted = (x + dx, y + dy);
+        drag.shifted = Some(shifted);
+        self.ivars().card_drag.set(Some(drag));
+        self.drag_card_to(NSPoint::new(shifted.0, shifted.1));
+    }
+
+    /// The fingers left: the held card is let go ([`SplitView::end_card_drag`]) — it comes to
+    /// rest inside its margins, at once under Reduce Motion — and only a gesture's hold
+    /// ends, not a press's drag. `false` when no gesture held a card.
+    pub(crate) fn let_go_card(&self) -> bool {
+        if self
+            .ivars()
+            .card_drag
+            .get()
+            .is_none_or(|drag| drag.shifted.is_none())
+        {
+            return false;
+        }
+        self.end_card_drag()
+    }
+
+    /// A turn of the wheel with ⌘⌥ over the card holding `pane`: it steps by `dx`, `dy` points,
+    /// inside the tab and its margins ([`Layers::shift`]), and the layout on disk takes where
+    /// it stands. `true` if the card moved.
+    pub(crate) fn step_card(&self, pane: u64, dx: f64, dy: f64) -> bool {
+        // A drag or a pinch has the card: the wheel is not a third hand on it.
+        if self.ivars().card_drag.get().is_some() || self.ivars().card_pinch.get().is_some() {
+            return false;
+        }
+        // A card on its way back from a drag stays where the step finds it: at rest.
+        self.ivars().settling.set(self.ivars().settling.get() + 1);
+        self.rest_at_once();
+        let mut layers = self.layers();
+        let moved = {
+            let min = self.limits();
+            let ground = self.ground(&min);
+            layers.shift(pane, dx, dy, &ground)
+        };
+        if moved {
+            self.ivars().cards.replace(layers.cards);
+            self.layout_panes();
+            self.settled();
+        }
+        moved
+    }
+
+    /// A pinch with ⌘⌥ begins sizing the card holding `pane`. `false` when it is not taken: a
+    /// press's drag has the card, or it fills the tab.
+    pub(crate) fn begin_card_pinch(&self, pane: u64) -> bool {
+        let layers = self.layers();
+        let Some(index) = layers.card_of(pane) else {
+            return false;
+        };
+        if self.ivars().card_drag.get().is_some()
+            || layers.filling(self.ivars().card_zoomed.get()) == Some(index)
+        {
+            return false;
+        }
+        // A card on its way back from a drag stays where the pinch finds it: at rest.
+        self.ivars().settling.set(self.ivars().settling.get() + 1);
+        self.rest_at_once();
+        let layers = self.layers();
+        let min = self.limits();
+        let start = self.ground(&min).shown(&layers.cards[index]);
+        self.ivars().card_pinch.set(Some(CardPinch {
+            pane,
+            start,
+            scale: 1.0,
+            moved: false,
+        }));
+        true
+    }
+
+    /// An event of the pinch: the fingers made the size `magnification` larger (0.1 is a tenth;
+    /// below zero, smaller). The card has the whole of the pinch's scale from where it began, about
+    /// its centre ([`Area::scaled`]), and stops at the tab's edge, its margins and its least.
+    pub(crate) fn pinch_card(&self, magnification: f64) {
+        let Some(mut pinch) = self.ivars().card_pinch.get() else {
+            return;
+        };
+        if self.card_left_hands(pinch.pane) {
+            return;
+        }
+        // One step cannot make the size nothing, and the whole is held to what a card can be:
+        // a pinch that went on far past the tab's edge would take as long to come back.
+        let step = (1.0 + magnification).max(PINCH_SCALE.0);
+        pinch.scale = (pinch.scale * step).clamp(PINCH_SCALE.0, PINCH_SCALE.1);
+        let min = self.limits();
+        let ground = self.ground(&min);
+        let changed = {
+            let mut cards = self.ivars().cards.borrow_mut();
+            let Some(card) = cards
+                .iter_mut()
+                .find(|card| card.tree.leaves().contains(&pinch.pane))
+            else {
+                return;
+            };
+            let least = ground.least(&card.tree);
+            let area = pinch.start.scaled(pinch.scale, ground.margins, least);
+            let changed = area != card.area;
+            card.area = area;
+            changed
+        };
+        pinch.moved |= changed;
+        self.ivars().card_pinch.set(Some(pinch));
+        if changed {
+            self.layout_panes();
+        }
+    }
+
+    /// The fingers left: the card keeps the size they made, and the layout on disk takes it if
+    /// it changed. `false` when no pinch was on.
+    pub(crate) fn end_card_pinch(&self) -> bool {
+        let Some(pinch) = self.ivars().card_pinch.take() else {
+            return false;
+        };
+        if pinch.moved {
+            self.settled();
         }
         true
     }
@@ -3989,7 +4246,7 @@ mod tests {
     #[test]
     fn a_card_that_fills_the_tab_is_neither_sized_nor_carried() {
         assert!(body_of("fn sync_grips(").contains("self.card_zoomed().is_none()"));
-        let drag = body_of("pub(crate) fn begin_card_drag(");
+        let drag = body_of("fn take_card(");
         let refused = drag.find("layers.filling(").expect("asks the zoom");
         let begun = drag.find("card_drag.set(").expect("begins the drag");
         assert!(refused < begun, "the zoom is asked before the drag begins");
@@ -4005,10 +4262,50 @@ mod tests {
     }
 
     #[test]
+    fn the_gestures_of_command_and_option_take_no_card_a_press_has_or_that_fills_the_tab() {
+        // Under the pointer: a card that fills the tab is not one.
+        assert!(body_of("pub(crate) fn floating_card_at(").contains("layers.filling("));
+        // Two fingers: a press's drag (no `shifted`) keeps the card, and the gesture's own hold
+        // is the only one the fingers move and let go.
+        let hold = body_of("pub(crate) fn hold_card(");
+        assert!(hold.contains("drag.shifted.is_none()"));
+        assert!(hold.contains("self.take_card(pane, None,"));
+        assert!(body_of("pub(crate) fn carry_card(").contains("drag.shifted else"));
+        let let_go = body_of("pub(crate) fn let_go_card(");
+        assert!(let_go.contains("drag.shifted.is_none()"));
+        assert!(let_go.contains("self.end_card_drag()"));
+        // A pinch: neither a press's drag nor the zoom.
+        let pinch = body_of("pub(crate) fn begin_card_pinch(");
+        assert!(pinch.contains("self.ivars().card_drag.get().is_some()"));
+        assert!(pinch.contains("layers.filling("));
+        assert!(body_of("fn take_card(").contains("self.ivars().card_pinch.get().is_some()"));
+        // What the fingers have is not written once the card is a capsule or a card fills the tab.
+        assert!(body_of("fn drag_card_to(").contains("self.card_left_hands(drag.pane)"));
+        assert!(body_of("pub(crate) fn pinch_card(").contains("self.card_left_hands(pinch.pane)"));
+        // A step and a pinch begin from the card at rest, not from where a drag let it go.
+        assert!(body_of("pub(crate) fn step_card(").contains("self.rest_at_once()"));
+        assert!(pinch.contains("self.rest_at_once()"));
+    }
+
+    #[test]
+    fn a_pinch_sizes_the_card_by_the_floating_modules_own_reckoning_from_where_it_began() {
+        let pinch = body_of("pub(crate) fn pinch_card(");
+        assert!(pinch.contains("pinch.start.scaled(pinch.scale, ground.margins, least)"));
+        // The whole of the scale, not a step of it, is what the card is made from.
+        assert!(pinch.contains("pinch.scale * step"));
+        // The end keeps the size and tells the layout on disk once, only if it changed.
+        let end = body_of("pub(crate) fn end_card_pinch(");
+        assert!(end.contains("pinch.moved"));
+        assert!(end.contains("self.settled()"));
+        // A wheel's turn goes the way of the move key: the one reckoning in `Layers`.
+        assert!(body_of("pub(crate) fn step_card(").contains("layers.shift("));
+    }
+
+    #[test]
     fn a_click_that_moved_no_card_is_not_a_layout_change() {
         let end = body_of("pub(crate) fn end_card_drag(");
         assert!(end.contains("drag.moved"));
-        let drag = body_of("pub(crate) fn drag_card(");
+        let drag = body_of("fn drag_card_to(");
         assert!(drag.contains("moved: true"));
     }
 }

@@ -104,7 +104,8 @@ curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
 | Equalize splits | ⌃⌘= |
 | Zoom pane (a split pane or a floating one fills the tab) / unzoom | ⌥⌘. |
 | Float pane / dock pane | ⌥⌘↩ |
-| Move floating pane | ⌃⌥⌘ + arrow |
+| Move floating pane | ⌃⌥⌘ + arrow, or ⌥⌘ + two fingers over it |
+| Size floating pane about its centre | ⌥⌘ + pinch over it |
 | Minimize floating pane (or open the last one minimized) | ⌥⌘M |
 | Hide / show all floating panes | ⌥⇧⌘↩ |
 | Close pane or tab / close window | ⌘W / ⇧⌘W |
@@ -239,7 +240,14 @@ goes with no side, `--ratio`, `--new-tab`, `--group` or `--window`. `move pane
 p9 --beside p3 --right`, `--tab t3` (another tab) and `--new-tab` take a floating
 pane too and put it flat where they say; `--dock` sets it back in its own tab.
 `resize p9 --right` or `--left` changes the card's width and `--below` or
-`--above` its height, as ⌃⌘ + arrow does. `zoom p9` of a floating pane makes its
+`--above` its height, as ⌃⌘ + arrow does. On a trackpad, ⌥⌘ with two fingers over
+a floating card — anywhere on it, a page or a web view too — carries it, and ⌥⌘
+with a pinch makes it larger or smaller about its centre, both the way the card's
+header and its edges do (at the tab's edge it stops, and a card carried toward
+the edge comes back inside when the fingers leave); a mouse wheel with ⌥⌘ over
+the card steps it. Held from the first touch, the gesture stays the card's to its
+end, though the keys are let go; without ⌥⌘ the fingers scroll and pinch what is
+under them as before, and a flat pane is not touched. `zoom p9` of a floating pane makes its
 card fill the tab over the other panes, and again gives the room back. `swap`
 of two panes that are not in one layer, a plain `split` or `move --beside` beside
 a floating pane, `--dock` or `--at` of a flat pane are mistakes (64). `minimize

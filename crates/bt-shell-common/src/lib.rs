@@ -48,6 +48,7 @@
 
 pub mod agent;
 pub mod apps;
+pub mod card_gesture;
 pub mod child;
 pub mod download;
 pub mod environment;

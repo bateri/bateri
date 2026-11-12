@@ -396,6 +396,29 @@ impl Area {
         )
     }
 
+    /// The area grown (`scale` above 1) or shrunk (below 1) about its centre, as a pinch does:
+    /// each side moves the same way a grip's edge does ([`Area::dragged`] on the top left and
+    /// the bottom right corners, then [`Area::held_inside`]), so the card stops at the tab's
+    /// edge, at `margins` and at `least`, and no second reckoning of those is written. An edge
+    /// at a wall stays there while the other one still gives. A `scale` that is not above zero
+    /// (or not a number) leaves the area as it is.
+    pub fn scaled(self, scale: f64, margins: Margins, least: (f64, f64)) -> Self {
+        if scale.is_nan() || scale <= 0.0 {
+            return self;
+        }
+        let kept = self.within(least);
+        let (least_width, least_height) = (least.0.clamp(0.0, 1.0), least.1.clamp(0.0, 1.0));
+        // The size the pinch asks for, held to the least first, so that a shrink past it still
+        // keeps the centre (two edges that each stop at the least would not).
+        let width = (kept.width * scale).clamp(least_width, 1.0);
+        let height = (kept.height * scale).clamp(least_height, 1.0);
+        let (more_x, more_y) = ((width - kept.width) / 2.0, (height - kept.height) / 2.0);
+        kept.dragged(Grip::TopLeft, -more_x, -more_y, least)
+            .held_inside(Grip::TopLeft, margins, least)
+            .dragged(Grip::BottomRight, more_x, more_y, least)
+            .held_inside(Grip::BottomRight, margins, least)
+    }
+
     /// The area with the edges `grip` holds moved by `dx`, `dy` (fractions): an edge stops at
     /// the tab's edge and at `least` from the opposite one, the opposite edge never moves.
     pub fn dragged(self, grip: Grip, dx: f64, dy: f64, least: (f64, f64)) -> Self {
@@ -1333,6 +1356,13 @@ impl Layers {
             Direction::Down => (0.0, step),
             Direction::Up => (0.0, -step),
         };
+        self.shift(pane, dx, dy, ground)
+    }
+
+    /// A turn of the wheel with ⌘⌥ over floating pane `pane`'s card: it moves by `dx`, `dy`
+    /// points, staying inside the tab and its margins, as [`Layers::move_key`] does for a key.
+    /// `false` when `pane` is not floating or nothing moved.
+    pub fn shift(&mut self, pane: u64, dx: f64, dy: f64, ground: &Ground<'_>) -> bool {
         self.edit_area(pane, ground, |area, least| {
             area.moved(dx / ground.bounds.width, dy / ground.bounds.height, least)
         })
@@ -1976,6 +2006,25 @@ mod tests {
         assert!(!layers.move_key(3, Direction::Right, 100.0, &g));
         assert!(!layers.move_key(3, Direction::Down, 100.0, &g));
         assert!(!layers.move_key(2, Direction::Down, 100.0, &g));
+    }
+
+    #[test]
+    fn a_wheel_steps_a_card_by_points_in_any_direction_and_stops_at_the_margin() {
+        let mut g = ground(&small);
+        let mut layers = with_cards(vec![Card::of(3, Area::new(0.2, 0.2, 0.4, 0.4))]);
+        // 100 of 1000 across, 60 of 600 down.
+        assert!(layers.shift(3, 100.0, 60.0, &g));
+        assert!(same(layers.cards[0].area, Area::new(0.3, 0.3, 0.4, 0.4)));
+        assert!(layers.shift(3, -50.0, -30.0, &g));
+        assert!(same(layers.cards[0].area, Area::new(0.25, 0.25, 0.4, 0.4)));
+        // Against the margin it goes no further, and says so; the tab's edge is no nearer.
+        g.margins = Margins::of_points(10.0, 10.0, 10.0, 10.0, g.bounds);
+        layers.cards[0].area = Area::new(0.5, 0.2, 0.4, 0.4);
+        assert!(layers.shift(3, 500.0, 0.0, &g));
+        assert!(near(layers.cards[0].area.x, 0.59));
+        assert!(!layers.shift(3, 500.0, 0.0, &g));
+        // A flat pane has no card to step.
+        assert!(!layers.shift(1, 100.0, 0.0, &g));
     }
 
     // ---- docking ------------------------------------------------------------------------
@@ -2737,6 +2786,46 @@ mod tests {
         // The way back is a straight line.
         let half = Area::new(0.0, 0.0, 0.4, 0.4).toward(Area::new(0.2, 0.1, 0.4, 0.4), 0.5);
         assert!(near(half.x, 0.1) && near(half.y, 0.05) && near(half.width, 0.4));
+    }
+
+    #[test]
+    fn a_pinch_of_one_point_two_grows_the_card_about_its_centre() {
+        let area = Area::new(0.3, 0.3, 0.4, 0.2);
+        let grown = area.scaled(1.2, Margins::NONE, (0.1, 0.1));
+        assert!(near(grown.width, 0.48) && near(grown.height, 0.24));
+        let (before, after) = (area.centre(), grown.centre());
+        assert!(near(before.0, after.0) && near(before.1, after.1));
+        // Less than one is the way back, to where it began.
+        let back = grown.scaled(1.0 / 1.2, Margins::NONE, (0.1, 0.1));
+        assert!(near(back.x, 0.3) && near(back.y, 0.3));
+        assert!(near(back.width, 0.4) && near(back.height, 0.2));
+    }
+
+    #[test]
+    fn a_pinch_stops_at_the_margin_and_at_the_least_and_the_card_stays_inside() {
+        let margins = Margins {
+            left: 0.02,
+            top: 0.03,
+            right: 0.02,
+            bottom: 0.03,
+        };
+        // Far larger than the room: it takes the room and no more.
+        let huge = Area::new(0.3, 0.3, 0.4, 0.4).scaled(10.0, margins, (0.1, 0.1));
+        assert!(near(huge.x, 0.02) && near(huge.y, 0.03));
+        assert!(near(huge.width, 0.96) && near(huge.height, 0.94));
+        // An edge at the margin stays there while the other one still gives.
+        let wall = Area::new(0.5, 0.3, 0.48, 0.4).scaled(1.25, margins, (0.1, 0.1));
+        assert!(near(wall.x + wall.width, 0.98));
+        assert!(near(wall.x, 0.44) && near(wall.width, 0.54));
+        // Far smaller than the least: the least, and still about the centre.
+        let area = Area::new(0.3, 0.3, 0.4, 0.4);
+        let small = area.scaled(0.01, margins, (0.15, 0.2));
+        assert!(near(small.width, 0.15) && near(small.height, 0.2));
+        assert!(near(small.centre().0, 0.5) && near(small.centre().1, 0.5));
+        // A scale that is nothing (or not a number) changes nothing.
+        for scale in [0.0, -1.0, f64::NAN] {
+            assert_eq!(area.scaled(scale, margins, (0.1, 0.1)), area);
+        }
     }
 
     #[test]

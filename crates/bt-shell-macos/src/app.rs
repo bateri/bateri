@@ -1089,6 +1089,9 @@ pub(crate) struct Ivars {
     /// The ⌘ watch of the tabs' key hints (`tab_bar::watch_command_key`):
     /// the monitor's token, kept for the process's lifetime.
     command_monitor: RefCell<Option<Retained<AnyObject>>>,
+    /// The watch of ⌘⌥ with two fingers, a pinch or a wheel over a floating card
+    /// (`card_gesture::watch`): the monitor's token, kept for the process's lifetime.
+    card_monitor: RefCell<Option<Retained<AnyObject>>>,
     /// What the key watch last saw held ([`Hold`]): only when it was ⌘ or
     /// ⌥⌘ does a release or a key press walk the windows
     /// ([`AppDelegate::hold_changed`]).
@@ -1206,6 +1209,10 @@ define_class!(
             self.ivars()
                 .command_monitor
                 .replace(crate::tab_bar::watch_command_key());
+            // And ⌘⌥ over a floating card, with two fingers, a pinch or a wheel.
+            self.ivars()
+                .card_monitor
+                .replace(crate::card_gesture::watch());
             // The scroll bar's system preference likewise; the panes were born
             // with the resolved form (their grid's first `TIOCSWINSZ` sees it).
             self.observe_scroller_style();
@@ -2774,6 +2781,7 @@ impl AppDelegate {
             layout_writer: Cell::new(false),
             layout_save_pending: Cell::new(false),
             command_monitor: RefCell::new(None),
+            card_monitor: RefCell::new(None),
             hold: Cell::new(Hold::Nothing),
             tab_drag: RefCell::new(None),
             tab_merge: RefCell::new(None),
