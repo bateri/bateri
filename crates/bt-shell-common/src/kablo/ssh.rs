@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bt_core::{CommandLevel, PaneUuid, RemoteKind, RemoteTarget, Settings};
 
@@ -44,6 +44,7 @@ use super::Cause;
 use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
 use super::local::{self, LocalChannel};
 use super::remote::{RemoteCommand, RemoteStream};
+use super::served;
 use super::service::{
     Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal, Streams,
 };
@@ -135,6 +136,28 @@ pub struct SshBackend {
     /// thread of its own, so nothing waits for it. `None`: none is started (the timed run keeps the
     /// person's folder out of it).
     pub watches: Option<Arc<crate::apps::Watches>>,
+}
+
+/// A [`Channel`] over the connection kept to an account's server ([`Streams::command`]): the
+/// script is run by the server's `sh`, started by the bridge, and nothing logs in for it. The
+/// limit is the whole step's, the wait for the connection's answer included.
+struct KeptChannel {
+    streams: Streams,
+    account: String,
+    limit: Duration,
+}
+
+impl Channel for KeptChannel {
+    fn run(&self, script: &str, input: &[u8]) -> io::Result<install::Reply> {
+        let asked = Instant::now();
+        let command = self
+            .streams
+            .command(&self.account, served::sh(script), self.limit)
+            .map_err(io::Error::other)?;
+        let left = self.limit.saturating_sub(asked.elapsed());
+        // Whole: a step's answer is read by whoever asked, as an `ssh`'s is.
+        install::reply_of(command, input, u64::MAX, Some(left))
+    }
 }
 
 impl SshBackend {
@@ -298,6 +321,29 @@ impl SshBackend {
         }
     }
 
+    /// The way a step reaches `server` now. Over the connection kept to it when that is up
+    /// ([`KeptChannel`]): the script is a program the bridge starts, a round trip on a
+    /// connection that has logged in, which is what every job on a server takes. Else an `ssh`
+    /// of its own, as the steps before there is a connection are: it rides a master that is
+    /// there and logs in again when none is, which on a server reached through a proxy is
+    /// seconds — and a pane that waits for the step waits them out.
+    fn step_channel(&self, server: &KabloHost, limit: Duration) -> Box<dyn Channel> {
+        if let Ok(streams) = self.streams()
+            && streams.live(&server.key)
+        {
+            return Box::new(KeptChannel {
+                streams: streams.clone(),
+                account: server.key.clone(),
+                limit,
+            });
+        }
+        let target = self.target(server);
+        Box::new(SshChannel {
+            argv: ssh_argv_for(&target, &self.route_of(&target)),
+            limit,
+        })
+    }
+
     /// The package and the home directory the account of this Mac needs; none of either, no
     /// account.
     fn here(&self) -> Option<(&Bundle, &Path)> {
@@ -332,11 +378,7 @@ impl SshBackend {
         if self.bundle.is_none() {
             return;
         }
-        let target = self.target(server);
-        let channel = SshChannel {
-            argv: ssh_argv_for(&target, &self.route_of(&target)),
-            limit: install::NOTES_LIMIT,
-        };
+        let channel = self.step_channel(server, install::NOTES_LIMIT);
         let Ok(reply) = channel.run(crate::agent::notes::READ, &[]) else {
             return;
         };
@@ -497,12 +539,8 @@ impl Backend for SshBackend {
             }
             return;
         }
-        let target = self.target(server);
-        let channel = SshChannel {
-            argv: ssh_argv_for(&target, &self.route_of(&target)),
-            limit: install::STEP_LIMIT,
-        };
-        install::put_files(&channel, installed, wants);
+        let channel = self.step_channel(server, install::STEP_LIMIT);
+        install::put_files(&*channel, installed, wants);
     }
 
     fn stage_folder(&self, server: &KabloHost) -> Option<crate::stage::Folder> {
@@ -512,13 +550,9 @@ impl Backend for SshBackend {
             return None;
         }
         let instance = self.masters.as_ref()?.instance();
-        let target = self.target(server);
-        let channel = SshChannel {
-            argv: ssh_argv_for(&target, &self.route_of(&target)),
-            limit: install::STEP_LIMIT,
-        };
+        let channel = self.step_channel(server, install::STEP_LIMIT);
         let name = crate::stage::folder_name(instance, &server.key, &crate::stage::this_machine());
-        install::prepare_stage(&channel, &name)
+        install::prepare_stage(&*channel, &name)
     }
 
     fn stage_ready(&self, account: &str) {
@@ -526,9 +560,9 @@ impl Backend for SshBackend {
     }
 
     fn number(&self, server: &KabloHost) -> Option<u64> {
-        // Only a machine kablo is kept on has numbers to give: the connection is the one the
-        // install used. This Mac's terminals are numbered by the same counter, run here, unless
-        // the command is not wanted (`off`): they then keep the names they are made with.
+        // Only a machine kablo is kept on has numbers to give. This Mac's terminals are numbered
+        // by the same counter, run here, unless the command is not wanted (`off`): they then keep
+        // the names they are made with.
         let kablo = self.bundle.as_ref()?.remote_path();
         if local::is_account(&server.key) {
             if !self.agent_wanted(server) {
@@ -541,12 +575,11 @@ impl Backend for SshBackend {
             };
             return install::next_number(&channel, &kablo);
         }
-        let target = self.target(server);
-        let channel = SshChannel {
-            argv: ssh_argv_for(&target, &self.route_of(&target)),
-            limit: install::NUMBER_LIMIT,
-        };
-        install::next_number(&channel, &kablo)
+        // The pane that asked waits for this step: over the connection the server's terminals
+        // are on it is a round trip, and only the first terminal, which is started before there
+        // is one, is numbered by an `ssh` (on the master its own login just made).
+        let channel = self.step_channel(server, install::NUMBER_LIMIT);
+        install::next_number(&*channel, &kablo)
     }
 
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried> {
@@ -782,11 +815,7 @@ impl Backend for SshBackend {
         if self.bundle.is_none() || local::is_account(&server.key) {
             return Vec::new();
         }
-        let target = self.target(server);
-        let channel = SshChannel {
-            argv: ssh_argv_for(&target, &self.route_of(&target)),
-            limit: install::RECORDS_LIMIT,
-        };
+        let channel = self.step_channel(server, install::RECORDS_LIMIT);
         match channel.run(crate::agent::notes::RECORDS, &[]) {
             Ok(reply) if reply.status == Some(0) => {
                 crate::agent::notes::parse_records(reply.out.as_bytes())

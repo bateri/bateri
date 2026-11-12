@@ -499,6 +499,70 @@ fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none
     assert_eq!(world.calls().len(), asked, "no call was made");
 }
 
+/// A server whose connection is up is asked over it: the counter, the shells' files of an account
+/// the ledger brought back, what the script left and who opened what are programs the bridge
+/// starts, and no `ssh` is run for any of them — not even the ones that ask where the master
+/// is. A new login for each (seconds, on a server behind a proxy) is what the pane that waits
+/// for its number would wait out.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_steps_of_a_server_whose_connection_is_up_run_over_it_and_start_no_ssh() {
+    let world = stand_in("kept-steps", 0);
+    let mut backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let kablo = world.home.join(".local/share/kablo/0.2.0/kablo");
+    std::fs::create_dir_all(kablo.parent().expect("a directory")).expect("kablo's place");
+    crate::child::tests::write_program(&kablo, KABLO);
+    let dir = world.home.join(".local/share/bateri/terminals");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("p3"), "opener p4\nkeep-open yes\n").expect("a record");
+    let placing = world.home.join(".local/share/bateri/placing");
+    std::fs::create_dir_all(&placing).expect("dir");
+    std::fs::write(
+        placing.join("p7"),
+        "bateri 2\nplace\nterminal p7\nanchor p4\nside below\n",
+    )
+    .expect("a note");
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&got);
+    backend.notes = Some(Box::new(move |server, notes| {
+        sink.lock().expect("lock").push((server, notes));
+    }));
+
+    let ran = crate::kablo::service::fake_streams::Ran::default();
+    backend.serving(Streams::at_home(&world.home, Arc::clone(&ran)));
+    let asked = world.calls().len();
+
+    assert_eq!(backend.number(&host), Some(1));
+    assert_eq!(backend.number(&host), Some(2));
+    let installed = Installed {
+        target: Target::LinuxX86_64,
+        version: "0.2.0".to_owned(),
+        path: ".local/share/kablo/0.2.0/kablo".to_owned(),
+        fresh: false,
+    };
+    backend.files(&host, &installed);
+    assert!(
+        world
+            .home
+            .join(".local/share/bateri/shell/bash/dock.bash")
+            .is_file(),
+        "the shells' files were written"
+    );
+    backend.reachable(&host.key, &host);
+    assert_eq!(got.lock().expect("lock").len(), 1);
+    assert!(!placing.join("p7").exists(), "read once");
+    assert_eq!(backend.records(&host).len(), 1);
+
+    assert_eq!(world.calls().len(), asked, "{:?}", world.calls());
+    let ran = ran.lock().expect("lock");
+    assert_eq!(ran.len(), 5);
+    for words in ran.iter() {
+        assert_eq!(words[..2], ["sh", "-c"], "the server's sh reads the step");
+    }
+    assert!(ran[0][2].ends_with("bateri --next-number"), "{:?}", ran[0]);
+}
+
 /// What the server's script left while the Mac was away is read over the master as a step of its
 /// own, handed over with the server it came from and removed on the server; a build without the
 /// package, or one that places nothing, asks nothing.

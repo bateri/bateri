@@ -4329,6 +4329,8 @@ fn bridge_writer(mut writer: Box<dyn Write + Send>, written: &Receiver<Vec<u8>>)
 
 mod pipes;
 pub use pipes::Streams;
+#[cfg(test)]
+pub(crate) use pipes::fake as fake_streams;
 
 #[cfg(test)]
 pub(crate) mod tests;

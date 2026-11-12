@@ -23,6 +23,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A file ⌘-clicked on a server opens without a second login, and so does a new pane or tab there.** For every new terminal on a server bateri asked the server for the terminal's number over an `ssh` connection of its own. On a server that is slow to log in to (one reached through a proxy or a tunnel) that login was the wait: the new pane stood empty for seconds at every ⌘-click, ⌘D and ⌘T. The number is now asked over the connection that is already open, as are the other small things bateri asks a server it is connected to.
 - **In bash, output that does not end with a newline stays in the terminal.** After `cat` of such a file, the text showed up in the input box instead, missing its first two letters. On a server, a shell started after the update has the fix.
 - **A zoomed pane keeps its bar.** The bar, with the pane's name and buttons, was cut off above the tab while the pane was zoomed.
 - **A button's tip names the key that runs its command on your keyboard.** On a keyboard that is not a US one macOS moves some punctuation shortcuts (⌘] is ⌘Ü on a Turkish keyboard), and a button's tip still named the US key.

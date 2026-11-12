@@ -12,15 +12,12 @@
 //! names it, in the characters [`is_name`] allows), the version (three numbers), the sum (64
 //! hex digits) and the part (letters, digits and `-`).
 
-use std::io::{self, Read, Write};
-use std::thread;
+use std::io;
 use std::time::Duration;
 
 use bt_core::pencere::apps::{Version, is_name};
-use kablo_proto::v1::Exit;
 
-use crate::kablo::install::{Channel, Reply};
-use crate::kablo::remote::RemoteCommand;
+use crate::kablo::install::{Channel, Reply, reply_of};
 use crate::kablo::served::Served;
 use crate::ssh_route::Ask;
 
@@ -106,44 +103,11 @@ pub struct Through {
 
 impl Channel for Through {
     fn run(&self, script: &str, input: &[u8]) -> io::Result<Reply> {
-        let RemoteCommand {
-            stdin,
-            stdout,
-            stderr,
-            end,
-        } = self
+        let command = self
             .served
             .sh(script, Ask::Never, self.wait)
             .map_err(io::Error::other)?;
-        let data = input.to_vec();
-        let writer = thread::spawn(move || {
-            if let Some(mut stdin) = stdin {
-                let _ = stdin.write_all(&data);
-            }
-        });
-        let said = |mut from: Box<dyn Read + Send>| {
-            thread::spawn(move || {
-                let mut kept = Vec::new();
-                let _ = from.by_ref().take(SAID).read_to_end(&mut kept);
-                // What is said beyond it is read and dropped, so that the step is not held back.
-                let _ = io::copy(&mut from, &mut io::sink());
-                String::from_utf8_lossy(&kept).into_owned()
-            })
-        };
-        let out = said(Box::new(stdout));
-        let err = said(Box::new(stderr));
-        let exit = end.wait().map_err(io::Error::other)?;
-        let _ = writer.join();
-        let status = match exit {
-            Exit::Code(code) => i32::from(u8::try_from(code & 0xff).unwrap_or(255)),
-            // Ended by a signal: not an exit status of the script.
-            Exit::Signal(_) => return Err(io::Error::other("the step was ended by a signal")),
-        };
-        Ok(Reply {
-            status: Some(status),
-            out: out.join().unwrap_or_default(),
-            err: err.join().unwrap_or_default(),
-        })
+        reply_of(command, input, SAID, None)
     }
 }
 

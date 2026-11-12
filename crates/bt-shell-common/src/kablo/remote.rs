@@ -406,6 +406,34 @@ impl End {
         }
     }
 
+    /// [`End::wait`] for `limit` at most: a program that has not ended by then is ended
+    /// ([`End::kill`]) and the answer is the `Err` that says so. For a step somebody waits on,
+    /// which a server that stopped answering must not hold for as long as it likes.
+    pub fn wait_within(&self, limit: Duration) -> Result<Exit, String> {
+        let deadline = Instant::now() + limit;
+        let mut ended = self.shared.ended();
+        loop {
+            if let Some(exit) = ended.exit {
+                return Ok(exit);
+            }
+            if let Some(over) = &ended.over {
+                return Err(over.clone());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                drop(ended);
+                self.kill();
+                return Err("the server did not answer in time".to_owned());
+            }
+            ended = self
+                .shared
+                .ended_cv
+                .wait_timeout(ended, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
     /// How the program ended, if it has.
     pub fn try_wait(&self) -> Option<Result<Exit, String>> {
         let ended = self.shared.ended();

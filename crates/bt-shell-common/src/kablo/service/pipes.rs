@@ -372,3 +372,106 @@ impl Core {
         moved
     }
 }
+
+#[cfg(test)]
+pub(crate) mod fake {
+    //! A connection that is up to a server that is a directory here: for the tests of what asks
+    //! [`Streams`] for a program, with a real process at the far end and no service behind it.
+
+    use std::io::Write as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::path::Path;
+    use std::process::{Command as Process, Stdio};
+    use std::sync::Mutex;
+    use std::thread;
+
+    use kablo_proto::v1::Exit;
+
+    use super::*;
+
+    /// The words of every program asked for, in the order they were.
+    pub(crate) type Ran = Arc<Mutex<Vec<Vec<String>>>>;
+
+    impl Streams {
+        /// What asks for programs on a server that is the directory `home`, over a connection
+        /// that is up for every account: each program is run here with the words it was asked
+        /// with, `home` for its home, and its words are written down in `ran`. A connection is
+        /// refused: a directory makes none.
+        pub(crate) fn at_home(home: &Path, ran: Ran) -> Streams {
+            let (tx, asked) = mpsc::channel();
+            let home = home.to_owned();
+            thread::spawn(move || {
+                while let Ok(msg) = asked.recv() {
+                    match msg {
+                        Msg::StreamLive { reply, .. } => {
+                            let _ = reply.send(true);
+                        }
+                        Msg::StreamOpen(open) => run(open, &home, &ran),
+                        _ => {}
+                    }
+                }
+            });
+            Streams { tx, person: false }
+        }
+    }
+
+    fn run(open: StreamOpen, home: &Path, ran: &Ran) {
+        let StreamOpen { what, mut far, .. } = open;
+        let What::Command(command) = what else {
+            far.refused("a directory makes no connections");
+            return;
+        };
+        let words: Vec<String> = command
+            .argv
+            .iter()
+            .map(|word| String::from_utf8_lossy(word).into_owned())
+            .collect();
+        ran.lock().expect("lock").push(words.clone());
+        let Some((program, args)) = words.split_first() else {
+            far.refused("no program");
+            return;
+        };
+        let child = Process::new(program)
+            .args(args)
+            .current_dir(home)
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn();
+        let mut child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                far.refused(&error.to_string());
+                return;
+            }
+        };
+        thread::spawn(move || {
+            far.opened();
+            // What the caller writes, until it has nothing more to write.
+            let mut stdin = child.stdin.take();
+            loop {
+                match far.next_input() {
+                    Ok(Some(chunk)) => {
+                        if let Some(stdin) = stdin.as_mut() {
+                            let _ = stdin.write_all(&chunk);
+                        }
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(1)),
+                    Err(()) => break,
+                }
+            }
+            drop(stdin);
+            match child.wait_with_output() {
+                Ok(output) => {
+                    far.out(output.stdout);
+                    far.err(output.stderr);
+                    far.eof();
+                    far.exited(Exit::Code(output.status.code().unwrap_or(1)));
+                }
+                Err(_) => far.over(&Over::Lost),
+            }
+        });
+    }
+}

@@ -55,6 +55,13 @@ impl Runs for Through {
     }
 }
 
+/// The POSIX `script` as a program for the server's `sh`: the words every job on a server runs
+/// ([`Served::sh`]), which no login shell reads on the way.
+pub(crate) fn sh(script: &str) -> Command {
+    let words = ["sh", "-c", script];
+    Command::new(words.iter().map(|word| word.as_bytes().to_vec()).collect())
+}
+
 /// A server, as a job runs programs on it. Cheap to clone and to send to a thread.
 #[derive(Clone)]
 pub struct Served {
@@ -80,12 +87,7 @@ impl Served {
     /// of its own and never on the main one. `wait` is how long the connection and the server's
     /// answer may take. The `Err` is a line for the person who asked.
     pub fn sh(&self, script: &str, ask: Ask, wait: Duration) -> Result<RemoteCommand, String> {
-        let words = ["sh", "-c", script];
-        self.run(
-            Command::new(words.iter().map(|word| word.as_bytes().to_vec()).collect()),
-            ask,
-            wait,
-        )
+        self.run(sh(script), ask, wait)
     }
 
     /// Runs `command` as it is: its words are the program's `argv`, and nothing reads them on the

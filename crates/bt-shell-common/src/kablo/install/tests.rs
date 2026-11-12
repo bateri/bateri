@@ -1272,3 +1272,65 @@ fn a_pipe_that_cannot_be_made_says_nothing_and_ends_with_its_own_status() {
         b"not yours"
     );
 }
+
+/// `sh -c script`, piped and in a group of its own, as a program the server runs.
+fn far_program(script: &str) -> RemoteCommand {
+    use std::os::unix::process::CommandExt as _;
+    let child = Command::new("/bin/sh")
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("a program");
+    RemoteCommand::local(child)
+}
+
+/// A program the server ran over the kept connection is a step like one an `ssh` carried: what
+/// it was given to read, what it said (as much of it as was asked for) and how it ended.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_run_over_the_kept_connection_is_a_step_with_its_input_its_words_and_its_status() {
+    let reply = reply_of(
+        far_program("cat; echo said >&2; exit 3"),
+        b"given",
+        u64::MAX,
+        Some(Duration::from_secs(10)),
+    )
+    .expect("a step");
+    assert_eq!(
+        reply,
+        Reply {
+            status: Some(3),
+            out: "given".to_owned(),
+            err: "said\n".to_owned(),
+        }
+    );
+    // No more is kept than was asked for, and the program is not held back by the rest.
+    let reply = reply_of(far_program("head -c 100000 /dev/zero"), &[], 16, None).expect("a step");
+    assert_eq!((reply.status, reply.out.len()), (Some(0), 16));
+}
+
+/// A step somebody waits on has a limit: a program that has not ended by then is ended, and the
+/// step is an error, so a server that stopped answering does not hold a pane for as long as it
+/// likes.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_step_over_the_kept_connection_that_takes_too_long_is_ended() {
+    let marker = std::env::temp_dir().join(format!("bt-step-limit-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let asked = Instant::now();
+    let error = reply_of(
+        far_program(&format!("sleep 5; : > {}", marker.display())),
+        &[],
+        u64::MAX,
+        Some(Duration::from_millis(200)),
+    )
+    .expect_err("too long");
+    assert!(asked.elapsed() < Duration::from_secs(3), "the step waited");
+    assert_eq!(error.to_string(), "the server did not answer in time");
+    // Ended, not left to run on: what it would have done next is not done.
+    std::thread::sleep(Duration::from_secs(6).saturating_sub(asked.elapsed()));
+    assert!(!marker.exists(), "the program ran on after its step");
+}

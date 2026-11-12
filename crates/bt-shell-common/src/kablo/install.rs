@@ -57,7 +57,9 @@ use std::time::{Duration, Instant};
 
 use kablo_proto::SessionId;
 use kablo_proto::install::{self, Target};
+use kablo_proto::v1::Exit;
 
+use super::remote::RemoteCommand;
 use crate::ssh_wrap::Wants;
 use crate::upload::sq;
 
@@ -895,6 +897,60 @@ pub fn run_command_in(
         status: status.code(),
         out: String::from_utf8_lossy(&out).into_owned(),
         err: String::from_utf8_lossy(&err).into_owned(),
+    })
+}
+
+/// What a program the server ran over the connection kept to it ([`RemoteCommand`]) came to, as
+/// a step's [`Reply`]: `input` is written to its standard input, the first `said` bytes of what
+/// it writes to each of its outputs are kept (the rest is read and dropped, so that the program
+/// is not held back), and its end is waited for — for `limit` at most when there is one, after
+/// which the program is ended and the step is an error, as an `ssh` that took too long is
+/// ([`run_command`]).
+pub fn reply_of(
+    command: RemoteCommand,
+    input: &[u8],
+    said: u64,
+    limit: Option<Duration>,
+) -> io::Result<Reply> {
+    let RemoteCommand {
+        stdin,
+        stdout,
+        stderr,
+        end,
+    } = command;
+    let data = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&data);
+        }
+    });
+    let kept = |mut from: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            let _ = from.by_ref().take(said).read_to_end(&mut kept);
+            let _ = io::copy(&mut from, &mut io::sink());
+            String::from_utf8_lossy(&kept).into_owned()
+        })
+    };
+    let out = kept(Box::new(stdout));
+    let err = kept(Box::new(stderr));
+    // A step that ran out of time is not waited for further: its readers end with the stream,
+    // which ending the program closes.
+    let exit = match limit {
+        Some(limit) => end.wait_within(limit),
+        None => end.wait(),
+    }
+    .map_err(io::Error::other)?;
+    let _ = writer.join();
+    let status = match exit {
+        Exit::Code(code) => i32::from(u8::try_from(code & 0xff).unwrap_or(255)),
+        // Ended by a signal: not an exit status of the script.
+        Exit::Signal(_) => return Err(io::Error::other("the step was ended by a signal")),
+    };
+    Ok(Reply {
+        status: Some(status),
+        out: out.join().unwrap_or_default(),
+        err: err.join().unwrap_or_default(),
     })
 }
 
