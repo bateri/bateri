@@ -578,6 +578,105 @@ fn a_ctrl_c_before_the_terminal_is_shown_gives_the_first_program_its_shell() {
     app.until("the pipe ended", |_| handle.is_finished());
     assert_eq!(handle.join().expect("no panic"), Outcome::Shell(130));
     drop((stdin_write, stdout_read));
+
+    // A pane that is one terminal's and no more has no shell to give: it ends as the
+    // interrupted command, and the pane closes with it.
+    static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let (stdin_read, stdin_write) = pipe();
+    let (stdout_read, stdout_write) = pipe();
+    let mut closing = self::config(
+        &socket,
+        new_target(),
+        true,
+        stdin_read.as_raw_fd(),
+        stdout_write.as_raw_fd(),
+    );
+    closing.close_at_end = true;
+    closing.cancel = Some(&CLOSING);
+    let asked = app.asked.len();
+    let handle = std::thread::spawn(move || {
+        let outcome = run(&closing);
+        drop((stdin_read, stdout_write));
+        outcome
+    });
+    app.until("the second request waits", |app| app.asked.len() > asked);
+    CLOSING.store(true, std::sync::atomic::Ordering::Release);
+    app.until("the pipe ended", |_| handle.is_finished());
+    assert_eq!(handle.join().expect("no panic"), Outcome::Exit(130));
+    drop((stdin_write, stdout_read));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a pane with nothing but a note in it shows: the note, and under it how to close.
+fn alone(note: &str) -> Vec<u8> {
+    format!("{note}\n\x1b[2mPress Enter to close\x1b[0m\n").into_bytes()
+}
+
+/// A pane that is one terminal's and no more (the pane of a program a clicked path opens) never
+/// becomes the plain `ssh`, whatever keeps its terminal from being shown: nobody to ask, an
+/// application that goes before it answers, or one that says no. It says why and ends — and as
+/// that line is all the pane ever had, it stays until the person presses Enter: a pane that
+/// closed at once would have taken it away unread.
+#[test]
+fn a_pane_that_is_one_terminals_says_why_it_is_empty_and_waits_to_be_read() {
+    let dir = scratch("alone-pane");
+    let socket = dir.join("hold");
+    let reached = "bateri: could not reach the bateri app, so nothing was opened";
+
+    // Nobody listens. What is typed that is not Enter does not close it; Enter does.
+    let mut hold = run_on_pipes_closing(&socket, new_target(), true, true);
+    until("the line shown", || hold.shown.bytes() == alone(reached));
+    hold.typed.write_all(b"ls x\x1b[A").expect("typed");
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !hold.handle.as_ref().is_some_and(JoinHandle::is_finished),
+        "the line waits to be read"
+    );
+    hold.typed.write_all(b"\r").expect("typed");
+    assert_eq!(hold.outcome(), Outcome::Exit(EXIT_REFUSED));
+    assert_eq!(hold.shown.bytes(), alone(reached), "and nothing after it");
+
+    // An application that goes before it answers is the same as none; Ctrl-C closes too.
+    let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::Hang);
+    let mut hold = run_on_pipes_closing(&socket, new_target(), true, true);
+    app.until("the line shown", |_| hold.shown.bytes() == alone(reached));
+    hold.typed.write_all(b"\x03").expect("typed");
+    assert_eq!(hold.outcome(), Outcome::Exit(EXIT_REFUSED));
+    drop(app);
+
+    // One that says no and why, and would have sent a pane of the user's to the plain `ssh`:
+    // the pane says why. The pane going (the end of what is typed) ends the wait.
+    let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::FallBack);
+    let hold = run_on_pipes_closing(&socket, new_target(), true, true);
+    app.until("the line shown", |_| {
+        hold.shown.bytes() == alone("no kablo on this server")
+    });
+    assert!(!hold.handle.as_ref().is_some_and(JoinHandle::is_finished));
+    let Running { handle, typed, .. } = hold;
+    drop(typed);
+    assert_eq!(
+        handle.expect("running").join().expect("no panic"),
+        Outcome::Exit(EXIT_REFUSED)
+    );
+    drop(app);
+
+    // One that says no for good: the same.
+    let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::Refuse);
+    let mut hold = run_on_pipes_closing(&socket, new_target(), true, true);
+    app.until("the line shown", |_| {
+        hold.shown.bytes() == alone("the terminal is gone")
+    });
+    hold.typed.write_all(b"\n").expect("typed");
+    assert_eq!(hold.outcome(), Outcome::Exit(EXIT_REFUSED));
+
+    // A pane of the user's is as it was: the plain `ssh`, and nothing printed.
+    let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::FallBack);
+    let mut hold = run_on_pipes_closing(&socket, new_target(), true, false);
+    app.until("the pipe ended", |_| {
+        hold.handle.as_ref().is_some_and(JoinHandle::is_finished)
+    });
+    assert_eq!(hold.outcome(), Outcome::FallBack);
+    assert!(hold.shown.bytes().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -866,12 +965,13 @@ fn ssh_hold_process() {
     let socket = PathBuf::from(parts.next().unwrap_or_default());
     let rest: Vec<OsString> = parts.map(OsString::from).collect();
     let code = match mode.as_str() {
-        "pipe" => {
+        // `alone`: the pipe of a pane that is one terminal's and no more.
+        "pipe" | "alone" => {
             let config = Config {
                 terminal: SessionId::new("b-proc").expect("an id"),
                 target: new_target(),
-                first: false,
-                close_at_end: false,
+                first: mode == "alone",
+                close_at_end: mode == "alone",
                 sockets: vec![socket],
                 input: libc::STDIN_FILENO,
                 output: libc::STDOUT_FILENO,
@@ -1026,6 +1126,53 @@ fn a_first_program_that_cannot_show_a_terminal_runs_ssh_as_a_command_and_then_th
         .expect("the block ended with ssh's status");
     let shell = stdout.find("started --posix").expect("the shell ran");
     assert!(began < ssh && ssh < end && end < shell, "{stdout:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The process of a pane that is one terminal's and no more, with nobody to ask: neither the
+/// plain `ssh` nor the shell runs in it. It says why, waits for Enter, and ends as an `ssh`
+/// that could not connect does; the marks of the command it stands in for are not closed by a
+/// shell that never comes.
+#[test]
+fn the_process_of_a_pane_that_is_one_terminals_runs_neither_ssh_nor_the_shell() {
+    let dir = scratch("alone-exec");
+    let sep = '\u{1f}';
+    let child = process(&format!(
+        "main{sep}{}{sep}--first{sep}--shell-arg{sep}--posix{sep}--close-at-end{sep}--{sep}-p{sep}22{sep}rasp",
+        dir.display()
+    ))
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("the process");
+    let mut child = Reaper(Some(child));
+    let stdout = child
+        .0
+        .as_mut()
+        .and_then(|c| c.stdout.take())
+        .expect("stdout");
+    let shown = Capture::of(OwnedFd::from(stdout));
+    let text = || String::from_utf8_lossy(&shown.bytes()).replace('\r', "");
+    until("the line and how to close", || {
+        text().contains("could not reach the bateri app") && text().contains("Press Enter to close")
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        matches!(child.0.as_mut().map(Child::try_wait), Some(Ok(None))),
+        "it waits to be read"
+    );
+    child
+        .0
+        .as_mut()
+        .and_then(|c| c.stdin.take())
+        .expect("stdin")
+        .write_all(b"\n")
+        .expect("Enter");
+    let status = child.0.take().expect("the child").wait().expect("ended");
+    assert_eq!(status.code(), Some(EXIT_REFUSED));
+    let text = text();
+    assert!(!text.contains("-p 22 rasp"), "no ssh ran: {text:?}");
+    assert!(!text.contains("started"), "no shell ran: {text:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1212,5 +1359,74 @@ fn on_a_real_terminal_the_pipe_is_raw_follows_the_size_and_gives_the_terminal_ba
     let status = child.0.as_mut().expect("child").wait().expect("status");
     assert_eq!(status.code(), Some(7));
     // 92 would say the terminal was not given back as it was.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// On a real terminal the line of an empty pane is read key by key: what was typed before the
+/// line was there is no answer to it and is dropped, Enter closes without a line being
+/// completed first, and the terminal is given back as it was.
+#[test]
+fn on_a_real_terminal_the_line_of_an_empty_pane_waits_for_an_enter_typed_after_it() {
+    let dir = scratch("tty-alone");
+    let (master, slave) = open_pty();
+    // Typed ahead, Enter and all, while the pane was still empty.
+    (&master).write_all(b"early\r").expect("typed ahead");
+    let mut command = process(&format!("alone\u{1f}{}", dir.join("hold").display()));
+    command
+        .stdin(slave.try_clone().expect("clone"))
+        .stdout(slave.try_clone().expect("clone"))
+        .stderr(slave.try_clone().expect("clone"));
+    // SAFETY: only async-signal-safe calls between fork and exec; the child leads a session of
+    // its own with the terminal as its controlling one.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for fd in 3..1024 {
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
+    let mut child = Reaper(Some(command.spawn().expect("the process")));
+    let mut got = Vec::new();
+    until("the line at the terminal", || {
+        let mut buffer = [0u8; 4096];
+        if let Ok(n) = (&master).read(&mut buffer) {
+            got.extend_from_slice(&buffer[..n]);
+        }
+        String::from_utf8_lossy(&got).contains("Press Enter to close")
+    });
+    assert!(
+        String::from_utf8_lossy(&got).contains("could not reach the bateri app"),
+        "{:?}",
+        String::from_utf8_lossy(&got)
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        matches!(child.0.as_mut().map(Child::try_wait), Some(Ok(None))),
+        "what was typed ahead did not close it"
+    );
+    // A key that is not Enter, then Enter, with no line to complete: raw.
+    (&master).write_all(b"x").expect("typed");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(matches!(
+        child.0.as_mut().map(Child::try_wait),
+        Some(Ok(None))
+    ));
+    (&master).write_all(b"\r").expect("Enter");
+    let mut status = None;
+    until("the process ended", || {
+        // The terminal's output is read so that the process can finish writing.
+        let mut buffer = [0u8; 4096];
+        let _ = (&master).read(&mut buffer);
+        status = child.0.as_mut().and_then(|c| c.try_wait().ok().flatten());
+        status.is_some()
+    });
+    // 255: it ended as refused, and the terminal's modes are what they were (92 if not).
+    assert_eq!(status.and_then(|s| s.code()), Some(EXIT_REFUSED));
+    drop(slave);
     let _ = std::fs::remove_dir_all(&dir);
 }

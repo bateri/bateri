@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pane opened for a file on a server says why it is empty, and waits to be read.** When the program could not be started there, the pane printed one line and closed at once, too fast to read; and when it could not reach bateri itself it turned into a plain `ssh` login on the server. It now shows the line with `Press Enter to close` under it and closes when you press Enter (or Ctrl-C), and it never becomes an `ssh` or a shell. Ctrl-C while such a pane is still waiting for the server closes it, where it used to leave a shell in it.
+
 ## [0.28.1] - 2026-11-12
 
 ### Fixed

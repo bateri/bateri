@@ -35,6 +35,16 @@
 //! with the plain `ssh` it stands in for (see [`Outcome::FallBack`]), because
 //! nothing has been shown yet.
 //!
+//! **A pane that is one terminal's and no more** (`--close-at-end`: a pane a program on a
+//! server asked for, the pane of a program a clicked path opens) never becomes anything
+//! else: no plain `ssh`, which would be a login nobody asked for, and no shell, whatever
+//! ended it — a terminal that could not be shown, an application that cannot be reached, the
+//! user's Ctrl-C while it waits. It ends, and the pane closes with it. When it asked for a
+//! new terminal and was given none, the line that says why is all the pane ever had, and a
+//! pane that closed at once would take it away unread: the line stays until the person presses
+//! Enter (the one place the rule is: [`Config::ends_with`], [`unserved`], [`say_alone`]). A
+//! pane made for a terminal that was there already ends with its note as it did.
+//!
 //! **Ending.** When the terminal's program ends this exits with its status
 //! (a signal is 128 plus its number), so the shell that started it sees what
 //! `ssh` would have shown. A pane that started with this program as its **first**
@@ -286,6 +296,12 @@ pub fn hold_main(args: &[OsString], env: &Env) -> Action {
         }
         _ => {
             let Ok(terminal) = new_terminal_name() else {
+                // No name to ask for a terminal with. A pane that is one terminal's and no
+                // more has no plain `ssh` to become: it says so and ends.
+                if parsed.close_at_end {
+                    say_alone(NOT_SERVED, libc::STDIN_FILENO, libc::STDOUT_FILENO, None);
+                    return Action::Exit(EXIT_REFUSED);
+                }
                 return plain_ssh();
             };
             (
@@ -367,8 +383,9 @@ pub struct Config {
     pub first: bool,
     /// The pane is the terminal's and no more: when the terminal ends, or is gone when asked for,
     /// this ends with the status and the pane closes with it, even for a first program (a pane a
-    /// program on a server asked for, whose program was the point of it). The user's Ctrl-C
-    /// before the terminal is shown still leaves the shell a first program leaves.
+    /// program on a server asked for, or one opened for a program, whose program was the point
+    /// of it). It has no plain `ssh` to become either, and the user's Ctrl-C before the terminal
+    /// is shown ends it too (module docs).
     pub close_at_end: bool,
     /// The sockets of bateri to try, in order.
     pub sockets: Vec<PathBuf>,
@@ -383,6 +400,19 @@ pub struct Config {
     /// pane, and a Ctrl-C that killed it would close the pane — while a typed `ssh`'s
     /// pipe is killed by the signal as `ssh` would be.
     pub cancel: Option<&'static AtomicBool>,
+}
+
+impl Config {
+    /// How this ends with the status `code` of what it stood for: a pane's first program hands
+    /// over to the shell the pane would have started, unless the pane is the terminal's and no
+    /// more ([`Config::close_at_end`]), which ends with it; a typed one ends with the status.
+    fn ends_with(&self, code: u8) -> Outcome {
+        if self.first && !self.close_at_end {
+            Outcome::Shell(code)
+        } else {
+            Outcome::Exit(i32::from(code))
+        }
+    }
 }
 
 /// What the pipe keeps between connections: the name of the server's account
@@ -443,6 +473,10 @@ impl State {
 struct Finish {
     outcome: Outcome,
     note: Option<String>,
+    /// The note is all the pane ever had: it asked for a new terminal, was given none, and
+    /// closes with this program. It stays on the screen until the person has read it
+    /// ([`say_alone`]).
+    alone: bool,
 }
 
 impl Finish {
@@ -450,6 +484,7 @@ impl Finish {
         Finish {
             outcome,
             note: None,
+            alone: false,
         }
     }
 }
@@ -486,8 +521,9 @@ pub fn run(config: &Config) -> Outcome {
             }
         }
         if !state.committed() {
-            // Nothing has been shown: the plain `ssh` is still possible.
-            break Finish::quiet(Outcome::FallBack);
+            // Nothing has been shown: the plain `ssh` is still possible, where the pane may
+            // be one.
+            break unserved(config, NOT_REACHED.to_owned());
         }
         failures = if welcomed { 0 } else { failures + 1 };
         let pause = config
@@ -501,7 +537,11 @@ pub fn run(config: &Config) -> Outcome {
     drop(winch);
     drop(raw);
     if let Some(note) = finish.note.filter(|note| !note.is_empty()) {
-        let _ = write_all(config.output, format!("{note}\n").as_bytes());
+        if finish.alone {
+            say_alone(&note, config.input, config.output, config.cancel);
+        } else {
+            let _ = write_all(config.output, format!("{note}\n").as_bytes());
+        }
     }
     finish.outcome
 }
@@ -540,12 +580,8 @@ fn serve(
         if cancelled(config, raw) {
             // The user gave up: what was asked of bateri is let go of with the
             // connection, and the pane gets its shell with the status of an
-            // interrupted command.
-            return Served::Done(Finish::quiet(if config.first {
-                Outcome::Shell(STATUS_INTERRUPTED)
-            } else {
-                Outcome::Exit(i32::from(STATUS_INTERRUPTED))
-            }));
+            // interrupted command (a pane that is the terminal's and no more ends).
+            return Served::Done(Finish::quiet(config.ends_with(STATUS_INTERRUPTED)));
         }
         let mut fds = [
             poll_in(stream.as_raw_fd()),
@@ -631,12 +667,11 @@ fn serve(
                         state.offset = Some(end);
                     }
                     ToHold::End { code, note } => {
-                        let outcome = if config.first && !config.close_at_end {
-                            Outcome::Shell(code)
-                        } else {
-                            Outcome::Exit(i32::from(code))
-                        };
-                        return Served::Done(Finish { outcome, note });
+                        return Served::Done(Finish {
+                            outcome: config.ends_with(code),
+                            note,
+                            alone: false,
+                        });
                     }
                     ToHold::Bell => {
                         let _ = write_all(config.output, b"\x07");
@@ -793,15 +828,90 @@ fn status_code(status: std::process::ExitStatus) -> u8 {
 /// bateri will not show a terminal.
 fn refused(config: &Config, state: &State, fall_back: bool, text: String) -> Finish {
     if fall_back && !state.committed() {
+        return unserved(
+            config,
+            if text.is_empty() {
+                NOT_SERVED.to_owned()
+            } else {
+                text
+            },
+        );
+    }
+    let alone = config.close_at_end && !state.committed();
+    Finish {
+        outcome: config.ends_with(u8::try_from(EXIT_REFUSED).unwrap_or(u8::MAX)),
+        // A pane with nothing else in it does not close without a word.
+        note: Some(if alone && text.is_empty() {
+            NOT_SERVED.to_owned()
+        } else {
+            text
+        }),
+        alone,
+    }
+}
+
+/// What a pane that is one terminal's and no more says when bateri cannot be reached.
+const NOT_REACHED: &str = "bateri: could not reach the bateri app, so nothing was opened";
+
+/// What such a pane says when bateri will show no terminal in it and does not say why.
+const NOT_SERVED: &str = "bateri: there is no terminal to show";
+
+/// Nothing was shown and nothing will be: the plain `ssh` this stands in for runs — but not in
+/// a pane that is one terminal's and no more, which has no `ssh` to become. It says `why` and
+/// ends.
+fn unserved(config: &Config, why: String) -> Finish {
+    if !config.close_at_end {
         return Finish::quiet(Outcome::FallBack);
     }
     Finish {
-        outcome: if config.first && !config.close_at_end {
-            Outcome::Shell(u8::try_from(EXIT_REFUSED).unwrap_or(u8::MAX))
-        } else {
-            Outcome::Exit(EXIT_REFUSED)
-        },
-        note: Some(text),
+        outcome: Outcome::Exit(EXIT_REFUSED),
+        note: Some(why),
+        alone: true,
+    }
+}
+
+/// The line under a note that is all a pane has.
+const DISMISS: &str = "Press Enter to close";
+
+/// Says `note` in a pane that has nothing else and closes when this program ends, and leaves it
+/// there until the person has read it: Enter closes, and so do Ctrl-C and Ctrl-D, as they end
+/// anything that waits in a terminal. What was typed before the note is no answer to it and is
+/// dropped first. The pane going (the end of the input, a hangup) ends the wait too.
+fn say_alone(note: &str, input: RawFd, output: RawFd, cancel: Option<&AtomicBool>) {
+    let lines = format!("{note}\n\x1b[2m{DISMISS}\x1b[0m\n");
+    let _ = write_all(output, lines.as_bytes());
+    // A key is read as it is pressed, Ctrl-C among them: raw, where this is a terminal.
+    let raw = Raw::enter(input);
+    if raw.is_some() {
+        // SAFETY: `tcflush` drops what the terminal holds unread; it has no other effect.
+        unsafe { libc::tcflush(input, libc::TCIFLUSH) };
+    }
+    // An interrupt from before the note is no answer to it either.
+    if let Some(flag) = cancel {
+        flag.store(false, Ordering::Release);
+    }
+    let mut buffer = [0u8; 64];
+    loop {
+        // Where the terminal could not be made raw, Ctrl-C is the signal.
+        if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return;
+        }
+        let mut fds = [poll_in(input)];
+        if poll(&mut fds, -1).is_err() {
+            return;
+        }
+        if !ready(&fds[0]) {
+            continue;
+        }
+        match read_fd(input, &mut buffer) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                let closes = |byte: &u8| matches!(byte, b'\r' | b'\n' | 0x03 | 0x04);
+                if buffer.get(..n).is_some_and(|read| read.iter().any(closes)) {
+                    return;
+                }
+            }
+        }
     }
 }
 
