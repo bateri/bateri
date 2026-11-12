@@ -86,10 +86,11 @@ use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_common::native_view::{
-    Bars, Cursor as PageCursor, Fault as PageFault, Fill as PageFill, Host as PageDriveHost,
-    Id as PageId, Input, Key as PageKey, Keyboard, LookSlot, Menu as PageMenu, Mods as PageMods,
-    Opening, PageEditors, PageHandle, Panel as PagePanel, Phase, Point as PagePoint,
-    Rect as PageRect, Route, Scrolling, TerminalLook, caret_width_pt, copy_key, terminal_look,
+    Bars, CarryOut, Cursor as PageCursor, Fault as PageFault, Fill as PageFill,
+    Host as PageDriveHost, Id as PageId, Input, Key as PageKey, Keyboard, LookSlot,
+    Menu as PageMenu, Mods as PageMods, Opening, PageEditors, PageHandle, Panel as PagePanel,
+    Phase, Point as PagePoint, Rect as PageRect, Route, Scrolling, TerminalLook, caret_width_pt,
+    copy_key, terminal_look,
 };
 use bt_shell_common::view_strip;
 use objc2_app_kit::{NSEvent, NSEventType};
@@ -4364,6 +4365,9 @@ impl TerminalPane {
             let mut page = handle.page();
             page.set_zoom(zoom);
             page.set_scrolling(scrolling);
+            // The pane begins the system's drag of what an element carries ([`PageHost::carry`]);
+            // a page told otherwise would hear the moves of one it cannot drag.
+            page.set_carry(true);
         }
         handle.set_active(active);
         {
@@ -6599,6 +6603,40 @@ impl TerminalPane {
         true
     }
 
+    /// The page asks for the system's drag of what an element carries (`Host::carry`), in the event
+    /// that moved the pointer: the drag is begun with it ([`crate::carry::begin`]), and the pane's
+    /// view hears nothing of the mouse until it ends (the system has the pointer: the press the
+    /// view knew of is let go of). Where it cannot be begun the page is told the drag is not done,
+    /// or it would wait for an end that never comes.
+    fn begin_carry(&self, out: &CarryOut) {
+        let look = self.session().map(|session| {
+            let theme = session.theme();
+            crate::carry::Look {
+                ground: theme.background,
+                ink: theme.foreground,
+            }
+        });
+        let began = look.is_some_and(|look| crate::carry::begin(self, out, look));
+        if began {
+            self.view().forget_page_pointer();
+        } else {
+            self.carry_ended(false);
+        }
+    }
+
+    /// The system's drag of a carry is over, `done` where something took it: the page is told,
+    /// and hears the pointer again.
+    pub(crate) fn carry_ended(&self, done: bool) {
+        self.page_touch(|page| page.page().carried(done));
+    }
+
+    /// Whether a drop of bateri's own carry is taken here: the terminal's, as a paste. A pane that
+    /// has a page of the kit or a program's web view over it is not a terminal to enter words in,
+    /// and one with no session has none to enter them in.
+    pub(crate) fn takes_carry(&self) -> bool {
+        self.session().is_some() && !self.page_is_up() && !self.shows_web_view()
+    }
+
     /// How a page's boxes scroll here: their bars as the pane's own scroll bar is (the setting, or
     /// the system's overlay or legacy scrollers), pulled past their ends as AppKit's views are only
     /// when `[motion] scroll_bounce` asks for it (otherwise they stop at their ends as the
@@ -8494,6 +8532,14 @@ impl PageDriveHost for PageHost<'_> {
     fn text_size(&mut self, points: i32) {
         if self.up() {
             self.0.set_page_text_size(points);
+        }
+    }
+
+    /// The person pulled what an element carries out of the page: the system's drag of it begins in
+    /// the event that moved the pointer ([`TerminalPane::begin_carry`]).
+    fn carry(&mut self, carry: CarryOut) {
+        if self.up() {
+            self.0.begin_carry(&carry);
         }
     }
 
@@ -10451,5 +10497,59 @@ mod tests {
         // Forgotten where the page goes, and not carried to the next.
         assert!(body_of("    fn take_page_down(").contains("self.ivars().page_text_size.set(0);"));
         assert!(body_of("    fn page_fields(").contains("self.ivars().page_text_size.set(0);"));
+    }
+    /// What a page carries out of the view is dragged by the system from the pane: the page is told
+    /// the host carries (or it keeps the pointer), the host's `carry` begins the drag in the event
+    /// that moved the pointer and the drag's end is told back to the page; where none can be begun
+    /// the page is told it is not done. A source scan, because a drag needs a window server and
+    /// the mouse.
+    #[test]
+    fn what_a_page_carries_is_dragged_from_the_pane_and_its_end_is_told_back() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let carry = include_str!("carry.rs");
+        let carry = &carry[..carry.find("#[cfg(test)]").unwrap_or(carry.len())];
+        let body = |source: &'static str, name: &str| {
+            let at = source.find(name).unwrap_or_else(|| panic!("{name}"));
+            &source[at..at + source[at..].find("\n    }\n").expect("its end")]
+        };
+        assert!(body(pane, "    fn page_fields(").contains("page.set_carry(true);"));
+        let host = body(pane, "    fn carry(&mut self, carry: CarryOut)");
+        assert!(host.contains("if self.up()") && host.contains("self.0.begin_carry(&carry);"));
+        let begin = body(pane, "    fn begin_carry(");
+        assert!(
+            begin.contains("crate::carry::begin(self, out, look)"),
+            "{begin}"
+        );
+        assert!(
+            begin.contains("self.view().forget_page_pointer();"),
+            "{begin}"
+        );
+        assert!(
+            begin.contains("self.carry_ended(false);"),
+            "not begun is not done: {begin}"
+        );
+        // The drag's end is the page's: told done where an operation was done, then drained.
+        assert!(body(pane, "    pub(crate) fn carry_ended(").contains("carried(done)"));
+        let ended = &carry[carry.find("fn session_ended(").expect("the end")..];
+        assert!(
+            ended.contains("operation != NSDragOperation::None"),
+            "{ended}"
+        );
+        assert!(ended.contains("pane.carry_ended(done)"), "{ended}");
+        // Begun with the event being handled and only if it is the person's left drag, and the
+        // pasteboard is plain words and an address: no file URL (the host never reads a path).
+        let started = &carry[carry.find("pub(crate) fn begin(").expect("begin")..];
+        assert!(
+            started.contains("NSEventType::LeftMouseDragged"),
+            "{started}"
+        );
+        assert!(started.contains("currentEvent()"), "{started}");
+        assert!(!carry.contains("NSPasteboardTypeFileURL") && !carry.contains("NSURL"));
+        // Only a terminal takes one.
+        assert!(
+            body(pane, "    pub(crate) fn takes_carry(")
+                .contains("!self.page_is_up() && !self.shows_web_view()")
+        );
     }
 }

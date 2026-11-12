@@ -55,14 +55,15 @@ pub use look::{LookSlot, caret_width_pt, terminal_look};
 pub use page::{MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, script_page};
 pub use pencere_drive::{
     CarryOut, Drained, Field, Held, Host, Outline, Painted, Placement, Route, Scrolling, Tip,
-    ZOOM_TEXT,
+    ZOOM_TEXT, carriable,
 };
 pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script};
 use pencere_sandbox::{FigureKey, Images, draw_figure, figure_key};
 pub use pencere_view::{
-    Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, FieldState, FileEntry,
-    FileSource, Fill, GesturePhase, Id, Input, Key, KeyConvention, Keyboard, Menu, MenuEntry, Mods,
-    Panel, Phase, Point, Rect, Role, Saving, Shortcut, State, TerminalLook, WallTime, copy_key,
+    Accessible, AccessibleRole, Bars, Button, Carry, Command, Cursor, FieldKind, FieldState,
+    FileEntry, FileSource, Fill, GesturePhase, Id, Input, Key, KeyConvention, Keyboard, Menu,
+    MenuEntry, Mods, Panel, Payload, Phase, Point, Rect, Role, Saving, Shortcut, State,
+    TerminalLook, WallTime, copy_key,
 };
 use pencere_view::{
     Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,

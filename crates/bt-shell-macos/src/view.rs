@@ -28,9 +28,16 @@
 //! path of a file dropped from Finder is escaped
 //! ([`crate::quote::shell_quote`]) and lands on the input line through
 //! `Session::paste`. Registration is with `NSPasteboardTypeFileURL` and
-//! **only** it - a plain-text drop would make the escape rule conditional on
-//! the type, and since Finder puts two types in a single drop the order of
-//! the arms would become a decision too.
+//! **bateri's own carry** ([`crate::carry::carry_type`]: what a view of the kit hands over, a
+//! file of a page beside the terminal or an issue) - and no plain-text type: a plain-text drop
+//! would make the escape rule conditional on the type, and since Finder puts two types in a
+//! single drop the order of the arms would become a decision too. **The arms are ordered by one
+//! rule: bateri's own carry first, then files.** A carry is taken only where its source is this
+//! process's ([`crate::carry::taken`]; the type's name is anyone's to write), only by a terminal
+//! (a pane with a page of the kit or a web view over it takes none), its words from the source
+//! and not from the pasteboard; a path is escaped as a dropped file's is, words enter as they are;
+//! both go through the pane's `hold_input` gate and `Session::paste`, so a line that is one cannot
+//! be a second command. Text from anywhere else is refused as it was.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
@@ -58,7 +65,7 @@ use objc2_foundation::{
 };
 
 use bt_shell_common::native_view::{
-    Button as PageButton, DropWay, GesturePhase, Input, Menu as PageMenu,
+    Button as PageButton, Carry, DropWay, GesturePhase, Input, Menu as PageMenu,
     MenuEntry as PageMenuEntry, MenuUp, Phase, Point as PagePoint, ShownMenu, drop_way,
 };
 use objc2_app_kit::NSMenu;
@@ -2145,6 +2152,10 @@ define_class!(
         /// let its name stay here anyway.
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            if let Some(answer) = self.carried_over(sender) {
+                // bateri's own carry: no files to tell a page of.
+                return answer;
+            }
             self.ivars()
                 .drag_count
                 .set(dropped_paths(&sender.draggingPasteboard()).len());
@@ -2156,6 +2167,9 @@ define_class!(
         /// is told where the files are now.
         #[unsafe(method(draggingUpdated:))]
         fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            if let Some(answer) = self.carried_over(sender) {
+                return answer;
+            }
             self.dragged_over(sender)
         }
 
@@ -2202,39 +2216,11 @@ define_class!(
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            let pane = self.pane();
-            self.ivars().drag_count.set(0);
-            self.ivars().drag_told.set(None);
-            let paths = dropped_paths(&sender.draggingPasteboard());
-            let at = self.convertPoint_fromView(sender.draggingLocation(), None);
-            let at = PagePoint::new(at.x as f32, at.y as f32);
-            let session = self.ivars().session.get();
-            let remote = session.is_some_and(|session| session.remote_target().is_some());
-            // What takes the files is what is up in the pane: a page of a view with files is
-            // given them as files (the paths are told where the program reads the person's),
-            // any other page is told their paths, and nothing is written to the program's line
-            // or uploaded; with no page, a remote session uploads them and a local one has
-            // their paths written to the line.
-            !paths.is_empty()
-                && match drop_way(pane.as_ref().and_then(|pane| pane.files_mode()), remote) {
-                    DropWay::Handles => {
-                        let given = pane
-                            .as_ref()
-                            .is_some_and(|pane| pane.give_dropped(at, &paths));
-                        if !given && let Some(pane) = &pane {
-                            // Nothing was given: the page that heard files were over it is
-                            // told they went.
-                            pane.files_drag_left();
-                        }
-                        given
-                    }
-                    DropWay::Paths => pane.is_some_and(|pane| pane.page_files(at, paths)),
-                    DropWay::Upload => pane.is_some_and(|pane| pane.upload_drop(paths)),
-                    DropWay::Paste => session.is_some_and(|session| {
-                        session.paste(shell_quote(&paths).into_bytes());
-                        true
-                    }),
-                }
+            match crate::carry::taken(sender) {
+                // bateri's own carry first, then files: the one rule of the order.
+                Some(carry) => self.take_carry(&carry),
+                None => self.drop_files(sender),
+            }
         }
     }
 
@@ -2425,6 +2411,86 @@ fn resolve_text(string: &AnyObject) -> Option<String> {
 }
 
 impl BateriView {
+    /// A drag of bateri's own carry over the view (`draggingEntered:`, `draggingUpdated:`): `None`
+    /// where it is not one (a drag of anywhere else, files or any type: the answer is
+    /// [`BateriView::dragged_over`]'s), and for one the answer to it: copy where a terminal takes
+    /// the words ([`TerminalPane::takes_carry`]) and they are words a terminal may be handed
+    /// ([`crate::carry::bytes_of`]), none where it does not.
+    fn carried_over(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<NSDragOperation> {
+        let carry = crate::carry::taken(sender)?;
+        let takes = self.pane().is_some_and(|pane| pane.takes_carry())
+            && crate::carry::bytes_of(&carry).is_some();
+        Some(if takes {
+            NSDragOperation::Copy
+        } else {
+            NSDragOperation::None
+        })
+    }
+
+    /// The release of bateri's own carry: its words enter the input line through the pane's
+    /// `hold_input` gate and `Session::paste`, as a paste does (a path escaped as a dropped file's
+    /// is; words as they are). Nothing is entered where the pane is not a terminal that takes
+    /// one, where the words break the rule of a carry again here, or where the pane holds its input.
+    fn take_carry(&self, carry: &Carry) -> bool {
+        self.ivars().drag_count.set(0);
+        self.ivars().drag_told.set(None);
+        let Some(pane) = self.pane().filter(|pane| pane.takes_carry()) else {
+            return false;
+        };
+        let (Some(session), Some(bytes)) =
+            (self.ivars().session.get(), crate::carry::bytes_of(carry))
+        else {
+            return false;
+        };
+        if pane.hold_input(false) {
+            return false;
+        }
+        session.paste(bytes);
+        true
+    }
+
+    /// The files dropped on the view (the kind of drag [`BateriView::dragged_over`] answers):
+    /// what `performDragOperation:` does with them.
+    fn drop_files(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        let pane = self.pane();
+        self.ivars().drag_count.set(0);
+        self.ivars().drag_told.set(None);
+        let paths = dropped_paths(&sender.draggingPasteboard());
+        let at = self.convertPoint_fromView(sender.draggingLocation(), None);
+        let at = PagePoint::new(at.x as f32, at.y as f32);
+        let session = self.ivars().session.get();
+        let remote = session.is_some_and(|session| session.remote_target().is_some());
+        // What takes the files is what is up in the pane: a page of a view with files is
+        // given them as files (the paths are told where the program reads the person's),
+        // any other page is told their paths, and nothing is written to the program's line
+        // or uploaded; with no page, a remote session uploads them and a local one has
+        // their paths written to the line.
+        !paths.is_empty()
+            && match drop_way(pane.as_ref().and_then(|pane| pane.files_mode()), remote) {
+                DropWay::Handles => {
+                    let given = pane
+                        .as_ref()
+                        .is_some_and(|pane| pane.give_dropped(at, &paths));
+                    if !given && let Some(pane) = &pane {
+                        // Nothing was given: the page that heard files were over it is
+                        // told they went.
+                        pane.files_drag_left();
+                    }
+                    given
+                }
+                DropWay::Paths => pane.is_some_and(|pane| pane.page_files(at, paths)),
+                DropWay::Upload => pane.is_some_and(|pane| pane.upload_drop(paths)),
+                DropWay::Paste => session.is_some_and(|session| {
+                    // A pane whose terminal is not there takes no paste, a drop included.
+                    if pane.as_ref().is_some_and(|pane| pane.hold_input(false)) {
+                        return false;
+                    }
+                    session.paste(shell_quote(&paths).into_bytes());
+                    true
+                }),
+            }
+    }
+
     /// The answer to a drag over the view (`draggingEntered:`, `draggingUpdated:`): copy where
     /// a page is up or the pane takes a drop, and none where it does not; and the page of a
     /// view with files is told how many files are over it and where.
@@ -2495,13 +2561,17 @@ impl BateriView {
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         // The single condition for being a drag destination: the view must say
         // **in advance** which types it accepts, otherwise `draggingEntered:` is
-        // never called. The list has a single type - a plain-text drop is out of
-        // scope and the escape rule is thus not conditional on the type.
+        // never called. The list has two types, and no plain-text one: a plain-text drop is out
+        // of scope and the escape rule is thus not conditional on the type (the second is
+        // bateri's own carry, taken by its source and not by its type: [`crate::carry::taken`]).
         //
         // SAFETY: the `unsafe` block is only for the **static** access of
         // `NSPasteboardTypeFileURL` (the `clipboard` precedent); it is a real
         // pasteboard type registration and does not resolve to `None`.
-        this.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+        this.registerForDraggedTypes(&NSArray::from_slice(&[
+            unsafe { NSPasteboardTypeFileURL },
+            crate::carry::carry_type(),
+        ]));
         this
     }
 
@@ -4140,6 +4210,67 @@ mod tests {
                 "{needle}"
             );
         }
+    }
+
+    /// What the view takes as a drop is two kinds, in one order: bateri's own carry first, then
+    /// files, and nothing of a plain-text type. A carry is the process's own (its source, not the
+    /// type's name), is entered by a terminal alone and goes through the pane's gate and
+    /// `Session::paste`; it is never uploaded, remote pane or not. A source scan, because a drop
+    /// needs a window server and a drag from another process.
+    #[test]
+    fn a_drop_is_bateris_own_carry_first_then_files_and_never_text_from_anywhere_else() {
+        let source = include_str!("view.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let body = |signature: &str, end: &str| {
+            let at = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            &source[at..at + source[at..].find(end).expect("its end")]
+        };
+        // Registered for the file URL and the carry's type, and no plain-text type.
+        let new = body("    pub(crate) fn new(mtm", "        this\n    }");
+        assert!(
+            new.contains("NSPasteboardTypeFileURL") && new.contains("crate::carry::carry_type()")
+        );
+        assert!(!new.contains("NSPasteboardTypeString") && !new.contains("NSPasteboardTypeURL"));
+        // The carry's arm is before the files' in the release, and in the entering and the moves.
+        let perform = body("        fn perform_drag_operation(", "\n        }\n");
+        assert!(
+            perform.find("crate::carry::taken(sender)") < perform.find("self.drop_files(sender)")
+        );
+        for signature in [
+            "        fn dragging_entered(",
+            "        fn dragging_updated(",
+        ] {
+            let moved = body(signature, "\n        }\n");
+            assert!(
+                moved.find("self.carried_over(sender)") < moved.find("self.dragged_over(sender)"),
+                "{signature}"
+            );
+        }
+        // A carry is the process's own: its source, and not the pasteboard's say-so.
+        let over = body("    fn carried_over(", "\n    }\n");
+        assert!(over.contains("crate::carry::taken(sender)?"), "{over}");
+        assert!(over.contains("pane.takes_carry()") && over.contains("crate::carry::bytes_of("));
+        // Taken by a terminal, through the gate and the one paste; not uploaded.
+        let take = body("    fn take_carry(", "\n    }\n");
+        assert!(take.contains("pane.takes_carry()"), "{take}");
+        assert!(take.contains("crate::carry::bytes_of(carry)"), "{take}");
+        assert!(
+            take.find("pane.hold_input(false)") < take.find("session.paste(bytes)"),
+            "{take}"
+        );
+        assert!(
+            !take.contains("upload") && !take.contains("write("),
+            "{take}"
+        );
+        // A file dropped from Finder goes through the same gate where it is pasted.
+        let files = body("    fn drop_files(", "\n    }\n");
+        let paste = &files[files.find("DropWay::Paste").expect("the paste arm")..];
+        assert!(
+            paste.find("hold_input(false)") < paste.find("session.paste("),
+            "{paste}"
+        );
     }
 
     #[test]

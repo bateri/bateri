@@ -15,6 +15,7 @@ of every installed copy. A version without a section is not released.
 ### Added
 
 - **Zoom Pane: any pane can fill the tab.** Every pane's bar has a new button left of Close, and Window ▸ Zoom Pane (⌥⌘.) does the same for the pane that has the keyboard. The other panes slide out of the way, and the same button or key brings them back. Floating panes stay over a zoomed split pane. A floating pane can be zoomed too: it fills the tab over the splits and returns to the place and size it had. Giving the keyboard to a pane the zoom hides ends the zoom.
+- **Drag what a program's page shows into a terminal or another application.** A page of a program (a file of textpen, an issue of linearpen) can now hand an item to the system's drag. Pull it out of the page and a small card with the words that will be entered hangs from the pointer; let it go on a terminal pane and the words are entered on the input line (a path escaped as a file dropped from Finder is), let it go on another application and it gets the words and, if the page named one, the address. A pane with a page or a program's web view over it takes no such drop, and a terminal takes words only from bateri's own drag, never plain text from elsewhere.
 
 ### Changed
 

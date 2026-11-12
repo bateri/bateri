@@ -408,7 +408,7 @@ mod tests {
         // before the line's text.
         let view = include_str!("view.rs");
         let view = &view[..view.find("#[cfg(test)]").unwrap_or(view.len())];
-        let perform = body(view, "        fn perform_drag_operation(");
+        let perform = body(view, "    fn drop_files(");
         assert!(
             perform.contains("drop_way(pane.as_ref().and_then(|pane| pane.files_mode()), remote)")
         );
