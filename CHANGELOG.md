@@ -18,6 +18,7 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **A file you ⌘-click opens under a waiting sign, and its pane says what is coming.** The pane that opens for the file used to stand as an empty terminal until the program showed its page; on a server it had a cursor in it and, after a few seconds, an empty input box, as if a shell had died there. Now the pane's bar names the program and the file from the first moment, with Quit ⌃C to give up, and a quiet ring turns in the middle of the pane while the program is on its way. Nothing of a shell is drawn in such a pane. On this computer the program is usually there before the ring shows.
 - **Zoom Split is now Zoom Pane, and its key is ⌥⌘. (Option-Command-full stop).** ⇧⌘↩ no longer zooms: `zoom_split = "shift+cmd+return"` under `[keys]` brings it back, and a key you had set there is kept. On a Turkish keyboard it is the full-stop key too, where macOS would otherwise make it ⌥⌘Ç. The command palette also finds it by "focus" and "maximize".
 - **`bateri zoom` takes a floating pane.** `bateri zoom p9` of a floating pane was a mistake (64); it now makes the pane fill the tab, and again gives the room back. `bateri ls` then gives it as the tab's `zoomed` pane, and the panes it covers are not `on screen`.
 

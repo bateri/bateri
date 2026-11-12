@@ -103,6 +103,7 @@ use crate::pencere_view::{self, ViewHost, Waits};
 use crate::ports::Listener;
 use crate::program;
 use crate::program::identity::{self, Kind, Seen};
+use crate::program_wait::ProgramWait;
 use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
@@ -389,6 +390,19 @@ const DIM_ALPHA: f64 = 0.3;
 /// split has both. Not measured, a design constant (the user's choice of the
 /// number: 0.5).
 const LINK_VEIL_ALPHA: f64 = 0.5;
+
+/// The dock rows a pane is born with: the integration's for a pane whose program is a shell, and
+/// none for one opened for a program ([`Launch::program`]) — no shell will ever give it a
+/// prompt, on this computer (where the integration says so itself) or on a server, where the
+/// pane's first program is the pipe and the integration is the shell's that would follow it.
+/// A reserve that no prompt fills is an empty dock with a cursor on it under the program.
+fn birth_dock_rows(birth: &Birth) -> u16 {
+    if birth.launch.program.is_some() {
+        0
+    } else {
+        birth.integration.dock_rows
+    }
+}
 
 define_class!(
     // SAFETY: NSBox is designed for subclassing; DimOverlay implements no
@@ -1139,6 +1153,10 @@ struct ShellWake {
     /// ([`PROBE_DELAY`]) and reads the moment it runs, so a burst of output
     /// is one probe and an idle pane runs none.
     program_probe: Arc<RemoteProbe>,
+    /// The probe of a pane that waits for the program it was opened for
+    /// ([`TerminalPane::probe_program_wait`]): the same two bits, armed at the pane's birth and
+    /// until the terminal has drawn something. Never armed in any other pane.
+    wait_probe: Arc<RemoteProbe>,
     /// Which program the pane runs, for its tab's icon: the same two bits again — armed on the
     /// `C` edge of a local command and on the edges of the remote shell's, a first look at once
     /// (the command's line is on the screen), then one look per [`IDENTITY_DELAY`] of output
@@ -1397,6 +1415,27 @@ impl ShellWake {
         });
     }
 
+    /// Throws the wait probe to the main queue ([`ShellWake::wait_probe`]): the terminal of a
+    /// pane that waits for its program said something. A look that found nothing drawn yet
+    /// arms the next.
+    fn dispatch_wait_probe(&self) {
+        let probe = Arc::clone(&self.wait_probe);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            if !probe.begin() {
+                return;
+            }
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let Some(pane) = lookup(mtm, id) else {
+                return;
+            };
+            if pane.probe_program_wait() {
+                probe.rearm();
+            }
+        });
+    }
+
     /// Throws the program probe to the main queue **after [`PROBE_DELAY`]**
     /// ([`ShellWake::program_probe`]); the job drops its slot before reading,
     /// so an edge that arrives while it runs schedules the next look.
@@ -1534,6 +1573,10 @@ impl Wake for ShellWake {
         // armed, an edge with no look pending schedules one.
         if self.program_probe.output() {
             self.dispatch_program_probe();
+        }
+        // A pane that waits for its program: has the terminal drawn anything yet.
+        if self.wait_probe.output() {
+            self.dispatch_wait_probe();
         }
         // The program the process table has not named yet: one look per burst of output.
         if self.identity_probe.output() {
@@ -2075,6 +2118,15 @@ pub struct PaneIvars {
     /// the dock — its context row says what is happening and stays at full
     /// clarity. CoreAnimation's, like [`PaneIvars::dim`]: it asks for no frame.
     link_veil: Retained<DimOverlay>,
+    /// What the pane wears while the program it was opened for is on its way
+    /// ([`crate::program_wait`]): there from the pane's birth until there is something to see
+    /// ([`TerminalPane::end_program_wait`]). `None` in a pane that was not opened for a program,
+    /// and once the wait is over. Only in memory: a pane shown again is not waiting.
+    program_wait: RefCell<Option<Retained<ProgramWait>>>,
+    /// What the header over the pane says while it waits ([`TerminalPane::view_head`]): the
+    /// program and what it opens, with the way out a view has. There and gone with
+    /// [`PaneIvars::program_wait`].
+    wait_words: RefCell<Option<pencere_view::Words>>,
     /// How the connection stands for the terminal the pane shows, as the
     /// application's bridge last said (`Live` for a pane that shows its own
     /// shell). Passive states ([`PaneLink::is_passive`]) take the keys.
@@ -2834,6 +2886,21 @@ impl TerminalPane {
         dim.paint(&theme);
         let link_veil = DimOverlay::new(mtm);
         link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
+        // A pane opened for a program waits for it under a cover, from its first moment.
+        let program_wait = launch
+            .program
+            .is_some()
+            .then(|| ProgramWait::new(mtm, &theme, reduce_motion));
+        // And says in its header what is on its way, in the words its view will stand under.
+        let wait_words = launch.program.as_ref().map(|program| {
+            let opens = &program.opens;
+            let strip = view_strip::strip(
+                Some(&opens.what),
+                opens.place.as_deref(),
+                Some(&opens.program),
+            );
+            pencere_view::Words::new(strip, &[], pencere_view::Exit::Quit)
+        });
         let card_frame = FrameBox::new(mtm, &theme);
         let link_label = LinkLabel::new(mtm);
         link_label.0.paint(&theme);
@@ -2869,6 +2936,8 @@ impl TerminalPane {
             view: view.clone(),
             dim: dim.clone(),
             link_veil: link_veil.clone(),
+            program_wait: RefCell::new(program_wait.clone()),
+            wait_words: RefCell::new(wait_words),
             connection: Cell::new(PaneLink::Live),
             card_frame: card_frame.clone(),
             headed: Cell::new(false),
@@ -2889,6 +2958,13 @@ impl TerminalPane {
                 remote_probe: Arc::default(),
                 login_probe: Arc::default(),
                 program_probe: Arc::default(),
+                wait_probe: {
+                    let probe = Arc::<RemoteProbe>::default();
+                    if program_wait.is_some() {
+                        probe.rearm();
+                    }
+                    probe
+                },
                 identity_probe: Arc::default(),
                 port_probe: Arc::new(PortProbe::new(ports_on)),
                 environment_pending: Arc::default(),
@@ -2993,6 +3069,12 @@ impl TerminalPane {
         // The veil is on top: the search panel goes right above `view`
         // (`SearchBar::new`), so it too stays under the veil and the dimmed
         // pane's panel is dimmed too.
+        // The cover of a pane that waits for its program: over the terminal and its small
+        // surfaces, under the veils, which dim it as they dim a view.
+        if let Some(wait) = &program_wait {
+            wait.setFrame(this.bounds());
+            this.addSubview(wait);
+        }
         // The connection's veil lies under the dim one and over the grid only:
         // [`TerminalPane::place_link_veil`] keeps the dock out of it.
         link_veil.setFrame(this.bounds());
@@ -3682,7 +3764,7 @@ impl TerminalPane {
         let Some(birth) = self.ivars().birth.take() else {
             return Err(std::io::Error::other("pane started a second time"));
         };
-        let rows = birth.integration.dock_rows;
+        let rows = birth_dock_rows(&birth);
         self.ivars().dock_rows_at_birth.set(rows);
         self.ivars().dock_rows.set(rows);
         // The grid size derives from the window; the session is born with its
@@ -4395,6 +4477,9 @@ impl TerminalPane {
         paint_layer(&self.ivars().layer, &theme);
         self.ivars().dim.paint(&theme);
         self.ivars().link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
+        if let Some(wait) = self.ivars().program_wait.borrow().as_ref() {
+            wait.paint(&theme);
+        }
         self.ivars().card_frame.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
         self.ivars().block_tip.paint(&theme);
@@ -4711,9 +4796,39 @@ impl TerminalPane {
             .birth
             .borrow()
             .as_ref()
-            .map_or(self.ivars().dock_rows.get(), |birth| {
-                birth.integration.dock_rows
-            })
+            .map_or(self.ivars().dock_rows.get(), birth_dock_rows)
+    }
+
+    /// The terminal of a pane that waits for its program ([`crate::program_wait`]) said
+    /// something: when it has drawn anything the wait is over — a program that shows no view,
+    /// or the line that says why the terminal could not be had. `true` when there is nothing to
+    /// see yet and the next output is to ask again.
+    fn probe_program_wait(&self) -> bool {
+        if self.ivars().program_wait.borrow().is_none() {
+            return false;
+        }
+        if self.session().is_none_or(|session| session.shows_nothing()) {
+            return true;
+        }
+        if self.end_program_wait() {
+            // The terminal's own header from here on.
+            self.host().program_changed(self.ivars().id);
+        }
+        false
+    }
+
+    /// There is something to see in a pane that waited for its program: the cover goes, and
+    /// the header's words with it, which were the wait's. Once; a no-op in every other pane.
+    /// `true` when the pane waited: its owner is to read the header again
+    /// ([`PaneHost::program_changed`]) once what is there now has its own words, which a view
+    /// that starts says itself.
+    fn end_program_wait(&self) -> bool {
+        let Some(wait) = self.ivars().program_wait.take() else {
+            return false;
+        };
+        wait.end();
+        self.ivars().wait_words.replace(None);
+        true
     }
 
     /// Whether the pane is a card now.
@@ -6665,14 +6780,21 @@ impl TerminalPane {
     /// program's web view, the page a program's module draws, a debug build's demo page —, for
     /// the pane's theme's ground: the owner shows it over the pane for as long as the view is up
     /// ([`pencere_view::ViewHead`]), and is told when it comes and goes
-    /// ([`PaneHost::program_changed`]). `None` over the terminal.
+    /// ([`PaneHost::program_changed`]). `None` over the terminal. A pane opened for a program
+    /// says the same of the program that is on its way ([`crate::program_wait`]): its name and
+    /// what it opens, with no icon yet, and the same way out — ⌃C ends the wait as it ends the
+    /// program.
     pub fn view_head(&self) -> Option<pencere_view::ViewHead> {
         let dark = self.session()?.theme().is_dark();
         if let Some(host) = self.view_host() {
             return Some(host.head(dark));
         }
+        if let Some(words) = self.ivars().page_words.borrow().as_ref() {
+            return Some(words.head(dark));
+        }
+        // No view yet, in a pane opened for a program: what is on its way.
         self.ivars()
-            .page_words
+            .wait_words
             .borrow()
             .as_ref()
             .map(|words| words.head(dark))
@@ -6908,8 +7030,14 @@ impl TerminalPane {
     /// block tip, the jump button) and under the veils, so a pane that is not the keyboard's
     /// dims over its view as it does over its terminal.
     fn start_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
+        // The program the pane was opened for is here: the header is read again below, with
+        // the view's own words in it, or here when the view could not be started.
+        let waited = self.end_program_wait();
         if start.kind.is_native() {
             self.start_native_view(session, start);
+            if waited && !self.program_page_up() {
+                self.host().program_changed(self.ivars().id);
+            }
             return;
         }
         // The crate has one view at a time; a stale one goes first.
@@ -6921,6 +7049,9 @@ impl TerminalPane {
         let Some(host) = ViewHost::start(self.mtm(), session, start, self.bounds(), &theme, &text)
         else {
             session.close_view();
+            if waited {
+                self.host().program_changed(ivars.id);
+            }
             return;
         };
         self.addSubview_positioned_relativeTo(
@@ -7171,6 +7302,15 @@ impl TerminalPane {
     /// a server keeps has both from the server's own word; a plain `ssh` knows the place
     /// and not the program (the process table shows `ssh`); a local pane's program is the
     /// first of the jobs in front of its shell.
+    /// The server of the terminal the pane shows, in the word the header over a program's
+    /// view names it by ([`TerminalPane::view_whereabouts`]): what a pane opened from this one
+    /// for a program on the same server says of it before the program does, so the two
+    /// headers say the place the same way. `None` in a pane that shows no terminal a server
+    /// keeps.
+    pub(crate) fn kept_host(&self) -> Option<String> {
+        self.host().kept_terminal(self.uuid()).map(|kept| kept.host)
+    }
+
     fn view_whereabouts(&self) -> (Option<String>, Option<String>) {
         if let Some(kept) = self.host().kept_terminal(self.uuid()) {
             let program = kept
@@ -8991,6 +9131,62 @@ mod tests {
         assert!(body.contains("pencere_view::content_size(self.bounds())"));
         // The parent is the one the command was chosen with, in the same branch.
         assert!(pane.contains("views: self.view_options(shell_parent, no_shell),"));
+    }
+
+    /// A pane opened for a program waits for it under a cover and wears it once: put on at the
+    /// pane's birth and for no other pane, taken off where there is something to see — the
+    /// program's view, of either kind, or anything the terminal has drawn, asked at an edge of
+    /// output — and never put back. Such a pane reserves no dock: no shell will give it a prompt,
+    /// on this computer or on a server, and the reserve would be an empty dock under the program.
+    /// A source scan, because a pane needs a window server.
+    #[test]
+    fn a_pane_opened_for_a_program_waits_under_a_cover_until_there_is_something_to_see() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |name: &str| {
+            let at = pane.find(name).unwrap_or_else(|| panic!("{name}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        // Born with the pane, for a program's pane alone, and armed with it.
+        let born = body_of("    pub(crate) fn new(");
+        assert!(born.contains(
+            "let program_wait = launch\n            .program\n            .is_some()\n            \
+             .then(|| ProgramWait::new(mtm, &theme, reduce_motion));"
+        ));
+        assert!(
+            born.contains("if program_wait.is_some() {\n                        probe.rearm();")
+        );
+        assert_eq!(pane.matches("ProgramWait::new(").count(), 1);
+        // Under the veils, which dim it as they dim a view.
+        let place = |word: &str| born.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(place("this.addSubview(wait);") < place("this.addSubview(&link_veil);"));
+        // The view of either kind takes it off, before anything else.
+        let view = body_of("    fn start_view(");
+        let place = |word: &str| view.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(
+            place("let waited = self.end_program_wait();") < place("if start.kind.is_native() {")
+        );
+        // So does what the terminal draws, and only that: output that draws nothing asks again.
+        let probe = body_of("    fn probe_program_wait(");
+        assert!(probe.contains("session.shows_nothing()"));
+        assert!(probe.contains("if self.end_program_wait() {"));
+        // Once: the cover is taken, not read, and the header's words go with it.
+        let end = body_of("    fn end_program_wait(");
+        assert!(end.contains("self.ivars().program_wait.take()"));
+        assert!(end.contains("self.ivars().wait_words.replace(None);"));
+        // While it waits the header says what is on its way, after a view's own words.
+        let head = body_of("    pub fn view_head(");
+        let place = |word: &str| head.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(place(".page_words") < place(".wait_words"));
+        // No dock is reserved, before the start and at it.
+        let rows = body_of("fn birth_dock_rows(");
+        assert!(rows.contains("if birth.launch.program.is_some() {\n        0"));
+        assert!(body_of("    pub fn start(").contains("let rows = birth_dock_rows(&birth);"));
+        assert!(
+            body_of("    fn reserved_dock_rows(")
+                .contains(".map_or(self.ivars().dock_rows.get(), birth_dock_rows)")
+        );
+        assert_eq!(pane.matches("integration.dock_rows").count(), 1);
     }
 
     /// The program a click opens a path in reads no startup file: it is started in a shell's

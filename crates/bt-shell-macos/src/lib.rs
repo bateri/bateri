@@ -70,6 +70,7 @@ mod pane_files;
 mod password_sheet;
 mod pencere_view;
 mod pointer;
+mod program_wait;
 mod promise;
 mod remote_ports;
 #[cfg(debug_assertions)]

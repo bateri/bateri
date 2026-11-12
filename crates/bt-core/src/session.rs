@@ -53,7 +53,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
+use alacritty_terminal::grid::{Dimensions, Grid, GridCell as _, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
@@ -10240,6 +10240,22 @@ impl Session {
         self.term.lock().mode().contains(TermMode::ALT_SCREEN)
     }
 
+    /// Whether the terminal has shown nothing yet: no row has left for the history and every
+    /// cell of the screen is as a cleared one is. What a program writes that draws nothing — a
+    /// mark, a question, the switch to the other screen — leaves it so, and one printed letter
+    /// or one painted cell does not. Read from `Term` itself, as
+    /// [`Self::on_alternate_screen`] is: a pane that waits for its program asks at an edge of
+    /// output, not at a frame. One `Term` round over the screen's cells.
+    pub fn shows_nothing(&self) -> bool {
+        let term = self.term.lock();
+        let grid = term.grid();
+        grid.history_size() == 0
+            && (0..term.screen_lines()).all(|row| {
+                let line = Line(i32::try_from(row).unwrap_or(i32::MAX));
+                (0..term.columns()).all(|column| grid[line][Column(column)].is_empty())
+            })
+    }
+
     /// Block `key`'s command row as text and its depth (rows from the history's top), found
     /// walking up from the bottom — the newest block's start is the last one there. `None` on
     /// the alternate screen (the row is in the primary screen behind the program: its text can
@@ -14676,6 +14692,32 @@ mod tests {
         assert_eq!(typed, b"typed\r");
         // Nothing of a PTY is there to read modes from.
         assert!(terminal.session.with_pty_fd(|_| Some(())).is_none());
+    }
+
+    /// A pane that waits for its program asks whether the terminal has shown anything: what a
+    /// program says that draws nothing (a mark, a title pushed, the other screen, a question)
+    /// leaves the screen as it was born, and the first letter does not.
+    #[test]
+    fn a_terminal_has_shown_nothing_until_something_is_drawn_on_it() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        assert!(terminal.session.shows_nothing());
+        terminal
+            .terminal
+            .write_all(b"\x1b]133;C\x07\x1b[22t\x1b[?1049h\x1b[c")
+            .expect("written");
+        // The answer to the question is the sign that all of it was read.
+        terminal
+            .terminal
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .expect("timeout");
+        let mut buffer = [0u8; 64];
+        let n = io::Read::read(&mut terminal.terminal, &mut buffer).expect("an answer");
+        assert!(buffer[..n].starts_with(b"\x1b[?"), "{:?}", &buffer[..n]);
+        assert!(terminal.session.shows_nothing());
+        terminal.terminal.write_all(b"x").expect("written");
+        wait_text(&terminal.session, "x");
+        assert!(!terminal.session.shows_nothing());
     }
 
     /// A stream has no master, so what the pane asks of the PTY it asks of its owner by the

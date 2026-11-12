@@ -6288,6 +6288,11 @@ impl AppDelegate {
             let Some(argv) = bt_shell_common::open_with::argv_server(&name, line, &path) else {
                 return;
             };
+            // The server by the word the program's own header will name it by.
+            let place = from
+                .kept_host()
+                .unwrap_or_else(|| target.label().into_owned());
+            let opens = launch::Opens::of(Some(place), &name, &path);
             Start {
                 held: Some(Held {
                     args: args.to_vec(),
@@ -6301,6 +6306,7 @@ impl AppDelegate {
                     directory: Some(directory),
                     // The shell that was asked is this computer's, not the server's.
                     env: Vec::new(),
+                    opens,
                 }),
                 runs: PaneRuns::UserShell,
                 ..Start::default()
@@ -6328,6 +6334,7 @@ impl AppDelegate {
                     argv,
                     directory: None,
                     env,
+                    opens: launch::Opens::of(None, &name, &path),
                 }),
                 runs: PaneRuns::Program { keep_open: false },
                 ..Start::default()

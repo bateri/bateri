@@ -529,6 +529,40 @@ pub(crate) struct ProgramStart {
     /// program's own ([`bt_shell_common::child::login_env`]): started in a shell's place, the
     /// program reads no startup file. Empty when the shell was not asked or gave no answer.
     pub(crate) env: Vec<(String, String)>,
+    /// What the header over the pane says of it while it is on its way ([`Opens`]).
+    pub(crate) opens: Opens,
+}
+
+/// What a pane opened for a program says in its header before the program has shown anything
+/// ([`crate::program_wait`]): the words the program's own view will stand under, known from the
+/// click — so the header names the program from the pane's first moment and keeps its name
+/// where it is when the view comes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Opens {
+    /// The server the program runs on, as the pane it was clicked in calls it; `None` on this
+    /// computer.
+    pub(crate) place: Option<String>,
+    /// The program's name.
+    pub(crate) program: String,
+    /// The name of the file or the folder: the last part of its path.
+    pub(crate) what: String,
+}
+
+impl Opens {
+    /// The words for `program` opening `path` on `place`. A path that ends in `/` (a folder
+    /// written so, the root) is named by its last part that is one, and the root by itself.
+    pub(crate) fn of(place: Option<String>, program: &str, path: &str) -> Self {
+        let what = path
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(path)
+            .to_owned();
+        Self {
+            place,
+            program: program.to_owned(),
+            what,
+        }
+    }
 }
 
 /// Printed without the environment: its values are the person's, secrets among them, and a
@@ -539,6 +573,7 @@ impl std::fmt::Debug for ProgramStart {
             .field("argv", &self.argv)
             .field("directory", &self.directory)
             .field("env", &self.env.len())
+            .field("opens", &self.opens)
             .finish()
     }
 }
@@ -663,6 +698,29 @@ pub(crate) fn fallen_back(history: Option<Vec<u8>>, note: Note) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// What a pane opened for a program says before the program does: the program, and the
+    /// file or the folder by its own name — the last part of the path that is one, whatever
+    /// the path ends in — with the server when there is one.
+    #[test]
+    fn a_waiting_pane_names_the_program_and_what_it_opens_by_its_own_name() {
+        let opens = super::Opens::of(None, "textpen", "/home/u/notes/message.txt");
+        assert_eq!(
+            (
+                opens.place.as_deref(),
+                opens.program.as_str(),
+                opens.what.as_str()
+            ),
+            (None, "textpen", "message.txt")
+        );
+        let opens = super::Opens::of(Some("rasp".to_owned()), "textpen", "/home/u/Projects/");
+        assert_eq!(
+            (opens.place.as_deref(), opens.what.as_str()),
+            (Some("rasp"), "Projects")
+        );
+        // The root has no part to be named by: it is named as it is written.
+        assert_eq!(super::Opens::of(None, "textpen", "/").what, "/");
+    }
+
     /// The dock of `-- zsh` and of no `-- sh`: a shell is asked the one decision there is, by its
     /// path, and a program is not asked at all.
     #[test]
