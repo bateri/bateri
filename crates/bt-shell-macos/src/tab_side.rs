@@ -577,15 +577,8 @@ impl TabBar {
         let side = self.side_for(top, count + usize::from(flight.gap.is_some()));
         // The list's places, headers among them: a carried tab's room opens before the row it is
         // over, below any header that stands there. In Activity a tab's row holds its agents.
-        let entries = side_entries(&shown.headings, count, flight.gap, 0);
-        let room =
-            (self.bounds().size.width - 2.0 * tabs::EDGE - DETAIL_X - tabs::ROW_END).max(0.0);
-        let shapes: Vec<RowShape> = shown
-            .tabs
-            .iter()
-            .map(|label| RowShape::of(label, shown.activity, shown.details, room))
-            .collect();
-        let entries = tall_entries(entries, &shapes);
+        let shapes = row_shapes(shown, side.width);
+        let entries = listed_entries(shown, &shapes, flight.gap, 0);
         let mut column = side.layout_with(&entries);
         let selected_tab = shown.tabs.get(shown.selected).map(|label| label.tab);
         let was_overflowing = iv.overflowed.replace(column.overflow);
@@ -872,13 +865,13 @@ impl TabBar {
 
     /// The column as the window's list lays it out — without a drag's preview or a gap — with
     /// `room` more places than it has tabs: 0 is the column as it is, 1 the column a carried tab
-    /// would make ([`TabBar::strip_with_room`]'s upright half).
+    /// would make ([`TabBar::strip_with_room`]'s upright half). Its rows are as tall as the ones
+    /// on screen ([`read_column`]): this is the column a carry is read on.
     pub(super) fn column_with_room(&self, room: usize) -> Option<Column> {
         let top = self.ivars().side.get()?;
         let shown = self.ivars().shown.borrow();
         let count = shown.tabs.len();
-        let entries = side_entries(&shown.headings, count, None, room);
-        (count > 0).then(|| self.side_for(top, count + room).layout_with(&entries))
+        (count > 0).then(|| read_column(&shown, self.side_for(top, count + room), room))
     }
 
     /// Puts the name field over `row` (the bar's space), in the type the selected row's title
@@ -1190,6 +1183,41 @@ impl RowShape {
             height,
         }
     }
+}
+
+/// How each listed tab's row is made in a column `width` wide ([`RowShape`]): what a row says
+/// has the row's width to wrap in, less the tile before it and the row's end.
+fn row_shapes(shown: &Shown, width: f64) -> Vec<RowShape> {
+    let room = (width - 2.0 * tabs::EDGE - DETAIL_X - tabs::ROW_END).max(0.0);
+    shown
+        .tabs
+        .iter()
+        .map(|label| RowShape::of(label, shown.activity, shown.details, room))
+        .collect()
+}
+
+/// The places of `shown`'s list, top to bottom, each tab's row as tall as its shape, with a
+/// carried tab's `gap` and `room` more places at the end ([`side_entries`]). **The one list every
+/// layout of the column is laid from** — the one that places the rows and the one a carry is read
+/// on ([`read_column`]): read on rows of one height, every row under a tall one is taken for the
+/// row above it.
+fn listed_entries(
+    shown: &Shown,
+    shapes: &[RowShape],
+    gap: Option<usize>,
+    room: usize,
+) -> Vec<Entry> {
+    tall_entries(
+        side_entries(&shown.headings, shown.tabs.len(), gap, room),
+        shapes,
+    )
+}
+
+/// The column `side` lays `shown`'s list out to, without a drag's preview or a gap, with `room`
+/// more places than it has tabs ([`TabBar::column_with_room`]).
+fn read_column(shown: &Shown, side: Side, room: usize) -> Column {
+    let shapes = row_shapes(shown, side.width);
+    side.layout_with(&listed_entries(shown, &shapes, None, room))
 }
 
 /// The listed tabs' rows: each tab's [`Entry::Tab`] in `entries` takes its shape's height
@@ -1923,6 +1951,57 @@ mod tests {
         quiet[0].focused = false;
         let shape = RowShape::of(&label(quiet), false, true, 120.0);
         assert_eq!(shape.lead, Some(1), "the focused pane's reply");
+    }
+
+    /// A column 200 wide and `height` tall, its list from 40 down, scrolled by `scroll`.
+    fn side(height: f64, count: usize, scroll: f64) -> Side {
+        Side {
+            width: 200.0,
+            height,
+            top: 40.0,
+            count,
+            scroll,
+            warning: false,
+            tally: false,
+            corner: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_carry_is_read_on_rows_as_tall_as_the_ones_on_screen() {
+        // The first tab's agent said something: its row is tall, and the rows under it start
+        // lower than rows of one height would.
+        let shown = Shown {
+            tabs: vec![
+                label(vec![agent(None, Some(LONG), None)]),
+                label(Vec::new()),
+                label(Vec::new()),
+            ],
+            details: true,
+            ..Shown::default()
+        };
+        let said = tabs::ASK_LINES as f64 * tabs::ASK_ROW;
+        let column = read_column(&shown, side(600.0, 3, 0.0), 0);
+        let plain = side(600.0, 3, 0.0).layout();
+        assert_eq!(column.rows[0].height, tabs::TAB_HEIGHT + said);
+        assert_eq!(column.rows[1].y, plain.rows[1].y + said);
+        // The middle of the second row on screen is the second tab — on rows of one height the
+        // same point is the third's.
+        let middle = column.rows[1].y + column.rows[1].height / 2.0;
+        assert_eq!(column.pane_over(middle), tabs::PaneOver::OnTab { index: 1 });
+        assert_eq!(plain.pane_over(middle), tabs::PaneOver::OnTab { index: 2 });
+        // The line between the first two rows runs under the tall row, not through it.
+        assert_eq!(column.between(1), column.rows[0].y + column.rows[0].height);
+
+        // A column that just holds three plain rows: the list scrolls by what the tall row adds,
+        // and is read where it was scrolled to.
+        let rows = 3.0 * tabs::TAB_HEIGHT + 2.0 * tabs::GAP + 2.0 * tabs::LIST_PAD;
+        let height = 40.0 + rows + tabs::EDGE;
+        assert!(!side(height, 3, 0.0).layout().overflow);
+        let scrolled = read_column(&shown, side(height, 3, said), 0);
+        assert!(scrolled.overflow);
+        assert_eq!(scrolled.scroll, said);
+        assert_eq!(scrolled.rows[1].y, plain.rows[1].y);
     }
 
     #[test]
