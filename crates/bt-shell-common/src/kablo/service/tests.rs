@@ -1187,6 +1187,107 @@ fn the_pane_of_a_program_is_not_let_fall_back_to_the_plain_ssh() {
     assert_eq!(holder.outcome(), Outcome::FallBack);
 }
 
+/// The lines a program's pane ends with, as they are written: they are all the person is told.
+#[test]
+fn the_lines_that_say_why_a_program_has_no_terminal() {
+    assert_eq!(
+        not_started_line("rasp", true),
+        "bateri: could not connect to rasp"
+    );
+    assert_eq!(
+        not_started_line("rasp", false),
+        "bateri: could not start the program on rasp"
+    );
+}
+
+/// A program's pane that is given no terminal says why, with the server as the person wrote it:
+/// it has no plain `ssh` that would say it. A server whose numbers are all taken could not start
+/// the terminal; a pane of the user's on the same server is the plain `ssh`, with no line.
+#[test]
+fn the_pane_of_a_program_is_told_that_its_terminal_could_not_be_started() {
+    let taken = || {
+        let world = Fake::new(Bridge::new(Age::Current));
+        world.counts_from(7);
+        for number in 7..20 {
+            world.bridge().add(&format!("p{number}"), Size::default());
+        }
+        world
+    };
+    let world = taken();
+    world.info.lock().expect("lock").program = Some(vec!["prog".into(), "/srv/a".into()]);
+    let rig = Rig::over("program-not-started", world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    // (After the note of the terminals that run there already, which every new one is given.)
+    until("the line shown", || {
+        holder
+            .shown
+            .bytes()
+            .ends_with(b"\r\nbateri: could not start the program on rasp\n")
+    });
+    drop(rig);
+
+    let rig = Rig::over("pane-not-started", taken());
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert!(
+        !String::from_utf8_lossy(&holder.shown.bytes()).contains("could not"),
+        "the plain `ssh` says what is wrong itself"
+    );
+}
+
+/// A server that is given up on (the last attempts to reach it failed) is not asked for the
+/// terminal of a program: the pane says the server could not be connected to.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_pane_of_a_program_is_told_that_its_server_could_not_be_connected_to() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept(
+        "program-given-up-1",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    first.service.stop();
+    drop(first);
+
+    // The next bateri finds the account in the ledger and cannot reach its server.
+    world.carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let again = Rig::kept(
+        "program-given-up-2",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let _resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    let attempts = world.count("carry");
+    for attempt in 1..=3 {
+        again.service.retry_account("u@rasp:22");
+        until("an attempt", || world.count("carry") > attempts + attempt);
+    }
+    // The click in the pane of that server: a program, in a pane of its own.
+    world.info.lock().expect("lock").program = Some(vec!["prog".into(), "/srv/a".into()]);
+    let mut program = Holder::new(&again.socket(), "b-2");
+    assert_eq!(program.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    until("the line shown", || {
+        program.shown.bytes() == b"bateri: could not connect to rasp\n"
+    });
+    assert!(!world.bridge().has(&SessionId::new("b-2").expect("a name")));
+}
+
 #[test]
 fn what_is_not_in_a_pane_or_not_a_kablo_call_is_the_plain_ssh() {
     let rig = Rig::new("plain");

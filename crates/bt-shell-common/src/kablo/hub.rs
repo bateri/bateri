@@ -1170,6 +1170,12 @@ impl Hub {
         }
     }
 
+    /// Whether the holder is the pane of a program ([`Hub::for_a_program`]): one that is told
+    /// in a line why it has no terminal, where another runs the plain `ssh`.
+    pub fn is_for_a_program(&self, hold: HoldId) -> bool {
+        self.holds.get(&hold).is_some_and(|entry| entry.program)
+    }
+
     /// Ends a holder: it says `note` if there is one and exits with `code`.
     /// Its terminal is let go of and lives on, on the server.
     pub fn end(&mut self, hold: HoldId, code: u8, note: Option<&str>) {

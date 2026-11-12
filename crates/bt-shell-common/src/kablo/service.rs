@@ -323,6 +323,18 @@ impl Shown {
     }
 }
 
+/// The line the pane of a program ends with when it is given no terminal on `server`, named as
+/// the person wrote it: all the person is told, since the pane has no plain `ssh` that would
+/// say what is wrong. `given_up`: the server is not reached ([`Core::gives_up`]); else it is
+/// there, and the terminal could not be started on it.
+fn not_started_line(server: &str, given_up: bool) -> String {
+    if given_up {
+        format!("bateri: could not connect to {server}")
+    } else {
+        format!("bateri: could not start the program on {server}")
+    }
+}
+
 /// Why no terminal is shown, and what the pane does instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
@@ -2054,7 +2066,7 @@ impl Core {
                     .started(hold, &account, spec, terminal_named(number))
                     .is_err()
                 {
-                    self.hub.refuse(hold, true, "");
+                    self.not_started(hold, &account);
                 }
             }
             Msg::End(pane) => self.end(&pane, now),
@@ -3952,7 +3964,7 @@ impl Core {
     fn prepare(&mut self, hold: HoldId, server: KabloHost, pane: PaneInfo) {
         let numbered = self.hub.version_of(hold) >= wire::NAMED;
         if self.gives_up(&server.key) {
-            self.hub.refuse(hold, true, "");
+            self.not_started(hold, &server.key);
             // Being asked is a reason to look again: a server that is back serves the next one.
             if let Some(client) = self.hub.client_mut(&server.key) {
                 client.retry_now(Instant::now());
@@ -3964,7 +3976,7 @@ impl Core {
             let account = entry.server.key.clone();
             if !numbered {
                 if self.started(hold, &account, spec, None).is_err() {
-                    self.hub.refuse(hold, true, "");
+                    self.not_started(hold, &account);
                 }
                 return;
             }
@@ -3973,8 +3985,8 @@ impl Core {
             // (`stale`): the command file would name a binary that has no `bateri` in it and undo
             // what the renewal of the first dial writes.
             let files = (!entry.files && !entry.stale).then(|| entry.installed.clone());
-            if !self.ask_number(hold, server, account, spec, files) {
-                self.hub.refuse(hold, true, "");
+            if !self.ask_number(hold, server, account.clone(), spec, files) {
+                self.not_started(hold, &account);
             }
             return;
         }
@@ -4052,14 +4064,28 @@ impl Core {
         match server {
             Some(server) if again => {
                 if !self.ask_number(hold, server, account.to_owned(), spec, None) {
-                    self.hub.refuse(hold, true, "");
+                    self.not_started(hold, account);
                 }
             }
             _ => {
                 self.collisions.remove(&hold);
-                self.hub.refuse(hold, true, "");
+                self.not_started(hold, account);
             }
         }
+    }
+
+    /// Gives a holder none of the new terminal it asked for on `account`. Nothing was shown, so
+    /// a pane of the user's runs the plain `ssh` it stands in for, which says what is wrong in
+    /// its own words. The pane of a program has none to become and is told in a line
+    /// ([`not_started_line`]); where the account is not known, the hub's own line says it.
+    fn not_started(&mut self, hold: HoldId, account: &str) {
+        let text = match self.accounts.get(account) {
+            Some(entry) if self.hub.is_for_a_program(hold) => {
+                not_started_line(&entry.server.host, self.gives_up(account))
+            }
+            _ => String::new(),
+        };
+        self.hub.refuse(hold, true, &text);
     }
 
     fn prepared(&mut self, hold: HoldId, outcome: Result<Ready, Refusal>, now: Instant) {
@@ -4083,7 +4109,7 @@ impl Core {
             .started(hold, &account, ready.spec, terminal_named(ready.number))
             .is_err()
         {
-            self.hub.refuse(hold, true, "");
+            self.not_started(hold, &account);
         }
     }
 }
