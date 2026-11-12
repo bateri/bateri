@@ -612,7 +612,7 @@ fn pipe() -> (OwnedFd, OwnedFd) {
     }
 }
 
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
 
 impl Capture {
     fn of(read: OwnedFd) -> Capture {
@@ -631,20 +631,20 @@ impl Capture {
         Capture(bytes)
     }
 
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         self.0.lock().expect("lock").clone()
     }
 }
 
 /// A pane's `ssh-hold`: the pipe on pipes, in a thread.
-struct Holder {
+pub(crate) struct Holder {
     handle: Option<JoinHandle<Outcome>>,
-    typed: File,
-    shown: Capture,
+    pub(crate) typed: File,
+    pub(crate) shown: Capture,
 }
 
 impl Holder {
-    fn start(socket: &Path, terminal: &str, target: Target) -> Holder {
+    pub(crate) fn start(socket: &Path, terminal: &str, target: Target) -> Holder {
         let (stdin_read, stdin_write) = pipe();
         let (stdout_read, stdout_write) = pipe();
         let config = Config {

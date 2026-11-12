@@ -4305,4 +4305,4 @@ mod pipes;
 pub use pipes::Streams;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

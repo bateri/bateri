@@ -526,6 +526,8 @@ struct StandIn {
     /// How late what the app says reaches kablo ([`Late`]): the line of a server that is this
     /// far away.
     late: Option<Duration>,
+    /// A holder that connects is in a pane of the app's, and so may be shown a terminal.
+    panes: bool,
 }
 
 /// A line to kablo that is as long as a network's: what is written reaches `to` after `late`,
@@ -564,7 +566,7 @@ impl Write for Late {
 
 impl Backend for RealMac {
     fn pane(&self, _: &Peer) -> Option<PaneInfo> {
-        None
+        self.stand_in.panes.then(PaneInfo::default)
     }
 
     fn route(&self, _: &[String]) -> Option<KabloHost> {
@@ -1579,6 +1581,195 @@ fn a_program_started_with_its_terminal_is_answered_by_the_pane_that_attaches_lat
     service.stop();
 }
 
+/// A program that asks where the cursor is the moment it starts and says what it was told, as
+/// hex. It waits long for the answer, so that a busy machine cannot make it give up.
+const ASK_FOR_THE_CURSOR: &str = "stty raw -echo min 0 time 100; printf '\\033[6n'; \
+     got=$(dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -d ' \\n'); \
+     stty sane; echo \"got:$got\"";
+
+/// A program that a command starts for a pane (`bateri split -- PROGRAM`) runs before the app has
+/// made the pane, and asks its terminal the moment it starts. kablo's command has the terminal
+/// keep the questions for that pane, and the pane the app makes for a terminal that runs already
+/// (from now on, with a picture of the screen: [`crate::kablo::hub::Hub::resume`]) is shown the
+/// question after the picture: its answer is the one the program hears. Answered by the terminal
+/// itself, which shows no views, a program that shows one takes its pane for a plain terminal (an
+/// editor opened with `bateri split -- textpen FILE` on a server came up as `vi`).
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_a_command_started_for_a_pane_is_answered_by_the_pane_that_is_placed() {
+    use crate::hold::wire::Target;
+    use crate::kablo::service::tests::Holder;
+    use kablo_bateri::message::hex_word;
+
+    let Some(mut here) = Here::with_panes("placed") else {
+        return;
+    };
+    let kablo = here
+        .ground
+        .kept
+        .clone()
+        .expect("the kablo that was installed");
+    // The command as the app of another machine carries it here (`-S`): it starts the terminal
+    // and says its number, and the pane is asked for by the one that is told the number.
+    let words = ["split", "--", "/bin/sh", "-c", ASK_FOR_THE_CURSOR].map(hex_word);
+    let ran = Command::new(&kablo)
+        .args(["bateri", "--hex"])
+        .args(&words)
+        .env(sockdir_variable(), &here.ground.sockets)
+        .env("HOME", &here.ground.home)
+        .env_remove("XDG_DATA_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("kablo");
+    let said = String::from_utf8_lossy(&ran.stdout).into_owned();
+    assert!(
+        ran.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let id = said.trim().rsplit('\n').next().unwrap_or_default();
+    here.ground
+        .made
+        .push(SessionId::new(id).expect("the number of the terminal"));
+    // The program has asked by now, and its terminal has had the time to answer, had it meant to.
+    thread::sleep(Duration::from_millis(400));
+
+    let mut pane = Holder::start(
+        here.service.socket(),
+        id,
+        Target::Resume {
+            account: ACCOUNT.into(),
+            offset: None,
+        },
+    );
+    let shown = |pane: &Holder| String::from_utf8_lossy(&pane.shown.bytes()).into_owned();
+    waits_for("the question is shown to the pane", || {
+        let shown = shown(&pane);
+        // Answered already, the pane is shown what the program said of it, in a picture.
+        assert!(
+            !shown.contains("got:"),
+            "the terminal answered for itself before its pane came: {shown:?}"
+        );
+        shown.contains("\x1b[6n")
+    });
+    pane.typed.write_all(b"\x1b[9;9R").expect("typed");
+    waits_for("the program hears the pane", || {
+        let shown = shown(&pane);
+        assert!(
+            !shown.contains("got:1b5b313b3152"),
+            "the terminal answered for itself: {shown:?}"
+        );
+        shown.contains("got:1b5b393b3952")
+    });
+}
+
+/// The same on this computer, with a program that shows a view: `bateri split -- PROGRAM` in a
+/// terminal here starts the program in a terminal of this computer's kablo, and the pane the app
+/// makes for it reads that terminal from its first byte, as a terminal it is shown again. The
+/// terminal kept the program's first questions for it, so nothing of what the pane reads is past
+/// that was answered already: the pane answers, and the view opens.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_a_command_started_here_shows_its_view_in_the_pane_that_is_placed() {
+    use bt_core::pencere::Action;
+    use kablo_bateri::message::hex_word;
+    use std::sync::atomic::Ordering;
+
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("placed-here");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let channel = LocalChannel::new(ground.home.clone());
+    let installed = ensure_here(&channel, &bundle, true).expect("kablo, installed");
+    let kablo = ground.home.join(&installed.path);
+    ground.kept = Some(kablo.clone());
+    let backend = RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+        streams: Default::default(),
+        stand_in: StandIn {
+            late: Some(Duration::from_millis(300)),
+            ..Default::default()
+        },
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+
+    // The command, as the app carries it to this computer for a program on a server (`-S
+    // @local`): it starts the program's terminal and says its number.
+    let options = demopen_options(&ground.home);
+    let program = options
+        .command
+        .as_ref()
+        .and_then(|(_, words)| words.last().cloned())
+        .expect("the program");
+    let words = ["split", "--", program.as_str(), "--files"].map(hex_word);
+    let ran = Command::new(&kablo)
+        .args(["bateri", "--hex-here"])
+        .args(&words)
+        .env(sockdir_variable(), &ground.sockets)
+        .env("HOME", &ground.home)
+        .env_remove("XDG_DATA_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("kablo");
+    let said = String::from_utf8_lossy(&ran.stdout).into_owned();
+    assert!(
+        ran.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let id = SessionId::new(said.trim().rsplit('\n').next().unwrap_or_default())
+        .expect("the number of the terminal");
+    ground.made.push(id.clone());
+
+    // The pane the app makes for it: the terminal is written beside the pane first, and the
+    // pane finds it there.
+    let pane = options.pane_uuid.clone().expect("a pane");
+    ledger.shown(ACCOUNT, &id, Some(&pane));
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    let stream = service
+        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .expect("the terminal of this Mac that was started");
+    assert_eq!(ledger.terminals_of(ACCOUNT), [id], "found, not made again");
+    let wake = PaneFlag::default();
+    let pending = Arc::clone(&wake.pending);
+    let session = Arc::new(
+        bt_core::Session::streamed(options, Arc::new(wake), stream)
+            .expect("a session over the stream"),
+    );
+
+    let begun = Instant::now();
+    let mut started = false;
+    while !started {
+        if pending.swap(false, Ordering::AcqRel) {
+            started = session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::StartView(_)));
+        }
+        // A program that was told of a terminal that shows no views writes its list as text
+        // and ends.
+        assert!(
+            started || (session.reader_alive() && begun.elapsed() < Duration::from_secs(20)),
+            "the program was not answered by its pane and shows no view: {:?}",
+            screen(&session)
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    drop(session);
+    service.stop();
+}
+
 /// Has the program receive `size` bytes of a file the pane gives it, and says how long it took
 /// (from the call to its answer), the way the pane's turn drives the session.
 #[allow(clippy::too_many_arguments)]
@@ -2219,11 +2410,33 @@ impl Here {
         Here::with(name, None, Some(mailer))
     }
 
+    /// As [`Here::new`], where a holder that connects is in a pane of the app's.
+    fn with_panes(name: &str) -> Option<Here> {
+        Here::standing_in(
+            name,
+            StandIn {
+                panes: true,
+                ..StandIn::default()
+            },
+        )
+    }
+
     fn with(
         name: &str,
         shell: Option<PathBuf>,
         mailer: Option<Arc<dyn Fn(crate::kablo::service::Letter) + Send + Sync>>,
     ) -> Option<Here> {
+        Here::standing_in(
+            name,
+            StandIn {
+                shell,
+                mailer,
+                ..StandIn::default()
+            },
+        )
+    }
+
+    fn standing_in(name: &str, stand_in: StandIn) -> Option<Here> {
         let Some(bundle) = release() else {
             eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
             return None;
@@ -2242,11 +2455,7 @@ impl Here {
             home: ground.home.clone(),
             sockets: ground.sockets.clone(),
             streams: Default::default(),
-            stand_in: StandIn {
-                shell,
-                mailer,
-                ..StandIn::default()
-            },
+            stand_in,
         });
         let ledger = Arc::new(Ledger::memory());
         let service =
