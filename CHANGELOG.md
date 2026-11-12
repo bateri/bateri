@@ -16,7 +16,7 @@ of every installed copy. A version without a section is not released.
 
 - **A tab dragged in the side column lands where you let it go.** Under a row that shows what its agent said or asks (`tab_details`), and under an agent's rows in Activity, the rows were read as standing higher than they are drawn: the tab landed a row or more below the pointer, and the line that marks the place stood in the wrong gap. A pane dragged onto the column was misplaced the same way.
 - **`bateri split -- textpen FILE` opens the file in textpen in an `ssh` terminal.** A program started with `bateri split`, `tab` or `window` on a server asked its terminal whether it can show its page before the new pane was connected, and came up as a plain editor (`vi`). The pane now answers it.
-- **A pane opened for a file on a server says why it stays empty.** When the program could not be started, the pane closed before its one line could be read, or turned into a plain `ssh` login. The line now stays, with `Press Enter to close` under it, and the pane never becomes an `ssh` or a shell.
+- **A pane that could not open a file on a server stays until you have read it.** When the program could not be started, the pane closed before its one line could be read, or turned into a plain `ssh` login. The line now stays, with `Press Enter to close` under it, and the pane never becomes an `ssh` or a shell.
 
 ## [0.28.1] - 2026-11-12
 
