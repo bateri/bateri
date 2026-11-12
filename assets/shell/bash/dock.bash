@@ -88,6 +88,29 @@ __bateri_dock_arm() {
 }
 
 
+# Moves the caret to the start of a fresh row when the output of a command left it inside one
+# (`printf x`, a file without a final newline). bash draws the prompt where the caret is, and the
+# terminal reads the row the prompt is on as the dock's line: the output would leave the grid and
+# show in the dock from the prompt's third column on. zsh (`PROMPT_SP`) and fish move to a fresh
+# row themselves; bash does not.
+#
+# zsh's way, without its mark: as many spaces as the row has columns, then a carriage return.
+# From the first column they fill the row and the wrap is left pending, so the return goes back
+# to the start of the same row; from any other column they wrap onto the next row and the return
+# goes to its start. Nothing is asked of the terminal, so nothing is waited for. Called LAST in
+# `PROMPT_COMMAND` (from `__bateri_dock_ps1`), so text a user's entry printed is moved past too.
+#
+# Known limits, both zsh's too. The output's row now soft-wraps into the prompt's: a resize while
+# that prompt is up reflows the prompt onto it and readline's redraw writes over the output, as
+# zsh's and fish's do. `COLUMNS` is readline's, current at the prompt, and after a command where
+# `checkwinsize` is on (bash 5's default); a resize during a command under bash 4.4 can leave it
+# narrower than the row, and then the prompt stays on the output's row. Without a usable
+# `COLUMNS` nothing is printed.
+__bateri_dock_fresh_line() {
+  [[ ${COLUMNS-} =~ ^[1-9][0-9]{0,4}$ ]] || return 0
+  printf '%*s\r' "$COLUMNS" ''
+}
+
 # The prompt the terminal draws a dock for, set at every prompt (`PS1`, and `PS2` empty): nothing of
 # the user's. `$1` is the anchor (the OSC 8 target of this prompt's block), `$2` the remote shell's
 # identity `<P>.<S>.<n>` — empty for the local shell.
@@ -115,8 +138,9 @@ __bateri_dock_arm() {
 #   edit gate for a line with a line break in it (the keys go to readline as they are typed).
 #
 # The prompt is rebuilt at every prompt, from nothing: a theme that rewrites `PS1` is taken back
-# at the next one.
+# at the next one. The caret is moved to a fresh row first (`__bateri_dock_fresh_line`).
 __bateri_dock_ps1() {
+  __bateri_dock_fresh_line
   local ready= tag= mark=
   if [[ -n ${2-} ]]; then
     tag="bt_remote=$2;"

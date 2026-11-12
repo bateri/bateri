@@ -2674,7 +2674,9 @@ mod remote_shells {
     use kablo_bateri::paths;
 
     use super::{boot, boot_in, remote_command};
-    use crate::child::tests::{click_dock, read_dock, screen};
+    use crate::child::tests::{
+        click_dock, output_without_a_final_newline_stays_on_the_grid, read_dock, screen,
+    };
     use crate::child::{SilentWake, wait_until};
     use crate::settings::TempRoot;
 
@@ -3715,6 +3717,25 @@ mod remote_shells {
         };
         the_server_shell_has_a_dock("bash", &session, true);
         close(&session);
+    }
+
+    /// A command whose output does not end its last line, on a server: the output stays on the
+    /// grid and the next prompt's line starts empty, in each of the three shells (bash moves its
+    /// prompt to a fresh row from the dock's own file; zsh and fish do it themselves).
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_server_output_without_a_final_newline_stays_on_the_grid() {
+        for (name, files) in [
+            ("bash", BASH_THEME),
+            ("zsh", ZSH_THEME),
+            ("fish", FISH_THEME),
+        ] {
+            let Some((session, _root)) = docked(name, "no-newline", files, &[]) else {
+                continue;
+            };
+            output_without_a_final_newline_stays_on_the_grid(name, &session);
+            close(&session);
+        }
     }
 
     /// zsh keeps the display of its line editor on a mirror (`8133;u` and the rest, which the

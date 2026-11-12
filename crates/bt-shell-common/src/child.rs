@@ -2779,6 +2779,67 @@ pub(crate) mod tests {
         state
     }
 
+    /// A command whose output does not end its last line, in a shell whose dock line is read
+    /// from the grid: the output stays on the grid, on a row of its own, the next prompt's line
+    /// starts empty, and the next command is a block of its own on the row after the output. A
+    /// prompt drawn after the output, on the same row, makes that row the input line: the grid
+    /// hides the output and the dock reads it from the prompt's third column (`llo world!`).
+    ///
+    /// Not asked: a resize while that prompt is up. The row after the output is the output row's
+    /// soft-wrapped continuation (zsh's `PROMPT_SP` shape, which fish and the bash dock share),
+    /// a reflow pulls the prompt up onto it and the shell's redraw writes over the output — the
+    /// same in all three shells (measured).
+    pub(crate) fn output_without_a_final_newline_stays_on_the_grid(name: &str, session: &Session) {
+        let blocks = std::cell::RefCell::new(Blocks::default());
+        let rows = || screen(session, &mut blocks.borrow_mut());
+        let output_row =
+            |rows: &[String]| rows.iter().position(|row| row.starts_with("Hello world!"));
+        session.write(b"printf 'Hello world!'\n");
+        wait_until(
+            &format!("{name}: the output was not on the grid, on a row of its own"),
+            || output_row(&rows()).is_some(),
+        );
+        wait_until(
+            &format!("{name}: the next prompt's dock did not start empty"),
+            || {
+                let dock = read_dock(session, &blocks);
+                dock.status == DockStatus::Live && dock.buffer.is_empty()
+            },
+        );
+        session.write(b"echo next");
+        wait_until(
+            &format!("{name}: the dock did not show the typed line alone"),
+            || read_dock(session, &blocks).buffer == "echo next",
+        );
+        assert!(
+            output_row(&rows()).is_some(),
+            "{name}: the output left the grid when a line was typed: {:?}",
+            rows()
+        );
+        session.write(b"\n");
+        wait_until(&format!("{name}: the next command did not run"), || {
+            rows().iter().any(|row| row == "next")
+        });
+        let mut now = Blocks::default();
+        let drawn = screen(session, &mut now);
+        let output = output_row(&drawn);
+        let command = drawn.iter().position(|row| row.trim_start() == "echo next");
+        assert!(
+            output.is_some() && command.is_some_and(|command| Some(command) > output),
+            "{name}: the output and the next command are not two rows: {drawn:?}"
+        );
+        let anchored: Vec<usize> = now
+            .as_slice()
+            .iter()
+            .map(|block| usize::from(block.row))
+            .collect();
+        assert!(
+            command.is_some_and(|command| anchored.contains(&command))
+                && !output.is_some_and(|output| anchored.contains(&output)),
+            "{name}: the next command's block is not on its own row: {anchored:?} {drawn:?}"
+        );
+    }
+
     /// A fish session with a dock, a prompt of the user's and a right prompt of the user's,
     /// both unique so that a claim "it is not drawn" cannot be fooled by other text.
     fn spawn_fish_dock(fish: &Fish, root: &TempRoot) -> Session {
@@ -2795,6 +2856,18 @@ pub(crate) mod tests {
                 .is_some_and(|state| state.phase == ShellPhase::Input)
         });
         session
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_fish_output_without_a_final_newline_stays_on_the_grid() {
+        // fish moves its prompt to a fresh row itself (its omitted-newline mark); the guard
+        // is that the dock keeps relying on it.
+        let Some(fish) = fish() else { return };
+        let root = TempRoot::new("fish-no-newline");
+        let session = spawn_fish_dock(&fish, &root);
+        output_without_a_final_newline_stays_on_the_grid("fish", &session);
+        session.shutdown();
     }
 
     #[test]
@@ -4055,6 +4128,21 @@ pub(crate) mod tests {
         wait_until("the command after the cancelled line did not run", || {
             rows().iter().any(|row| row == "after")
         });
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_bash_output_without_a_final_newline_stays_on_the_grid() {
+        // bash draws its prompt where the output left the cursor; the dock's prompt moves to a
+        // fresh row first (`dock.bash`, the same file a server's bash reads).
+        let Some(bash) = bash() else { return };
+        let root = TempRoot::new("bash-no-newline");
+        let home = root.0.join("home");
+        write_home_file(&home, ".bash_profile", "PS1='$ '\n");
+        let session = spawn_bash_dock(&bash, &home, &[]);
+        at_the_prompt(&session);
+        output_without_a_final_newline_stays_on_the_grid("bash", &session);
         session.shutdown();
     }
 

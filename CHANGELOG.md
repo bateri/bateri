@@ -23,6 +23,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **In bash, output that does not end with a newline stays where it was printed.** After `cat` of a file without a final newline (or `printf 'text'`), the text disappeared from the terminal and showed up in the input box, missing its first two letters. The prompt now starts on a new line, as it does in zsh and fish. On a server, a shell started after the update has the fix.
 - **A zoomed pane keeps its bar.** The bar, with the pane's name and buttons, was cut off above the tab while the pane was zoomed.
 - **A button's tip names the key that runs its command on your keyboard.** On a keyboard that is not a US one macOS moves some punctuation shortcuts (⌘] is ⌘Ü on a Turkish keyboard), and a button's tip still named the US key.
 - **A tab dragged in the side column lands where you let it go.** Under a row that shows what its agent said or asks (`tab_details`), and under an agent's rows in Activity, the rows were read as standing higher than they are drawn: the tab landed a row or more below the pointer, and the line that marks the place stood in the wrong gap. A pane dragged onto the column was misplaced the same way.
