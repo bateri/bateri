@@ -87,7 +87,10 @@ mod tests {
         };
         assert!(demo.handle(Event::Input(escape)).expect("a reply").close);
         let moved = demo
-            .handle(Event::Input(Input::Move(Point::new(5.0, 50.0))))
+            .handle(Event::Input(Input::Move {
+                at: Point::new(5.0, 50.0),
+                mods: Mods::default(),
+            }))
             .expect("a reply");
         assert!(!moved.redraw);
     }

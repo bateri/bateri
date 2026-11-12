@@ -2240,6 +2240,11 @@ pub struct PaneIvars {
     /// program opened: whose it is, the handle its input goes by, the filter's text field, the
     /// pointer's tracking area (`crate::native_page`).
     page_up: RefCell<Option<crate::native_page::Page>>,
+    /// How many points the text of the page that is up is larger (or smaller) than the terminal's:
+    /// what the page said by `text_size` (`pencere_drive::Host::text_size`), 0 for a page that
+    /// said none. The terminal's own text does not change by it: it is the page's alone, and
+    /// forgotten where the page goes ([`TerminalPane::take_page_down`]).
+    page_text_size: Cell<i32>,
     /// How the terminal draws its cursor and its selection, told to the page that is up
     /// (`pencere.terminal_look()`): the part that is the person's settings (`look_base`, from
     /// the birth settings and the save-time path alike, [`TerminalPane::set_terminal_look`]) and
@@ -2999,6 +3004,7 @@ impl TerminalPane {
             stage: RefCell::new(None),
             page_words: RefCell::new(None),
             page_up: RefCell::new(None),
+            page_text_size: Cell::new(0),
             look_base: Cell::new(look_base),
             look: LookSlot::new(look_base),
             unseen_wake: Cell::new((0, None)),
@@ -4294,6 +4300,12 @@ impl TerminalPane {
             self.refresh_geometry();
         }
         // A page of the kit is as large as the terminal's text, Bigger and Smaller with it.
+        self.apply_page_zoom();
+    }
+
+    /// The page that is up is told how large it is drawn now ([`TerminalPane::page_zoom`]) and
+    /// drawn again: after the terminal's text changed size, or the page said its own.
+    fn apply_page_zoom(&self) {
         if let Some(page) = self.ivars().page_up.borrow().as_ref() {
             let zoom = self.page_zoom();
             page.fields.set_zoom(zoom);
@@ -4301,6 +4313,16 @@ impl TerminalPane {
             if let Some(link) = self.link() {
                 link.poke_page();
             }
+        }
+    }
+
+    /// The page that is up says how many points larger than the terminal's its text is (negative:
+    /// smaller): its own size, which the terminal's does not follow. Held to what a page can be
+    /// drawn at ([`TerminalPane::page_zoom`]); said again, nothing is done.
+    fn set_page_text_size(&self, points: i32) {
+        let points = points.clamp(-PAGE_TEXT_SIZE_LIMIT, PAGE_TEXT_SIZE_LIMIT);
+        if self.ivars().page_text_size.replace(points) != points {
+            self.apply_page_zoom();
         }
     }
 
@@ -4317,7 +4339,7 @@ impl TerminalPane {
     /// to the kit's ([`bt_shell_common::native_view::Placement::zoom_for`]).
     fn page_zoom(&self) -> f32 {
         let font = self.ivars().zoom.get().apply(&self.ivars().font.borrow());
-        bt_shell_common::native_view::Placement::zoom_for(font.size)
+        page_text_zoom(font.size, self.ivars().page_text_size.get())
     }
 
     /// The fields of the page `handle` drives: made and moved as its outline says, the size of
@@ -4329,6 +4351,8 @@ impl TerminalPane {
         theme: &bt_core::Theme,
         family: Option<String>,
     ) -> Rc<crate::native_page::PageFields> {
+        // A page is its own: what the one before it said of its text is not this one's.
+        self.ivars().page_text_size.set(0);
         let zoom = self.page_zoom();
         let fields = crate::native_page::PageFields::new(self, *theme, family, zoom);
         // What AppKit says first, then the page borrowed: nothing of the pane runs while it is.
@@ -4392,7 +4416,14 @@ impl TerminalPane {
             },
             held,
         );
-        handle.input(Input::Release { at, button }, held);
+        handle.input(
+            Input::Release {
+                at,
+                button,
+                mods: held,
+            },
+            held,
+        );
         self.drain_page();
     }
 
@@ -6150,6 +6181,7 @@ impl TerminalPane {
             // The header says the terminal's words again.
             self.host().program_changed(self.ivars().id);
         }
+        self.ivars().page_text_size.set(0);
         if let Some(page) = self.ivars().page_up.take() {
             // The keyboard was in a field: it goes back to the terminal.
             let typing = page.fields.typing();
@@ -6541,12 +6573,27 @@ impl TerminalPane {
     /// The wheel or the trackpad over a page of the kit's, in the view's points, with the part of
     /// the gesture AppKit says it is: the pane scrolls the page's box under the pointer
     /// (`pencere_drive::Page::wheel`). `true` when a page is up.
-    pub(crate) fn page_wheel(&self, at: PagePoint, dx: f32, dy: f32, phase: Phase) -> bool {
+    pub(crate) fn page_wheel(
+        &self,
+        at: PagePoint,
+        dx: f32,
+        dy: f32,
+        phase: Phase,
+        precise: bool,
+        mods: PageMods,
+    ) -> bool {
+        self.page_touch(|page| page.wheel(at, dx, dy, phase, precise, mods))
+    }
+
+    /// What a trackpad's fingers did over a page of the kit's (a pinch, a rotation, a double tap,
+    /// a swipe, the force of a press): `tell` says it to the page, and what the page answered is
+    /// done. `true` when a page is up: nothing of it is the grid's.
+    pub(crate) fn page_touch(&self, tell: impl FnOnce(&PageHandle)) -> bool {
         if !self.page_is_up() {
             return false;
         }
         if let Some(handle) = self.page_handle() {
-            handle.wheel(at, dx, dy, phase, crate::native_page::held_mods());
+            tell(&handle);
             self.drain_page();
         }
         true
@@ -8319,6 +8366,20 @@ pub(crate) fn new_pane_uuid() -> PaneUuid {
 /// The frames' clock, the base of the link's tick stamps (`CACurrentMediaTime`, the pacer's): the
 /// clock a page of the kit is given to read between frames (`Opening::clock`), so that what the
 /// person does between frames and the frames themselves are on one clock.
+/// The most points a page's text may be said larger or smaller than the terminal's: a page that
+/// says more has said what no size can show ([`page_text_zoom`] holds the size to the range a page
+/// is drawn in), and the number stays one a person can step back from.
+const PAGE_TEXT_SIZE_LIMIT: i32 = 100;
+
+/// How much larger than its own size a page is drawn where the terminal's text is `points` large
+/// and the page asked for `extra` points more: the terminal's size with the page's own, held to
+/// the range a page can be laid out in. A size of nothing or less is the least, not the
+/// kit's fallback of a size that is not one ([`bt_shell_common::native_view::Placement::zoom_for`]
+/// takes it for 1).
+fn page_text_zoom(points: f64, extra: i32) -> f32 {
+    bt_shell_common::native_view::Placement::zoom_for((points + f64::from(extra)).max(1.0))
+}
+
 fn frames_clock() -> f64 {
     CACurrentMediaTime()
 }
@@ -8424,6 +8485,15 @@ impl PageDriveHost for PageHost<'_> {
                 Keyboard::Field(id) => fields.send_keyboard(Some(id)),
                 Keyboard::Page => fields.send_keyboard(None),
             }
+        }
+    }
+
+    /// How many points larger than the terminal's the page's text is, in what it said to the
+    /// person's act or not: the page's own size, the terminal's text unchanged
+    /// ([`TerminalPane::set_page_text_size`]).
+    fn text_size(&mut self, points: i32) {
+        if self.up() {
+            self.0.set_page_text_size(points);
         }
     }
 
@@ -9791,11 +9861,11 @@ mod tests {
         };
         // Nothing hands the page a move without asking where the pointer is.
         assert_eq!(
-            view.matches("Input::Move(").count(),
+            view.matches("Input::Move {").count(),
             1,
             "the page is moved in one place"
         );
-        assert!(body(view, "    fn page_pointer(").contains("Input::Move("));
+        assert!(body(view, "    fn page_pointer(").contains("Input::Move {"));
         assert!(body(view, "    fn page_pointer(").contains("self.over_page("));
         for signature in ["        fn mouse_moved(", "        fn mouse_entered("] {
             let moved = body(view, signature);
@@ -9884,6 +9954,11 @@ mod tests {
         for call in [
             ".page().input(",
             ".page().wheel(",
+            ".page().magnify(",
+            ".page().rotate(",
+            ".page().smart_magnify(",
+            ".page().swipe(",
+            ".page().pressure(",
             ".page().key_up(",
             ".page().set_active(",
             ".page().key(",
@@ -9900,11 +9975,24 @@ mod tests {
             input.contains(&format!("handle.input(input, {held})")),
             "{input}"
         );
+        // The wheel and the fingers say the modifiers their own event was made with, to the
+        // handle, which catches the page up with them before it tells anything.
         let wheel = body(pane, "    pub(crate) fn page_wheel(");
         assert!(
-            wheel.contains(&format!("{held})")) && wheel.contains("handle.wheel("),
+            wheel.contains("self.page_touch(")
+                && wheel.contains("page.wheel(at, dx, dy, phase, precise, mods)"),
             "{wheel}"
         );
+        let touch = body(pane, "    pub(crate) fn page_touch(");
+        assert!(
+            touch.contains("tell(&handle);") && touch.contains("self.drain_page()"),
+            "{touch}"
+        );
+        for selector in ["magnify", "rotate"] {
+            let tell = format!("page.{selector}(");
+            let at = view.find(&tell).unwrap_or_else(|| panic!("{tell}"));
+            assert!(view[at..at + 80].contains("mods)"), "{tell}");
+        }
         let live = body(include_str!("native_page.rs"), "pub(crate) fn held_mods(");
         assert!(live.contains("NSEvent::modifierFlags_class()"), "{live}");
         // The modifiers alone, the keyboard's way out and the pointer's go through the same.
@@ -9913,9 +10001,9 @@ mod tests {
         // The one move, press, release and wheel of the view reach the page by `page_input` and
         // `page_wheel`, which drain what it said (the pointer's shape, the clock) right after.
         assert!(body(view, "        fn flags_changed(").contains("pane.page_input(Input::Mods("));
-        assert!(body(view, "    fn page_pointer(").contains("pane.page_input(Input::Move("));
+        assert!(body(view, "    fn page_pointer(").contains("pane.page_input(Input::Move {"));
         assert!(body(view, "    fn page_pointer_left(").contains("pane.page_input(Input::Leave)"));
-        assert!(body(pane, "    pub(crate) fn page_wheel(").contains("self.drain_page()"));
+        assert!(touch.contains("self.drain_page()"), "{touch}");
         assert!(input.contains("self.drain_page()"), "{input}");
     }
 
@@ -10307,5 +10395,61 @@ mod tests {
             ..info
         };
         assert_eq!(super::block_meta(&restored, clock), "");
+    }
+    /// A page names its text size by points over the terminal's: the page is drawn that much
+    /// larger, held to the range a page can be laid out in, and a size of nothing is the least,
+    /// not the kit's fallback of 1 for what is no size.
+    #[test]
+    fn a_page_says_its_text_size_in_points_over_the_terminals() {
+        let kit = f64::from(bt_shell_common::native_view::ZOOM_TEXT);
+        // The terminal's size and no more: the page as large as the terminal's text.
+        assert!((super::page_text_zoom(kit, 0) - 1.0).abs() < 1e-6);
+        // Two points more, and two fewer.
+        assert!((super::page_text_zoom(kit, 2) - (kit as f32 + 2.0) / kit as f32).abs() < 1e-6);
+        assert!(super::page_text_zoom(kit, 2) > super::page_text_zoom(kit, 0));
+        assert!(super::page_text_zoom(kit, -2) < super::page_text_zoom(kit, 0));
+        // The range a page is drawn in, both ends: a page that says a great deal more or less is
+        // held to it, and a size below nothing is the least.
+        assert_eq!(super::page_text_zoom(kit, 1_000), 4.0);
+        assert_eq!(super::page_text_zoom(kit, -1_000), 0.5);
+        assert_eq!(super::page_text_zoom(kit, i32::MIN), 0.5);
+        assert_eq!(super::page_text_zoom(kit, i32::MAX), 4.0);
+        // The terminal's text bigger, the page with it.
+        assert!(super::page_text_zoom(kit + 4.0, 0) > super::page_text_zoom(kit, 0));
+    }
+
+    /// What a page says of its text size is the page's, and the terminal's own text does not
+    /// follow it: it is applied where the page's zoom is (`apply_page_zoom`), and the terminal's
+    /// Bigger and Smaller (`apply_font`) keep it; the page that goes, or the next one, starts at
+    /// the terminal's size. A source scan, because a pane needs a window server.
+    #[test]
+    fn a_pages_text_size_is_its_own_and_goes_with_the_page() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |name: &str| {
+            let at = pane.find(name).unwrap_or_else(|| panic!("{name}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        // The terminal's text is not touched by it.
+        let said = body_of("    fn set_page_text_size(");
+        assert!(said.contains("self.apply_page_zoom();"));
+        assert!(
+            !said.contains("set_font") && !said.contains("zoom.set"),
+            "{said}"
+        );
+        // Its zoom is one place, the terminal's size with the page's own.
+        assert!(
+            body_of("    fn page_zoom(")
+                .contains("page_text_zoom(font.size, self.ivars().page_text_size.get())")
+        );
+        assert!(body_of("    fn apply_font(").contains("self.apply_page_zoom();"));
+        // The host says it, while the page is up.
+        let host = body_of("    fn text_size(&mut self, points: i32)");
+        assert!(
+            host.contains("if self.up()") && host.contains("self.0.set_page_text_size(points);")
+        );
+        // Forgotten where the page goes, and not carried to the next.
+        assert!(body_of("    fn take_page_down(").contains("self.ivars().page_text_size.set(0);"));
+        assert!(body_of("    fn page_fields(").contains("self.ivars().page_text_size.set(0);"));
     }
 }

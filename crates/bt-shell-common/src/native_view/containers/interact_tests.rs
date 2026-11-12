@@ -97,7 +97,14 @@ fn click(page: &mut Containers, laid: &Laid, id: Id, button: Button) -> Reply {
         },
         laid,
     );
-    page.input(Input::Release { at, button }, laid)
+    page.input(
+        Input::Release {
+            at,
+            button,
+            mods: Mods::default(),
+        },
+        laid,
+    )
 }
 
 fn names(page: &Containers) -> Vec<&'static str> {
@@ -343,6 +350,7 @@ fn a_click_chooses_the_row_and_a_click_on_a_project_folds_it() {
         Input::Release {
             at,
             button: Button::Left,
+            mods: Mods::default(),
         },
         &laid,
     );
@@ -355,11 +363,23 @@ fn the_pointer_over_a_row_lights_it_and_a_pointer_that_stays_in_it_costs_no_fram
     let mut page = Containers::fixture();
     let laid = lay(&mut page, 600.0);
     let on = center(&laid, RowKey::Container("db").id());
-    let first = page.input(Input::Move(on), &laid);
+    let first = page.input(
+        Input::Move {
+            at: on,
+            mods: Mods::default(),
+        },
+        &laid,
+    );
     assert!(first.redraw);
     assert_eq!(first.cursor, Cursor::Pointer);
     // The same row, another point of it: nothing changed, nothing to draw.
-    let again = page.input(Input::Move(Point::new(on.x + 6.0, on.y)), &laid);
+    let again = page.input(
+        Input::Move {
+            at: Point::new(on.x + 6.0, on.y),
+            mods: Mods::default(),
+        },
+        &laid,
+    );
     assert!(!again.redraw);
     assert_eq!(again.cursor, Cursor::Pointer);
     assert!(page.animating(), "the highlight is coming up");
@@ -374,7 +394,13 @@ fn the_pointer_over_a_row_lights_it_and_a_pointer_that_stays_in_it_costs_no_fram
     assert!(!page.animating());
     assert!(page.glow(RowKey::Container("db").id()) > 0.99);
     // Off the rows: the hand goes and the highlight fades out.
-    let gone = page.input(Input::Move(Point::new(990.0, 2.0)), &laid);
+    let gone = page.input(
+        Input::Move {
+            at: Point::new(990.0, 2.0),
+            mods: Mods::default(),
+        },
+        &laid,
+    );
     assert!(gone.redraw);
     assert_eq!(gone.cursor, Cursor::Arrow);
     assert!(page.animating());
@@ -387,7 +413,16 @@ fn reduce_motion_lights_a_row_at_once_and_asks_for_no_more_frames() {
     page.advance(1.0, true);
     let laid = lay(&mut page, 600.0);
     let on = center(&laid, RowKey::Container("db").id());
-    assert!(page.input(Input::Move(on), &laid).redraw);
+    assert!(
+        page.input(
+            Input::Move {
+                at: on,
+                mods: Mods::default()
+            },
+            &laid
+        )
+        .redraw
+    );
     assert!(
         page.glow(RowKey::Container("db").id()) > 0.99,
         "already at full"
@@ -698,6 +733,8 @@ fn only_the_rows_near_what_is_in_view_are_built_however_long_the_list_is() {
             x: None,
             y: Some(150_000.0),
             animate: false,
+            zoom: None,
+            at: None,
         });
     });
     let deep = lay(&mut page, 600.0);
@@ -738,7 +775,8 @@ fn a_page_at_rest_asks_for_nothing() {
             .input(
                 Input::Release {
                     at: Point::new(5.0, 5.0),
-                    button: Button::Left
+                    button: Button::Left,
+                    mods: Mods::default(),
                 },
                 &laid
             )
@@ -752,7 +790,14 @@ fn the_pointer_takes_the_shape_of_what_it_is_over() {
     let laid = lay(&mut page, 600.0);
     let over = |page: &mut Containers, id: Id| {
         let at = center(&laid, id);
-        page.input(Input::Move(at), &laid).cursor
+        page.input(
+            Input::Move {
+                at,
+                mods: Mods::default(),
+            },
+            &laid,
+        )
+        .cursor
     };
     assert_eq!(
         over(&mut page, RowKey::Container("db").id()),

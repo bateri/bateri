@@ -45,8 +45,8 @@ use bt_gpu::{Renderer, UiContext, UiList, UiPage};
 use pencere_drive::{FrameAt, Host, Outline, Page, Painted, Placement, Route, Setup};
 use pencere_sandbox::{Assets, ModuleLimits, Program, Script};
 use pencere_view::{
-    Drawing as Drawn, Font, Id, Input, Key, Measure, Menu, MenuEntry, Metrics, Mods, Phase, Point,
-    Rect, TerminalLook, WallTime,
+    Drawing as Drawn, Font, GesturePhase, Id, Input, Key, Measure, Menu, MenuEntry, Metrics, Mods,
+    Phase, Point, Rect, TerminalLook, WallTime,
 };
 
 use super::containers::Demo;
@@ -364,7 +364,7 @@ impl PageHandle {
 
     /// The drive's page, for one call: what the pane tells it (`text`, `focus`, `pick`, `command`,
     /// `files`, `message`, `room`; the person's input goes by [`PageHandle::input`],
-    /// [`PageHandle::wheel`], [`PageHandle::key_up`] and the keyboard's coming and going by
+    /// [`PageHandle::wheel`], [`PageHandle::magnify`], [`PageHandle::key_up`] and the keyboard's coming and going by
     /// [`PageHandle::set_active`], which keep what the page knows of the modifiers), how it is to be
     /// (`set_zoom`, `set_scrolling`), its wakes while the pane is not seen (`wake_unseen`) and what
     /// it said (`drain`, done after the page is let go of: `Drained::deliver` calls back into the
@@ -377,15 +377,16 @@ impl PageHandle {
     /// drive hears a modifier only from the host (`flagsChanged` is the key window's alone), so a
     /// ⌘ pressed while another window had the keyboard is unknown to it when the pointer comes
     /// over an editor: before the pointer is told anything (a move, a press, a release) the page is
-    /// told the modifiers if they are not what it last heard (`Input::Mods`; the pointer's events
-    /// carry none), and the drive then draws what they make and takes the shape they give. What a
-    /// press, a key or `Mods` itself carries is what the page knows from then on, and the
-    /// pointer's leaving makes the drive forget them (so does the keyboard's leaving,
+    /// told the modifiers if they are not what it last heard (`Input::Mods`), and the drive then
+    /// draws what they make and takes the shape they give. What a move, a press, a release, a key
+    /// or `Mods` itself carries is what the page knows from then on (a host that has a pointer's
+    /// event makes it carry the modifiers it was made with: `Mods::default()` there is a ⌘ let go
+    /// of), and the pointer's leaving makes the drive forget them (so does the keyboard's leaving,
     /// [`PageHandle::set_active`]).
     pub fn input(&self, input: Input, held: Mods) {
         if matches!(
             input,
-            Input::Move(_) | Input::Press { .. } | Input::Release { .. }
+            Input::Move { .. } | Input::Press { .. } | Input::Release { .. } | Input::Extra { .. }
         ) {
             self.catch_up(held);
         }
@@ -394,17 +395,53 @@ impl PageHandle {
             Input::Mods(mods)
             | Input::Key { mods, .. }
             | Input::KeyUp { mods, .. }
-            | Input::Press { mods, .. } => self.told.set(mods),
+            | Input::Move { mods, .. }
+            | Input::Press { mods, .. }
+            | Input::Release { mods, .. }
+            | Input::Extra { mods, .. }
+            | Input::Scroll { mods, .. }
+            | Input::Magnify { mods, .. }
+            | Input::Rotate { mods, .. } => self.told.set(mods),
             Input::Leave => self.told.set(Mods::default()),
-            Input::Move(_) | Input::Release { .. } | Input::Scroll { .. } => {}
+            Input::SmartMagnify { .. } | Input::Swipe { .. } | Input::Pressure { .. } => {}
         }
     }
 
     /// The wheel or the trackpad over the page: the modifiers are caught up first, as for the
-    /// pointer ([`PageHandle::input`]).
-    pub fn wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase, held: Mods) {
+    /// pointer ([`PageHandle::input`]). `precise` says a trackpad's points, not a wheel's steps.
+    pub fn wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase, precise: bool, held: Mods) {
         self.catch_up(held);
-        self.page().wheel(at, dx, dy, phase);
+        self.page().wheel(at, dx, dy, phase, precise);
+    }
+
+    /// The fingers of a pinch over the page: the content is to be `1 + by` times as large as it
+    /// was at the gesture's last event. The modifiers are caught up first, as for the wheel (the
+    /// drive tells the page the ones it last heard).
+    pub fn magnify(&self, at: Point, by: f32, phase: GesturePhase, held: Mods) {
+        self.catch_up(held);
+        self.page().magnify(at, by, phase);
+    }
+
+    /// The fingers of a rotation over the page, by `degrees` (counter-clockwise is positive) since
+    /// the gesture's last event; the modifiers caught up as for a pinch.
+    pub fn rotate(&self, at: Point, degrees: f32, phase: GesturePhase, held: Mods) {
+        self.catch_up(held);
+        self.page().rotate(at, degrees, phase);
+    }
+
+    /// A double tap with two fingers over the page.
+    pub fn smart_magnify(&self, at: Point) {
+        self.page().smart_magnify(at);
+    }
+
+    /// A swipe of three fingers, one step (`dx`, `dy`: −1, 0 or 1; right and down are 1).
+    pub fn swipe(&self, dx: i32, dy: i32) {
+        self.page().swipe(dx, dy);
+    }
+
+    /// The force of a press on a trackpad that feels it, over the page.
+    pub fn pressure(&self, at: Point, stage: u8, pressure: f32) {
+        self.page().pressure(at, stage, pressure);
     }
 
     /// A key went up while the page has the keyboard: the drive takes its modifiers as it takes a
@@ -688,7 +725,7 @@ pub(super) mod tests {
     use pencere_drive::Host;
     use pencere_sandbox::Fault;
     use pencere_view::{
-        Cursor, DrawList, Fill, Input, KeyConvention, Keyboard, Menu, Paint, Phase,
+        Button, Cursor, DrawList, Fill, Input, KeyConvention, Keyboard, Menu, Paint, Phase,
     };
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
@@ -887,6 +924,20 @@ pub(super) mod tests {
             if let Input::Press { mods, .. } = input {
                 self.held = mods;
             }
+            // A move and a release carry the ones the system holds, as the host's do (the drive
+            // takes what an event says: `Mods::default()` is a ⌘ let go of).
+            let input = match input {
+                Input::Move { at, .. } => Input::Move {
+                    at,
+                    mods: self.held,
+                },
+                Input::Release { at, button, .. } => Input::Release {
+                    at,
+                    button,
+                    mods: self.held,
+                },
+                other => other,
+            };
             self.handle.input(input, self.held);
         }
 
@@ -926,7 +977,7 @@ pub(super) mod tests {
         }
 
         pub(in crate::native_view) fn wheel(&mut self, at: Point, dx: f32, dy: f32, phase: Phase) {
-            self.handle.wheel(at, dx, dy, phase, self.held);
+            self.handle.wheel(at, dx, dy, phase, false, self.held);
         }
 
         pub(in crate::native_view) fn text(&mut self, field: Id, text: &str) {
@@ -2292,13 +2343,84 @@ return {
         }
     }
 
+    /// What the person's fingers say reaches the page with the modifiers the system holds: the
+    /// drive hears a modifier from the host alone (`Page::wheel`, `magnify` and `rotate` tell the
+    /// page the ones it last heard), so a ⌘ pressed while another window had the keyboard must be
+    /// caught up before a pinch or a turn of the wheel, or the box a ⌘-wheel zooms scrolls instead.
+    /// A move and a release carry theirs, and the page knows them from then on.
+    #[test]
+    fn a_gesture_and_a_wheel_are_told_the_page_with_the_modifiers_held() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let renderer = Rc::new(renderer);
+        let command = Mods {
+            command: true,
+            ..Mods::default()
+        };
+        let at = Point::new(40.0, 60.0);
+        let (_page, handle) = containers_demo(opening(&renderer, None), || {});
+        let forget = |handle: &PageHandle| {
+            handle.input(Input::Leave, Mods::default());
+            assert!(
+                !handle.page().mods().command,
+                "the page forgot the modifiers"
+            );
+        };
+        type Tell<'a> = &'a dyn Fn(&PageHandle);
+        let tells: [(&str, Tell); 3] = [
+            ("wheel", &|handle| {
+                handle.wheel(at, 0.0, 4.0, Phase::Wheel, false, command);
+            }),
+            ("pinch", &|handle| {
+                handle.magnify(at, 0.1, GesturePhase::Move, command);
+            }),
+            ("rotation", &|handle| {
+                handle.rotate(at, 5.0, GesturePhase::Move, command);
+            }),
+        ];
+        for (name, tell) in tells {
+            forget(&handle);
+            tell(&handle);
+            assert!(
+                handle.page().mods().command,
+                "a {name} is told with the ⌘ the system holds"
+            );
+        }
+        // The pointer's own events carry them: what the page last heard is what they said.
+        forget(&handle);
+        handle.input(Input::Move { at, mods: command }, Mods::default());
+        assert!(handle.page().mods().command, "a move says ⌘ is held");
+        handle.input(
+            Input::Release {
+                at,
+                button: Button::Left,
+                mods: Mods::default(),
+            },
+            Mods::default(),
+        );
+        assert!(!handle.page().mods().command, "a release says it is let go");
+        // A button at the side is the pointer's, too.
+        handle.input(
+            Input::Extra {
+                at,
+                button: 4,
+                down: true,
+                mods: command,
+            },
+            Mods::default(),
+        );
+        assert!(handle.page().mods().command);
+    }
+
     /// The demo on the real renderer: it draws when it changed and rests, the fades that start
     /// with the pointer end by themselves, and the pane is told where its field goes. Skipped
     /// where no GPU device can be had.
     #[test]
     fn the_demo_rests_between_the_inputs_that_change_it_and_tells_the_pane_its_field() {
         use pencere_drive::Field;
-        use pencere_view::{Button, FieldKind};
+        use pencere_view::FieldKind;
         let Ok(renderer) = Renderer::system_default() else {
             eprintln!("skipped: no GPU device");
             return;
@@ -2363,8 +2485,23 @@ return {
 
         // The pointer over a row: one frame's worth of change, then fades until they end.
         let over_a_row = Point::new(300.0, 32.0 + 150.0);
-        assert!(answer(&handle, Input::Move(over_a_row)).redraw);
-        let same = answer(&handle, Input::Move(Point::new(301.0, 32.0 + 151.0)));
+        assert!(
+            answer(
+                &handle,
+                Input::Move {
+                    at: over_a_row,
+                    mods: Mods::default()
+                }
+            )
+            .redraw
+        );
+        let same = answer(
+            &handle,
+            Input::Move {
+                at: Point::new(301.0, 32.0 + 151.0),
+                mods: Mods::default(),
+            },
+        );
         assert!(!same.redraw, "the same row: no frame");
         build(&mut page, &renderer, &theme, 2.0);
         let frames = rest(&mut page, &handle, &renderer, &theme, false, 2.0);
@@ -2381,7 +2518,16 @@ return {
             minimum_contrast: MINIMUM_CONTRAST,
         });
         rest(&mut page, &handle, &renderer, &theme, true, 1.0);
-        assert!(answer(&handle, Input::Move(over_a_row)).redraw);
+        assert!(
+            answer(
+                &handle,
+                Input::Move {
+                    at: over_a_row,
+                    mods: Mods::default()
+                }
+            )
+            .redraw
+        );
         let frames = rest(&mut page, &handle, &renderer, &theme, true, 1.1);
         assert!(frames <= 2, "{frames}");
     }
@@ -2425,7 +2571,7 @@ return {
             .and_then(|laid| laid.bounds(list_id))
             .expect("the list");
         let over = Point::new(list.x + list.w / 2.0, list.y + list.h / 2.0);
-        page.wheel(over, 0.0, 120.0, Phase::Wheel);
+        page.wheel(over, 0.0, 120.0, Phase::Wheel, false);
         assert!(page.drain().redraw, "a frame is worth drawing");
         settle(&mut page);
         let offset = |page: &Page| {
@@ -2448,7 +2594,7 @@ return {
         let (y, end) = offset(&page).expect("the list");
         assert_eq!(y, end);
         // A wheel over what does not scroll is the page's: answered as the pointer is.
-        page.wheel(Point::new(2.0, 2.0), 0.0, 10.0, Phase::Wheel);
+        page.wheel(Point::new(2.0, 2.0), 0.0, 10.0, Phase::Wheel, false);
         let answers = settle(&mut page);
         assert!(
             answers.iter().any(|answer| answer.pointer),

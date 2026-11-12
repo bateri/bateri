@@ -354,6 +354,7 @@ fn an_input_method_composes_in_the_editor_and_a_press_ends_it() {
     rig.input(Input::Release {
         at,
         button: Button::Left,
+        mods: Mods::default(),
     });
     rig.settle(0.2);
     state(&mut rig);
@@ -436,6 +437,7 @@ fn the_bars_answer_the_pointer_before_the_page_and_the_wheel_scrolls_the_box_und
     rig.input(Input::Release {
         at: list(198.0, 90.0),
         button: Button::Left,
+        mods: Mods::default(),
     });
     rig.settle(0.4);
     // A press beside it is the page's.
@@ -489,7 +491,10 @@ fn a_reply_is_done_in_the_panes_order_and_what_the_person_does_back_is_told() {
         rig.key(key, mods);
         rig.settle(0.1);
     }
-    rig.input(Input::Move(Point::new(300.0, 32.0 + 300.0)));
+    rig.input(Input::Move {
+        at: Point::new(300.0, 32.0 + 300.0),
+        mods: Mods::default(),
+    });
     rig.settle(0.2);
     // The first line: the second is a rule, and a pick of a rule is not told the page.
     rig.pick(0);
@@ -890,7 +895,10 @@ fn on_a_word() -> Point {
 fn a_modifier_pressed_elsewhere_is_told_before_the_pointer_comes_over_the_editor() {
     // Without it, the control: the pointer over the word is the I-beam and no link was offered.
     let mut rig = words();
-    rig.input(Input::Move(on_a_word()));
+    rig.input(Input::Move {
+        at: on_a_word(),
+        mods: Mods::default(),
+    });
     frame(&mut rig, 0.3);
     assert_eq!(
         shapes(&mut rig).last().map(String::as_str),
@@ -900,7 +908,10 @@ fn a_modifier_pressed_elsewhere_is_told_before_the_pointer_comes_over_the_editor
 
     let mut rig = words();
     rig.hold(COMMAND);
-    rig.input(Input::Move(on_a_word()));
+    rig.input(Input::Move {
+        at: on_a_word(),
+        mods: Mods::default(),
+    });
     frame(&mut rig, 0.3);
     assert_eq!(
         shapes(&mut rig).last().map(String::as_str),
@@ -917,7 +928,10 @@ fn a_modifier_pressed_elsewhere_is_told_before_the_pointer_comes_over_the_editor
     // modifiers with the pointer's leaving, and is told them again with its first move.
     rig.input(Input::Leave);
     rig.hold(COMMAND);
-    rig.input(Input::Move(on_a_word()));
+    rig.input(Input::Move {
+        at: on_a_word(),
+        mods: Mods::default(),
+    });
     frame(&mut rig, 0.9);
     assert_eq!(
         shapes(&mut rig).last().map(String::as_str),
@@ -929,7 +943,10 @@ fn a_modifier_pressed_elsewhere_is_told_before_the_pointer_comes_over_the_editor
     rig.set_active(false);
     frame(&mut rig, 1.2);
     assert_eq!(rig.said(), "enter leave enter leave");
-    rig.input(Input::Move(Point::new(14.0, 32.0 + 12.0)));
+    rig.input(Input::Move {
+        at: Point::new(14.0, 32.0 + 12.0),
+        mods: Mods::default(),
+    });
     frame(&mut rig, 1.5);
     assert_eq!(rig.said(), "enter leave enter leave enter");
     // And the wheel: the page that does not know ⌘ is told it before the wheel.
@@ -956,7 +973,10 @@ fn the_pointers_rest_on_a_word_is_a_time_the_seen_pane_wakes_the_page_at() {
         None,
         "a page at rest waits for nothing"
     );
-    rig.input(Input::Move(on_a_word()));
+    rig.input(Input::Move {
+        at: on_a_word(),
+        mods: Mods::default(),
+    });
     rig.settle(0.2);
     assert_eq!(
         round(rig.wake_at()),
@@ -1056,6 +1076,7 @@ fn press_in_editor(rig: &mut PaneRig, button: Button, mods: Mods) {
     rig.input(Input::Release {
         at: Point::new(12.0, 32.0 + 12.0),
         button,
+        mods: Mods::default(),
     });
     rig.settle(0.0);
 }

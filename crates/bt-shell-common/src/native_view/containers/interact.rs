@@ -275,8 +275,9 @@ impl Containers {
 
     /// The host scrolled boxes of the page: the list is built again where what is in view comes
     /// near the end of the rows made.
-    pub fn scrolled(&mut self, boxes: &[(Id, pencere_view::Point)]) -> Reply {
-        let moved = self.list.scrolled(boxes);
+    pub fn scrolled(&mut self, boxes: &[pencere_view::Scrolled]) -> Reply {
+        let boxes: Vec<_> = boxes.iter().map(|boxed| (boxed.id, boxed.offset)).collect();
+        let moved = self.list.scrolled(&boxes);
         self.reply(moved)
     }
 
@@ -337,7 +338,7 @@ impl Containers {
     /// What the person did, with the page as it was last laid out (`laid`).
     pub fn input(&mut self, input: Input, laid: &dyn Queries) -> Reply {
         match input {
-            Input::Move(at) => {
+            Input::Move { at, .. } => {
                 self.pointer = Some(at);
                 let changed = self.hover_to(laid, Some(at));
                 self.reply(changed)
@@ -350,7 +351,7 @@ impl Containers {
             Input::Press {
                 at, button, mods, ..
             } => self.press(laid, at, button, mods),
-            Input::Release { at, button } => match button {
+            Input::Release { at, button, .. } => match button {
                 Button::Left => self.release(laid, at),
                 Button::Right | Button::Middle => self.reply(false),
             },
@@ -360,8 +361,17 @@ impl Containers {
                 self.reply(false)
             }
             Input::Key { key, mods } => self.key(key, mods, laid),
-            // The list reads no key that goes up, nor the modifiers alone.
-            Input::KeyUp { .. } | Input::Mods(_) => self.reply(false),
+            // The list reads no key that goes up, nor the modifiers alone, nor a button at the
+            // side, a pinch, a rotation, a swipe or the force of a press: they are the host's to
+            // tell and nothing of the list's.
+            Input::KeyUp { .. }
+            | Input::Mods(_)
+            | Input::Extra { .. }
+            | Input::Magnify { .. }
+            | Input::SmartMagnify { .. }
+            | Input::Rotate { .. }
+            | Input::Swipe { .. }
+            | Input::Pressure { .. } => self.reply(false),
         }
     }
 

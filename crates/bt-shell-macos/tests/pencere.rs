@@ -821,6 +821,34 @@ fn run(dir: &Path) {
     // outside the view, where the view cannot draw.
     let (area, bounds) = (web.frame(), pane.bounds());
     assert_eq!(area, bounds);
+    // The page's own events are the page's: a pinch, a double tap and a swipe reach its DOM as
+    // they are (the web view makes nothing of its own of them: no magnification), and nothing of
+    // the pane lies over it to take an event first — a hit in the middle of the pane is the view
+    // or something inside it. (Over a floating card the 5 point grips of its edge are the one
+    // thing that is above the view, and they are not in the middle.)
+    let kit = web
+        .clone()
+        .downcast::<objc2_web_kit::WKWebView>()
+        .expect("the view is a web view");
+    // SAFETY: reading a flag of a web view on the main thread.
+    assert!(
+        !unsafe { kit.allowsMagnification() },
+        "the web view magnifies itself"
+    );
+    let middle = NSPoint::new(bounds.size.width / 2.0, bounds.size.height / 2.0);
+    // SAFETY: reading the superview on the main thread; the `Retained` keeps it alive.
+    let above = unsafe { pane.superview() };
+    let in_super = above.map_or(middle, |above| {
+        pane.convertPoint_toView(middle, Some(&above))
+    });
+    let hit = pane
+        .hitTest(in_super)
+        .expect("the middle of the pane is something");
+    assert!(
+        hit.isDescendantOf(&web),
+        "a view over the program's takes the events first: {:?}",
+        hit.class().name()
+    );
     // The words the program gave for the view and itself (the `title` and `program` of its
     // `open`), not the process's; on this Mac no place. Its icon is drawn by its name, and the
     // way out is ⌃C to the program.

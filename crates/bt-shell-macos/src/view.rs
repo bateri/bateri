@@ -58,8 +58,8 @@ use objc2_foundation::{
 };
 
 use bt_shell_common::native_view::{
-    Button as PageButton, DropWay, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, MenuUp,
-    Phase, Point as PagePoint, ShownMenu, drop_way,
+    Button as PageButton, DropWay, GesturePhase, Input, Menu as PageMenu,
+    MenuEntry as PageMenuEntry, MenuUp, Phase, Point as PagePoint, ShownMenu, drop_way,
 };
 use objc2_app_kit::NSMenu;
 
@@ -387,6 +387,46 @@ pub(crate) fn page_wheel_phases(phase: NSEventPhase, momentum: NSEventPhase) -> 
         &[Phase::Wheel]
     } else {
         &[Phase::Move]
+    }
+}
+
+/// The part of a pinch or a rotation an event of it is: its beginning, its end (or AppKit giving it
+/// up: the page is told it as the end, so that it lets go of what it kept for the gesture), and
+/// the rest.
+pub(crate) fn page_gesture_phase(phase: NSEventPhase) -> GesturePhase {
+    if phase.contains(NSEventPhase::Began) {
+        GesturePhase::Begin
+    } else if phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled) {
+        GesturePhase::End
+    } else {
+        GesturePhase::Move
+    }
+}
+
+/// The step of a swipe of three fingers, as the page says it (`dx` 1 to the right, `dy` 1 down):
+/// AppKit's `deltaX` is positive for a swipe to the left and its `deltaY` positive for one up
+/// (Apple's Cocoa Event Handling Guide).
+pub(crate) fn page_swipe_step(delta_x: f64, delta_y: f64) -> (i32, i32) {
+    let step = |delta: f64| {
+        if delta > 0.0 {
+            -1
+        } else if delta < 0.0 {
+            1
+        } else {
+            0
+        }
+    };
+    (step(delta_x), step(delta_y))
+}
+
+/// A button of the pointer beyond the third as the page counts them (from 1: 4 is the first of the
+/// ones at the side) and the bit that holds it in [`ViewIvars::page_held`]. AppKit counts from 0
+/// (left, right, middle, then the others), and the bits are `1 << button number`; a button past
+/// the last bit is no one's.
+pub(crate) fn page_extra_button(number: isize) -> Option<(u8, u8)> {
+    match u8::try_from(number) {
+        Ok(n @ 3..=7) => Some((n + 1, 1 << n)),
+        _ => None,
     }
 }
 
@@ -1075,6 +1115,9 @@ define_class!(
         #[unsafe(method(otherMouseDragged:))]
         fn other_mouse_dragged(&self, event: &NSEvent) {
             if event.buttonNumber() != 2 {
+                // A page of the kit follows a button at the side that is held, as it does the
+                // others; the grid drops the drag.
+                self.page_drag(event);
                 return;
             }
             if self.page_drag(event) {
@@ -1300,6 +1343,9 @@ define_class!(
         fn other_mouse_down(&self, event: &NSEvent) {
             self.note_interaction();
             if event.buttonNumber() != 2 {
+                // A page of the kit is told the others (the ones at a mouse's side); the grid
+                // drops them.
+                self.page_extra(event, true);
                 return;
             }
             self.button_event(event, MouseButton::Middle, true);
@@ -1308,9 +1354,96 @@ define_class!(
         #[unsafe(method(otherMouseUp:))]
         fn other_mouse_up(&self, event: &NSEvent) {
             if event.buttonNumber() != 2 {
+                self.page_extra(event, false);
                 return;
             }
             self.button_event(event, MouseButton::Middle, false);
+        }
+
+        /// A pinch. A page of the kit hears it (a box of its that zooms takes it first,
+        /// `pencere_drive::Page::magnify`); on the grid it is nothing, as it was.
+        #[unsafe(method(magnifyWithEvent:))]
+        fn magnify_with_event(&self, event: &NSEvent) {
+            self.note_interaction();
+            if let Some(pane) = self.pane()
+                && pane.page_is_up()
+            {
+                let at = self.page_point(event);
+                let by = event.magnification() as f32;
+                let phase = page_gesture_phase(event.phase());
+                let mods = crate::native_page::mods_of(event.modifierFlags());
+                pane.page_touch(|page| page.magnify(at, by, phase, mods));
+                return;
+            }
+            // SAFETY: `NSResponder`'s `magnifyWithEvent:` takes an `NSEvent`, returns nothing.
+            let _: () = unsafe { msg_send![super(self), magnifyWithEvent: event] };
+        }
+
+        /// A double tap with two fingers: a page of the kit hears it.
+        #[unsafe(method(smartMagnifyWithEvent:))]
+        fn smart_magnify_with_event(&self, event: &NSEvent) {
+            self.note_interaction();
+            if let Some(pane) = self.pane()
+                && pane.page_is_up()
+            {
+                let at = self.page_point(event);
+                pane.page_touch(|page| page.smart_magnify(at));
+                return;
+            }
+            // SAFETY: as `magnifyWithEvent:`.
+            let _: () = unsafe { msg_send![super(self), smartMagnifyWithEvent: event] };
+        }
+
+        /// A rotation: a page of the kit hears it, in degrees as AppKit says them (positive
+        /// counter-clockwise).
+        #[unsafe(method(rotateWithEvent:))]
+        fn rotate_with_event(&self, event: &NSEvent) {
+            self.note_interaction();
+            if let Some(pane) = self.pane()
+                && pane.page_is_up()
+            {
+                let at = self.page_point(event);
+                let degrees = event.rotation();
+                let phase = page_gesture_phase(event.phase());
+                let mods = crate::native_page::mods_of(event.modifierFlags());
+                pane.page_touch(|page| page.rotate(at, degrees, phase, mods));
+                return;
+            }
+            // SAFETY: as `magnifyWithEvent:`.
+            let _: () = unsafe { msg_send![super(self), rotateWithEvent: event] };
+        }
+
+        /// A swipe of three fingers: a page of the kit hears it. The system's own use of it
+        /// (back and forward) is the responder chain's, which the grid still gives it.
+        #[unsafe(method(swipeWithEvent:))]
+        fn swipe_with_event(&self, event: &NSEvent) {
+            self.note_interaction();
+            if let Some(pane) = self.pane()
+                && pane.page_is_up()
+            {
+                let (dx, dy) = page_swipe_step(event.deltaX(), event.deltaY());
+                pane.page_touch(|page| page.swipe(dx, dy));
+                return;
+            }
+            // SAFETY: as `magnifyWithEvent:`.
+            let _: () = unsafe { msg_send![super(self), swipeWithEvent: event] };
+        }
+
+        /// The force of a press on a trackpad that feels it: a page of the kit hears it.
+        #[unsafe(method(pressureChangeWithEvent:))]
+        fn pressure_change_with_event(&self, event: &NSEvent) {
+            if let Some(pane) = self.pane()
+                && pane.page_is_up()
+            {
+                let at = self.page_point(event);
+                let stage = u8::try_from(event.stage().clamp(0, 2)).unwrap_or(0);
+                let force = event.pressure();
+                let force = if force.is_finite() { force.clamp(0.0, 1.0) } else { 0.0 };
+                pane.page_touch(|page| page.pressure(at, stage, force));
+                return;
+            }
+            // SAFETY: as `magnifyWithEvent:`.
+            let _: () = unsafe { msg_send![super(self), pressureChangeWithEvent: event] };
         }
 
         /// Wheel and trackpad: if the application asked for mouse reports -
@@ -1351,9 +1484,11 @@ define_class!(
                 let dx = -(event.scrollingDeltaX() as f32) * step;
                 let dy = -(event.scrollingDeltaY() as f32) * step;
                 let at = self.page_point(event);
+                let precise = event.hasPreciseScrollingDeltas();
+                let mods = crate::native_page::mods_of(event.modifierFlags());
                 for phase in page_wheel_phases(event.phase(), event.momentumPhase()) {
                     let (dx, dy) = if *phase == Phase::Begin { (0.0, 0.0) } else { (dx, dy) };
-                    pane.page_wheel(at, dx, dy, *phase);
+                    pane.page_wheel(at, dx, dy, *phase, precise, mods);
                 }
                 return;
             }
@@ -2946,7 +3081,11 @@ impl BateriView {
                     count: u32::try_from(event.clickCount()).unwrap_or(1).max(1),
                 }
             } else {
-                Input::Release { at, button }
+                Input::Release {
+                    at,
+                    button,
+                    mods: crate::native_page::mods_of(event.modifierFlags()),
+                }
             });
             return;
         }
@@ -3295,7 +3434,10 @@ impl BateriView {
         let held = self.ivars().page_held.get() != 0;
         if held || self.over_page(pane, event) {
             self.ivars().page_over.set(true);
-            pane.page_input(Input::Move(self.page_point(event)));
+            pane.page_input(Input::Move {
+                at: self.page_point(event),
+                mods: crate::native_page::mods_of(event.modifierFlags()),
+            });
         } else {
             self.page_pointer_left(pane);
         }
@@ -3310,6 +3452,28 @@ impl BateriView {
         };
         self.page_pointer(&pane, event);
         true
+    }
+
+    /// A button of the pointer beyond the third went down or came up, for the page of the pane if
+    /// one is up: told as its own event, never as a press ([`Input::Extra`]), and held like the
+    /// others, so that the page follows the pointer until it is let go ([`ViewIvars::page_held`]).
+    fn page_extra(&self, event: &NSEvent, pressed: bool) {
+        let Some(pane) = self.pane().filter(|pane| pane.page_is_up()) else {
+            return;
+        };
+        let Some((button, bit)) = page_extra_button(event.buttonNumber()) else {
+            return;
+        };
+        let held = self.ivars().page_held.get();
+        self.ivars()
+            .page_held
+            .set(if pressed { held | bit } else { held & !bit });
+        pane.page_input(Input::Extra {
+            at: self.page_point(event),
+            button,
+            down: pressed,
+            mods: crate::native_page::mods_of(event.modifierFlags()),
+        });
     }
 
     /// The pointer is not over the page any more: it is told once, and its answer sets no pointer.
@@ -3891,6 +4055,91 @@ mod tests {
             [Phase::Coast]
         );
         assert_eq!(page_wheel_phases(none, NSEventPhase::Ended), [Phase::Stop]);
+    }
+
+    #[test]
+    fn a_page_is_told_the_part_of_a_pinch_or_a_rotation_each_event_is() {
+        assert_eq!(page_gesture_phase(NSEventPhase::Began), GesturePhase::Begin);
+        assert_eq!(
+            page_gesture_phase(NSEventPhase::Changed),
+            GesturePhase::Move
+        );
+        assert_eq!(page_gesture_phase(NSEventPhase::Ended), GesturePhase::End);
+        assert_eq!(
+            page_gesture_phase(NSEventPhase::Cancelled),
+            GesturePhase::End,
+            "AppKit giving the gesture up is its end: the page lets go of what it kept"
+        );
+        assert_eq!(
+            page_gesture_phase(NSEventPhase::None),
+            GesturePhase::Move,
+            "a pinch with no phase (a device that has none) is a move"
+        );
+    }
+
+    /// AppKit's swipe is positive to the left and up; the page's is positive to the right and down.
+    #[test]
+    fn a_swipe_is_told_to_the_page_right_and_down_positive() {
+        assert_eq!(page_swipe_step(1.0, 0.0), (-1, 0), "to the left");
+        assert_eq!(page_swipe_step(-1.0, 0.0), (1, 0), "to the right");
+        assert_eq!(page_swipe_step(0.0, 1.0), (0, -1), "up");
+        assert_eq!(page_swipe_step(0.0, -1.0), (0, 1), "down");
+        assert_eq!(page_swipe_step(0.0, 0.0), (0, 0));
+        assert_eq!(page_swipe_step(1.0, -1.0), (-1, 1));
+    }
+
+    /// The buttons at a mouse's side are the page's by their own number: AppKit counts the left,
+    /// right and middle from 0, the page from 1, and the bit that holds one is below the byte's end.
+    #[test]
+    fn a_button_beyond_the_third_is_counted_from_one_and_held_by_its_own_bit() {
+        for (number, button, bit) in [(3, 4, 8), (4, 5, 16), (5, 6, 32), (7, 8, 128)] {
+            assert_eq!(page_extra_button(number), Some((button, bit)));
+        }
+        // The three the page knows as presses are not its extras, and a button past the last bit
+        // is no one's.
+        for number in [-1, 0, 1, 2, 8, 20] {
+            assert_eq!(page_extra_button(number), None, "{number}");
+        }
+        // The held bits of the three are 1, 2 and 4 (`button_event`), and the others do not meet.
+        assert!([1u8, 2, 4].iter().all(|bit| bit & 0b1111_1000 == 0));
+    }
+
+    /// A page of the kit hears a pinch, a double tap, a rotation, a swipe and the force of a press
+    /// when one is up, and the grid is the responder chain's, as it was: each handler hands the
+    /// event to `super` where no page is up. A source scan, because a view needs a window server.
+    #[test]
+    fn a_trackpads_fingers_reach_a_page_and_the_grid_leaves_them_to_the_responder_chain() {
+        let source = include_str!("view.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        for (selector, tell) in [
+            ("magnifyWithEvent:", "page.magnify("),
+            ("smartMagnifyWithEvent:", "page.smart_magnify("),
+            ("rotateWithEvent:", "page.rotate("),
+            ("swipeWithEvent:", "page.swipe("),
+            ("pressureChangeWithEvent:", "page.pressure("),
+        ] {
+            let head = format!("#[unsafe(method({selector}))]");
+            let at = source.find(&head).unwrap_or_else(|| panic!("{selector}"));
+            let body = &source[at..at + source[at..].find("\n        }\n").expect("its end")];
+            assert!(body.contains("pane.page_is_up()"), "{selector}");
+            assert!(body.contains(tell), "{selector}");
+            assert!(
+                body.contains(&format!(
+                    "msg_send![super(self), {}",
+                    selector.trim_end_matches(':')
+                )) || body.contains(&format!("msg_send![super(self), {selector}")),
+                "{selector}: no page, no change"
+            );
+        }
+        // The pointer's events say the modifiers they were made with: a `Mods::default()` is a ⌘
+        // let go of.
+        for needle in ["Input::Move {", "Input::Release {", "Input::Extra {"] {
+            let at = source.find(needle).unwrap_or_else(|| panic!("{needle}"));
+            assert!(
+                source[at..at + 220].contains("mods: crate::native_page::mods_of("),
+                "{needle}"
+            );
+        }
     }
 
     #[test]
