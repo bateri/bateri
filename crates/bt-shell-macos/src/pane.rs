@@ -5274,6 +5274,30 @@ impl TerminalPane {
         jobs::foreground(parent, session.child_pid(), &SystemTable)
     }
 
+    /// Whether the pane ends with its program: the terminal is the program's own, started in the
+    /// shell's place with no shell before or after it, so that the pane goes whenever the program
+    /// does — by its own quit (`:q`, ⌃C) as by a close. What the pane runs says so
+    /// ([`ShellParent::NoShell`]: a click that opened a path here, `bateri split -- PROGRAM` here).
+    ///
+    /// Closing such a pane is quitting its program, the one thing the pane shows, so the close of
+    /// that pane or its tab does not ask about it ([`crate::window::running_asks`]): the program is
+    /// told that its terminal went away (`SIGHUP`), as any terminal program is when its window
+    /// closes, and keeps its work its own way then (an editor's swap file or draft). A close of
+    /// several tabs, and the quit, ask about it as about any program. A program with a shell
+    /// behind it (`--keep-open`) is a job in front of that shell and is asked about.
+    ///
+    /// A pane that shows a terminal a server keeps is not read so, whatever runs there: a request
+    /// that places it does not say whether its terminal runs a shell or a program, and a restored
+    /// pane no longer knows the program it was opened for, so the same pane would ask or not by
+    /// how it came. Its close asks while the server says a program is in front, and offers to
+    /// leave it running.
+    pub(crate) fn ends_with_its_program(&self) -> bool {
+        self.ivars()
+            .shell_parent
+            .get()
+            .is_some_and(|parent| !parent.has_shell())
+    }
+
     /// The remote-session probe: takes the running command's
     /// generation, probes the foreground group and reports to the session if
     /// it found ssh/mosh. The return is two bits ([`RemoteProbeOutcome`]):

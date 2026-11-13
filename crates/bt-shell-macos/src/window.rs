@@ -290,12 +290,17 @@ pub(crate) fn should_ask(
 /// the same read; under `always` the decision does not look at the table but
 /// the text still wants to name the running job, so it is read once the
 /// question is settled.
+///
+/// Under `running`, a close that [`Takes::One`] tab does not ask about a pane that ends with its
+/// program ([`TerminalPane::ends_with_its_program`], [`running_asks`]). When another pane makes
+/// it ask, the text names that program too, since the close ends it as well.
 pub(crate) fn foregrounds_to_ask(
     timed: bool,
     confirm: ConfirmClose,
+    takes: Takes,
     panes: &[Retained<TerminalPane>],
 ) -> Option<Vec<Foreground>> {
-    foregrounds_to_ask_for(timed, confirm, false, panes)
+    foregrounds_to_ask_for(timed, confirm, false, takes, panes)
 }
 
 /// [`foregrounds_to_ask`] for a close that may be of tabs picked together (`selected`,
@@ -304,6 +309,7 @@ pub(crate) fn foregrounds_to_ask_for(
     timed: bool,
     confirm: ConfirmClose,
     selected: bool,
+    takes: Takes,
     panes: &[Retained<TerminalPane>],
 ) -> Option<Vec<Foreground>> {
     let read = || {
@@ -315,13 +321,48 @@ pub(crate) fn foregrounds_to_ask_for(
     let mut seen = None;
     let ask = should_ask(timed, confirm, selected, || {
         let foregrounds = read();
-        let running = foregrounds
+        let own: Vec<bool> = panes
             .iter()
-            .any(|foreground| matches!(foreground, Foreground::Running(_)));
+            .map(|pane| pane.ends_with_its_program())
+            .collect();
+        let running = running_asks(takes, &own, &foregrounds);
         seen = Some(foregrounds);
         running
     });
     ask.then(|| seen.unwrap_or_else(read))
+}
+
+/// How much a close takes at once: the question of [`running_asks`] depends on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Takes {
+    /// One tab or one of its panes, the one the person closes: ⌘W, the tab's `×`, the red button
+    /// of a window that has one tab.
+    One,
+    /// Several tabs at once — Close Other Tabs, Close Group, a window of several tabs — or the
+    /// application: the person may not have in mind all that runs in them.
+    Many,
+}
+
+impl Takes {
+    /// What a close of `tabs` tabs takes.
+    pub(crate) fn tabs(tabs: usize) -> Self {
+        if tabs > 1 { Self::Many } else { Self::One }
+    }
+}
+
+/// Whether what runs in the closing panes makes `running` ask: a program in front of a pane
+/// (`own[i]` and `foregrounds[i]` are one pane's). In a shell's pane the close ends more than
+/// the person may mean — the program and the shell they could have stopped it in.
+///
+/// A pane that ends with its program ([`TerminalPane::ends_with_its_program`]) holds nothing
+/// else: closing that one tab or pane is quitting the program, as its own quit is, and is not
+/// asked. A close that takes [`Takes::Many`] asks about it as about any program: among several
+/// tabs, or at the quit, it may be one the person is not looking at — an agent at work in a tab
+/// behind.
+pub(crate) fn running_asks(takes: Takes, own: &[bool], foregrounds: &[Foreground]) -> bool {
+    own.iter().zip(foregrounds).any(|(&own, foreground)| {
+        matches!(foreground, Foreground::Running(_)) && (takes == Takes::Many || !own)
+    })
 }
 
 /// The unit the question counts: tab or pane.
@@ -4218,9 +4259,13 @@ impl TerminalWindow {
             .filter_map(|&id| self.tab(id))
             .flat_map(|tab| tab.panes())
             .collect();
-        let Some(foregrounds) =
-            foregrounds_to_ask_for(self.ivars().run.is_some(), confirm, selected, &panes)
-        else {
+        let Some(foregrounds) = foregrounds_to_ask_for(
+            self.ivars().run.is_some(),
+            confirm,
+            selected,
+            Takes::tabs(ids.len()),
+            &panes,
+        ) else {
             for id in ids {
                 self.close_tab_now(id);
             }
@@ -4430,7 +4475,8 @@ impl TerminalWindow {
         };
         let confirm = app.settings().confirm_close;
         let panes = self.panes();
-        let Some(foregrounds) = foregrounds_to_ask(false, confirm, &panes) else {
+        let takes = Takes::tabs(self.tab_count());
+        let Some(foregrounds) = foregrounds_to_ask(false, confirm, takes, &panes) else {
             return true;
         };
         let unit = unit_for(panes.len(), self.tab_count());
@@ -4451,7 +4497,9 @@ impl TerminalWindow {
         };
         let confirm = app.settings().confirm_close;
         let panes = self.panes();
-        let Some(foregrounds) = foregrounds_to_ask(self.ivars().run.is_some(), confirm, &panes)
+        let takes = Takes::tabs(self.tab_count());
+        let Some(foregrounds) =
+            foregrounds_to_ask(self.ivars().run.is_some(), confirm, takes, &panes)
         else {
             self.close();
             return;
@@ -4478,7 +4526,8 @@ impl TerminalWindow {
         };
         let confirm = app.settings().confirm_close;
         let panes = tab.panes();
-        let Some(foregrounds) = foregrounds_to_ask(self.ivars().run.is_some(), confirm, &panes)
+        let Some(foregrounds) =
+            foregrounds_to_ask(self.ivars().run.is_some(), confirm, Takes::One, &panes)
         else {
             self.close_tab_now(id);
             return;
@@ -4511,6 +4560,7 @@ impl TerminalWindow {
         let Some(foregrounds) = foregrounds_to_ask(
             self.ivars().run.is_some(),
             confirm,
+            Takes::One,
             std::slice::from_ref(&pane),
         ) else {
             tab.close_pane(pane.id());
@@ -6089,6 +6139,76 @@ mod tests {
         // *Close*; a server's shell next to a local program is not.
         assert!(offers_leave(&[false, true], &[vim.clone(), npm.clone()]));
         assert!(!offers_leave(&[true, false], &[Foreground::Idle, vim]));
+    }
+
+    /// A program in front of a shell asks. Closing one tab or pane does not ask about a pane that
+    /// ends with its program (a ⌘-clicked file, `bateri split -- PROGRAM`): closing it is quitting
+    /// that program. A close of several tabs, or the quit, asks about it as about any program —
+    /// it may be at work in a tab behind. Beside a pane that asks, it is named, since the close
+    /// ends it too.
+    #[test]
+    fn a_pane_that_ends_with_its_program_asks_only_when_a_close_takes_more() {
+        let vim = running(&["vim"]);
+        let textpen = running(&["textpen"]);
+        let one = Takes::One;
+        assert!(running_asks(one, &[false], std::slice::from_ref(&vim)));
+        assert!(!running_asks(one, &[true], std::slice::from_ref(&textpen)));
+        assert!(!running_asks(one, &[false], &[Foreground::Idle]));
+        assert!(!running_asks(one, &[], &[]));
+        assert!(running_asks(
+            one,
+            &[true, false],
+            &[textpen.clone(), vim.clone()]
+        ));
+        assert!(!running_asks(
+            one,
+            &[true, false],
+            &[textpen.clone(), Foreground::Idle]
+        ));
+        let many = Takes::Many;
+        assert!(running_asks(many, &[true], std::slice::from_ref(&textpen)));
+        assert!(running_asks(many, &[false], std::slice::from_ref(&vim)));
+        assert!(!running_asks(many, &[true], &[Foreground::Idle]));
+        assert_eq!(
+            prompt(CloseScope::Tab, Unit::Pane, &[textpen, vim]).message,
+            "Processes are running in 2 panes: “textpen”, “vim”. Closing ends them."
+        );
+        // One tab is one, the red button of a window with one tab too; more is more.
+        assert_eq!(Takes::tabs(1), Takes::One);
+        assert_eq!(Takes::tabs(2), Takes::Many);
+
+        // Every close and the quit decide here, from the pane's own word.
+        let source = include_str!("window.rs");
+        let source = &source[..source.find("#[cfg(test)]").expect("the tests")];
+        let at = source
+            .find("pub(crate) fn foregrounds_to_ask_for(")
+            .expect("the decision");
+        let decision = &source[at..at + source[at..].find("\n}\n").expect("its end")];
+        assert!(decision.contains(".map(|pane| pane.ends_with_its_program())"));
+        assert!(decision.contains("running_asks(takes, &own, &foregrounds)"));
+        // The close of a pane and of one tab take one; the quit takes everything.
+        let body = |name: &str| {
+            let at = source.find(name).unwrap_or_else(|| panic!("{name}"));
+            &source[at..at + source[at..].find("\n    }\n").expect("its end")]
+        };
+        assert!(body("    fn close_pane_asking(").contains("Takes::One,"));
+        assert!(body("    pub(crate) fn close_tab_asking(").contains("Takes::One,"));
+        assert!(body("    fn close_tabs_with(").contains("Takes::tabs(ids.len()),"));
+        assert!(body("    fn should_close_now(").contains("Takes::tabs(self.tab_count())"));
+        assert!(body("    fn close_window_asking(").contains("Takes::tabs(self.tab_count())"));
+        let app = include_str!("app.rs");
+        assert!(
+            app.contains("window::foregrounds_to_ask(timed, confirm, window::Takes::Many, &asked)")
+        );
+        // A pane ends with its program when no shell holds its terminal: what it runs says so, not
+        // how it was opened.
+        let pane = include_str!("pane.rs");
+        let at = pane
+            .find("    pub(crate) fn ends_with_its_program(")
+            .expect("the pane's word");
+        let word = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(word.contains(".is_some_and(|parent| !parent.has_shell())"));
+        assert!(!word.contains(".program"));
     }
 
     #[test]

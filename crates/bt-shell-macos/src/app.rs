@@ -3241,7 +3241,10 @@ impl AppDelegate {
             .filter(|pane| ends_kept || !(pane.shows_kept_terminal() || pane.is_streamed()))
             .cloned()
             .collect();
-        let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &asked) else {
+        // The quit takes everything: a program a pane holds alone is asked about too.
+        let Some(foregrounds) =
+            window::foregrounds_to_ask(timed, confirm, window::Takes::Many, &asked)
+        else {
             self.ivars().end_kept.set(ends_kept);
             return NSApplicationTerminateReply::TerminateNow;
         };

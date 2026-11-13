@@ -1049,6 +1049,16 @@ cancels.
 - Not counted: background jobs (`sleep 100 &` — zsh warns about those itself
   on `exit`), a loop running inside the shell itself, and a program that
   replaces the shell (`exec vim`). All three look as if the shell were idle.
+- A pane that holds one program and no shell closes without asking, alone or
+  with its tab (⌘W, the tab's ×): on this computer, a file you ⌘-click open
+  and a program `bateri split`, `tab` or `window` starts (without
+  `--keep-open`). The pane goes whenever its program quits, so closing it is
+  quitting the program. The program is told its terminal went away, as when
+  any terminal window closes, and editors keep their unsaved work then:
+  textpen as a draft it offers back, vim in its swap file. Closing several
+  tabs at once, a window of several tabs, or quitting asks about it as about
+  any program, and so does closing it together with a pane that asks. On a
+  server such a pane still asks, and offers to leave the program running.
 
 The value is read at closing time, so it takes effect the moment you save.
 
