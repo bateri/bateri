@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::jobs::{ProcessTable, ShellParent, shell_pid};
+use crate::jobs::{ProcessTable, ShellParent, own_process};
 
 /// The most processes a walk visits — a guard, not a policy: a pane with more
 /// is a fork bomb, not a dev server.
@@ -64,21 +64,22 @@ pub fn url(port: u16) -> String {
     format!("http://localhost:{port}")
 }
 
-/// The pids of the pane whose PTY child is `child`: the shell and its
-/// descendants, then `tty_members` (the terminal's other processes) — each
-/// once, in that order. Empty while `login` has forked no shell yet.
+/// The pids of the pane whose PTY child is `child`: its own process (the shell,
+/// or the program where there is none) and its descendants, then `tty_members`
+/// (the terminal's other processes) — each once, in that order. Empty while
+/// `login` has forked no shell yet.
 pub fn pane_pids(
     parent: ShellParent,
     child: u32,
     table: &impl ProcessTable,
     tty_members: &[u32],
 ) -> Vec<u32> {
-    let Some(shell) = shell_pid(parent, child, table) else {
+    let Some(own) = own_process(parent, child, table) else {
         return Vec::new();
     };
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
-    let mut stack = vec![shell];
+    let mut stack = vec![own];
     while let Some(pid) = stack.pop() {
         if order.len() >= WALK_LIMIT {
             break;
@@ -102,7 +103,7 @@ pub fn pane_pids(
 /// The listeners of the pane whose PTY child is `child`, ascending by port,
 /// then by pid; one per port and process.
 pub fn pane_listeners(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Vec<Listener> {
-    let tty = shell_pid(parent, child, table)
+    let tty = own_process(parent, child, table)
         .map(terminal_members)
         .unwrap_or_default();
     let mut found: Vec<Listener> = Vec::new();
@@ -496,6 +497,11 @@ mod tests {
             [11, 12, 13, 14, 15]
         );
         assert!(pane_pids(ShellParent::Login, 20, &table, &[30]).is_empty());
+        // A terminal with no shell is its program's: the walk starts at the program, the child.
+        assert_eq!(
+            pane_pids(ShellParent::NoShell, 12, &table, &[12, 99]),
+            [12, 13, 14, 99]
+        );
     }
 
     #[test]

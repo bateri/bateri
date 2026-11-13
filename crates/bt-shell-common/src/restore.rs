@@ -1651,6 +1651,7 @@ pub fn clear_attempt(lock: &Lock) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::child::ShellParent;
     use crate::settings::TempRoot;
 
     const A: &str = "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0";
@@ -2090,6 +2091,13 @@ mod tests {
         assert!(!stays.ends_with_its_terminal());
         assert!(!shell.ends_with_its_terminal());
         assert!(!PaneRuns::UserShell.ends_with_its_terminal());
+        // Where its terminal's shell is: none under a program in the shell's place, the child
+        // itself under one asked to stay (the command's `sh -c`, then the login shell), and where
+        // this computer starts it for a shell.
+        assert_eq!(program.shell_parent(), Some(ShellParent::NoShell));
+        assert_eq!(stays.shell_parent(), Some(ShellParent::Direct));
+        assert_eq!(shell.shell_parent(), None);
+        assert_eq!(PaneRuns::UserShell.shell_parent(), None);
     }
 
     const V8_FIXTURE: &str = concat!(

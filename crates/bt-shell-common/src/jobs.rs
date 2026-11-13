@@ -67,6 +67,20 @@ pub enum ShellParent {
     /// -l`, and alacritty's own path there), the timed run's fixed scripts and
     /// the real PTY test (login needs root, so it cannot be spawned in a test).
     Direct,
+    /// There is no shell: the child is a program started in the shell's place (a path opened in
+    /// a program, `bateri split -- PROGRAM`), and the terminal ends with it. That program leads
+    /// the terminal's foreground group itself, as a shell at its prompt does, so a pane that took
+    /// it for the shell would see "the shell in front" for as long as it runs — no icon, no close
+    /// question, a view's `hello` never answered. Here every group in front is a program's, and
+    /// nothing is the shell's ([`shell_pid`] is `None`).
+    NoShell,
+}
+
+impl ShellParent {
+    /// Whether a shell holds the terminal, whose own group in front means "at its prompt".
+    pub fn has_shell(self) -> bool {
+        !matches!(self, Self::NoShell)
+    }
 }
 
 /// What is in the foreground.
@@ -85,6 +99,17 @@ pub enum Foreground {
 pub struct Groups {
     pub(crate) own: u32,
     pub(crate) foreground: u32,
+}
+
+impl Groups {
+    /// The group in front when a job holds the terminal — not the shell's own group, which is
+    /// the shell at its prompt; `None` then, and when the terminal has no foreground (`0`: its
+    /// group cannot be read). Read of the pane's own process ([`own_process`]): in a terminal
+    /// with no shell every group in front is the program's.
+    pub(crate) fn job(self, parent: ShellParent) -> Option<u32> {
+        let shells = parent.has_shell() && self.foreground == self.own;
+        (self.foreground != 0 && !shells).then_some(self.foreground)
+    }
 }
 
 /// The answer of the remote session probe ([`remote`]).
@@ -226,30 +251,46 @@ fn asked_var(entry: &[u8], keys: &[&str]) -> Option<(String, String)> {
 /// `login` (⌘W right as the tab is born) is idle, because there is no job to
 /// close; if the shell's group cannot be read it is **running without a
 /// name**, because a systematic breakage should be a visible "always asks",
-/// not a silent "never asks".
+/// not a silent "never asks". A terminal with no shell is its program's, which
+/// is running for as long as the terminal is.
 pub fn foreground(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Foreground {
     // `login` forks a single shell; if there is none yet, there is no job to close.
-    let Some(shell) = shell_pid(parent, child, table) else {
+    let Some(own) = own_process(parent, child, table) else {
         return Foreground::Idle;
     };
     // A zero group means "the terminal has no foreground": the shell's
     // controlling terminal is not readable, and that too is the unreadable-table
     // branch — `members(0)` would be the kernel's answer, not a group's.
-    let Some(groups) = table.groups(shell).filter(|groups| groups.foreground != 0) else {
+    let Some(groups) = table.groups(own).filter(|groups| groups.foreground != 0) else {
         return Foreground::Running(Vec::new());
     };
-    if groups.foreground == groups.own {
-        return Foreground::Idle;
+    match groups.job(parent) {
+        Some(job) => Foreground::Running(names(job, table)),
+        None => Foreground::Idle,
     }
-    Foreground::Running(names(groups.foreground, table))
 }
 
 /// The shell's pid: on the direct path the child itself, on the `login` path
-/// its only child (`None` if there is none yet).
+/// its only child (`None` if there is none yet), and none where there is no shell.
 pub(crate) fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<u32> {
     match parent {
         ShellParent::Direct => Some(child),
         ShellParent::Login => table.children(child).first().copied(),
+        ShellParent::NoShell => None,
+    }
+}
+
+/// The pane's own process: the one its other processes descend from, and whose terminal
+/// groups are read — the shell ([`shell_pid`]), or the child itself where there is no shell
+/// and the child is the program.
+pub(crate) fn own_process(
+    parent: ShellParent,
+    child: u32,
+    table: &impl ProcessTable,
+) -> Option<u32> {
+    match parent {
+        ShellParent::NoShell => Some(child),
+        ShellParent::Login | ShellParent::Direct => shell_pid(parent, child, table),
     }
 }
 
@@ -274,23 +315,19 @@ pub fn shell_group(parent: ShellParent, child: u32, table: &impl ProcessTable) -
 /// in its place keeps its group), `login` with no shell forked yet, and an
 /// unreadable group. The caller keeps its arm and asks on the next output
 /// edge, so a systematic read error costs at most one probe per delay while
-/// output flows — and the dock is never hidden on a guess.
+/// output flows — and the dock is never hidden on a guess. In a terminal with
+/// no shell the program in front is the job.
 pub fn job_in_foreground(parent: ShellParent, child: u32, table: &impl ProcessTable) -> bool {
-    let Some(shell) = shell_pid(parent, child, table) else {
-        return false;
-    };
-    table
-        .groups(shell)
-        .is_some_and(|groups| groups.foreground != 0 && groups.foreground != groups.own)
+    own_process(parent, child, table)
+        .and_then(|own| table.groups(own))
+        .and_then(|groups| groups.job(parent))
+        .is_some()
 }
 
-/// The working directory of the shell that holds the terminal; `None` if the table cannot say.
-pub fn shell_directory(
-    parent: ShellParent,
-    child: u32,
-    table: &impl ProcessTable,
-) -> Option<String> {
-    table.cwd(shell_pid(parent, child, table)?)
+/// The working directory of what holds the terminal — its shell, or the program where there is
+/// none ([`own_process`]); `None` if the table cannot say.
+pub fn own_directory(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<String> {
+    table.cwd(own_process(parent, child, table)?)
 }
 
 /// The PTY's two terminal modes that say whether a remote session is past its
@@ -345,16 +382,16 @@ pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Pro
     if let Some(found) = first_program(child, table) {
         return found;
     }
-    let Some(shell) = shell_pid(parent, child, table) else {
+    let Some(own) = own_process(parent, child, table) else {
         return Probe::Local;
     };
-    let Some(groups) = table.groups(shell).filter(|groups| groups.foreground != 0) else {
+    let Some(groups) = table.groups(own).filter(|groups| groups.foreground != 0) else {
         return Probe::Local;
     };
-    if groups.foreground == groups.own {
+    let Some(job) = groups.job(parent) else {
         return Probe::Undecided;
-    }
-    let mut members = table.members(groups.foreground);
+    };
+    let mut members = table.members(job);
     if members.is_empty() {
         return Probe::Local;
     }
@@ -405,8 +442,9 @@ pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Pro
     }
     // Nothing was recognized but a member still carries the shell's name: a
     // forked child that has not `exec`ed yet — the other side of the pipeline
-    // (`tee` in `ssh prod | tee log`) may have `exec`ed first.
-    let shell_name = table.name(shell);
+    // (`tee` in `ssh prod | tee log`) may have `exec`ed first. A terminal with
+    // no shell forks nothing: its program carries its own name.
+    let shell_name = shell_pid(parent, child, table).and_then(|shell| table.name(shell));
     if shell_name.is_some() && names.contains(&shell_name) {
         return Probe::Undecided;
     }
@@ -1953,10 +1991,51 @@ pub(crate) mod tests {
     fn the_directory_of_the_shell_is_read_past_login() {
         let table = login_shell(101).in_dir(101, "/work/api");
         assert_eq!(
-            shell_directory(ShellParent::Login, 100, &table).as_deref(),
+            own_directory(ShellParent::Login, 100, &table).as_deref(),
             Some("/work/api")
         );
-        assert_eq!(shell_directory(ShellParent::Login, 900, &table), None);
+        assert_eq!(own_directory(ShellParent::Login, 900, &table), None);
+    }
+
+    /// A program started in the shell's place (`bateri split -- claude`, a path a click opened)
+    /// is the terminal's own process and leads its foreground group, as a shell at its prompt
+    /// does. Read as a terminal with no shell, that group is the program's: a job in front, named
+    /// for the close question, whose directory is the program's, and no group is the shell's.
+    /// Read as a shell, the same terminal is a shell at its prompt for as long as the program runs.
+    #[test]
+    fn in_a_terminal_with_no_shell_the_group_in_front_is_the_programs() {
+        let claude = Table::new(Some(200))
+            .run(200, 1, 200, &["claude", "work on it"])
+            .in_dir(200, "/work/app");
+        let none = ShellParent::NoShell;
+        assert!(job_in_foreground(none, 200, &claude));
+        assert_eq!(foreground(none, 200, &claude), running(&["claude"]));
+        assert_eq!(shell_group(none, 200, &claude), None);
+        assert_eq!(
+            own_directory(none, 200, &claude).as_deref(),
+            Some("/work/app")
+        );
+        assert_eq!(remote(none, 200, &claude), Probe::Local);
+        assert!(!job_in_foreground(ShellParent::Direct, 200, &claude));
+        assert_eq!(
+            foreground(ShellParent::Direct, 200, &claude),
+            Foreground::Idle
+        );
+        // What the program runs in its own group is the program's too: an ssh it started is the
+        // session, at once (no shell forks, so nothing is waited for).
+        let ssh = Table::new(Some(200))
+            .run(200, 1, 200, &["ssh", "prod"])
+            .run(201, 200, 200, &["ssh", "-W", "prod:22", "jump"]);
+        assert!(
+            matches!(remote(none, 200, &ssh), Probe::Remote(target) if target.host == "prod"),
+            "{:?}",
+            remote(none, 200, &ssh)
+        );
+        // A terminal whose group cannot be read is a program running without a name, and no job
+        // is said to be in front.
+        let unreadable = Table::new(None).run(200, 1, 200, &["claude"]);
+        assert!(!job_in_foreground(none, 200, &unreadable));
+        assert_eq!(foreground(none, 200, &unreadable), running(&[]));
     }
 
     #[test]

@@ -13427,10 +13427,11 @@ impl Session {
         marked
     }
 
-    /// A job outside the shell's group holds the terminal, as the owner read it after the past of
-    /// a terminal shown again ([`Self::replaying`]). Where the marks no longer say a command runs
-    /// it opens one ([`crate::shell::ShellLog::program_in_front`]; `directory` is the shell's), and
-    /// `true` says the title changed.
+    /// A program holds the terminal, as the owner knows it: one started in the shell's place,
+    /// whose terminal has no shell to print a mark, or a job outside the shell's group read after
+    /// the past of a terminal shown again ([`Self::replaying`]). Where the marks do not say a
+    /// command runs it opens one ([`crate::shell::ShellLog::program_in_front`]; `directory` is the
+    /// shell's, or the program's), and `true` says the title changed.
     pub fn note_program_in_front(&self, directory: Option<String>) -> bool {
         let opened = lock(&self.shell).program_in_front(directory.as_deref());
         if opened {

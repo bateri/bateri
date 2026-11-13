@@ -3507,11 +3507,13 @@ impl ShellLog {
     }
 
     /// A program holds the terminal, and nothing read of the stream says a command started: the
-    /// marks went with the start of a past the server no longer keeps (its relay was replaced and
-    /// built its picture from what is left). Without a command the pane reads as a shell at its
-    /// prompt, dock and all, over the program. The command it opens is closed as any other, by the
-    /// shell's next marks; `directory` is the shell's, and a directory it said itself stays. `true`
-    /// if it was news.
+    /// program was started in the shell's place, where no shell prints a mark, or the marks went
+    /// with the start of a past the server no longer keeps (its relay was replaced and built its
+    /// picture from what is left). Without a command the pane reads as a shell at its prompt,
+    /// dock and all, over the program. The command it opens is closed as any other, by the
+    /// shell's next marks, or runs until the terminal ends; `directory` is the shell's (the
+    /// program's where there is no shell), and a directory it said itself stays. `true` if it was
+    /// news.
     pub(crate) fn program_in_front(&mut self, directory: Option<&str>) -> bool {
         if self.running_command().is_some() || self.context.remote.is_some() {
             return false;

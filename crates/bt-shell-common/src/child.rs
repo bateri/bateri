@@ -272,6 +272,20 @@ impl PaneRuns {
     pub fn ends_with_its_terminal(&self) -> bool {
         matches!(self, Self::Program { keep_open: false })
     }
+
+    /// How the shell is found in the pane's terminal, where what the pane runs says it rather than
+    /// the way this computer starts a shell ([`shell_command`]): there is none for a program not
+    /// asked to stay open, which is the terminal's own process, started in the shell's place
+    /// ([`ShellParent::NoShell`]); for one asked to stay open it is the terminal's own process,
+    /// the shell (`sh -c`) the command runs it from, which `exec`s the login shell after it
+    /// ([`ShellParent::Direct`]). `None` for a shell this computer starts.
+    pub fn shell_parent(&self) -> Option<ShellParent> {
+        match self {
+            Self::Program { keep_open: false } => Some(ShellParent::NoShell),
+            Self::Program { keep_open: true } => Some(ShellParent::Direct),
+            Self::UserShell | Self::Shell(_) => None,
+        }
+    }
 }
 
 /// The command that spawns an untimed session's shell and the shell's position

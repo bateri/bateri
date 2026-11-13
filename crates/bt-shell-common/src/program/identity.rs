@@ -545,16 +545,13 @@ pub enum Seen {
 /// command it runs, as the guide bar's is: the elevator's own processes are
 /// nothing a pane does.
 pub fn find(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Seen {
-    let Some(shell) = jobs::shell_pid(parent, child, table) else {
-        return Seen::Waiting;
-    };
-    let Some(groups) = table
-        .groups(shell)
-        .filter(|groups| groups.foreground != 0 && groups.foreground != groups.own)
+    let Some(job) = jobs::own_process(parent, child, table)
+        .and_then(|own| table.groups(own))
+        .and_then(|groups| groups.job(parent))
     else {
         return Seen::Waiting;
     };
-    let mut pids = table.members(groups.foreground);
+    let mut pids = table.members(job);
     pids.sort_unstable();
     let mut group: Vec<Process> = pids
         .into_iter()
@@ -628,11 +625,10 @@ pub fn kept_path(parent: ShellParent, child: u32, table: &impl ProcessTable) -> 
 
 /// The program at the end of the pane's foreground group: its first leaf.
 fn kept_leaf(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<u32> {
-    let shell = jobs::shell_pid(parent, child, table)?;
-    let groups = table
-        .groups(shell)
-        .filter(|groups| groups.foreground != 0 && groups.foreground != groups.own)?;
-    let mut pids = table.members(groups.foreground);
+    let job = table
+        .groups(jobs::own_process(parent, child, table)?)?
+        .job(parent)?;
+    let mut pids = table.members(job);
     pids.sort_unstable();
     let parents: Vec<Option<u32>> = pids.iter().map(|&pid| table.parent(pid)).collect();
     pids.iter()
@@ -960,6 +956,24 @@ mod tests {
 
     fn kept_at(table: &Table) -> Option<String> {
         kept_path(ShellParent::Login, 100, table)
+    }
+
+    /// The program started in the shell's place (`bateri split -- claude`) leads the terminal's
+    /// group itself: in a terminal with no shell it is named from its own process, the icon's
+    /// and a view's answer's; taken for a shell it is a shell at its prompt and nothing is named.
+    #[test]
+    fn a_program_in_the_shells_place_is_named_from_its_own_process() {
+        let claude = Table::new(Some(200)).run(200, 1, 200, &["claude", "work on it"]);
+        assert_eq!(
+            find(ShellParent::NoShell, 200, &claude),
+            Seen::Kind(Kind::Agent(Agent::ClaudeCode))
+        );
+        assert_eq!(
+            kept_name(ShellParent::NoShell, 200, &claude).as_deref(),
+            Some("claude")
+        );
+        assert_eq!(find(ShellParent::Direct, 200, &claude), Seen::Waiting);
+        assert_eq!(kept_name(ShellParent::Direct, 200, &claude), None);
     }
 
     #[test]

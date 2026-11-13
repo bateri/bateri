@@ -3886,6 +3886,15 @@ impl TerminalPane {
         let shell_name = (self.ivars().run.is_none() && held.is_none())
             .then(|| runs.shell_name())
             .flatten();
+        // A program in the shell's place is the terminal's own process, whoever started it: a
+        // click that opened a path in it (the pane starts it), or a command (`bateri split --
+        // PROGRAM`: the command started it, and the pane shows its terminal). What the pane runs
+        // says where the terminal's shell is, so that no reading of the process table takes that
+        // program for one ([`child::PaneRuns::shell_parent`]). Not in a pane whose program is the
+        // pipe to a server.
+        let says = (self.ivars().run.is_none() && held.is_none())
+            .then(|| runs.shell_parent())
+            .flatten();
         self.ivars().runs.replace(runs);
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
@@ -3904,12 +3913,12 @@ impl TerminalPane {
         // `login` path). The timed run's scripts are the shell itself, so
         // they are `Direct`; deciding the parent in the same branch as the
         // command is what keeps the two from disagreeing.
-        // The program a click opened the pane for is the pane's own child: there is no shell
-        // under it, and the pane's views are told so (a child taken for the shell is "the shell
-        // in front" for as long as it runs, and a program that asks for a view is not answered).
-        let no_shell = self.ivars().run.is_none() && local_program.is_some();
+        // A program the pane starts is one a click opened a path in, which runs in the shell's
+        // place.
+        debug_assert!(local_program.is_none() || says == Some(ShellParent::NoShell));
+        // The terminal of a program the pane starts keeps the program's first questions for it.
+        let starts_program = local_program.is_some();
         let (command, shell_parent) = match self.ivars().run {
-            None if local_program.is_some() => (local_program, ShellParent::Direct),
             None => {
                 let shell = child::shell_command_for(asked_shell, &shell_args);
                 // A terminal a server keeps shown first: the program in front is the
@@ -3921,7 +3930,10 @@ impl TerminalPane {
                     .and_then(|held| crate::launch::held_command(held, &integration, &shell_args))
                 {
                     Some(pipe) => (Some(pipe), shell.1),
-                    None => shell,
+                    // The program a click opened the pane for is started here, in the shell's
+                    // place; a terminal a command started is shown, and the shell's command is only
+                    // what a terminal made here runs.
+                    None => (local_program.or(shell.0), says.unwrap_or(shell.1)),
                 }
             }
             Some(run) => (
@@ -4010,17 +4022,18 @@ impl TerminalPane {
             // shown, in every pane but a timed run's: there the program is the
             // gate's own script, the pane's reader hears no frame and nothing is
             // written to it.
-            views: self.view_options(shell_parent, no_shell),
+            views: self.view_options(shell_parent),
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // A terminal window without a shell is an empty box; what to do is the caller's call
         // (first window: the process exits; later ones: that window closes).
-        let (session, shell_parent) = match self.local_terminal(&options, shell_parent, no_shell) {
-            // The shell runs in a terminal of kablo's on this Mac and the session reads its
-            // bytes; the child's parent there is what it is for a shell started here.
-            Some(stream) => (Session::streamed(options, wake, stream)?, shell_parent),
-            None => (Session::spawn(options, wake)?, shell_parent),
-        };
+        let (session, shell_parent) =
+            match self.local_terminal(&options, shell_parent, starts_program) {
+                // The shell runs in a terminal of kablo's on this Mac and the session reads its
+                // bytes; the child's parent there is what it is for a shell started here.
+                Some(stream) => (Session::streamed(options, wake, stream)?, shell_parent),
+                None => (Session::spawn(options, wake)?, shell_parent),
+            };
         let session = Arc::new(session);
         // A terminal that was running when this bateri came: its screen is being built from its
         // own past, which also says (the ledger) whether a program's view was open over it. The
@@ -4175,33 +4188,38 @@ impl TerminalPane {
         // them from the first frame, and no change will say so.
         self.refresh_marks_wanted();
         // The past of a terminal shown again is read on the reader's thread, and what the tab and
-        // the probes learn from edges was not told while it was: told once it has been read.
-        if shown_again {
-            self.after_on_main(0, REPLAY_POLL, Self::replay_polled);
+        // the probes learn from edges was not told while it was: told once it has been read. A
+        // program in the shell's place has no mark that says it started, shown again or not.
+        if shown_again || !shell_parent.has_shell() {
+            self.after_on_main(0, REPLAY_POLL, Self::front_polled);
         }
         Ok(())
     }
 
-    /// Whether the past of the terminal this pane shows again has been read, asked every
-    /// [`REPLAY_POLL`] (`tries` is the number of times it was asked) until it has — or for
-    /// [`REPLAY_POLLS`] times, a bound for a connection that never says the past is complete.
-    fn replay_polled(&self, tries: u64) {
+    /// Whether what runs in the pane's terminal can be told: the past of a terminal this pane
+    /// shows again has been read, asked every [`REPLAY_POLL`] (`tries` is the number of times it
+    /// was asked) until it has — or for [`REPLAY_POLLS`] times, a bound for a connection that
+    /// never says the past is complete. A terminal just made has no past and is told at once.
+    fn front_polled(&self, tries: u64) {
         let Some(session) = self.session().cloned() else {
             return;
         };
         if session.replaying() && tries < REPLAY_POLLS {
-            self.after_on_main(tries + 1, REPLAY_POLL, Self::replay_polled);
+            self.after_on_main(tries + 1, REPLAY_POLL, Self::front_polled);
             return;
         }
-        // The marks of a command that started long ago can be gone with the start of the past
-        // (the relay was replaced and built its picture from what it still keeps), and the pane
-        // would read as a shell at its prompt, dock and all, over the program. What holds this
-        // computer's terminal says it. A server's shell is the server's to say.
+        // No mark may say that a command runs where the pane would read as a shell at its prompt,
+        // dock and all, over the program: a program in the shell's place prints none, and the
+        // marks of a command that started long ago can be gone with the start of the past (the
+        // relay was replaced and built its picture from what it still keeps). What the pane runs
+        // says the first, and what holds this computer's terminal the second. A server's shell is
+        // the server's to say.
         if session.reader_alive()
             && !self.shows_kept_terminal()
             && let Some(&parent) = self.ivars().shell_parent.get()
-            && jobs::job_in_foreground(parent, session.child_pid(), &SystemTable)
-            && session.note_program_in_front(jobs::shell_directory(
+            && (!parent.has_shell()
+                || jobs::job_in_foreground(parent, session.child_pid(), &SystemTable))
+            && session.note_program_in_front(jobs::own_directory(
                 parent,
                 session.child_pid(),
                 &SystemTable,
@@ -6028,10 +6046,10 @@ impl TerminalPane {
     /// (points: `0 × 0` where the pane has no layout yet), and how the shell is found
     /// from the child (`shell_parent`, recorded where the command was chosen: `login(1)`
     /// forks the shell on macOS, and the terminal's foreground group is the shell's, not
-    /// the child's). `no_shell` is a pane whose child is a program started in the shell's place
-    /// (a path opened in a program): no group there is a shell's ([`ShellGroup::no_shell`]).
+    /// the child's). A pane whose child is a program started in the shell's place
+    /// ([`ShellParent::NoShell`]) has no group that is a shell's ([`ShellGroup::no_shell`]).
     /// `None` in a timed run, whose program is the gate's own script.
-    fn view_options(&self, shell_parent: ShellParent, no_shell: bool) -> Option<ViewOptions> {
+    fn view_options(&self, shell_parent: ShellParent) -> Option<ViewOptions> {
         let ivars = self.ivars();
         if ivars.run.is_some() {
             return None;
@@ -6058,10 +6076,10 @@ impl TerminalPane {
         // page of the kit, up to the size the sandbox takes.
         options.native_entry_limit =
             Some(bt_shell_common::native_view::ModuleLimits::default().component as u64);
-        options.shell_group = Some(if no_shell {
-            ShellGroup::no_shell()
-        } else {
+        options.shell_group = Some(if shell_parent.has_shell() {
             ShellGroup::new(move |child| jobs::shell_group(shell_parent, child, &SystemTable))
+        } else {
+            ShellGroup::no_shell()
         });
         Some(options)
     }
@@ -9076,12 +9094,13 @@ mod tests {
     fn a_program_in_front_of_a_terminal_shown_again_is_a_command_before_the_probes_run() {
         let pane = include_str!("pane.rs");
         let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
-        let at = pane.find("fn replay_polled(").expect("the poll");
+        let at = pane.find("fn front_polled(").expect("the poll");
         let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         let front = body.find("note_program_in_front(").expect("asked");
         let probes = body.find("Wake::command_started(").expect("the probes");
         assert!(front < probes, "{body}");
         assert!(body.contains("job_in_foreground("), "{body}");
+        assert!(body.contains("!parent.has_shell()"), "{body}");
         assert!(body.contains("!self.shows_kept_terminal()"), "{body}");
     }
 
@@ -9306,7 +9325,7 @@ mod tests {
         assert!(body.contains("jobs::shell_group(shell_parent, child, &SystemTable)"));
         assert!(body.contains("pencere_view::content_size(self.bounds())"));
         // The parent is the one the command was chosen with, in the same branch.
-        assert!(pane.contains("views: self.view_options(shell_parent, no_shell),"));
+        assert!(pane.contains("views: self.view_options(shell_parent),"));
     }
 
     /// A pane opened for a program waits for it under a cover and wears it once: put on at the
@@ -9407,25 +9426,28 @@ mod tests {
         assert!(start.contains("runs: PaneRuns::Program { keep_open: false },"));
     }
 
-    /// The program a click opens a path in is started in the shell's place, as the pane's own
-    /// child: it leads the tty's foreground group itself. A pane that took it for its shell saw
-    /// the shell in front for as long as it ran and never answered its `hello`, and the program
-    /// (textpen) fell back to the person's `$EDITOR` in the floating pane. So the pane says
-    /// there is no shell, where the command is chosen, and the views are opened with that.
+    /// The program a click opens a path in, and the one a command starts (`bateri split --
+    /// PROGRAM`), is started in the shell's place, as the terminal's own process: it leads the
+    /// tty's foreground group itself. A pane that took it for its shell saw the shell in front
+    /// for as long as it ran and never answered its `hello`, and the program (textpen) fell back
+    /// to the person's `$EDITOR` in the floating pane. So the pane says there is no shell, from
+    /// what it runs, where the command is chosen, and the views are opened with that.
     #[test]
     fn a_pane_whose_child_is_a_program_tells_its_views_there_is_no_shell() {
         let pane = include_str!("pane.rs");
         let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
-        assert!(
-            pane.contains("let no_shell = self.ivars().run.is_none() && local_program.is_some();")
-        );
+        // What the pane runs says it, for a program a click started and one a command started.
+        assert!(pane.contains(".then(|| runs.shell_parent())"));
+        assert!(pane.contains("None => (local_program.or(shell.0), says.unwrap_or(shell.1)),"));
         let at = pane.find("fn view_options(").expect("view_options");
         let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
-        assert!(body.contains("no_shell: bool"));
-        let branch = body.find("if no_shell {").expect("the branch");
+        let branch = body
+            .find("if shell_parent.has_shell() {")
+            .expect("the branch");
+        let other = body[branch..].find("} else {").expect("the other arm");
         assert!(
-            body[branch..]
-                .trim_start_matches("if no_shell {")
+            body[branch + other..]
+                .trim_start_matches("} else {")
                 .trim_start()
                 .starts_with("ShellGroup::no_shell()")
         );

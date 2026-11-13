@@ -482,23 +482,21 @@ const TOOL_DEPTH: usize = 2;
 /// group sudo holds is answered by the command it runs ([`Found`]); a
 /// nested shell a forking tool opened takes the tool's title.
 /// [`Found::Waiting`] when the shell's own group holds the terminal or the
-/// table is unreadable. Main thread: system calls only.
+/// table is unreadable; in a terminal with no shell the group in front is the
+/// program's. Main thread: system calls only.
 pub fn find(
     parent: ShellParent,
     child: u32,
     table: &impl ProcessTable,
     home: Option<&Path>,
 ) -> Found {
-    let Some(shell) = jobs::shell_pid(parent, child, table) else {
+    let Some(own) = jobs::own_process(parent, child, table) else {
         return Found::Waiting;
     };
-    let Some(groups) = table
-        .groups(shell)
-        .filter(|groups| groups.foreground != 0 && groups.foreground != groups.own)
-    else {
+    let Some(job) = table.groups(own).and_then(|groups| groups.job(parent)) else {
         return Found::Waiting;
     };
-    let mut pids = table.members(groups.foreground);
+    let mut pids = table.members(job);
     pids.sort_unstable();
     let members: Vec<Member> = pids
         .into_iter()
@@ -530,7 +528,7 @@ pub fn find(
             .map_or(Found::Elevated, |program| Found::Program(Box::new(program)));
     }
     match classify(&members, home) {
-        Some(program) => Found::Program(Box::new(opened_by(program, shell, table))),
+        Some(program) => Found::Program(Box::new(opened_by(program, own, table))),
         None => Found::Unknown,
     }
 }
@@ -577,14 +575,15 @@ fn command_below(elevators: &[u32], table: &impl ProcessTable) -> Option<u32> {
 /// A nested shell a forking tool opened (`devbox shell`), named after the
 /// tool: an interactive shell takes a group of its own, so the tool is
 /// above it, outside the group — looked for up to [`TOOL_DEPTH`] parents,
-/// short of the terminal's `shell`. Any other program as it is.
-fn opened_by(program: Program, shell: u32, table: &impl ProcessTable) -> Program {
+/// short of the terminal's own process `own` (its shell, or the program where
+/// there is none). Any other program as it is.
+fn opened_by(program: Program, own: u32, table: &impl ProcessTable) -> Program {
     if !matches!(program.family, Family::Nested(_)) {
         return program;
     }
     let mut at = table.parent(program.pid);
     for _ in 0..TOOL_DEPTH {
-        let Some(pid) = at.filter(|&pid| pid != shell && pid > 1) else {
+        let Some(pid) = at.filter(|&pid| pid != own && pid > 1) else {
             break;
         };
         let title = table
@@ -2070,6 +2069,24 @@ mod tests {
             &[],
         );
         assert_eq!(find(ShellParent::Login, 100, &idle, home()), Found::Waiting);
+        // The same program started in the shell's place leads the terminal's group itself: with
+        // no shell it is the program in front, and taken for a shell it is the shell at its prompt.
+        let alone = crate::jobs::tests::Table::new(Some(300)).exec(
+            300,
+            1,
+            300,
+            ("node", "/opt/homebrew/bin/node"),
+            &["node"],
+            &[],
+        );
+        assert!(matches!(
+            find(ShellParent::NoShell, 300, &alone, home()),
+            Found::Program(_)
+        ));
+        assert_eq!(
+            find(ShellParent::Direct, 300, &alone, home()),
+            Found::Waiting
+        );
         // An unreadable record (another user's process) is skipped.
         let root = login_shell(200).with(200, 101, 200, "python3");
         assert_eq!(find(ShellParent::Login, 100, &root, home()), Found::Unknown);
