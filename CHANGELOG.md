@@ -12,13 +12,15 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- **bateri keeps its program for your terminals in its own folder.** kablo, which keeps a terminal running when bateri quits or a connection drops, now lives in `~/.local/share/bateri/kablo/`, on this Mac and on a server, instead of a folder of its own next to bateri's. Terminals that were started before keep running and are moved on their own, and the old folder is removed once nothing runs from it.
+- **Messages about that program say bateri.** The notes about putting it on a server, the line shown when a server's copy cannot talk to this bateri, and the errors of `bateri` commands no longer call it kablo.
+- **Move the window from the top of the panes.** With the tabs at the side, drag the empty part of a top pane's header, or the space around it, to move the window; double-click zooms it. Panes are now carried by their icon and name, which light up under the pointer.
+
 ### Fixed
 
 - **A very long line no longer freezes a program's editor.** Opening a file with one long line, like minified JavaScript or JSON, in an editor such as textpen froze bateri: half a minute for a line of a hundred thousand characters. Such a line now opens at once.
-
-### Changed
-
-- **Move the window from the top of the panes.** With the tabs at the side, drag the empty part of a top pane's header, or the space around it, to move the window; double-click zooms it. Panes are now carried by their icon and name, which light up under the pointer.
 
 ## [0.29.1] - 2026-11-14
 

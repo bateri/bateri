@@ -135,7 +135,7 @@ impl World {
     fn upgrades(&self, version: &str) -> Vec<String> {
         std::fs::read_to_string(
             self.home
-                .join(format!(".local/share/kablo/{version}/upgrades")),
+                .join(format!(".local/share/bateri/kablo/{version}/upgrades")),
         )
         .unwrap_or_default()
         .lines()
@@ -285,7 +285,7 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
         .install(&host, &ids(&["t1", "t2"]))
         .expect("installed");
     assert!(installed.fresh);
-    assert_eq!(installed.path, ".local/share/kablo/0.2.0/kablo");
+    assert_eq!(installed.path, ".local/share/bateri/kablo/0.2.0/kablo");
     assert!(world.home.join(&installed.path).exists());
     // Remembered as a server with bateri's files.
     let state = ssh_wrap::load(&world.state);
@@ -296,8 +296,8 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
     assert_eq!(
         world.upgrades("0.2.0"),
         [
-            "upgrade t1 .local/share/kablo/0.2.0/kablo",
-            "upgrade t2 .local/share/kablo/0.2.0/kablo"
+            "upgrade t1 .local/share/bateri/kablo/0.2.0/kablo",
+            "upgrade t2 .local/share/bateri/kablo/0.2.0/kablo"
         ]
     );
     // The second time finds it, and renews nothing.
@@ -333,7 +333,7 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
     assert_eq!(back, b"hello bridge");
     let last = world.calls().into_iter().last().expect("a call");
     assert!(
-        last.ends_with(".local/share/kablo/0.2.0/kablo attach"),
+        last.ends_with(".local/share/bateri/kablo/0.2.0/kablo attach"),
         "{last}"
     );
     // Letting go ends it. The stand-in `ssh` is a shell with a `cat` under it, so the
@@ -471,7 +471,7 @@ fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none
     let argv = backend.master(&host).expect("plan").expect("step");
     assert_eq!(run_argv(&argv), 0);
     // kablo is on the server before any terminal there is numbered (the install put it).
-    let kablo = world.home.join(".local/share/kablo/0.2.0/kablo");
+    let kablo = world.home.join(".local/share/bateri/kablo/0.2.0/kablo");
     std::fs::create_dir_all(kablo.parent().expect("a directory")).expect("kablo's place");
     crate::child::tests::write_program(&kablo, KABLO);
     assert_eq!(backend.number(&host), Some(1));
@@ -510,7 +510,7 @@ fn the_steps_of_a_server_whose_connection_is_up_run_over_it_and_start_no_ssh() {
     let world = stand_in("kept-steps", 0);
     let mut backend = world.backend(Some(world.package()));
     let host = backend.route(&["rasp".into()]).expect("kablo");
-    let kablo = world.home.join(".local/share/kablo/0.2.0/kablo");
+    let kablo = world.home.join(".local/share/bateri/kablo/0.2.0/kablo");
     std::fs::create_dir_all(kablo.parent().expect("a directory")).expect("kablo's place");
     crate::child::tests::write_program(&kablo, KABLO);
     let dir = world.home.join(".local/share/bateri/terminals");
@@ -538,7 +538,7 @@ fn the_steps_of_a_server_whose_connection_is_up_run_over_it_and_start_no_ssh() {
     let installed = Installed {
         target: Target::LinuxX86_64,
         version: "0.2.0".to_owned(),
-        path: ".local/share/kablo/0.2.0/kablo".to_owned(),
+        path: ".local/share/bateri/kablo/0.2.0/kablo".to_owned(),
         fresh: false,
     };
     backend.files(&host, &installed);
@@ -684,9 +684,9 @@ fn what_ssh_says_when_the_bridge_ends_tells_a_login_from_a_network() {
 fn a_status_of_the_far_shell_that_could_not_run_kablo_is_a_kablo_that_is_missing() {
     for said in [
         "",
-        "bash: line 1: .local/share/kablo/0.2.0/kablo: No such file or directory\n",
-        "zsh:1: no such file or directory: .local/share/kablo/0.2.0/kablo\n",
-        "fish: Unknown command: .local/share/kablo/0.2.0/kablo\n",
+        "bash: line 1: .local/share/bateri/kablo/0.2.0/kablo: No such file or directory\n",
+        "zsh:1: no such file or directory: .local/share/bateri/kablo/0.2.0/kablo\n",
+        "fish: Unknown command: .local/share/bateri/kablo/0.2.0/kablo\n",
     ] {
         assert_eq!(why_it_ended(said, Some(127)), Cause::Missing, "{said:?}");
     }
@@ -724,7 +724,8 @@ fn a_bridge_whose_kablo_is_gone_from_the_server_ends_as_missing() {
     let argv = backend.master(&host).expect("plan").expect("step");
     assert_eq!(run_argv(&argv), 0);
     let installed = backend.install(&host, &[]).expect("installed");
-    std::fs::remove_dir_all(world.home.join(".local/share/kablo")).expect("removed on the server");
+    std::fs::remove_dir_all(world.home.join(".local/share/bateri/kablo"))
+        .expect("removed on the server");
 
     let Carried {
         mut reader,
@@ -800,7 +801,7 @@ fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
     let installed = Installed {
         target: Target::LinuxX86_64,
         version: "0.2.0".into(),
-        path: ".local/share/kablo/0.2.0/kablo".into(),
+        path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: false,
     };
     backend.files(&host, &installed);
@@ -809,7 +810,7 @@ fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
     assert!(
         std::fs::read_to_string(shell.join("bin/bateri"))
             .expect("the agent's command")
-            .contains(".local/share/kablo/0.2.0/kablo"),
+            .contains(".local/share/bateri/kablo/0.2.0/kablo"),
         "kablo's place is where the ledger says"
     );
     // An agent's hook comes with the setting and goes with it, on the next call.
@@ -888,17 +889,17 @@ fn a_kablo_of_an_older_release_is_replaced_under_the_terminals_it_runs() {
     let argv = backend.master(&host).expect("plan").expect("step");
     assert_eq!(run_argv(&argv), 0);
     // The server has the release the ledger remembers, and its terminals.
-    let old = world.home.join(".local/share/kablo/0.1.0/kablo");
+    let old = world.home.join(".local/share/bateri/kablo/0.1.0/kablo");
     std::fs::create_dir_all(old.parent().expect("dir")).expect("dir");
     std::fs::write(&old, "#!/bin/sh\n").expect("old kablo");
 
     let installed = backend.refresh(&host, &ids(&["t1"])).expect("renewed");
     assert_eq!(installed.version, "0.2.0");
-    assert_eq!(installed.path, ".local/share/kablo/0.2.0/kablo");
+    assert_eq!(installed.path, ".local/share/bateri/kablo/0.2.0/kablo");
     assert!(installed.fresh, "it was written now");
     assert_eq!(
         world.upgrades("0.2.0"),
-        ["upgrade t1 .local/share/kablo/0.2.0/kablo"]
+        ["upgrade t1 .local/share/bateri/kablo/0.2.0/kablo"]
     );
     assert_eq!(
         std::fs::read(&old).expect("the old one"),
@@ -979,24 +980,24 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
         .install(&here, &ids(&["t1", "t2"]))
         .expect("installed");
     assert!(installed.fresh);
-    assert_eq!(installed.path, ".local/share/kablo/0.2.0/kablo");
+    assert_eq!(installed.path, ".local/share/bateri/kablo/0.2.0/kablo");
     assert!(mac.join(&installed.path).is_file());
-    let asked = std::fs::read_to_string(mac.join(".local/share/kablo/0.2.0/upgrades"))
+    let asked = std::fs::read_to_string(mac.join(".local/share/bateri/kablo/0.2.0/upgrades"))
         .expect("the renewal");
     assert_eq!(
         asked.lines().collect::<Vec<_>>(),
         [
-            "upgrade t1 .local/share/kablo/0.2.0/kablo",
-            "upgrade t2 .local/share/kablo/0.2.0/kablo"
+            "upgrade t1 .local/share/bateri/kablo/0.2.0/kablo",
+            "upgrade t2 .local/share/bateri/kablo/0.2.0/kablo"
         ]
     );
     // Nothing of the stand-in server's was touched, and no ssh ran.
-    assert!(!world.home.join(".local/share/kablo").exists());
+    assert!(!world.home.join(".local/share/bateri/kablo").exists());
     assert!(world.calls().is_empty(), "{:?}", world.calls());
     // The second time finds it, and renews nothing.
     assert!(!backend.install(&here, &ids(&["t1"])).expect("found").fresh);
     assert_eq!(
-        std::fs::read_to_string(mac.join(".local/share/kablo/0.2.0/upgrades"))
+        std::fs::read_to_string(mac.join(".local/share/bateri/kablo/0.2.0/upgrades"))
             .expect("the renewal")
             .lines()
             .count(),
@@ -1041,14 +1042,14 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
 
     // A release older than the package's is renewed under the terminals it runs, and kept where
     // it is for the relays that run from it.
-    let old = mac.join(".local/share/kablo/0.1.0/kablo");
+    let old = mac.join(".local/share/bateri/kablo/0.1.0/kablo");
     std::fs::create_dir_all(old.parent().expect("dir")).expect("dir");
     std::fs::write(&old, "#!/bin/sh\n").expect("an old kablo");
     let renewed = backend.refresh(&here, &ids(&["t1"])).expect("renewed");
     assert_eq!(renewed.version, "0.2.0");
     assert!(old.exists());
     assert_eq!(
-        std::fs::read_to_string(mac.join(".local/share/kablo/0.2.0/upgrades"))
+        std::fs::read_to_string(mac.join(".local/share/bateri/kablo/0.2.0/upgrades"))
             .expect("the renewal")
             .lines()
             .count(),
@@ -1137,12 +1138,12 @@ fn reaching_a_server_sets_it_up_with_this_builds_kablo_and_command_once_a_run() 
     assert!(
         std::fs::read_to_string(&script)
             .expect("the command")
-            .contains(".local/share/kablo/0.2.0/kablo"),
+            .contains(".local/share/bateri/kablo/0.2.0/kablo"),
         "this build's, with the package's kablo"
     );
     // kablo itself was written (the server had none of this package's), and what ran from the
     // earlier one is renewed with it.
-    let kablo = world.home.join(".local/share/kablo/0.2.0");
+    let kablo = world.home.join(".local/share/bateri/kablo/0.2.0");
     assert!(kablo.join("kablo").is_file(), "no kablo was written");
     let asked = std::fs::read_to_string(kablo.join("upgrades")).expect("the renewal");
     assert_eq!(asked.lines().count(), 2, "{asked}");

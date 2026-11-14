@@ -44,8 +44,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use kablo_proto::install;
-
 use super::install::{Channel, Installed, Reply, run_command_in};
 use super::service::Carried;
 use super::{Cause, NewSession, Size};
@@ -106,10 +104,14 @@ impl Channel for LocalChannel {
 }
 
 /// The command that starts the bridge: the binary `installed` names, below `home`, run as
-/// `attach`. A caller that has to set its own environment on it (a test pointing kablo at a
-/// socket directory of its own) does so before [`start`]ing it.
+/// `attach`. The root is the one `installed` is in, not the current one: an account that was made
+/// before kablo moved has its binary where it was put, until it is renewed. A caller that has to
+/// set its own environment on it (a test pointing kablo at a socket directory of its own) does so
+/// before [`start`]ing it.
 pub fn bridge_command(home: &Path, installed: &Installed) -> io::Result<Command> {
-    let program = install::install_path_in(&home.to_string_lossy(), &installed.version)
+    let program = installed
+        .root()
+        .path_in(&home.to_string_lossy(), &installed.version)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     let mut command = Command::new(program);
     command.arg("attach");

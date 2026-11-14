@@ -95,6 +95,9 @@ struct Fake {
     carry_fails: AtomicU32,
     /// The bridges started, each with the flag that ends it.
     carried: Mutex<Vec<Arc<AtomicBool>>>,
+    /// The path of the kablo each bridge was asked for, in order (what [`Backend::carry`] was
+    /// given, started or not).
+    carried_paths: Mutex<Vec<String>>,
     /// While set, no bridge can be started: the network is down (`ConnectionRefused`),
     /// or the server wants a login nobody has saved (`PermissionDenied`).
     carry_error: Mutex<Option<io::ErrorKind>>,
@@ -159,6 +162,7 @@ impl Fake {
             carry_fails: AtomicU32::new(0),
             carry_noise: AtomicBool::new(false),
             carried: Mutex::new(Vec::new()),
+            carried_paths: Mutex::new(Vec::new()),
             carry_error: Mutex::new(None),
             eof_cause: Arc::new(Mutex::new(Cause::Dropped)),
             links: Mutex::new(Vec::new()),
@@ -235,6 +239,11 @@ impl Fake {
     /// What was asked of the folder for a program's files, in order.
     fn staged(&self) -> Vec<String> {
         self.staged.lock().expect("lock").clone()
+    }
+
+    /// The path of the kablo every bridge was asked for, in order.
+    fn carried_paths(&self) -> Vec<String> {
+        self.carried_paths.lock().expect("lock").clone()
     }
 
     fn count(&self, what: &str) -> usize {
@@ -365,7 +374,7 @@ impl Backend for Fake {
         Ok(Installed {
             target: kablo_proto::install::Target::LinuxX86_64,
             version: "0.2.0".into(),
-            path: ".local/share/kablo/0.2.0/kablo".into(),
+            path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
             fresh: self.fresh.load(Ordering::SeqCst),
         })
     }
@@ -400,13 +409,17 @@ impl Backend for Fake {
         Some(Installed {
             target: kablo_proto::install::Target::LinuxX86_64,
             version: "0.2.0".into(),
-            path: ".local/share/kablo/0.2.0/kablo".into(),
+            path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
             fresh: true,
         })
     }
 
-    fn carry(&self, server: &KabloHost, _: &Installed) -> io::Result<Carried> {
+    fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried> {
         self.note("carry");
+        self.carried_paths
+            .lock()
+            .expect("lock")
+            .push(installed.path.clone());
         if let Some(kind) = *self.carry_error.lock().expect("lock") {
             return Err(io::Error::new(kind, "no bridge"));
         }
@@ -2841,7 +2854,7 @@ fn the_old_release(ledger: &Ledger) {
         &Installed {
             target: kablo_proto::install::Target::LinuxX86_64,
             version: "0.1.0".into(),
-            path: ".local/share/kablo/0.1.0/kablo".into(),
+            path: ".local/share/bateri/kablo/0.1.0/kablo".into(),
             fresh: false,
         },
     );
@@ -2956,6 +2969,115 @@ fn a_renewal_that_cannot_be_made_leaves_the_account_as_it_was_until_the_next_dia
     });
 }
 
+/// What a bateri from before kablo moved wrote: the account's kablo is where it was put then,
+/// at the release this computer brings.
+fn the_former_root(ledger: &Ledger) {
+    ledger.remember(
+        &host("u@rasp:22"),
+        &Installed {
+            target: kablo_proto::install::Target::LinuxX86_64,
+            version: "0.2.0".into(),
+            path: ".local/share/kablo/0.2.0/kablo".into(),
+            fresh: false,
+        },
+    );
+}
+
+/// An account the ledger remembers in the former root is renewed before it is dialed even when
+/// the release is the one this computer brings (the renewal is what moves its terminals to the
+/// current root), and is known in the current root from then on, in the ledger too.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn an_account_in_the_former_root_is_renewed_into_the_current_one_before_it_is_dialed() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Old));
+    let first = Rig::kept("root-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    first.service.stop();
+    drop(first);
+    the_former_root(&ledger);
+    assert_eq!(ledger.known("u@rasp:22").expect("known").root, Root::Former);
+
+    let before = world.log().len();
+    let second = Rig::kept("root-2", world.clone(), ledger.clone(), END_GRACE);
+    let again = Holder::start(
+        &second.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("shown again, from where it was", || {
+        again.shown.bytes() == b"def"
+    });
+    assert_eq!(
+        world.log()[before..],
+        ["pane", "refresh", "carry"],
+        "renewed first, though the release is the same"
+    );
+    // What the renewal answered is what the bridge was made with.
+    assert_eq!(
+        world.carried_paths().last().map(String::as_str),
+        Some(".local/share/bateri/kablo/0.2.0/kablo")
+    );
+    let known = ledger.known("u@rasp:22").expect("known");
+    assert_eq!(known.root, Root::Current);
+    assert_eq!(
+        known.installed().path,
+        ".local/share/bateri/kablo/0.2.0/kablo"
+    );
+}
+
+/// A renewal that does not come (no room on the server, a failed install) leaves the account in
+/// the root its terminals run from: the bridge is made with the former root's path, which is a
+/// file that is there, and the ledger does not say otherwise.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn an_account_in_the_former_root_whose_renewal_does_not_come_is_dialed_in_the_former_root() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Old));
+    let first = Rig::kept("root-fail-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    first.service.stop();
+    drop(first);
+    the_former_root(&ledger);
+    world.refresh_fails.store(true, Ordering::SeqCst);
+
+    let before = world.log().len();
+    let second = Rig::kept("root-fail-2", world.clone(), ledger.clone(), END_GRACE);
+    let again = Holder::start(
+        &second.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("shown, the relay of the root before serving", || {
+        again.shown.bytes() == b"def"
+    });
+    assert_eq!(world.log()[before..], ["pane", "refresh", "carry"]);
+    assert_eq!(
+        world.carried_paths().last().map(String::as_str),
+        Some(".local/share/kablo/0.2.0/kablo"),
+        "the terminal runs from the file where it was put"
+    );
+    assert_eq!(
+        ledger.known("u@rasp:22").expect("known").root,
+        Root::Former,
+        "and nothing is written down as if it moved"
+    );
+}
+
 /// A holder that was shown a terminal bateri has since been told to end is not shown it
 /// again, and an account the ledger never heard of is refused as before.
 #[test]
@@ -2966,7 +3088,7 @@ fn a_terminal_marked_to_end_is_not_shown_again() {
         &Installed {
             target: kablo_proto::install::Target::LinuxX86_64,
             version: "0.2.0".into(),
-            path: ".local/share/kablo/0.2.0/kablo".into(),
+            path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
             fresh: false,
         },
     );

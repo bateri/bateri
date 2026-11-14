@@ -1172,7 +1172,7 @@ it:
   that you answer *Leave Running* to, and a terminal on a server that another
   of your Macs took — and restarting the Mac or logging out ends them.
 - Every tab's shell runs in a terminal that kablo keeps on this Mac — kablo is
-  bateri's companion program (one file under `~/.local/share/kablo/`, put there
+  bateri's companion program (one file under `~/.local/share/bateri/kablo/`, put there
   by bateri; nothing is installed system-wide and nothing needs root) — and
   bateri shows it. The terminals are what outlive bateri; no helper process of
   bateri's own is involved. A terminal costs memory in kablo for as long as it
@@ -2496,7 +2496,7 @@ command line of a program running as root, so a script run with `sudo`
 While `integration = true`, a plain `ssh` typed in the local zsh, fish or bash
 opens a terminal that **the server keeps**: it runs under kablo, bateri's
 companion program, which the first `ssh` to a server puts there (one file under
-`~/.local/share/kablo/`; nothing is installed system-wide and nothing needs
+`~/.local/share/bateri/kablo/`; nothing is installed system-wide and nothing needs
 root). The pane shows that terminal as if `ssh` had run in it, so you log in
 the way you always did (the password, the second factor and the question
 whether to trust the server's key are asked in the pane), the dock shows

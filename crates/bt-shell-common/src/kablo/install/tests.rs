@@ -57,7 +57,8 @@ impl Home {
     }
 
     fn installed(&self, version: &str) -> PathBuf {
-        self.dir.join(format!(".local/share/kablo/{version}/kablo"))
+        self.dir
+            .join(format!(".local/share/bateri/kablo/{version}/kablo"))
     }
 
     fn uploads(&self) -> usize {
@@ -142,7 +143,10 @@ fn the_package_names_its_version_and_hands_out_files_that_are_the_lists() {
     let root = TempRoot::new("kablo-bundle");
     let bundle = package(&root.0, "0.2.0", KABLO);
     assert_eq!(bundle.version(), "0.2.0");
-    assert_eq!(bundle.remote_path(), ".local/share/kablo/0.2.0/kablo");
+    assert_eq!(
+        bundle.remote_path(),
+        ".local/share/bateri/kablo/0.2.0/kablo"
+    );
     for target in Target::ALL {
         let artifact = bundle.artifact(target).expect("every target");
         assert_eq!(artifact.name, format!("kablo-0.2.0-{}", target.triple()));
@@ -194,7 +198,7 @@ fn the_first_connection_writes_kablo_and_the_next_finds_it() {
     let first = ensure(&home, &bundle).expect("installed");
     assert!(first.fresh, "written now");
     assert_eq!(first.version, "0.2.0");
-    assert_eq!(first.path, ".local/share/kablo/0.2.0/kablo");
+    assert_eq!(first.path, ".local/share/bateri/kablo/0.2.0/kablo");
     let file = home.installed("0.2.0");
     assert_eq!(std::fs::read(&file).expect("the file"), KABLO.as_bytes());
     let mode = std::fs::metadata(&file)
@@ -249,7 +253,7 @@ fn the_shells_files_go_with_the_look_for_kablo_and_cost_no_call_of_their_own() {
     }
     // The agent's command knows where kablo is: the place `ensure` found.
     assert!(
-        written("bin/bateri").contains(".local/share/kablo/0.2.0/kablo"),
+        written("bin/bateri").contains(".local/share/bateri/kablo/0.2.0/kablo"),
         "the agent's command lost kablo's place"
     );
     // The command is the one that can be run, the files are the owner's.
@@ -488,11 +492,11 @@ fn the_terminals_of_the_server_are_renewed_with_the_binary_that_was_written() {
         said.lines().collect::<Vec<_>>(),
         [
             format!(
-                "upgrade t1 .local/share/kablo/0.2.0/kablo from {}",
+                "upgrade t1 .local/share/bateri/kablo/0.2.0/kablo from {}",
                 home.dir.display()
             ),
             format!(
-                "upgrade b-0123456789abcdef .local/share/kablo/0.2.0/kablo from {}",
+                "upgrade b-0123456789abcdef .local/share/bateri/kablo/0.2.0/kablo from {}",
                 home.dir.display()
             ),
         ]
@@ -536,7 +540,7 @@ fn a_renewal_that_cannot_be_asked_is_nothing_more_than_a_no() {
     let installed = Installed {
         target: Target::LinuxX86_64,
         version: "0.2.0".into(),
-        path: ".local/share/kablo/0.2.0/kablo".into(),
+        path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: true,
     };
     assert!(!upgrade_sessions(&Failing, &installed, &ids(&["t1"])));
@@ -550,7 +554,12 @@ fn the_scripts_are_one_line_of_plain_sh_a_login_shell_hands_on_as_it_is() {
         upload_script("0.2.0", &sha256_hex(b"x")),
         upgrade_script("0.2.0", &ids(&["t1", "b-1"])).expect("a script"),
         census_script("0.2.0"),
-        prune_script(&["0.1.0".to_owned(), "0.2.0-dev+0123456789ab".to_owned()]).expect("a script"),
+        prune_script(&[
+            current("0.1.0"),
+            former("0.1.0"),
+            current("0.2.0-dev+0123456789ab"),
+        ])
+        .expect("a script"),
         pipe_script(
             "/home/me/.cache/pencere-stage/c148d55a",
             "0b5d7c1e9a3f4682d0e1c7a95b3f8d24",
@@ -616,7 +625,7 @@ fn the_ssh_channel_sends_the_script_as_one_word_for_sh_and_ends_a_step_that_take
 }
 
 /// Where kablo is in the home of [`counting_home`].
-const COUNTING_KABLO: &str = ".local/share/kablo/0.2.0/kablo";
+const COUNTING_KABLO: &str = ".local/share/bateri/kablo/0.2.0/kablo";
 
 /// A kablo that keeps the counter's contract and nothing else (kablo's own counter, its lock and
 /// what it does with a damaged state are kablo's tests): `bateri --next-number` prints the number
@@ -751,10 +760,27 @@ fn listing(runs: &[(&str, &str)]) -> String {
     format!("[\n{}\n]\n", objects.join(",\n"))
 }
 
+/// The directory of a version in the current root, as the census says it and as the versions
+/// nobody runs are named.
+fn current(name: &str) -> String {
+    format!(".local/share/bateri/kablo/{name}")
+}
+
+/// The same under the former root.
+fn former(name: &str) -> String {
+    format!(".local/share/kablo/{name}")
+}
+
 fn census(status: Option<i32>, dirs: &[&str], json: &str) -> Reply {
+    census_of(status, dirs, &[], json)
+}
+
+/// A census of a machine with `dirs` in the current root and `old` in the former one.
+fn census_of(status: Option<i32>, dirs: &[&str], old: &[&str], json: &str) -> Reply {
     let dirs: String = dirs
         .iter()
-        .map(|name| format!(".local/share/kablo/{name}\n"))
+        .map(|name| format!("{}\n", current(name)))
+        .chain(old.iter().map(|name| format!("{}\n", former(name))))
         .collect();
     Reply {
         status,
@@ -778,13 +804,50 @@ fn a_version_is_unused_when_no_terminal_of_the_machine_runs_a_relay_or_a_warden_
     let json = listing(&[("0.2.0", "0.1.5"), ("0.1.6", "0.2.0")]);
     assert_eq!(
         unused_versions(&census(Some(0), &dirs, &json), "0.2.0"),
-        ["0.1.0", "0.3.0-dev+0123456789ab"]
+        [current("0.1.0"), current("0.3.0-dev+0123456789ab")]
     );
     // No terminal at all: the machine's listing is an empty array, which is an answer.
     assert_eq!(
         unused_versions(&census(Some(0), &dirs, "[]\n"), "0.2.0"),
-        ["0.1.0", "0.1.5", "0.1.6", "0.3.0-dev+0123456789ab"]
+        [
+            current("0.1.0"),
+            current("0.1.5"),
+            current("0.1.6"),
+            current("0.3.0-dev+0123456789ab")
+        ]
     );
+}
+
+#[test]
+fn a_version_in_the_former_root_goes_when_no_terminal_says_it_and_the_two_roots_are_told_apart() {
+    let json = listing(&[("0.2.0", "0.1.5")]);
+    let reply = census_of(
+        Some(0),
+        &["0.2.0", "0.1.0"],
+        &["0.1.0", "0.1.5", "0.2.0", "not a version"],
+        &json,
+    );
+    // 0.1.0 is in both and nobody says it: both go, each as its own directory. 0.1.5 is a
+    // warden's and 0.2.0 is said by a terminal: the copies in the former root stay while a
+    // terminal says their version (the file a terminal runs from is not told apart from
+    // its version).
+    assert_eq!(
+        unused_versions(&reply, "0.2.0"),
+        [current("0.1.0"), former("0.1.0")]
+    );
+    // The version that stays is only the current root's: its copy in the former root goes when no
+    // terminal says it.
+    let reply = census_of(Some(0), &["0.2.0"], &["0.2.0"], "[]\n");
+    assert_eq!(unused_versions(&reply, "0.2.0"), [former("0.2.0")]);
+    // A directory of neither root, or one not made of a version's name, is nobody's to remove.
+    let stray = Reply {
+        status: Some(0),
+        out:
+            ".local/share/other/0.1.0\n.local/share/kablo/a/b\n.local/share/bateri/0.1.0\n---\n[]\n"
+                .to_owned(),
+        err: String::new(),
+    };
+    assert!(unused_versions(&stray, "0.2.0").is_empty());
 }
 
 #[test]
@@ -792,7 +855,11 @@ fn nothing_is_unused_by_an_answer_that_is_not_a_whole_one() {
     let dirs = ["0.1.0", "0.2.0"];
     let json = listing(&[("0.2.0", "0.2.0")]);
     let whole = census(Some(0), &dirs, &json);
-    assert_eq!(unused_versions(&whole, "0.2.0"), ["0.1.0"], "the control");
+    assert_eq!(
+        unused_versions(&whole, "0.2.0"),
+        [current("0.1.0")],
+        "the control"
+    );
     // The listing failed: not an empty one.
     assert!(unused_versions(&census(Some(1), &dirs, &json), "0.2.0").is_empty());
     assert!(unused_versions(&census(None, &dirs, &json), "0.2.0").is_empty());
@@ -803,7 +870,7 @@ fn nothing_is_unused_by_an_answer_that_is_not_a_whole_one() {
     // Not even the marker between the halves.
     let unmarked = Reply {
         status: Some(0),
-        out: format!(".local/share/kablo/0.1.0\n{json}"),
+        out: format!(".local/share/bateri/kablo/0.1.0\n{json}"),
         err: String::new(),
     };
     assert!(unused_versions(&unmarked, "0.2.0").is_empty());
@@ -814,19 +881,24 @@ const KABLO_LISTING: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.0
      list) [ -e \"$(dirname \"$0\")/broken\" ] && exit 1; cat \"$(dirname \"$0\")/listing\";; esac\n";
 
 /// A home whose kablo of the package's version is installed and which holds `others` as versions
-/// of kablo, each a directory with a binary in it, written long ago (`aged`) or just now.
-fn home_with(root: &Path, others: &[(&str, bool)]) -> (Home, Installed) {
+/// of kablo in the current root, each a directory with a binary in it, written long ago (`aged`)
+/// or just now, and `old` in the former root.
+fn home_with(root: &Path, others: &[(&str, bool)], old: &[(&str, bool)]) -> (Home, Installed) {
     let bundle = package(root, "0.2.0", KABLO_LISTING);
     let home = Home::new(&root.join("home"));
     std::fs::create_dir_all(&home.dir).expect("home");
     let installed = ensure(&home, &bundle).expect("installed");
-    for (version, aged) in others {
-        let dir = home.dir.join(format!(".local/share/kablo/{version}"));
+    let places = others
+        .iter()
+        .map(|(version, aged)| (current(version), *aged))
+        .chain(old.iter().map(|(version, aged)| (former(version), *aged)));
+    for (place, aged) in places {
+        let dir = home.dir.join(place);
         std::fs::create_dir_all(&dir).expect("a version");
         std::fs::write(dir.join("kablo"), "#!/bin/sh\n").expect("its binary");
         std::fs::set_permissions(dir.join("kablo"), std::fs::Permissions::from_mode(0o755))
             .expect("runnable");
-        if *aged {
+        if aged {
             // A directory is as old as the last entry made in it: this is the last thing done.
             let status = Command::new("touch")
                 .args(["-t", "202001010000"])
@@ -840,9 +912,11 @@ fn home_with(root: &Path, others: &[(&str, bool)]) -> (Home, Installed) {
 }
 
 fn kept(home: &Home, version: &str) -> bool {
-    home.dir
-        .join(format!(".local/share/kablo/{version}"))
-        .exists()
+    home.dir.join(current(version)).exists()
+}
+
+fn kept_in_the_former_root(home: &Home, version: &str) -> bool {
+    home.dir.join(former(version)).exists()
 }
 
 #[test]
@@ -858,9 +932,10 @@ fn the_versions_nothing_runs_are_removed_and_the_ones_something_runs_stay() {
             // Written a moment ago: another build may be about to start a terminal from it.
             ("0.3.0", false),
         ],
+        &[],
     );
     // A directory that holds no kablo is not a version of it and is not touched.
-    let stray = home.dir.join(".local/share/kablo/notes");
+    let stray = home.dir.join(".local/share/bateri/kablo/notes");
     std::fs::create_dir_all(&stray).expect("stray");
     std::fs::write(
         home.installed("0.2.0").with_file_name("listing"),
@@ -870,7 +945,7 @@ fn the_versions_nothing_runs_are_removed_and_the_ones_something_runs_stay() {
 
     let asked = prune_versions(&home, &installed);
     // Asked to go: what nothing runs from, however young; gone: only what was old enough too.
-    assert_eq!(asked, ["0.1.0", "0.3.0"]);
+    assert_eq!(asked, [current("0.1.0"), current("0.3.0")]);
     assert!(!kept(&home, "0.1.0"), "nothing runs from it");
     assert!(kept(&home, "0.1.5"), "a warden runs from it");
     assert!(kept(&home, "0.1.6"), "a relay and a warden run from it");
@@ -888,12 +963,13 @@ fn the_versions_nothing_runs_are_removed_and_the_ones_something_runs_stay() {
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn nothing_is_removed_when_the_machines_terminals_could_not_be_listed() {
     let root = TempRoot::new("kablo-prune-broken");
-    let (home, installed) = home_with(&root.0, &[("0.1.0", true)]);
+    let (home, installed) = home_with(&root.0, &[("0.1.0", true)], &[("0.1.0", true)]);
     let listed = home.installed("0.2.0").with_file_name("listing");
     std::fs::write(&listed, listing(&[("0.2.0", "0.2.0")])).expect("terminals");
     std::fs::write(listed.with_file_name("broken"), "").expect("a kablo that cannot list");
     assert!(prune_versions(&home, &installed).is_empty());
     assert!(kept(&home, "0.1.0"), "a failed listing is not an empty one");
+    assert!(kept_in_the_former_root(&home, "0.1.0"));
 
     // And a channel that fails does not remove anything either.
     struct Failing;
@@ -904,18 +980,114 @@ fn nothing_is_removed_when_the_machines_terminals_could_not_be_listed() {
     }
     assert!(prune_versions(&Failing, &installed).is_empty());
     assert!(kept(&home, "0.1.0"));
+    assert!(kept_in_the_former_root(&home, "0.1.0"));
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_former_root_is_swept_and_goes_when_nothing_is_left_in_it() {
+    let root = TempRoot::new("kablo-prune-former");
+    let (home, installed) = home_with(
+        &root.0,
+        &[],
+        &[
+            ("0.1.0", true),
+            ("0.1.5", true),
+            // Written a moment ago: asked to go, and not gone.
+            ("0.1.6", false),
+        ],
+    );
+    let listed = home.installed("0.2.0").with_file_name("listing");
+    // A terminal started before the move still runs from a copy there: 0.1.5.
+    std::fs::write(&listed, listing(&[("0.2.0", "0.1.5")])).expect("terminals");
+
+    let asked = prune_versions(&home, &installed);
+    assert_eq!(asked, [former("0.1.0"), former("0.1.6")]);
+    assert!(
+        !kept_in_the_former_root(&home, "0.1.0"),
+        "nothing runs from it"
+    );
+    assert!(
+        kept_in_the_former_root(&home, "0.1.5"),
+        "a warden runs from it"
+    );
+    assert!(
+        kept_in_the_former_root(&home, "0.1.6"),
+        "it is a moment old"
+    );
+    assert!(home.dir.join(".local/share/kablo").exists(), "not empty");
+    assert!(
+        kept(&home, "0.2.0"),
+        "the version that stays is in the current root"
+    );
+
+    // The terminal moved to the current root: its old copy goes, and the folder with it. What
+    // was a moment old is old enough by now (the age is the file's, so it is made old here).
+    std::fs::write(&listed, listing(&[("0.2.0", "0.2.0")])).expect("terminals");
+    for version in ["0.1.5", "0.1.6"] {
+        let status = Command::new("touch")
+            .args(["-t", "202001010000"])
+            .arg(home.dir.join(former(version)))
+            .status()
+            .expect("touch");
+        assert!(status.success());
+    }
+    let asked = prune_versions(&home, &installed);
+    assert_eq!(asked, [former("0.1.5"), former("0.1.6")]);
+    assert!(
+        !home.dir.join(".local/share/kablo").exists(),
+        "an empty former root goes"
+    );
+    assert!(kept(&home, "0.2.0"));
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_former_root_that_holds_something_else_stays() {
+    let root = TempRoot::new("kablo-prune-former-stray");
+    let (home, installed) = home_with(&root.0, &[], &[("0.1.0", true)]);
+    let note = home.dir.join(".local/share/kablo/notes");
+    std::fs::create_dir_all(&note).expect("a directory that is not a version");
+    std::fs::write(
+        home.installed("0.2.0").with_file_name("listing"),
+        listing(&[("0.2.0", "0.2.0")]),
+    )
+    .expect("terminals");
+    assert_eq!(prune_versions(&home, &installed), [former("0.1.0")]);
+    assert!(!kept_in_the_former_root(&home, "0.1.0"));
+    assert!(note.exists(), "rmdir leaves a folder that holds anything");
 }
 
 #[test]
 fn a_name_that_is_not_a_version_is_never_handed_to_rm() {
     assert_eq!(prune_script(&[]), None);
     assert_eq!(
-        prune_script(&["../..".to_owned(), "a b".to_owned(), "x;y".to_owned()]),
+        prune_script(&[
+            "../..".to_owned(),
+            "a b".to_owned(),
+            "x;y".to_owned(),
+            // A bare name is not a directory of either root, and neither is another root's.
+            "0.1.0".to_owned(),
+            ".local/share/other/0.1.0".to_owned(),
+            ".local/share/bateri/kablo/../../0.1.0".to_owned(),
+            ".local/share/bateri/kablo/a/b".to_owned(),
+        ]),
         None
     );
-    let script = prune_script(&["../..".to_owned(), "0.1.0".to_owned()]).expect("a script");
-    assert!(script.contains(" 0.1.0;"), "{script}");
+    let script = prune_script(&["../..".to_owned(), current("0.1.0")]).expect("a script");
+    assert!(
+        script.contains(" .local/share/bateri/kablo/0.1.0;"),
+        "{script}"
+    );
     assert!(!script.contains(".."), "{script}");
+    // The former root is only taken away with a version that was in it.
+    assert!(!script.contains("rmdir"), "{script}");
+    let script = prune_script(&[former("0.1.0")]).expect("a script");
+    assert!(script.contains("rm -rf $v"), "{script}");
+    assert!(
+        script.contains("rmdir .local/share/kablo 2>/dev/null"),
+        "{script}"
+    );
 }
 
 #[test]
@@ -929,7 +1101,7 @@ fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents
 
     let first = ensure_here(&channel, &bundle, true).expect("installed");
     assert!(first.fresh, "written now");
-    assert_eq!(first.path, ".local/share/kablo/0.2.0/kablo");
+    assert_eq!(first.path, ".local/share/bateri/kablo/0.2.0/kablo");
     let file = home.join(&first.path);
     assert_eq!(std::fs::read(&file).expect("the file"), KABLO.as_bytes());
     assert_eq!(
@@ -953,7 +1125,9 @@ fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents
         names
     };
     assert_eq!(names(&home), [".local"]);
-    assert_eq!(names(&home.join(".local/share")), ["bateri", "kablo"]);
+    // kablo is inside bateri's own directory: one folder is all bateri leaves of its own.
+    assert_eq!(names(&home.join(".local/share")), ["bateri"]);
+    assert_eq!(names(&home.join(".local/share/bateri/kablo")), ["0.2.0"]);
     assert_eq!(names(&home.join(".local/share/bateri/shell")), ["bin"]);
     assert_eq!(
         names(&home.join(".local/share/bateri/shell/bin")),
@@ -975,7 +1149,7 @@ fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents
     assert_eq!(
         ensure_here(&channel, &bundle, true),
         Err(Failure::Transient(
-            "the kablo on the server is not the package's".to_owned()
+            "the bateri on the server is not the package's".to_owned()
         ))
     );
     assert_eq!(

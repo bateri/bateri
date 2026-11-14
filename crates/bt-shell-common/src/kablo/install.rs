@@ -183,7 +183,7 @@ impl Bundle {
     }
 
     /// Where the binary of this version is on a server, relative to the home
-    /// directory (`.local/share/kablo/0.2.0/kablo`): also the command to run it
+    /// directory (`.local/share/bateri/kablo/0.2.0/kablo`): also the command to run it
     /// over ssh, which starts in the home directory.
     pub fn remote_path(&self) -> String {
         install::install_path(&self.version).unwrap_or_default()
@@ -269,6 +269,64 @@ pub struct Installed {
     pub fresh: bool,
 }
 
+impl Installed {
+    /// Which root the binary is in, from its path.
+    pub fn root(&self) -> Root {
+        Root::of(&self.path)
+    }
+}
+
+/// The two places a version of kablo is kept below the home directory: where it is put now, and
+/// where it was put before it moved into bateri's directory. A terminal started before the move
+/// runs from the former one until it is renewed, so a machine can have both, and what is known of
+/// a machine's kablo has to say which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Root {
+    /// [`kablo_proto::install::ROOT`]: where a version is installed.
+    Current,
+    /// [`kablo_proto::install::FORMER_ROOT`]: where one was installed before.
+    Former,
+}
+
+impl Root {
+    /// The directory, relative to the home directory, as it is written in a script and in the
+    /// ledger.
+    pub fn dir(self) -> &'static str {
+        match self {
+            Root::Current => install::ROOT,
+            Root::Former => install::FORMER_ROOT,
+        }
+    }
+
+    /// The binary of `version` in this root, relative to the home directory.
+    pub fn path(self, version: &str) -> Result<String, kablo_proto::Error> {
+        match self {
+            Root::Current => install::install_path(version),
+            Root::Former => install::former_install_path(version),
+        }
+    }
+
+    /// The binary of `version` in this root under a known home directory (an absolute path).
+    pub fn path_in(self, home: &str, version: &str) -> Result<String, kablo_proto::Error> {
+        match self {
+            Root::Current => install::install_path_in(home, version),
+            Root::Former => install::former_install_path_in(home, version),
+        }
+    }
+
+    /// The root a binary's path is in: the former one if it is under it, the current one for
+    /// any other.
+    pub fn of(path: &str) -> Root {
+        match path
+            .strip_prefix(install::FORMER_ROOT)
+            .is_some_and(|rest| rest.starts_with('/'))
+        {
+            true => Root::Former,
+            false => Root::Current,
+        }
+    }
+}
+
 /// Makes sure the server has the package's kablo: asks what the server is,
 /// looks for the binary (writing the shells' files in the same call) and writes
 /// it if it is not there. See the module documentation for what a [`Failure`]
@@ -315,7 +373,7 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
     let target = server_target(channel)?;
     let artifact = bundle
         .artifact(target)
-        .ok_or_else(|| Failure::transient(format!("the package has no kablo for {target}")))?;
+        .ok_or_else(|| Failure::transient(format!("the package has no bateri for {target}")))?;
     let installed = Installed {
         target,
         version: bundle.version().to_owned(),
@@ -330,7 +388,7 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
     };
     let probe = channel
         .run(&probe_and_files_script(bundle.version()), script.as_bytes())
-        .map_err(|error| Failure::transient(format!("looking for kablo: {error}")))?;
+        .map_err(|error| Failure::transient(format!("looking for bateri: {error}")))?;
     // A macOS binary is code-signed when the package is made, and a signature
     // is part of the file: two packages of the same kablo have two sums. What
     // such a file says its version is has to do.
@@ -343,16 +401,16 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
             // from it, so it is left alone, and so is the connection's
             // fate — plain this time.
             return Err(Failure::transient(
-                "the kablo on the server is not the package's",
+                "the bateri on the server is not the package's",
             ));
         }
     }
     let bytes = bundle
         .read(&artifact)
-        .map_err(|error| Failure::transient(format!("reading the package's kablo: {error}")))?;
+        .map_err(|error| Failure::transient(format!("reading the package's bateri: {error}")))?;
     let reply = channel
         .run(&upload_script(bundle.version(), &artifact.sha256), &bytes)
-        .map_err(|error| Failure::transient(format!("writing kablo: {error}")))?;
+        .map_err(|error| Failure::transient(format!("writing bateri: {error}")))?;
     match reply.status {
         Some(0) => Ok(Installed {
             fresh: true,
@@ -360,10 +418,10 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
         }),
         Some(EXIT_UNWRITABLE) => Err(Failure::Impossible(Why::Unwritable)),
         Some(EXIT_WONT_RUN) => Err(Failure::Impossible(Why::WontRun)),
-        Some(EXIT_DAMAGED) => Err(Failure::transient("kablo arrived damaged")),
-        Some(EXIT_INCOMPLETE) => Err(Failure::transient("kablo could not be written in full")),
+        Some(EXIT_DAMAGED) => Err(Failure::transient("bateri arrived damaged")),
+        Some(EXIT_INCOMPLETE) => Err(Failure::transient("bateri could not be written in full")),
         other => Err(Failure::transient(format!(
-            "writing kablo ended with {other:?}: {}",
+            "writing bateri ended with {other:?}: {}",
             reply.err.trim()
         ))),
     }
@@ -406,8 +464,9 @@ const EXIT_WONT_RUN: i32 = 10;
 /// file (whichever tool the server has) and what the file says its version is.
 /// One line of `sh`: [`crate::ssh_wrap::is_inline`]'s alphabet and no more.
 pub fn probe_script(version: &str) -> String {
+    let root = install::ROOT;
     format!(
-        "f=.local/share/kablo/{version}/kablo; if [ -x $f ]; then echo present; \
+        "f={root}/{version}/kablo; if [ -x $f ]; then echo present; \
          (sha256sum $f || shasum -a 256 $f) 2>/dev/null; $f version 2>/dev/null; fi"
     )
 }
@@ -634,8 +693,9 @@ fn look(reply: &Reply, sha256: &str, version: &str, resigned: bool) -> Look {
 /// [`EXIT_UNWRITABLE`] (the directory or the file cannot be made),
 /// [`EXIT_INCOMPLETE`], [`EXIT_DAMAGED`], [`EXIT_WONT_RUN`].
 pub fn upload_script(version: &str, sha256: &str) -> String {
+    let root = install::ROOT;
     format!(
-        "d=.local/share/kablo/{version}; f=$d/kablo; t=$d/.new-$$; \
+        "d={root}/{version}; f=$d/kablo; t=$d/.new-$$; \
          mkdir -p $d && : >$t || {{ rm -f $t; exit {EXIT_UNWRITABLE}; }}; \
          cat >$t && chmod 755 $t || {{ rm -f $t; exit {EXIT_INCOMPLETE}; }}; \
          s=$(sha256sum $t 2>/dev/null || shasum -a 256 $t 2>/dev/null); \
@@ -661,8 +721,9 @@ pub fn upgrade_script(version: &str, ids: &[SessionId]) -> Option<String> {
         .filter(|id| !id.starts_with('-'))
         .collect();
     (!ids.is_empty()).then(|| {
+        let root = install::ROOT;
         format!(
-            "f=.local/share/kablo/{version}/kablo; s=0; for i in {}; do $f upgrade $i $f || s=1; done; exit $s",
+            "f={root}/{version}/kablo; s=0; for i in {}; do $f upgrade $i $f || s=1; done; exit $s",
             ids.join(" ")
         )
     })
@@ -693,23 +754,29 @@ const PRUNE_AGE_MINUTES: u32 = 10;
 const CENSUS_MARK: &str = "---";
 
 /// The script that says which versions of kablo are installed and which terminals run from
-/// which: the directories of [`kablo_proto::install::ROOT`] that hold a binary, [`CENSUS_MARK`],
-/// then what the binary of `version` (the one that stays) lists as the machine's terminals —
-/// **all** of them, this user's, whoever started them. Its status is that of the listing: a
-/// listing that failed is not an empty one, and [`unused_versions`] is not asked about it. One
-/// line of `sh`, like the others.
+/// which: the directories of [`kablo_proto::install::ROOT`] and of
+/// [`kablo_proto::install::FORMER_ROOT`] that hold a binary (each as its path under the home
+/// directory), [`CENSUS_MARK`], then what the binary of `version` (the one that stays, in
+/// `ROOT`) lists as the machine's terminals — **all** of them, this user's, whoever started
+/// them. Its status is that of the listing: a listing that failed is not an empty one, and
+/// [`unused_versions`] is not asked about it. One line of `sh`, like the others.
 pub fn census_script(version: &str) -> String {
+    let (root, former) = (install::ROOT, install::FORMER_ROOT);
     format!(
-        "r=.local/share/kablo; for d in $r/*/; do [ -x $d/kablo ] && echo ${{d%/}}; done; \
-         echo {CENSUS_MARK}; $r/{version}/kablo list --json"
+        "for r in {root} {former}; do for d in $r/*/; do [ -x $d/kablo ] && echo ${{d%/}}; done; done; \
+         echo {CENSUS_MARK}; {root}/{version}/kablo list --json"
     )
 }
 
-/// The installed versions nothing runs from, given what [`census_script`] said: a version that is
-/// not `keep`, that no terminal on the machine runs its relay or its warden from
+/// The installed versions nothing runs from, given what [`census_script`] said, each as its
+/// directory under the home directory (`.local/share/bateri/kablo/0.2.0`, or the same under
+/// [`kablo_proto::install::FORMER_ROOT`]; one version can be in both): a version that is not
+/// `keep` in `ROOT`, that no terminal on the machine runs its relay or its warden from
 /// (`"version"` and `"warden_version"` of the listing), and that is a name kablo would have made
-/// ([`kablo_proto::install::install_dir`]). Empty for an answer that is not a whole one — the
-/// script failed, or the listing is not one — because nothing is known to be unused then.
+/// ([`kablo_proto::install::install_dir`]). A terminal is told apart by the version it says, not
+/// by the file it runs from, so a copy in the former root stays while a terminal says its
+/// version. Empty for an answer that is not a whole one — the script failed, or the listing is
+/// not one — because nothing is known to be unused then.
 pub fn unused_versions(reply: &Reply, keep: &str) -> Vec<String> {
     if reply.status != Some(0) {
         return Vec::new();
@@ -727,34 +794,59 @@ pub fn unused_versions(reply: &Reply, keep: &str) -> Vec<String> {
             .any(|key| listing.contains(&format!("\"{key}\":\"{name}\"")))
     };
     dirs.lines()
-        .filter_map(|line| line.trim().rsplit('/').next())
-        .filter(|name| *name != keep && install::install_dir(name).is_ok() && !used(name))
-        .map(str::to_owned)
+        .map(str::trim)
+        .filter_map(|line| {
+            let (root, name) = version_dir(line)?;
+            (!(root == install::ROOT && name == keep) && !used(name)).then(|| line.to_owned())
+        })
         .collect()
 }
 
-/// The script that removes the version directories `names` (each one [`unused_versions`] gave,
-/// a name that can only be a directory directly under the root) that were not written in the
-/// last [`PRUNE_AGE_MINUTES`] minutes. One line of `sh`, like the others.
-pub fn prune_script(names: &[String]) -> Option<String> {
-    let names: Vec<&str> = names
+/// The root and the version of a directory under the home directory, if it is the directory of a
+/// version in one of the two roots: what [`census_script`] says is what the roots hold, and this
+/// reads nothing that is not a name kablo would have made.
+fn version_dir(dir: &str) -> Option<(&'static str, &str)> {
+    [install::ROOT, install::FORMER_ROOT]
+        .into_iter()
+        .find_map(|root| {
+            let name = dir.strip_prefix(root)?.strip_prefix('/')?;
+            install::install_dir(name).ok()?;
+            Some((root, name))
+        })
+}
+
+/// The script that removes the version directories `dirs` (each one [`unused_versions`] gave, a
+/// directory that can only be one version's directly under a root) that were not written in the
+/// last [`PRUNE_AGE_MINUTES`] minutes, and the former root itself when that leaves it empty
+/// (`rmdir` leaves one that holds anything). One line of `sh`, like the others.
+pub fn prune_script(dirs: &[String]) -> Option<String> {
+    let dirs: Vec<&str> = dirs
         .iter()
         .map(String::as_str)
-        .filter(|name| install::install_dir(name).is_ok())
+        .filter(|dir| version_dir(dir).is_some())
         .collect();
-    (!names.is_empty()).then(|| {
+    let former = install::FORMER_ROOT;
+    let in_former = dirs
+        .iter()
+        .any(|dir| version_dir(dir).is_some_and(|(root, _)| root == former));
+    let tidy = if in_former {
+        format!(" rmdir {former} 2>/dev/null;")
+    } else {
+        String::new()
+    };
+    (!dirs.is_empty()).then(|| {
         format!(
-            "cd .local/share/kablo && for v in {}; do [ -z \"$(find $v -maxdepth 0 -mmin -{PRUNE_AGE_MINUTES})\" ] && rm -rf $v; done; :",
-            names.join(" ")
+            "for v in {}; do [ -z \"$(find $v -maxdepth 0 -mmin -{PRUNE_AGE_MINUTES})\" ] && rm -rf $v; done;{tidy} :",
+            dirs.join(" ")
         )
     })
 }
 
 /// Removes the versions of kablo nothing runs from, once the machine has the one in `installed`
 /// and its terminals were renewed with it: after an update the previous release's directory
-/// would otherwise stay for good. **Best effort**, and it removes nothing it has not been told is
-/// unused by a whole answer. The same rule on this Mac and on a server; the answer is the names
-/// that were asked to go, for a test and a log.
+/// would otherwise stay for good, and so would the former root's. **Best effort**, and it removes
+/// nothing it has not been told is unused by a whole answer. The same rule on this Mac and on a
+/// server; the answer is the directories that were asked to go, for a test and a log.
 pub fn prune_versions(channel: &dyn Channel, installed: &Installed) -> Vec<String> {
     let Ok(reply) = channel.run(&census_script(&installed.version), &[]) else {
         return Vec::new();

@@ -1188,7 +1188,7 @@ pub fn boot_in(cwd: Option<&str>) -> std::borrow::Cow<'static, str> {
 }
 
 /// Whether `path` can be kablo's place in the agent's command: relative to
-/// home (`.local/share/kablo/0.2.0/kablo`), made of the characters a version
+/// home (`.local/share/bateri/kablo/0.2.0/kablo`), made of the characters a version
 /// and the directories around it are made of, and nothing that steps out of
 /// the directory. It goes into a script on the server, so nothing else does.
 pub fn is_kablo_path(path: &str) -> bool {
@@ -3029,7 +3029,7 @@ mod remote_shells {
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_files_script_writes_every_file_once_and_only_for_a_shell_it_serves() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        let place = ".local/share/kablo/0.2.0/kablo";
+        let place = ".local/share/bateri/kablo/0.2.0/kablo";
         let mut shells = vec![PathBuf::from("/bin/sh")];
         shells.extend(which("dash"));
         for sh in shells {
@@ -3414,7 +3414,7 @@ mod remote_shells {
             "#!/bin/sh\nfor word in \"$@\"; do printf '%s\\n' \"$word\"; done > '{}'\n",
             record.display()
         );
-        let place = ".local/share/kablo/0.2.0/kablo";
+        let place = ".local/share/bateri/kablo/0.2.0/kablo";
         std::fs::create_dir_all(home.join(place).parent().expect("dir")).expect("dir");
         crate::child::tests::write_program(&home.join(place), &kablo_program);
         let sh = Path::new("/bin/sh");

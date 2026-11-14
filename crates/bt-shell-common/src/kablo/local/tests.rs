@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use kablo_proto::SessionId;
 
 use super::*;
-use crate::kablo::install::{self, Bundle, Failure, ensure_here, prune_versions, unused_versions};
+use crate::kablo::install::{
+    self, Bundle, Failure, Root, ensure_here, prune_versions, unused_versions, upgrade_sessions,
+};
 use crate::kablo::ledger::Ledger;
 use crate::kablo::service::{Backend, PaneInfo, Peer, Refusal, Service};
 use crate::kablo::{Attach, Client, Event, Exit, NewSession, Size};
@@ -71,7 +73,7 @@ fn a_bridge_here_whose_kablo_is_not_there_is_a_program_not_found() {
     let installed = Installed {
         target: kablo_proto::install::Target::LinuxX86_64,
         version: "0.2.0".into(),
-        path: ".local/share/kablo/0.2.0/kablo".into(),
+        path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: false,
     };
     let error = carry(&ground.home, &installed)
@@ -85,7 +87,7 @@ fn a_bridge_here_whose_kablo_is_not_there_is_a_program_not_found() {
 fn a_bridge_here_is_the_installed_kablo_run_as_attach_and_ending_it_ends_only_it() {
     let root = TempRoot::new("local-bridge");
     let home = root.0.join("mac");
-    let dir = home.join(".local/share/kablo/0.2.0");
+    let dir = home.join(".local/share/bateri/kablo/0.2.0");
     std::fs::create_dir_all(&dir).expect("version");
     // A kablo that is a script, whose `attach` echoes what it is given.
     std::fs::write(
@@ -98,7 +100,7 @@ fn a_bridge_here_is_the_installed_kablo_run_as_attach_and_ending_it_ends_only_it
     let installed = Installed {
         target: kablo_proto::install::Target::MacosAarch64,
         version: "0.2.0".into(),
-        path: ".local/share/kablo/0.2.0/kablo".into(),
+        path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: false,
     };
 
@@ -196,6 +198,28 @@ impl Ground {
             output.status.code(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
         )
+    }
+}
+
+impl Ground {
+    /// The command lines of this ground's relays and wardens, by its socket directory (`--dir`),
+    /// which no other ground has.
+    fn processes(&self) -> Vec<String> {
+        let Ok(listing) = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,command="])
+            .output()
+        else {
+            return Vec::new();
+        };
+        let sockets = self.sockets.to_string_lossy().into_owned();
+        String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains(&sockets)
+                    && (line.contains("kablo warden ") || line.contains("kablo relay "))
+            })
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -416,7 +440,7 @@ fn a_real_kablo_is_installed_here_keeps_a_terminal_past_its_bridge_and_is_read_b
 
     // The census reads what the real listing says: the version a relay and a warden run from.
     for old in ["0.0.9-old", "0.0.1"] {
-        let dir = ground.home.join(format!(".local/share/kablo/{old}"));
+        let dir = ground.home.join(format!(".local/share/bateri/kablo/{old}"));
         std::fs::create_dir_all(&dir).expect("an old version");
         std::fs::write(dir.join("kablo"), "#!/bin/sh\n").expect("its binary");
         std::fs::set_permissions(dir.join("kablo"), std::fs::Permissions::from_mode(0o755))
@@ -448,12 +472,20 @@ fn a_real_kablo_is_installed_here_keeps_a_terminal_past_its_bridge_and_is_read_b
     );
     assert_eq!(
         unused_versions(&census, &installed.version),
-        ["0.0.1"],
+        [".local/share/bateri/kablo/0.0.1"],
         "the version a terminal runs from stays, the one nothing runs from goes"
     );
-    assert_eq!(prune_versions(&channel, &installed), ["0.0.1"]);
-    assert!(!ground.home.join(".local/share/kablo/0.0.1").exists());
-    assert!(ground.home.join(".local/share/kablo/0.0.9-old").exists());
+    assert_eq!(
+        prune_versions(&channel, &installed),
+        [".local/share/bateri/kablo/0.0.1"]
+    );
+    assert!(!ground.home.join(".local/share/bateri/kablo/0.0.1").exists());
+    assert!(
+        ground
+            .home
+            .join(".local/share/bateri/kablo/0.0.9-old")
+            .exists()
+    );
     assert!(ground.home.join(&installed.path).exists());
 
     // The bridge goes, and the terminal is still there: a bridge made after it finds it, with
@@ -479,6 +511,152 @@ fn a_real_kablo_is_installed_here_keeps_a_terminal_past_its_bridge_and_is_read_b
         })
     });
     again.hang_up();
+}
+
+/// A terminal that was started before kablo moved runs from the former root. It comes back
+/// through a bridge made with that root's binary when its account says so (nothing renewed it),
+/// and once the machine's kablo renews it the terminal is the current root's and the former
+/// root's copy, with the root itself, is gone. There is one kablo release to run, so the former
+/// root's copy is the release's own file under another version's name.
+///
+/// A release that cannot be found is a failure here, not a skip: it is the one test that would
+/// say the move left a terminal behind.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_terminal_started_in_the_former_root_comes_back_from_it_and_is_renewed_into_the_current_one() {
+    let bundle = release().expect(
+        "a kablo release to run: the one the pinned revision made (../kablo/dist or KABLO_DIST; `make kablo-bump` makes it)",
+    );
+    let mut ground = Ground::new("former-root");
+    let channel = LocalChannel::new(ground.home.clone());
+    let current = match ensure_here(&channel, &bundle, true) {
+        Ok(installed) => installed,
+        Err(Failure::Impossible(why)) => {
+            eprintln!("SKIPPED: this machine is not one kablo is built for: {why:?}");
+            return;
+        }
+        Err(other) => panic!("kablo was not installed: {other:?}"),
+    };
+    assert_eq!(current.root(), Root::Current);
+    assert_eq!(
+        current.path,
+        format!(".local/share/bateri/kablo/{}/kablo", current.version)
+    );
+
+    // The release's file again under the former root, as a version that is older than it says.
+    let former_dir = ground.home.join(".local/share/kablo/0.0.9-old");
+    std::fs::create_dir_all(&former_dir).expect("the former root");
+    std::fs::copy(ground.home.join(&current.path), former_dir.join("kablo")).expect("a copy");
+    std::fs::set_permissions(
+        former_dir.join("kablo"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("runnable");
+    let former = Installed {
+        version: "0.0.9-old".into(),
+        path: Root::Former.path("0.0.9-old").expect("a path"),
+        ..current.clone()
+    };
+    assert_eq!(former.root(), Root::Former);
+    ground.kept = Some(ground.home.join(&former.path));
+
+    // A terminal made from the former root's file, by a relay and a warden that call themselves
+    // that version.
+    let id = SessionId::new("t1").expect("an id");
+    ground.made.push(id.clone());
+    let mut wire = Wire::open(ground.bridge(&former, Some("0.0.9-old")));
+    wire.until("the link", |w| w.has(|e| matches!(e, Event::Linked)));
+    let mut spec = NewSession::default();
+    spec.argv = vec![b"/bin/cat".to_vec()];
+    wire.client
+        .new_terminal(id.clone(), spec, Attach::new(SIZE))
+        .expect("a request");
+    wire.until("the terminal", |w| {
+        w.has(|e| matches!(e, Event::Attached { terminal, .. } if *terminal == id))
+    });
+    assert!(wire.client.input(&id, b"hello\n"));
+    wire.until("the echo", |w| w.says("hello"));
+    wire.hang_up();
+
+    // No renewal: the account says the former root, and the bridge made with it finds the terminal.
+    let mut again = Wire::open(ground.bridge(&former, None));
+    again.until("the link", |w| w.has(|e| matches!(e, Event::Linked)));
+    again.client.attach(id.clone(), Attach::new(SIZE).from(0));
+    again.until("the screen it kept", |w| w.says("hello"));
+    again.hang_up();
+
+    // The renewal, as the machine's kablo does it: the terminal's relay and warden are replaced by
+    // the current root's file.
+    let sockets = EnvChannel {
+        inner: LocalChannel {
+            limit: install::UPGRADE_LIMIT,
+            ..LocalChannel::new(ground.home.clone())
+        },
+        sockets: ground.sockets.clone(),
+    };
+    let before = ground.processes();
+    assert!(
+        !before.is_empty()
+            && before
+                .iter()
+                .all(|line| line.contains(&former_dir.to_string_lossy().into_owned())),
+        "the terminal started in the former root: {before:?}"
+    );
+    assert!(upgrade_sessions(
+        &sockets,
+        &current,
+        std::slice::from_ref(&id)
+    ));
+    // What runs for the terminal is the current root's file, relay and warden both (a warden is
+    // replaced when it is quiet, so it takes a moment).
+    let running = |from: &Path| {
+        let from = from.to_string_lossy().into_owned();
+        move |ground: &Ground| {
+            let lines = ground.processes();
+            !lines.is_empty() && lines.iter().all(|line| line.contains(&from))
+        }
+    };
+    let in_former = ground.home.join(".local/share/kablo");
+    let mut moved = false;
+    for _ in 0..100 {
+        if running(&ground.home.join(".local/share/bateri/kablo"))(&ground) {
+            moved = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        moved,
+        "the terminal runs from the current root: {:?}",
+        ground.processes()
+    );
+    assert!(
+        ground
+            .processes()
+            .iter()
+            .all(|line| !line.contains(&in_former.to_string_lossy().into_owned())),
+        "and nothing runs from the former one: {:?}",
+        ground.processes()
+    );
+
+    // And the terminal is where the account says now.
+    let mut last = Wire::open(ground.bridge(&current, None));
+    last.until("the link", |w| w.has(|e| matches!(e, Event::Linked)));
+    last.client.attach(id.clone(), Attach::new(SIZE).from(0));
+    last.until("the screen it kept", |w| w.says("hello"));
+    assert!(last.client.input(&id, &[4]));
+    last.until("the end", |w| {
+        w.has(|e| {
+            matches!(
+                e,
+                Event::Ended {
+                    exit: Exit::Code(0),
+                    ..
+                }
+            )
+        })
+    });
+    last.hang_up();
 }
 
 /// A [`Channel`] that points the machine's kablo at the test's socket directory.
@@ -2056,7 +2234,7 @@ impl Drop for RaspDir {
             eprintln!("MEASURE attach.err: {}", err.trim());
         }
         // The terminals this measurement made, by name; then its own directory, and nothing else.
-        let kablo = format!("{}/h/.local/share/kablo", self.dir);
+        let kablo = format!("{}/h/.local/share/bateri/kablo", self.dir);
         for id in &self.made {
             let script = format!(
                 "{} {kablo}/*/kablo end --force {} >/dev/null 2>&1",
@@ -2170,7 +2348,7 @@ fn measure_file_receive_over_ssh() {
         let rasp = rasp.lock().expect("lock");
         let (status, said) = rasp.run(
             &format!(
-                "mkdir -m 700 {dir} && mkdir -m 700 {dir}/s && mkdir -p {dir}/h/.local/share/kablo/{version} && uname -m"
+                "mkdir -m 700 {dir} && mkdir -m 700 {dir}/s && mkdir -p {dir}/h/.local/share/bateri/kablo/{version} && uname -m"
             ),
             Stdio::null(),
         );
@@ -2181,7 +2359,7 @@ fn measure_file_receive_over_ssh() {
             .expect("a kablo for the server");
         rasp.put(
             &artifact.path,
-            &format!("h/.local/share/kablo/{version}/kablo"),
+            &format!("h/.local/share/bateri/kablo/{version}/kablo"),
         );
         rasp.put(&demopen, "demopen");
     }

@@ -587,7 +587,7 @@ impl Backend for SshBackend {
             let home = self
                 .home
                 .as_deref()
-                .ok_or_else(|| io::Error::other("this Mac has no home to keep kablo in"))?;
+                .ok_or_else(|| io::Error::other("this Mac has no home to keep bateri in"))?;
             return local::carry(home, installed);
         }
         let target = self.target(server);

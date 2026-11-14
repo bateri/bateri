@@ -17,7 +17,13 @@
 //!   exists as long as one of its terminals is meant to live. **This Mac's account**
 //!   ([`super::local`]) has no server to name and no arguments: its row is an `L`,
 //!   the platform and the version alone, and a ledger that has one is written as
-//!   version 2 (without it, as version 1, which an earlier bateri reads too);
+//!   version 2 (without it, as version 1, which an earlier bateri reads too). **Where
+//!   the kablo is** is part of the row from version 3: kablo moved from one directory
+//!   below the home directory to another ([`Root`]), and a terminal started before the
+//!   move runs from the former one, so a row says which. A row with no root, which is
+//!   every row of version 1 and 2, was written before the move: its kablo is in the
+//!   former directory. A ledger with an account in the current directory is written as
+//!   version 3 (an earlier bateri does not read it: the file has one reader);
 //! - **a terminal** (`T … live`): a terminal bateri started, with the pane that
 //!   shows it; it is written when the request is made (a crash between the request
 //!   and the server's answer must not leave a terminal nobody can name) and
@@ -50,9 +56,10 @@
 //! installed app never see each other's terminals — a ledger they shared would have
 //! one end the other's — and the sweeps of the layout leave it alone. Its text is
 //! line based like the layout's: the first line names the version ([`HEADER`] +
-//! [`VERSION`]), then `A {key} {host} {port|-} {target} {version} {argument}…`, `L {target}
-//! {version}` (version 2) and `T {account} {terminal} {pane|-} {live|ending}`, text fields
-//! escaped as the layout's are. Every version the writer still writes is read, and a version's
+//! [`VERSION`]), then `A {key} {host} {port|-} {target} {version} [{root}] {argument}…`,
+//! `L {target} {version} [{root}]` (version 2; the `root` of both is the directory itself, from
+//! version 3) and `T {account} {terminal} {pane|-} {live|ending}`, text fields escaped as the
+//! layout's are. Every version the writer still writes is read, and a version's
 //! text stays frozen in the tests; a file that is not understood is an empty ledger
 //! (a newer bateri's after a downgrade is dropped, not misread). Every change is
 //! written through a temporary name and a `rename` (a half-written file is never
@@ -73,7 +80,7 @@ use bt_core::PaneUuid;
 use kablo_proto::SessionId;
 use kablo_proto::install::{self, Target};
 
-use super::install::Installed;
+use super::install::{Installed, Root};
 use super::local;
 use crate::restore::{escape, unescape, write_atomic};
 use crate::ssh_wrap::KabloHost;
@@ -81,8 +88,12 @@ use crate::ssh_wrap::KabloHost;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-kablo";
 
-/// The format's newest version: the one that can hold this Mac's account.
-pub const VERSION: u32 = 2;
+/// The format's newest version: the one that says where an account's kablo is.
+pub const VERSION: u32 = 3;
+
+/// The version that can hold this Mac's account, a view and an update: what a ledger that has
+/// one and no account in the current root is written as.
+const WITH_MAC: u32 = 2;
 
 /// The oldest version the writer still writes (a ledger with no account of this Mac), and so the
 /// oldest the reader keeps reading.
@@ -104,6 +115,8 @@ pub struct Known {
     pub target: Target,
     /// The version of the kablo there.
     pub version: String,
+    /// The root the kablo is in.
+    pub root: Root,
 }
 
 impl Known {
@@ -132,7 +145,7 @@ impl Known {
         Installed {
             target: self.target,
             version: self.version.clone(),
-            path: install::install_path(&self.version).unwrap_or_default(),
+            path: self.root.path(&self.version).unwrap_or_default(),
             fresh: false,
         }
     }
@@ -182,12 +195,19 @@ impl Rows {
 
     fn render(&self) -> String {
         // The oldest version that holds everything there is to write: an earlier bateri reads a
-        // ledger that has no account of this Mac, no view and no update.
-        let version = if self.accounts.contains_key(local::ACCOUNT)
+        // ledger that has no account of this Mac, no view and no update, and one whose accounts
+        // are all in the former root, which is where a row with no root is.
+        let version = if self
+            .accounts
+            .values()
+            .any(|known| known.root == Root::Current)
+        {
+            VERSION
+        } else if self.accounts.contains_key(local::ACCOUNT)
             || self.updating
             || self.terminals.iter().any(|row| row.view)
         {
-            VERSION
+            WITH_MAC
         } else {
             OLDEST
         };
@@ -196,16 +216,22 @@ impl Rows {
             out.push_str("U\n");
         }
         for known in self.accounts.values() {
+            // From version 3 a row says its root; before, there was one place and no word for it.
+            let root = if version >= VERSION {
+                format!(" {}", known.root.dir())
+            } else {
+                String::new()
+            };
             if known.is_local() {
                 out.push_str(&format!(
-                    "L {} {}\n",
+                    "L {} {}{root}\n",
                     known.target.triple(),
                     escape(&known.version)
                 ));
                 continue;
             }
             out.push_str(&format!(
-                "A {} {} {} {} {}",
+                "A {} {} {} {} {}{root}",
                 escape(&known.key),
                 escape(&known.host),
                 known.port.map_or("-".to_owned(), |port| port.to_string()),
@@ -256,14 +282,14 @@ impl Rows {
             let mut tokens = line.split(' ');
             match tokens.next()? {
                 "A" => {
-                    let known = parse_account(&mut tokens)?;
+                    let known = parse_account(&mut tokens, version)?;
                     if rows.accounts.insert(known.key.clone(), known).is_some() {
                         return None;
                     }
                 }
                 // This Mac's account: from version 2 on, and only once.
                 "L" if version >= 2 => {
-                    let known = parse_local(&mut tokens)?;
+                    let known = parse_local(&mut tokens, version)?;
                     if rows.accounts.insert(known.key.clone(), known).is_some() {
                         return None;
                     }
@@ -287,8 +313,21 @@ impl Rows {
     }
 }
 
+/// The root of an `A` or `L` line, which a line says from version 3 on: the directory itself,
+/// one of the two roots and no other. A line of an earlier version has none, and its kablo is in
+/// the former root.
+fn parse_root<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Option<Root> {
+    if version < VERSION {
+        return Some(Root::Former);
+    }
+    let word = tokens.next()?;
+    [Root::Current, Root::Former]
+        .into_iter()
+        .find(|root| root.dir() == word)
+}
+
 /// An `A` line's fields after the letter; the arguments run to the end of the line.
-fn parse_account<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Known> {
+fn parse_account<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Option<Known> {
     let key = unescape(tokens.next()?)?;
     let host = unescape(tokens.next()?)?;
     let port = match tokens.next()? {
@@ -299,8 +338,9 @@ fn parse_account<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Known
     let target = Target::ALL
         .into_iter()
         .find(|target| target.triple() == triple)?;
-    let version = unescape(tokens.next()?)?;
-    install::install_path(&version).ok()?;
+    let kablo = unescape(tokens.next()?)?;
+    install::install_path(&kablo).ok()?;
+    let root = parse_root(tokens, version)?;
     let argv = tokens.map(unescape).collect::<Option<Vec<String>>>()?;
     // This Mac's account has a row of its own: an `A` with its key is not one.
     (!key.is_empty() && !host.is_empty() && !argv.is_empty() && !local::is_account(&key)).then_some(
@@ -310,26 +350,29 @@ fn parse_account<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Known
             port,
             argv,
             target,
-            version,
+            version: kablo,
+            root,
         },
     )
 }
 
 /// An `L` line's fields after the letter: this Mac's account, the platform and the version.
-fn parse_local<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Known> {
+fn parse_local<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Option<Known> {
     let triple = tokens.next()?;
     let target = Target::ALL
         .into_iter()
         .find(|target| target.triple() == triple)?;
-    let version = unescape(tokens.next()?)?;
-    install::install_path(&version).ok()?;
+    let kablo = unescape(tokens.next()?)?;
+    install::install_path(&kablo).ok()?;
+    let root = parse_root(tokens, version)?;
     Some(Known {
         key: local::ACCOUNT.to_owned(),
         host: String::new(),
         port: None,
         argv: Vec::new(),
         target,
-        version,
+        version: kablo,
+        root,
     })
 }
 
@@ -433,6 +476,7 @@ impl Ledger {
             argv: server.argv.clone(),
             target: installed.target,
             version: installed.version.clone(),
+            root: installed.root(),
         };
         self.change(|rows| {
             let same = rows.accounts.get(&known.key) == Some(&known);

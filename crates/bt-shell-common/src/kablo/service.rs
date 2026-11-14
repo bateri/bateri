@@ -127,7 +127,7 @@ use kablo_proto::v1::stream::Command;
 use kablo_proto::v1::{NewSession, Status};
 
 use super::hub::{Declined, HoldId, Hub, HubEvent};
-use super::install::Installed;
+use super::install::{Installed, Root};
 use super::ledger::Ledger;
 use super::local;
 use super::remote::{RemoteCommand, RemoteStream};
@@ -3128,7 +3128,7 @@ impl Core {
             };
             let text = match cause {
                 Cause::Incompatible => {
-                    "bateri: the kablo on this server speaks a protocol this bateri does not"
+                    "bateri: the bateri on this server speaks a protocol this one does not"
                 }
                 _ => "bateri: the connection to this server could not be kept",
             };
@@ -3873,11 +3873,12 @@ impl Core {
     fn make_account(&mut self, server: KabloHost, installed: Installed, files: bool, now: Instant) {
         let key = server.key.clone();
         let name = self.shared.backend.name();
-        let stale = self
-            .shared
-            .backend
-            .version()
-            .is_some_and(|version| version != installed.version);
+        // An account whose kablo is in the former root is renewed too, whatever its version: the
+        // terminals it keeps are moved to the current root by the same renewal that moves them to
+        // a newer version.
+        let stale = self.shared.backend.version().is_some_and(|version| {
+            version != installed.version || installed.root() == Root::Former
+        });
         let mut client = Client::new(name.as_deref(), now);
         // A program on this Mac that runs `kablo app` finds the application, as a program on a
         // server does: the `bateri` command is the same one, and what it may do is the Mac's

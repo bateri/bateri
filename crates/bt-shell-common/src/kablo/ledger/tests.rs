@@ -38,7 +38,8 @@ fn installed() -> Installed {
 }
 
 /// A ledger with an account that has a live terminal, an account with another, and a
-/// terminal to end of an account the ledger never made.
+/// terminal to end of an account the ledger never made. Their kablo is in the former root, which
+/// is where a ledger of version 1 or 2 puts every account.
 fn rich() -> Rows {
     let mut rows = Rows::default();
     let known = Known {
@@ -51,6 +52,7 @@ fn rich() -> Rows {
             .collect(),
         target: Target::LinuxAarch64,
         version: "0.2.0".to_owned(),
+        root: Root::Former,
     };
     rows.accounts.insert(known.key.clone(), known);
     rows.accounts.insert(
@@ -62,6 +64,7 @@ fn rich() -> Rows {
             argv: vec!["ssh".to_owned(), "prod".to_owned()],
             target: Target::MacosAarch64,
             version: "0.2.1-rc.1".to_owned(),
+            root: Root::Former,
         },
     );
     rows.terminals.push(Row {
@@ -117,6 +120,7 @@ fn mac() -> Known {
         argv: Vec::new(),
         target: Target::MacosAarch64,
         version: "0.2.0-dev+222309ff9090".to_owned(),
+        root: Root::Former,
     }
 }
 
@@ -186,6 +190,118 @@ fn a_row_for_this_mac_is_understood_exactly_or_not_at_all() {
         assert_eq!(Rows::parse(&text), None, "{text:?}");
     }
     assert!(Rows::parse(V2_FIXTURE).is_some(), "the control");
+}
+
+/// [`richer`] with kablo moved to the current root on this Mac and on `prod`, and left in the
+/// former one on `rasp`: what a ledger is once some accounts were renewed and some were not.
+fn moved() -> Rows {
+    let mut rows = richer();
+    for key in [local::ACCOUNT, "root@prod:22"] {
+        rows.accounts.get_mut(key).expect("an account").root = Root::Current;
+    }
+    rows
+}
+
+/// Version 3 for [`moved`], frozen like the others: every `A` and `L` row says its root, the
+/// directory itself, right after the version. The texts of version 1 and 2 stay beside it: a row
+/// with no root is a row of the former root.
+const V3_FIXTURE: &str = concat!(
+    "bateri-kablo 3\n",
+    r"A ada@rasp:2222\svia\smy\sjump:22 rasp 2222 aarch64-unknown-linux-musl 0.2.0 .local/share/kablo ssh -p 2222 -J my\sjump ada@rasp",
+    "\n",
+    "L aarch64-apple-darwin 0.2.0-dev+222309ff9090 .local/share/bateri/kablo\n",
+    "A root@prod:22 prod - aarch64-apple-darwin 0.2.1-rc.1 .local/share/bateri/kablo ssh prod\n",
+    r"T ada@rasp:2222\svia\smy\sjump:22 b-0123456789abcdef0123456789abcdef 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live",
+    "\n",
+    "T root@prod:22 b-fedcba9876543210fedcba9876543210 - live\n",
+    "T gone@elsewhere:22 b-1 - ending\n",
+    "T local t1 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live\n",
+);
+
+#[test]
+fn the_root_of_an_accounts_kablo_is_the_third_version_and_the_earlier_ones_stay_what_they_were() {
+    assert_eq!(Rows::parse(V3_FIXTURE), Some(moved()));
+    assert_eq!(moved().render(), V3_FIXTURE);
+    // The texts before it have no root and say the former one for every row.
+    let before = Rows::parse(V2_FIXTURE).expect("version 2");
+    assert!(
+        before
+            .accounts
+            .values()
+            .all(|known| known.root == Root::Former)
+    );
+    assert_eq!(before, richer());
+    // A ledger whose accounts are all in the former root is still written as the version before:
+    // an earlier bateri reads it, and the row it wrote means the same.
+    assert_eq!(richer().render(), V2_FIXTURE);
+    assert_eq!(rich().render(), V1_FIXTURE);
+    // One account in the current root is enough for the third.
+    let mut one = rich();
+    one.accounts
+        .get_mut("root@prod:22")
+        .expect("an account")
+        .root = Root::Current;
+    assert!(one.render().starts_with("bateri-kablo 3\n"));
+}
+
+#[test]
+fn a_row_with_a_root_is_understood_exactly_or_not_at_all() {
+    let broken = |from: &str, to: &str| {
+        assert!(V3_FIXTURE.contains(from), "{from:?}");
+        V3_FIXTURE.replacen(from, to, 1)
+    };
+    for text in [
+        // The third version says the root in every row; a row without one is not read.
+        broken(" .local/share/bateri/kablo ssh prod", " ssh prod"),
+        broken(
+            "0.2.0-dev+222309ff9090 .local/share/bateri/kablo\n",
+            "0.2.0-dev+222309ff9090\n",
+        ),
+        // A root is one of the two, not a path.
+        broken(
+            ".local/share/bateri/kablo ssh prod",
+            ".local/share/other ssh prod",
+        ),
+        broken(
+            "0.2.0-dev+222309ff9090 .local/share/bateri/kablo\n",
+            "0.2.0-dev+222309ff9090 .local/share/kablo/0.2.0\n",
+        ),
+        // And not twice.
+        broken(
+            "0.2.0-dev+222309ff9090 .local/share/bateri/kablo\n",
+            "0.2.0-dev+222309ff9090 .local/share/bateri/kablo .local/share/kablo\n",
+        ),
+        // A version this bateri does not know.
+        V3_FIXTURE.replacen("bateri-kablo 3", "bateri-kablo 4", 1),
+    ] {
+        assert_eq!(Rows::parse(&text), None, "{text:?}");
+    }
+    assert!(Rows::parse(V3_FIXTURE).is_some(), "the control");
+}
+
+#[test]
+fn the_root_of_the_kablo_on_an_account_is_where_the_account_was_remembered_it() {
+    let ledger = Ledger::memory();
+    let server = server("ada@rasp:2222", &["ssh", "rasp"]);
+    // What a bateri before the move wrote, or what a renewal that did not happen left: its place is
+    // the former root's, and the path the account is dialed with is that one.
+    ledger.remember(&server, &installed());
+    let known = ledger.known(&server.key).expect("the account");
+    assert_eq!(known.root, Root::Former);
+    assert_eq!(known.installed().path, ".local/share/kablo/0.2.0/kablo");
+    // Once the account was renewed it is the current root's.
+    let renewed = Installed {
+        path: ".local/share/bateri/kablo/0.2.0/kablo".to_owned(),
+        ..installed()
+    };
+    ledger.remember(&server, &renewed);
+    let known = ledger.known(&server.key).expect("the account");
+    assert_eq!(known.root, Root::Current);
+    assert_eq!(
+        known.installed().path,
+        ".local/share/bateri/kablo/0.2.0/kablo"
+    );
+    assert!(!known.installed().fresh);
 }
 
 /// [`richer`] with the view of the pane the terminal of this Mac carries open and the mark that
@@ -347,7 +463,7 @@ fn text_that_is_not_exactly_understood_is_an_empty_ledger() {
     };
     for text in [
         String::new(),
-        "bateri-kablo 3\n".to_owned(),
+        "bateri-kablo 4\n".to_owned(),
         "bateri-kablo 0\n".to_owned(),
         "bateri-kablo 1 extra\n".to_owned(),
         "bateri-kablo 1".to_owned(),
