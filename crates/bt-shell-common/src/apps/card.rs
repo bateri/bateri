@@ -72,10 +72,9 @@ pub struct Ground {
     /// The account is this computer's own: its programs are brought without asking.
     pub local: bool,
     /// The server gets shell integration (`remote.integration`, or the host's own entry): a server
-    /// that does not has no terminal here that a card could hang over.
+    /// that does not has no terminal here that a card could hang over. A Production mark is not
+    /// part of it: it colors a server and decides nothing else.
     pub integration: bool,
-    /// The server is marked Production: nothing asks about it, whatever the integration says.
-    pub production: bool,
     /// The person has answered a card of this server (installed, or said Not Here): once is once.
     pub answered: bool,
     /// A card of this server is showing.
@@ -85,7 +84,7 @@ pub struct Ground {
 impl Ground {
     /// Whether a card may be raised for the server.
     pub fn may_ask(self) -> bool {
-        !self.local && self.integration && !self.production && !self.answered && !self.open
+        !self.local && self.integration && !self.answered && !self.open
     }
 }
 
@@ -418,7 +417,6 @@ mod tests {
         let ground = Ground {
             local: false,
             integration: true,
-            production: false,
             answered: false,
             open: false,
         };
@@ -435,13 +433,6 @@ mod tests {
                 "no integration",
                 Ground {
                     integration: false,
-                    ..ground
-                },
-            ),
-            (
-                "production",
-                Ground {
-                    production: true,
                     ..ground
                 },
             ),

@@ -550,7 +550,7 @@ fn eligible(
     state: &HostState,
 ) -> Option<Eligible> {
     let call = ssh_call("ssh", args).filter(|call| !call.command)?;
-    if !settings.integration_for(&call.host) {
+    if !settings.integration_for(&call.host).is_on() {
         return None;
     }
     let config = config(runner, args)?;
@@ -587,7 +587,7 @@ pub struct KabloHost {
 /// command, the setting allowing the host as typed, `ssh -G` saying the
 /// session is the ordinary one, and a server that is neither [`Fact::Plain`]
 /// (it has no shell to boot) nor [`Fact::NoKablo`] (kablo cannot be kept on
-/// it). A `production` host the setting refuses is plain, and so is a `ssh`
+/// it). A host the setting refuses (`off`, or its own entry saying `false`) is plain, and so is a `ssh`
 /// whose terminals are not both ends of a terminal — the caller's bit, which
 /// the shell function checks before it runs this at all. `None` → the plain
 /// `ssh`, and from then on **nothing of bateri's is on that connection**: it
@@ -1591,7 +1591,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use bt_core::{HostMark, HostRule};
+    use bt_core::{HostMark, HostRule, RemoteIntegration};
 
     fn words(list: &[&str]) -> Vec<String> {
         list.iter().map(|&word| word.to_owned()).collect()
@@ -1994,7 +1994,7 @@ mod tests {
         // not be: no process for a call that runs a command, a flag that is not
         // a session, or a host the setting refuses.
         let off = Settings {
-            remote_integration: false,
+            remote_integration: RemoteIntegration::Off,
             ..Settings::default()
         };
         let production = Settings {
@@ -2016,7 +2016,6 @@ mod tests {
             (&settings, &["-o", "RequestTTY=no", "prod"]),
             (&settings, &["-V"]),
             (&off, &["prod"]),
-            (&production, &["prod"]),
         ] {
             let runner = Gconfig::new(PLAIN);
             assert_eq!(
@@ -2026,6 +2025,19 @@ mod tests {
             );
             assert!(runner.calls.borrow().is_empty(), "{args:?}: no ssh -G");
         }
+        // A production mark colors the dock and decides nothing else: the host is taken as any
+        // other is, and asked about like the rest.
+        let runner = Gconfig::new(PLAIN);
+        assert_eq!(
+            kablo_path(
+                &words(&["prod"]),
+                &production,
+                &runner,
+                &HostState::default()
+            )
+            .map(|host| host.key),
+            Some("u@h:22".to_owned())
+        );
         for out in [
             "user u\nhostname h\nport 22\nremotecommand tmux\n",
             "user u\nhostname h\nport 22\nrequesttty false\n",

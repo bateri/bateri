@@ -25,8 +25,8 @@
 
 use bt_core::{
     CaretShape, ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, Erase,
-    IconColors, KeepRunning, Keypress, MinimizedPanes, Osc52, ReduceMotion, RemoteStatsMode,
-    RestoreWindows, SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit,
+    IconColors, KeepRunning, Keypress, MinimizedPanes, Osc52, ReduceMotion, RemoteIntegration,
+    RemoteStatsMode, RestoreWindows, SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit,
     ShellIntegration, SmoothScroll, SplitStyle, TabDetails, TabPosition, TabRunning,
 };
 
@@ -947,13 +947,14 @@ static CATALOG: [Setting; 41] = [
         |s| s.shell_node_version,
         SettingsEdit::ShellNodeVersion
     ),
-    toggle!(
+    named!(
         "remote.integration",
         Remote,
         "Set Up Shell Integration on Servers",
-        "ssh server remote integration",
+        "ssh server remote integration ask auto",
         false,
         None,
+        RemoteIntegration,
         |s| s.remote_integration,
         SettingsEdit::RemoteIntegration
     ),

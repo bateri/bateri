@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::thread;
 use std::time::Duration;
 
-use bt_core::{HostMark, Settings, host_mark};
+use bt_core::Settings;
 use bt_shell_common::apps::card::{self, Candidate, Card, Ground, Row, Stage};
 use bt_shell_common::apps::followed;
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -230,8 +230,7 @@ fn consider(mtm: MainThreadMarker) {
 fn ground(settings: &Settings, account: &str, host: &str, answered: bool, open: bool) -> Ground {
     Ground {
         local: bt_shell_common::kablo::local::is_account(account),
-        integration: settings.integration_for(host),
-        production: host_mark(&settings.remote_hosts, host) == HostMark::Production,
+        integration: settings.integration_for(host).is_on(),
         answered,
         open,
     }
@@ -521,7 +520,7 @@ mod tests {
 
     #[test]
     fn a_server_that_gets_no_integration_is_not_asked() {
-        let off = settings("[remote]\nintegration = false\n");
+        let off = settings("[remote]\nintegration = \"off\"\n");
         assert!(!asks(&off, "u@dev-1:22", "dev-1"));
         let host = settings("[remote]\nhosts = [{ host = \"dev-1\", integration = false }]\n");
         assert!(!asks(&host, "u@dev-1:22", "dev-1"));
@@ -529,15 +528,15 @@ mod tests {
     }
 
     #[test]
-    fn a_server_marked_production_is_not_asked_even_where_its_integration_is_turned_on() {
+    fn a_server_marked_production_is_asked_like_any_other() {
+        // The mark colors a server and decides nothing else.
         let production =
             settings("[remote]\nhosts = [{ host = \"prod-*\", mark = \"production\" }]\n");
-        assert!(!asks(&production, "u@prod-1:22", "prod-1"));
-        let turned_on = settings(
-            "[remote]\nhosts = [{ host = \"prod-*\", mark = \"production\", integration = true }]\n",
+        assert!(asks(&production, "u@prod-1:22", "prod-1"));
+        let off = settings(
+            "[remote]\nintegration = \"off\"\nhosts = [{ host = \"prod-*\", mark = \"production\" }]\n",
         );
-        assert!(turned_on.integration_for("prod-1"));
-        assert!(!asks(&turned_on, "u@prod-1:22", "prod-1"));
+        assert!(!asks(&off, "u@prod-1:22", "prod-1"));
         let staging = settings("[remote]\nhosts = [{ host = \"dev-*\", mark = \"staging\" }]\n");
         assert!(asks(&staging, "u@dev-1:22", "dev-1"));
     }

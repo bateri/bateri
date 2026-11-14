@@ -15,6 +15,7 @@ use kablo_proto::v1::{Exit, stream};
 use super::*;
 use crate::hold::wire::Target;
 use crate::hold::{Config, Outcome, run};
+use crate::kablo::ask;
 use crate::kablo::fake::{Activity, Age, Bridge};
 use crate::kablo::install::Installed;
 use crate::program::identity::{Agent, Kind};
@@ -86,6 +87,9 @@ struct Fake {
     kablo: AtomicBool,
     /// The program the master step runs on the pane, if any.
     master: Mutex<Option<Vec<String>>>,
+    /// What the permission step says ([`Backend::consent`]); the log has it, and the answer, only
+    /// when it is not a plain yes, so that the order of every other test's steps is as it was.
+    consent: Mutex<Consent>,
     fresh: AtomicBool,
     /// The server cannot be renewed now ([`Backend::refresh`] has no answer).
     refresh_fails: AtomicBool,
@@ -156,6 +160,7 @@ impl Fake {
             info: Mutex::new(PaneInfo::default()),
             kablo: AtomicBool::new(true),
             master: Mutex::new(None),
+            consent: Mutex::new(Consent::Granted),
             fresh: AtomicBool::new(false),
             refresh_fails: AtomicBool::new(false),
             refresh_mends: AtomicBool::new(false),
@@ -338,6 +343,18 @@ impl Backend for Fake {
     fn route(&self, _: &[String]) -> Option<KabloHost> {
         self.note("route");
         self.kablo.load(Ordering::SeqCst).then(|| host("u@rasp:22"))
+    }
+
+    fn consent(&self, _: &KabloHost) -> Consent {
+        let consent = self.consent.lock().expect("lock").clone();
+        if consent != Consent::Granted {
+            self.note("consent");
+        }
+        consent
+    }
+
+    fn answered(&self, _: &KabloHost, reply: Reply) {
+        self.note(&format!("answered:{reply:?}").to_lowercase());
     }
 
     fn master(&self, _: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
@@ -726,8 +743,7 @@ fn a_first_terminal_is_prepared_in_order_and_its_bytes_and_keys_cross_the_servic
     });
     // The note, once, before anything the terminal said.
     let shown = String::from_utf8_lossy(&holder.shown.bytes()).into_owned();
-    let note =
-        "bateri: kablo is set up on rasp; if the connection drops, this terminal keeps running";
+    let note = "bateri is set up on rasp; if the connection drops, this terminal keeps running";
     assert!(
         shown.starts_with(&format!("\x1b[0m\x1b[2m{note}\x1b[0m\r\n")),
         "{shown:?}"
@@ -1176,6 +1192,153 @@ fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
     let mut holder = Holder::new(&rig.socket(), "b-1");
     assert_eq!(holder.outcome(), Outcome::FallBack);
     assert_eq!(rig.world.count("install"), 0);
+}
+
+/// The program a pane's terminal runs for the question: a stand-in that ends with `status`.
+fn answering(status: u8) -> Consent {
+    Consent::Ask(vec![
+        b"/bin/sh".to_vec(),
+        b"-c".to_vec(),
+        format!("exit {status}").into_bytes(),
+    ])
+}
+
+/// A server bateri has not been to is asked about on the pane's terminal **before** the
+/// connection, the install or anything else: a yes and an always go on from there, in the order a
+/// terminal always starts in.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_server_that_is_asked_about_is_asked_first_and_a_yes_or_an_always_goes_on() {
+    for (status, answer) in [(ask::YES, "yes"), (ask::ALWAYS, "always")] {
+        let rig = Rig::new(&format!("ask-{answer}"));
+        *rig.world.consent.lock().expect("lock") = answering(status);
+        let _holder = Holder::new(&rig.socket(), "b-1");
+        rig.terminals(1);
+        assert_eq!(
+            rig.world.log(),
+            [
+                "pane",
+                "route",
+                "consent",
+                &format!("answered:{answer}"),
+                "master",
+                "install",
+                "number",
+                "carry"
+            ],
+            "{answer}"
+        );
+    }
+}
+
+/// A no is the plain `ssh` and nothing was done on the way: not the connection, not the install,
+/// not a bridge. What the person did not answer is not kept either: Control-C ends the connection
+/// the way it does at a password prompt, and a program that failed is the plain `ssh`.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_no_is_the_plain_ssh_and_an_interrupt_is_no_connection_and_nothing_is_done_before_either() {
+    let rig = Rig::new("ask-no");
+    *rig.world.consent.lock().expect("lock") = answering(ask::NO);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(rig.world.log(), ["pane", "route", "consent", "answered:no"]);
+    drop(rig);
+
+    let rig = Rig::new("ask-interrupt");
+    *rig.world.consent.lock().expect("lock") = answering(ask::INTERRUPTED);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    assert_eq!(
+        rig.world.log(),
+        ["pane", "route", "consent"],
+        "nothing is kept"
+    );
+    drop(rig);
+
+    let rig = Rig::new("ask-broken");
+    *rig.world.consent.lock().expect("lock") = answering(64);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(
+        rig.world.log(),
+        ["pane", "route", "consent"],
+        "nothing is kept"
+    );
+}
+
+/// A server the permission refuses is the plain `ssh`, with no question and no step.
+#[test]
+fn a_server_the_setting_refuses_is_the_plain_ssh_with_no_question() {
+    let rig = Rig::new("ask-refused");
+    *rig.world.consent.lock().expect("lock") = Consent::Refused;
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(rig.world.log(), ["pane", "route", "consent"]);
+}
+
+/// A holder of the first version cannot run a program on the pane's terminal, so it is not asked:
+/// the plain `ssh`, and no answer is invented for it.
+#[test]
+fn a_holder_of_the_first_version_is_not_asked_and_nothing_is_kept() {
+    use crate::hold::wire::{HoldReader, Open, ToApp, ToHold};
+    let rig = Rig::new("ask-old");
+    *rig.world.consent.lock().expect("lock") = answering(ask::YES);
+    let mut stream = std::os::unix::net::UnixStream::connect(rig.socket()).expect("connected");
+    let say = |stream: &mut std::os::unix::net::UnixStream, message: &ToApp| {
+        let mut bytes = Vec::new();
+        message.encode(&mut bytes);
+        stream.write_all(&bytes).expect("written");
+    };
+    say(
+        &mut stream,
+        &ToApp::Hello {
+            newest: 1,
+            oldest: 1,
+        },
+    );
+    say(
+        &mut stream,
+        &ToApp::Open(Open {
+            terminal: SessionId::new("b-1").expect("a name"),
+            size: kablo_proto::v1::Size {
+                cols: 80,
+                rows: 24,
+                xpixel: 0,
+                ypixel: 0,
+            },
+            target: Target::New {
+                args: vec![b"rasp".to_vec()],
+            },
+        }),
+    );
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("a timeout");
+    let mut reader = HoldReader::new();
+    let mut heard = Vec::new();
+    let mut buffer = [0u8; 4096];
+    while !heard
+        .iter()
+        .any(|message| matches!(message, ToHold::Refused { .. }))
+    {
+        let n = stream.read(&mut buffer).expect("read");
+        assert!(
+            n > 0,
+            "the connection closed before it was refused: {heard:?}"
+        );
+        reader.push(&buffer[..n]);
+        while let Some(message) = reader.read().expect("whole frames") {
+            heard.push(message);
+        }
+    }
+    assert!(
+        heard.contains(&ToHold::Refused {
+            fall_back: true,
+            text: String::new(),
+        }),
+        "{heard:?}"
+    );
+    assert_eq!(rig.world.log(), ["pane", "route", "consent"]);
 }
 
 /// The pane of a program on a server asked for that program and for no login: where the holder of

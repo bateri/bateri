@@ -37,6 +37,8 @@ struct World {
     log: PathBuf,
     state: PathBuf,
     ssh: PathBuf,
+    /// What the backend asked the application to write to the settings.
+    saved: Arc<Mutex<Vec<SettingsEdit>>>,
 }
 
 /// A stand-in server. `master_exit` is the status the master step ends with.
@@ -87,6 +89,7 @@ esac
         home,
         log,
         ssh,
+        saved: Arc::default(),
     }
 }
 
@@ -99,6 +102,13 @@ impl World {
             bundle,
             home: None,
             settings: Box::new(Settings::default),
+            asker: Some(PathBuf::from(
+                "/Applications/bateri.app/Contents/MacOS/bateri",
+            )),
+            save: {
+                let saved = Arc::clone(&self.saved);
+                Box::new(move |edit| saved.lock().expect("saved").push(edit))
+            },
             panes: Box::new(|_| Some(PaneInfo::default())),
             runner: Box::new(Through(self.ssh.clone())),
             name: Some("MacBook".into()),
@@ -768,6 +778,149 @@ fn a_server_kablo_cannot_be_kept_on_is_written_down_and_a_bad_moment_is_not() {
     std::fs::remove_dir_all(&world.home).expect("gone");
     assert_eq!(backend.install(&host, &[]), Err(Refusal::plain()));
     assert!(!ssh_wrap::load(&world.state).knows(Fact::NoKablo, "u@h:22"));
+    // The server is recorded before anything is written, so one the install fell over on still
+    // is: whatever removes bateri's files from a server finds it by this, and a person who said
+    // yes is not asked again.
+    assert!(ssh_wrap::load(&world.state).knows(Fact::Touched, "u@h:22"));
+}
+
+/// A server as the route would give it, for the steps that do not run `ssh`.
+fn rasp(host: &str) -> KabloHost {
+    KabloHost {
+        host: host.into(),
+        port: None,
+        argv: vec!["ssh".into(), host.into()],
+        config: String::new(),
+        key: "u@h:22".into(),
+    }
+}
+
+fn with_setting(backend: &mut SshBackend, mode: RemoteIntegration, hosts: Vec<bt_core::HostRule>) {
+    backend.settings = Box::new(move || Settings {
+        remote_integration: mode,
+        remote_hosts: hosts.clone(),
+        ..Settings::default()
+    });
+}
+
+fn entry(pattern: &str, integration: bool) -> bt_core::HostRule {
+    bt_core::HostRule {
+        pattern: pattern.to_owned(),
+        mark: None,
+        integration: Some(integration),
+        commands: None,
+    }
+}
+
+#[test]
+fn a_server_bateri_has_not_been_to_is_asked_about_before_anything_is_done() {
+    let world = stand_in("ask", 0);
+    let backend = world.backend(None);
+    // The default asks, and the question is this program run on the pane's terminal with the host
+    // as the person typed it.
+    let asked = backend.consent(&rasp("deploy@rasp"));
+    assert_eq!(
+        asked,
+        Consent::Ask(vec![
+            b"/Applications/bateri.app/Contents/MacOS/bateri".to_vec(),
+            b"ssh-ask".to_vec(),
+            b"deploy@rasp".to_vec(),
+        ])
+    );
+    // Nothing is written to the settings, to the server's record or to the server.
+    assert!(world.saved.lock().expect("saved").is_empty());
+    assert!(!world.state.exists());
+    assert!(!std::fs::read_to_string(&world.log).is_ok_and(|log| log.contains("rasp")));
+}
+
+#[test]
+fn a_server_bateri_has_been_to_the_setting_and_the_entry_settle_without_asking() {
+    use RemoteIntegration::{Ask, Auto, Off};
+    let world = stand_in("consent", 0);
+    let mut backend = world.backend(None);
+    let server = rasp("deploy@rasp");
+
+    // A server bateri has put its files on is not asked about again, however it got there.
+    let mut state = ssh_wrap::HostState::default();
+    state.note(Fact::Touched, "u@h:22", 1);
+    std::fs::write(&world.state, state.render()).expect("state");
+    assert_eq!(backend.consent(&server), Consent::Granted);
+    // …but a setting of `off` and an entry that says `false` still win: nothing is written.
+    with_setting(&mut backend, Off, vec![]);
+    assert_eq!(backend.consent(&server), Consent::Refused);
+    with_setting(&mut backend, Ask, vec![entry("rasp", false)]);
+    assert_eq!(backend.consent(&server), Consent::Refused);
+    std::fs::remove_file(&world.state).expect("state gone");
+
+    // Not been to: `auto` and the host's own `true` go ahead without a question, `off` and
+    // `false` refuse, and only `ask` asks.
+    with_setting(&mut backend, Auto, vec![]);
+    assert_eq!(backend.consent(&server), Consent::Granted);
+    with_setting(&mut backend, Ask, vec![entry("rasp", true)]);
+    assert_eq!(backend.consent(&server), Consent::Granted);
+    with_setting(&mut backend, Off, vec![]);
+    assert_eq!(backend.consent(&server), Consent::Refused);
+    with_setting(&mut backend, Off, vec![entry("rasp", true)]);
+    assert_eq!(backend.consent(&server), Consent::Granted);
+    with_setting(&mut backend, Auto, vec![entry("rasp", false)]);
+    assert_eq!(backend.consent(&server), Consent::Refused);
+    // A production host is colored and decides nothing: it is asked about like the rest.
+    backend.settings = Box::new(|| Settings {
+        remote_hosts: vec![bt_core::HostRule {
+            pattern: "rasp".to_owned(),
+            mark: Some(bt_core::HostMark::Production),
+            integration: None,
+            commands: None,
+        }],
+        ..Settings::default()
+    });
+    assert!(matches!(backend.consent(&server), Consent::Ask(_)));
+}
+
+#[test]
+fn nothing_that_cannot_ask_sets_a_server_up() {
+    let world = stand_in("nobody", 0);
+    let mut backend = world.backend(None);
+    backend.asker = None;
+    assert_eq!(backend.consent(&rasp("rasp")), Consent::Refused);
+    // Where nothing needs asking, nothing is lost.
+    backend.settings = Box::new(|| Settings {
+        remote_integration: RemoteIntegration::Auto,
+        ..Settings::default()
+    });
+    assert_eq!(backend.consent(&rasp("rasp")), Consent::Granted);
+}
+
+#[test]
+fn this_mac_is_never_asked_about() {
+    let world = stand_in("mac", 0);
+    let backend = world.backend(None);
+    let here = local::host();
+    assert_eq!(backend.consent(&here), Consent::Granted);
+}
+
+#[test]
+fn the_answers_are_written_where_the_menu_writes_them() {
+    let world = stand_in("answers", 0);
+    let backend = world.backend(None);
+    let server = rasp("deploy@rasp");
+    // Yes is kept by the install that follows (it records the server first), not here.
+    backend.answered(&server, Reply::Yes);
+    assert!(world.saved.lock().expect("saved").is_empty());
+    // No is this host's own entry, the line Shell ▸ Shell Integration on “{host}” writes.
+    backend.answered(&server, Reply::No);
+    // Always is the key every host follows.
+    backend.answered(&server, Reply::Always);
+    assert_eq!(
+        *world.saved.lock().expect("saved"),
+        [
+            SettingsEdit::RemoteHostIntegration {
+                host: "deploy@rasp".into(),
+                on: false,
+            },
+            SettingsEdit::RemoteIntegration(RemoteIntegration::Auto),
+        ]
+    );
 }
 
 #[test]
@@ -1224,12 +1377,18 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
     let args = vec!["rasp".to_owned()];
 
     // A server bateri never opened has no `bateri` to start a terminal with: told to open one.
+    // Under the default, which asks, that is also the answer for a program's `-S`: the question is
+    // asked in a pane, never by a program, so nothing is put on the server for one.
     let error = backend
         .reach(&args, Ask::Never, &|_| Vec::new())
         .expect_err("not set up");
     assert!(
         error.contains("has not set up rasp") && error.contains("ssh rasp"),
         "{error}"
+    );
+    assert!(
+        !world.home.join(".local").exists(),
+        "nothing was put on the server"
     );
 
     // Opened once, the server is reached: no terminal, no password, no second master.
@@ -1308,7 +1467,7 @@ fn a_server_has_its_programs_watched_where_the_command_and_the_integration_are_w
 
     // A server whose shells get no integration has the programs nowhere on its `PATH`.
     backend.settings = Box::new(|| Settings {
-        remote_integration: false,
+        remote_integration: bt_core::RemoteIntegration::Off,
         ..Settings::default()
     });
     assert!(!backend.watch_wanted(&host));

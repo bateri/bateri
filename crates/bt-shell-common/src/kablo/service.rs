@@ -126,6 +126,7 @@ use bt_core::{PaneUuid, PtyOps, PtySize, RemoteTarget, Stream, StreamExit};
 use kablo_proto::v1::stream::Command;
 use kablo_proto::v1::{NewSession, Status};
 
+use super::ask::Reply;
 use super::hub::{Declined, HoldId, Hub, HubEvent};
 use super::install::{Installed, Root};
 use super::ledger::Ledger;
@@ -363,6 +364,21 @@ impl Refusal {
     }
 }
 
+/// Whether bateri may put its files on a server, and how that is found out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Consent {
+    /// It may: the setting says to go ahead (`auto`, or the host's own entry), or bateri has been
+    /// there before, or the machine is this Mac.
+    Granted,
+    /// The person is asked first, on the pane's terminal and before the connection is made: the
+    /// program (`bateri ssh-ask HOST`) runs there and its status is the answer
+    /// ([`Reply::of_status`]). Nothing has been written to the server, and nothing is until
+    /// the answer is in.
+    Ask(Vec<Vec<u8>>),
+    /// It may not: the setting says `off`, or nothing can ask. The plain `ssh`.
+    Refused,
+}
+
 /// A started bridge: the two ends of the stream, and how to end it.
 pub struct Carried {
     /// What the bridge says.
@@ -392,6 +408,18 @@ pub trait Backend: Send + Sync + 'static {
     /// Whether the `ssh` arguments are a kablo call, and to whom. `None`: the
     /// plain `ssh`.
     fn route(&self, args: &[String]) -> Option<KabloHost>;
+
+    /// Whether bateri may put its files on the server, asked before anything is: the first step
+    /// of a terminal's preparation, ahead of the connection, so that a "no" costs no password.
+    /// The default is yes, for a backend with nothing to ask.
+    fn consent(&self, _server: &KabloHost) -> Consent {
+        Consent::Granted
+    }
+
+    /// Told what the person answered to the question of [`Consent::Ask`], to keep it: a "no" for
+    /// this host, an "always" for every host. A "yes" is kept by the install that follows, which
+    /// records the server before it writes anything.
+    fn answered(&self, _server: &KabloHost, _reply: Reply) {}
 
     /// The program that makes sure a master connection to the server exists, to
     /// be run on the pane's terminal (where it may ask for a password and for
@@ -4204,6 +4232,26 @@ fn prepare(
     numbered: bool,
 ) -> Result<Ready, Refusal> {
     let backend = &shared.backend;
+    match backend.consent(&server) {
+        Consent::Granted => {}
+        Consent::Refused => return Err(Refusal::plain()),
+        Consent::Ask(argv) => {
+            let (reply, answer) = mpsc::channel();
+            shared
+                .tx
+                .send(Msg::Run { hold, argv, reply })
+                .map_err(|_| Refusal::plain())?;
+            // The pane's terminal is the person's for as long as they take. No answer is a
+            // holder that cannot run it (version 1) or went away: the plain `ssh`, and nothing
+            // is kept.
+            let status = answer.recv().map_err(|_| Refusal::plain())?;
+            let reply = Reply::of_status(status)?;
+            backend.answered(&server, reply);
+            if reply == Reply::No {
+                return Err(Refusal::plain());
+            }
+        }
+    }
     if let Some(argv) = backend.master(&server)? {
         let (reply, answer) = mpsc::channel();
         shared
@@ -4219,7 +4267,7 @@ fn prepare(
     let installed = backend.install(&server, &live)?;
     let note = installed.fresh.then(|| {
         format!(
-            "bateri: kablo is set up on {}; if the connection drops, this terminal keeps running",
+            "bateri is set up on {}; if the connection drops, this terminal keeps running",
             server.host
         )
     });

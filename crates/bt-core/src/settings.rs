@@ -1683,11 +1683,12 @@ pub struct Settings {
     /// `[remote] stats` and `stats_interval` ([`RemoteStatsSettings`]).
     pub remote_stats: RemoteStatsSettings,
     /// `[remote] integration`: whether a plain `ssh` sets up the shell
-    /// integration on the server. The host's own entry and the
-    /// production mark come first ([`Self::integration_for`]). Like `osc52`, a
+    /// integration on the server, and whether it asks first. The host's own
+    /// entry comes first ([`Self::integration_for`]). Like `osc52`, a
     /// value that is not accepted and an unusable file turn it **off**: a wrong
-    /// guess here writes to servers silently.
-    pub remote_integration: bool,
+    /// guess here writes to servers silently. The `true` and `false` of the
+    /// earlier versions read as `"ask"` and `"off"`.
+    pub remote_integration: RemoteIntegration,
     /// `[apps] sources`: where the programs bateri keeps up to date publish their releases, as
     /// written (`user/repo`, an `https://` address or a `file:///` one — [`app_source_address`]
     /// reads them), in the file's order. `["bateri/textpen"]` unless the file writes the key;
@@ -1767,7 +1768,7 @@ impl Default for Settings {
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
-            remote_integration: true,
+            remote_integration: RemoteIntegration::default(),
             apps_sources: DEFAULT_APP_SOURCES
                 .iter()
                 .map(|source| (*source).to_owned())
@@ -1779,6 +1780,40 @@ impl Default for Settings {
     }
 }
 
+/// `[remote] integration`: whether a plain `ssh` puts bateri's files on a
+/// server, and whether bateri asks first.
+///
+/// What a host's own entry says (`integration = true | false`) comes before
+/// this ([`Settings::integration_for`]), and a server bateri already put its
+/// files on is not asked about again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteIntegration {
+    /// Sets the server up without asking.
+    Auto,
+    /// Asks in the terminal the first time a server is reached from this Mac,
+    /// before anything is written there. The answer is kept.
+    #[default]
+    Ask,
+    /// Never writes to a server.
+    Off,
+}
+
+impl RemoteIntegration {
+    /// The single list of spellings in the settings file.
+    pub const NAMES: &'static [(&'static str, Self)] =
+        &[("auto", Self::Auto), ("ask", Self::Ask), ("off", Self::Off)];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+
+    /// Whether a plain `ssh` may be taken over at all: yes for `auto` and `ask`.
+    pub fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
 /// The result of a file that could be parsed: the values and the ones not
 /// accepted.
 #[derive(Clone, Debug, PartialEq)]
@@ -1787,6 +1822,10 @@ pub struct Parsed {
     /// Not in the file's order but **in key reading order**; if empty the file
     /// is clean.
     pub diagnostics: Vec<Diagnostic>,
+    /// `[remote] integration` is still the `true`/`false` of the earlier
+    /// versions. It reads as `"ask"`/`"off"` already; the file says so after
+    /// [`SettingsEdit::RemoteIntegrationUpdated`].
+    pub legacy_remote_integration: bool,
 }
 
 /// Why a setting wasn't accepted.
@@ -1903,7 +1942,14 @@ pub enum SettingsEdit {
     },
     /// The settings window's "Set up shell integration on servers":
     /// `[remote] integration`.
-    RemoteIntegration(bool),
+    RemoteIntegration(RemoteIntegration),
+    /// The file's `[remote] integration` is still the earlier versions'
+    /// `true` or `false`: writes what it reads as (`"ask"` or `"off"`), and
+    /// the template's comment above it too when that is the template's own,
+    /// byte for byte. Changes nothing in a file that has no such value, so the
+    /// edit that [`Parsed::legacy_remote_integration`] asks for ends once it
+    /// is written.
+    RemoteIntegrationUpdated,
     /// Shell ▸ Shell Integration on “{host}”: the `[remote] hosts`
     /// edit after which `host`'s first matching entry that writes
     /// `integration` writes `on` — an explicit choice for this host, even
@@ -2038,7 +2084,9 @@ impl SettingsEdit {
             Self::RemoteHostMark { .. } | Self::RemoteHostIntegration { .. } => {
                 ("remote", "hosts", "remote.hosts")
             }
-            Self::RemoteIntegration(_) => ("remote", "integration", "remote.integration"),
+            Self::RemoteIntegration(_) | Self::RemoteIntegrationUpdated => {
+                ("remote", "integration", "remote.integration")
+            }
             Self::AppsSources(_) => ("apps", "sources", "apps.sources"),
             Self::AppsOpenWith(_) => ("apps", "open_with", "apps.open_with"),
             Self::DownloadDir(_) => ("remote", "download_dir", "remote.download_dir"),
@@ -2102,8 +2150,10 @@ impl SettingsEdit {
             Self::AppsSources(sources) => sources_value(sources),
             // The line's value; a removal writes none and never asks.
             Self::FontFeature { on, .. } => on.unwrap_or_default().into(),
+            Self::RemoteIntegration(mode) => mode.name().into(),
+            // Decided from the text in `with_edit`, which is the only caller.
+            Self::RemoteIntegrationUpdated => String::new().into(),
             Self::DownloadNotify(on)
-            | Self::RemoteIntegration(on)
             | Self::ShellPorts(on)
             | Self::ShellPythonEnv(on)
             | Self::ShellNodeVersion(on)
@@ -2458,13 +2508,14 @@ claude_integration = true
 #   { host = "rasp", commands = "screen" },
 # ]
 hosts = []
-# true | false. Lets a plain ssh set up shell integration on the server, so
-# the folder (and later command blocks) follow you there too. bateri writes a
-# few small files to ~/.local/share/bateri/shell on the server and never
-# touches its rc files. A host is set up only after bateri has seen a shell
-# there once. A host marked "production" stays plain unless its entry says
-# integration = true; integration = false in an entry turns one host off.
-integration = true
+# "auto" | "ask" | "off". Whether a plain ssh sets up shell integration on
+# the server, so the folder (and later command blocks) follow you there too, and
+# a terminal there keeps running when the connection drops. bateri writes a few
+# small files under ~/.local/share/bateri on the server and never touches its
+# rc files. "ask" asks in the terminal the first time you reach a server from
+# this Mac; "auto" never asks; "off" never sets anything up. An entry of
+# hosts decides for its own host: integration = true or false.
+integration = "ask"
 # Folders start with / or ~/.
 # Where "Download to Downloads" puts a remote file or folder.
 download_dir = "~/Downloads"
@@ -2533,7 +2584,7 @@ open_with = "textpen"
             osc52: Osc52::Off,
             // The file may hold `integration = false`; writing to a
             // server is the unsafe direction of the guess, as the clipboard is.
-            remote_integration: false,
+            remote_integration: RemoteIntegration::Off,
             // The file may hold `restore_windows = "off"` (or
             // `"layout"`); writing the scrollback to disk is the invisible side
             // effect, the layout is the visible gain.
@@ -2586,6 +2637,7 @@ open_with = "textpen"
         let mut parsed = Parsed {
             settings: Settings::default(),
             diagnostics: Vec::new(),
+            legacy_remote_integration: false,
         };
         let root = doc.as_table();
         match section(text, root, "terminal", &mut parsed.diagnostics) {
@@ -3155,16 +3207,25 @@ open_with = "textpen"
                 // `fallback` is deliberately not read, as for `osc52`: a value
                 // that isn't accepted turns the integration off.
                 if let Some(item) = remote.get("integration") {
-                    parsed.settings.remote_integration = boolean(
-                        text,
-                        item,
-                        "remote.integration",
-                        false,
-                        &mut parsed.diagnostics,
-                    );
+                    parsed.settings.remote_integration = match item.as_bool() {
+                        // The earlier versions' spelling: what the file meant then is
+                        // what it means now, with the question the new default adds.
+                        Some(on) => {
+                            parsed.legacy_remote_integration = true;
+                            legacy_integration(on)
+                        }
+                        None => named_enum(
+                            text,
+                            item,
+                            "remote.integration",
+                            RemoteIntegration::NAMES,
+                            RemoteIntegration::Off,
+                            &mut parsed.diagnostics,
+                        ),
+                    };
                 }
                 if hosts_rejected {
-                    parsed.settings.remote_integration = false;
+                    parsed.settings.remote_integration = RemoteIntegration::Off;
                 }
             }
             None if root.contains_key("remote") => {
@@ -3177,7 +3238,7 @@ open_with = "textpen"
                     .remote_files
                     .clone_from(&fallback.remote_files);
                 parsed.settings.remote_stats = fallback.remote_stats;
-                parsed.settings.remote_integration = false;
+                parsed.settings.remote_integration = RemoteIntegration::Off;
             }
             None => {}
         }
@@ -3231,14 +3292,16 @@ open_with = "textpen"
 
     /// Whether a plain `ssh` to `host` (as typed, like [`host_mark`]'s input)
     /// sets up the remote shell integration: the first matching
-    /// `[remote] hosts` entry that writes `integration`; if none does and the
-    /// host's mark is `production`, off; otherwise the `[remote] integration`
-    /// key. "The first match wins" as for the mark, per key.
-    pub fn integration_for(&self, host: &str) -> bool {
-        if let Some((_, on)) = integration_rule(&self.remote_hosts, host, MarkSubject::Host) {
-            return on;
+    /// `[remote] hosts` entry that writes `integration` (`true` is a yes that
+    /// asks nothing, `false` a no); otherwise the `[remote] integration` key.
+    /// "The first match wins" as for the mark, per key. The host's mark does
+    /// not take part: a production host is colored, not treated differently.
+    pub fn integration_for(&self, host: &str) -> RemoteIntegration {
+        match integration_rule(&self.remote_hosts, host, MarkSubject::Host) {
+            Some((_, true)) => RemoteIntegration::Auto,
+            Some((_, false)) => RemoteIntegration::Off,
+            None => self.remote_integration,
         }
-        host_mark(&self.remote_hosts, host) != HostMark::Production && self.remote_integration
     }
 
     /// What the `bateri` command may do on the server `host` (as typed): the first
@@ -3375,6 +3438,9 @@ open_with = "textpen"
             }
             SettingsEdit::RemoteHostIntegration { host, on } => {
                 return with_host_integration(text, host, *on);
+            }
+            SettingsEdit::RemoteIntegrationUpdated => {
+                return updated_remote_integration(text);
             }
             SettingsEdit::Shortcut { name, shortcuts } => {
                 return keys::with_shortcut(text, name, shortcuts.as_deref());
@@ -4484,6 +4550,78 @@ fn named_enum<T: Copy + PartialEq>(
     fallback
 }
 
+/// What the earlier versions' `integration = true | false` reads as now.
+///
+/// `true` did not mean "never ask" then because nothing asked, so it reads as
+/// the question's default and not as `"auto"`: someone who wrote it would
+/// otherwise be set up on every server, a production one too, without a word.
+fn legacy_integration(on: bool) -> RemoteIntegration {
+    if on {
+        RemoteIntegration::Ask
+    } else {
+        RemoteIntegration::Off
+    }
+}
+
+/// The comment the template had above `integration` before it took three
+/// values. A file that still has it, byte for byte, gets the new one with the
+/// new value; a comment the user changed stays.
+const REMOTE_INTEGRATION_COMMENT_V1: &str = "\
+# true | false. Lets a plain ssh set up shell integration on the server, so
+# the folder (and later command blocks) follow you there too. bateri writes a
+# few small files to ~/.local/share/bateri/shell on the server and never
+# touches its rc files. A host is set up only after bateri has seen a shell
+# there once. A host marked \"production\" stays plain unless its entry says
+# integration = true; integration = false in an entry turns one host off.
+";
+
+/// The comment above `integration` in the template; the template holds the same
+/// text (a test keeps the two together).
+const REMOTE_INTEGRATION_COMMENT: &str = "\
+# \"auto\" | \"ask\" | \"off\". Whether a plain ssh sets up shell integration on
+# the server, so the folder (and later command blocks) follow you there too, and
+# a terminal there keeps running when the connection drops. bateri writes a few
+# small files under ~/.local/share/bateri on the server and never touches its
+# rc files. \"ask\" asks in the terminal the first time you reach a server from
+# this Mac; \"auto\" never asks; \"off\" never sets anything up. An entry of
+# hosts decides for its own host: integration = true or false.
+";
+
+/// [`SettingsEdit::RemoteIntegrationUpdated`]'s text: the earlier versions'
+/// `true` or `false` becomes `"ask"` or `"off"` and the template's old comment
+/// above it the new one; a file with anything else there comes back as it is.
+/// Text that can't be parsed is `Err` as for every edit.
+fn updated_remote_integration(text: &str) -> Result<String, Diagnostic> {
+    let parsed = document(text)?;
+    let Some(on) = parsed
+        .get("remote")
+        .and_then(|remote| remote.get("integration"))
+        .and_then(Item::as_bool)
+    else {
+        return Ok(text.to_owned());
+    };
+    let written = SettingsEdit::RemoteIntegration(legacy_integration(on));
+    let rewritten = Settings::with_edit(text, &written)?;
+    // The comment sits directly above the key's own line, in the template's
+    // spelling, and nowhere else.
+    let key_line = |at: usize| rewritten[at..].starts_with("integration = ");
+    let found = rewritten
+        .match_indices(REMOTE_INTEGRATION_COMMENT_V1)
+        .map(|(at, comment)| at + comment.len())
+        .find(|after| key_line(*after));
+    Ok(match found {
+        Some(after) => {
+            let before = after - REMOTE_INTEGRATION_COMMENT_V1.len();
+            format!(
+                "{}{REMOTE_INTEGRATION_COMMENT}{}",
+                &rewritten[..before],
+                &rewritten[after..]
+            )
+        }
+        None => rewritten,
+    })
+}
+
 /// `[remote]`'s remote file keys: every key present is read, a value
 /// that isn't accepted takes `fallback`'s and leaves a diagnostic.
 fn remote_files(
@@ -5283,7 +5421,7 @@ mod tests {
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
-            remote_integration: true,
+            remote_integration: RemoteIntegration::default(),
             apps_sources: Settings::default().apps_sources,
             apps_sources_whole: true,
             apps_open_with: Settings::default().apps_open_with,
@@ -6393,7 +6531,7 @@ found 1.5; using 0.1"
             Settings::for_unusable_file(),
             Settings {
                 osc52: Osc52::Off,
-                remote_integration: false,
+                remote_integration: RemoteIntegration::Off,
                 restore_windows: RestoreWindows::Layout,
                 ..Settings::default()
             }
@@ -7081,17 +7219,163 @@ hosts = [
 
     #[test]
     fn remote_integration_is_read_and_a_rejected_value_is_off() {
-        assert!(clean("").remote_integration);
-        assert!(!clean("[remote]\nintegration = false\n").remote_integration);
-        assert!(clean("[remote]\nintegration = true\n").remote_integration);
+        // The default asks.
+        assert_eq!(clean("").remote_integration, RemoteIntegration::Ask);
+        assert_eq!(
+            clean("[remote]\n").remote_integration,
+            RemoteIntegration::Ask
+        );
+        for (value, expected) in [
+            ("auto", RemoteIntegration::Auto),
+            ("ask", RemoteIntegration::Ask),
+            ("off", RemoteIntegration::Off),
+        ] {
+            let text = format!("[remote]\nintegration = \"{value}\"\n");
+            let parsed = Settings::parse_keeping(&text, &Settings::default()).expect("parseable");
+            assert_eq!(parsed.settings.remote_integration, expected, "{value}");
+            assert!(!parsed.legacy_remote_integration, "{value}");
+            assert!(parsed.diagnostics.is_empty(), "{value}");
+        }
         // The osc52 exception: neither the default nor the given value.
         let current = Settings::default();
-        for text in ["[remote]\nintegration = \"no\"\n", "remote = 5\n"] {
+        for text in [
+            "[remote]\nintegration = \"no\"\n",
+            "[remote]\nintegration = 3\n",
+            "remote = 5\n",
+        ] {
             let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
-            assert!(!parsed.settings.remote_integration, "{text}");
+            assert_eq!(
+                parsed.settings.remote_integration,
+                RemoteIntegration::Off,
+                "{text}"
+            );
         }
         let (_, diagnostic) = rejected("[remote]\nintegration = \"no\"\n");
         assert_eq!(diagnostic.key, Some("remote.integration"));
+        assert!(
+            diagnostic.message.contains("\"auto\", \"ask\" or \"off\""),
+            "{}",
+            diagnostic.message
+        );
+    }
+
+    #[test]
+    fn the_earlier_true_and_false_read_as_ask_and_off_and_say_so() {
+        // `true` was the default and meant "set servers up"; nothing asked then.
+        // Reading it as "auto" would set every server up, a production one too,
+        // without a word.
+        for (value, expected) in [
+            ("true", RemoteIntegration::Ask),
+            ("false", RemoteIntegration::Off),
+        ] {
+            let text = format!("[remote]\nintegration = {value}\n");
+            let parsed = Settings::parse_keeping(&text, &Settings::default()).expect("parseable");
+            assert_eq!(parsed.settings.remote_integration, expected, "{value}");
+            assert!(parsed.legacy_remote_integration, "{value}");
+            assert!(parsed.diagnostics.is_empty(), "{value}");
+        }
+        // A file with no such value has nothing to say.
+        for text in ["", "[remote]\n", "[remote]\nintegration = \"ask\"\n"] {
+            let parsed = Settings::parse_keeping(text, &Settings::default()).expect("parseable");
+            assert!(!parsed.legacy_remote_integration, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn updating_the_earlier_value_writes_the_new_one_and_stops() {
+        let update = |text: &str| {
+            Settings::with_edit(text, &SettingsEdit::RemoteIntegrationUpdated).expect("writable")
+        };
+        // Spelling, order and the rest of the file stay.
+        assert_eq!(
+            update("[remote]\nintegration = true # mine\nhosts = []\n"),
+            "[remote]\nintegration = \"ask\" # mine\nhosts = []\n"
+        );
+        assert_eq!(
+            update("[remote]\nintegration = false\n"),
+            "[remote]\nintegration = \"off\"\n"
+        );
+        assert_eq!(
+            update("remote.integration = true\n"),
+            "remote.integration = \"ask\"\n"
+        );
+        assert_eq!(
+            update("remote = { integration = true, hosts = [] }\n"),
+            "remote = { integration = \"ask\", hosts = [] }\n"
+        );
+        // Nothing to update: the text comes back as it is, so the write that
+        // follows a read ends with the write's own read.
+        for text in [
+            "",
+            "[remote]\nintegration = \"auto\"\n",
+            "[remote]\nhosts = []\n",
+            "[remote]\nintegration = \"no\"\n",
+        ] {
+            assert_eq!(update(text), text, "{text:?}");
+        }
+        let once = update("[remote]\nintegration = true\n");
+        assert_eq!(update(&once), once);
+        // Text that cannot be parsed is not written.
+        assert!(
+            Settings::with_edit(
+                "[remote\nintegration = true\n",
+                &SettingsEdit::RemoteIntegrationUpdated
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn updating_replaces_the_templates_old_comment_only_when_it_is_the_templates() {
+        let old = format!(
+            "[remote]\nhosts = []\n{REMOTE_INTEGRATION_COMMENT_V1}integration = true\n\
+             # Folders start with / or ~/.\n"
+        );
+        let updated =
+            Settings::with_edit(&old, &SettingsEdit::RemoteIntegrationUpdated).expect("writable");
+        assert_eq!(
+            updated,
+            format!(
+                "[remote]\nhosts = []\n{REMOTE_INTEGRATION_COMMENT}integration = \"ask\"\n\
+                 # Folders start with / or ~/.\n"
+            )
+        );
+        // A comment the user changed by one word stays, the value still changes.
+        let mine = old.replace("Lets a plain ssh", "Lets my plain ssh");
+        let updated =
+            Settings::with_edit(&mine, &SettingsEdit::RemoteIntegrationUpdated).expect("writable");
+        assert_eq!(
+            updated,
+            mine.replace("\nintegration = true\n", "\nintegration = \"ask\"\n")
+        );
+        // The old comment is the template's only above the key's own line.
+        let elsewhere = format!(
+            "{REMOTE_INTEGRATION_COMMENT_V1}# not the key\n[remote]\nintegration = false\n"
+        );
+        let updated = Settings::with_edit(&elsewhere, &SettingsEdit::RemoteIntegrationUpdated)
+            .expect("writable");
+        assert_eq!(
+            updated,
+            elsewhere.replace("\nintegration = false\n", "\nintegration = \"off\"\n")
+        );
+    }
+
+    #[test]
+    fn the_template_says_ask_and_carries_the_comment_the_update_writes() {
+        let template = Settings::TEMPLATE;
+        assert!(
+            template.contains(&format!(
+                "{REMOTE_INTEGRATION_COMMENT}integration = \"ask\"\n"
+            )),
+            "the template and the comment the update writes are one text"
+        );
+        assert!(
+            !template.contains(REMOTE_INTEGRATION_COMMENT_V1),
+            "the old comment is gone from the template"
+        );
+        let parsed = Settings::parse_keeping(template, &Settings::default()).expect("parseable");
+        assert_eq!(parsed.settings.remote_integration, RemoteIntegration::Ask);
+        assert!(!parsed.legacy_remote_integration);
     }
 
     #[test]
@@ -7143,12 +7427,16 @@ hosts = [
             assert_eq!(diagnostic.key, Some("remote.hosts"), "{entry}");
             // The previous list is gone with it (empty at launch), so the
             // integration turns off rather than falling open on production.
-            assert!(!settings.remote_integration, "{entry}");
+            assert_eq!(
+                settings.remote_integration,
+                RemoteIntegration::Off,
+                "{entry}"
+            );
         }
     }
 
     #[test]
-    fn integration_resolves_entry_then_production_then_the_key() {
+    fn integration_resolves_the_entry_and_then_the_key_and_the_mark_takes_no_part() {
         let rule = |pattern: &str, mark: HostMark, integration: Option<bool>| HostRule {
             pattern: pattern.to_owned(),
             mark: Some(mark),
@@ -7164,28 +7452,39 @@ hosts = [
             ],
             ..Settings::default()
         };
-        // The entry's own value, even over the production mark.
-        assert!(settings.integration_for("deploy@prod-web"));
-        assert!(!settings.integration_for("lab"));
-        // A production entry without a value: off.
-        assert!(!settings.integration_for("prod-db"));
+        use RemoteIntegration::{Ask, Auto, Off};
+        // The entry's own value: `true` is a yes that asks nothing.
+        assert_eq!(settings.integration_for("deploy@prod-web"), Auto);
+        assert_eq!(settings.integration_for("lab"), Off);
+        // A production host is colored, not treated differently: it asks like the rest.
+        assert_eq!(settings.integration_for("prod-db"), Ask);
         // Another mark, or no entry: the key.
-        assert!(settings.integration_for("api.staging"));
-        assert!(settings.integration_for("elsewhere"));
+        assert_eq!(settings.integration_for("api.staging"), Ask);
+        assert_eq!(settings.integration_for("elsewhere"), Ask);
         let off = Settings {
-            remote_integration: false,
+            remote_integration: Off,
             ..settings.clone()
         };
-        assert!(!off.integration_for("api.staging"));
-        assert!(!off.integration_for("elsewhere"));
-        assert!(off.integration_for("prod-web"), "the entry beats the key");
+        assert_eq!(off.integration_for("api.staging"), Off);
+        assert_eq!(off.integration_for("elsewhere"), Off);
+        assert_eq!(
+            off.integration_for("prod-web"),
+            Auto,
+            "the entry beats the key"
+        );
+        let auto = Settings {
+            remote_integration: Auto,
+            ..settings
+        };
+        assert_eq!(auto.integration_for("prod-db"), Auto);
+        assert_eq!(auto.integration_for("lab"), Off, "the entry beats the key");
     }
 
     #[test]
     fn the_menu_mark_never_drops_a_hosts_integration() {
         let integration = |text: &str| {
             Settings {
-                remote_integration: true,
+                remote_integration: RemoteIntegration::Auto,
                 ..clean(text)
             }
             .integration_for("router")
@@ -7208,14 +7507,18 @@ hosts = [
                 HostMark::Production,
             ),
         ] {
-            assert!(!integration(text), "{text}");
+            assert_eq!(integration(text), RemoteIntegration::Off, "{text}");
             let edited = with_host_mark(text, "router", mark, MarkSubject::Host).expect("edit");
             assert_eq!(
                 host_mark(&clean(&edited).remote_hosts, "router"),
                 mark,
                 "{edited}"
             );
-            assert!(!integration(&edited), "the integration stays off: {edited}");
+            assert_eq!(
+                integration(&edited),
+                RemoteIntegration::Off,
+                "the integration stays off: {edited}"
+            );
         }
     }
 
@@ -7260,8 +7563,9 @@ hosts = [
                 "the level stays: {edited}"
             );
             if text.contains("integration = false") {
-                assert!(
-                    !after.integration_for(host),
+                assert_eq!(
+                    after.integration_for(host),
+                    RemoteIntegration::Off,
                     "the integration stays: {edited}"
                 );
             }
@@ -7296,8 +7600,9 @@ hosts = [
         ] {
             let edited = with_host_mark(text, "prod", HostMark::Production, MarkSubject::Host)
                 .expect("edit");
-            assert!(
-                !clean(&edited).remote_integration,
+            assert_eq!(
+                clean(&edited).remote_integration,
+                RemoteIntegration::Off,
                 "the section's own key stays: {edited}"
             );
             assert_eq!(
@@ -8587,7 +8892,8 @@ cursor = \"spring\"
                     commands: None,
                 },
             ),
-            SettingsEdit::RemoteIntegration(on) => settings.remote_integration = on,
+            SettingsEdit::RemoteIntegration(mode) => settings.remote_integration = mode,
+            SettingsEdit::RemoteIntegrationUpdated => {}
             SettingsEdit::AppsSources(sources) => settings.apps_sources = sources,
             SettingsEdit::AppsOpenWith(name) => settings.apps_open_with = name,
             SettingsEdit::DownloadDir(path) => settings.remote_files.download_dir = path,
@@ -8696,7 +9002,7 @@ cursor = \"spring\"
                 host: "deploy@vm".to_owned(),
                 on: false,
             },
-            SettingsEdit::RemoteIntegration(false),
+            SettingsEdit::RemoteIntegration(RemoteIntegration::Off),
             SettingsEdit::AppsSources(vec![
                 "acme/tool".to_owned(),
                 "https://example.com/tool/app.json".to_owned(),
@@ -8852,7 +9158,10 @@ cursor = \"spring\"
             )
         );
         let settings = clean(&written);
-        assert!(settings.integration_for("deploy@prod"));
+        assert_eq!(
+            settings.integration_for("deploy@prod"),
+            RemoteIntegration::Auto
+        );
         assert_eq!(
             host_mark(&settings.remote_hosts, "prod"),
             HostMark::Production
@@ -8888,8 +9197,8 @@ cursor = \"spring\"
              { host = \"vm\", mark = \"staging\" }]\n"
         );
         let settings = clean(&written);
-        assert!(settings.integration_for("vm"));
-        assert!(!settings.integration_for("other"));
+        assert_eq!(settings.integration_for("vm"), RemoteIntegration::Auto);
+        assert_eq!(settings.integration_for("other"), RemoteIntegration::Off);
         assert_eq!(host_mark(&settings.remote_hosts, "vm"), HostMark::Staging);
     }
 
@@ -8911,7 +9220,10 @@ cursor = \"spring\"
             "[remote]\n# first\n[[remote.hosts]]\nhost = \"vm\"\nintegration = true\n\n\
              [[remote.hosts]]\nhost = \"*\"\nintegration = false\n"
         );
-        assert!(clean(&written).integration_for("vm"));
+        assert_eq!(
+            clean(&written).integration_for("vm"),
+            RemoteIntegration::Auto
+        );
     }
 
     #[test]
@@ -8928,7 +9240,10 @@ cursor = \"spring\"
              { host = \"*\", integration = false }, \
              { host = \"vm\", integration = false, note = \"lab box\" }]\n"
         );
-        assert!(clean(&written).integration_for("vm"));
+        assert_eq!(
+            clean(&written).integration_for("vm"),
+            RemoteIntegration::Auto
+        );
     }
 
     #[test]
@@ -8941,9 +9256,10 @@ cursor = \"spring\"
             "[remote]\nhosts = [{ host = \"prod\", integration = true, mark = \"production\" }]\n"
         );
         let settings = clean(&both);
-        assert!(
+        assert_eq!(
             settings.integration_for("prod"),
-            "the prod default is overridden"
+            RemoteIntegration::Auto,
+            "the entry decides"
         );
         assert_eq!(
             host_mark(&settings.remote_hosts, "prod"),
@@ -8952,7 +9268,7 @@ cursor = \"spring\"
         // Mark then toggle: the integration goes in place, the mark stays.
         let text = marked("", "prod", HostMark::Production);
         let settings = clean(&integrated(&text, "prod", true));
-        assert!(settings.integration_for("prod"));
+        assert_eq!(settings.integration_for("prod"), RemoteIntegration::Auto);
         assert_eq!(
             host_mark(&settings.remote_hosts, "prod"),
             HostMark::Production

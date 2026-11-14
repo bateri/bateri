@@ -485,6 +485,13 @@ impl FileState {
 }
 
 impl Loaded {
+    /// Whether the file holds `[remote] integration` as the earlier versions wrote it, `true` or
+    /// `false`: the caller writes [`SettingsEdit::RemoteIntegrationUpdated`] so the file says
+    /// what it is read as. A file that could not be parsed has no such value to rewrite.
+    pub fn legacy_remote_integration(&self) -> bool {
+        matches!(self, Loaded::Parsed(parsed) if parsed.legacy_remote_integration)
+    }
+
     /// The read's state as it goes to the window and the subtitle; which settings get applied
     /// is a separate question ([`Loaded::at_launch`], [`Loaded::live`]).
     pub fn state(&self) -> FileState {

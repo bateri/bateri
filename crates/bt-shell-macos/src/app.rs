@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    HostMark, InitialInput, MarkSubject, PaneUuid, ReduceMotion, RemoteKind, RestoreWindows,
-    SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, TabDetails,
-    TabPosition, Teardown, Theme,
+    HostMark, InitialInput, MarkSubject, PaneUuid, ReduceMotion, RemoteIntegration, RemoteKind,
+    RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
+    ShellIntegration, TabDetails, TabPosition, Teardown, Theme,
 };
 use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
 use bt_shell_common::kablo::quit;
@@ -31,12 +31,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
-    NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSText, NSWindow,
-    NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference, NSWorkspace,
-    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidWakeNotification,
-    NSWorkspaceWillPowerOffNotification,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueMixed,
+    NSControlStateValueOff, NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags,
+    NSMenu, NSMenuDelegate, NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen,
+    NSText, NSWindow, NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference,
+    NSWorkspace, NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSWorkspaceDidWakeNotification, NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
     NSArray, NSBundle, NSCurrentLocaleDidChangeNotification, NSDictionary,
@@ -1572,17 +1572,20 @@ define_class!(
             // and its resolved answer; locally grey.
             if item.action() == Some(sel!(toggleHostIntegration:)) {
                 let remote = self.key_remote_mark().map(|(host, _)| {
-                    let on = self.settings().integration_for(&host);
-                    (host, on)
+                    let answer = self.settings().integration_for(&host);
+                    (host, answer)
                 });
                 let model = crate::menu::integration_menu(
-                    remote.as_ref().map(|(host, on)| (host.as_str(), *on)),
+                    remote
+                        .as_ref()
+                        .map(|(host, answer)| (host.as_str(), *answer)),
                 );
                 item.setTitle(&NSString::from_str(&model.title));
-                item.setState(if model.checked {
-                    NSControlStateValueOn
-                } else {
-                    NSControlStateValueOff
+                item.setState(match model.answer {
+                    RemoteIntegration::Auto => NSControlStateValueOn,
+                    // The question is still to come: neither on nor off.
+                    RemoteIntegration::Ask => NSControlStateValueMixed,
+                    RemoteIntegration::Off => NSControlStateValueOff,
                 });
                 model.enabled
             } else if let Some(details) = [
@@ -1847,11 +1850,13 @@ define_class!(
             }
         }
 
-        /// Shell ▸ Shell Integration on “{host}”: writes the opposite of
-        /// the host's resolved answer as the host's own `[remote] hosts` entry
-        /// (`SettingsEdit::RemoteHostIntegration`) — the Mark … as ▸ path: the
-        /// menu only writes, nothing is written to an unparseable file, and the
-        /// next `ssh` reads the file. A no-op if the tab became local.
+        /// Shell ▸ Shell Integration on “{host}”: writes the host's own
+        /// `[remote] hosts` entry (`SettingsEdit::RemoteHostIntegration`) — the
+        /// Mark … as ▸ path: the menu only writes, nothing is written to an
+        /// unparseable file, and the next `ssh` reads the file. A no-op if the
+        /// tab became local. The mark is checked for `auto`, a dash for `ask`
+        /// and none for `off`: a click turns it **on** (`true`, a yes that asks
+        /// nothing) from `ask` and `off`, and off from `auto`.
         ///
         /// It also forgets the server's `plain` row
         /// (`ssh_wrap::forget_plain`), the one way back for a server branded
@@ -1864,7 +1869,7 @@ define_class!(
         #[unsafe(method(toggleHostIntegration:))]
         fn toggle_host_integration(&self, _sender: Option<&AnyObject>) {
             if let Some((host, _)) = self.key_remote_mark() {
-                if self.settings().integration_for(&host) {
+                if self.settings().integration_for(&host) == RemoteIntegration::Auto {
                     self.forget_plain(Some(host));
                 } else {
                     self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: true });
@@ -6138,7 +6143,12 @@ impl AppDelegate {
                 self.watch_config(root);
                 let loaded = settings::load(root);
                 self.ivars().settings_state.replace(loaded.state());
-                loaded.at_launch()
+                let legacy = loaded.legacy_remote_integration();
+                let read = loaded.at_launch();
+                if legacy {
+                    self.update_legacy_remote_integration(root);
+                }
+                read
             }
             None => (
                 Settings::for_unusable_file(),
@@ -6516,6 +6526,7 @@ impl AppDelegate {
         // `scrollback` saved with the wrong type must not truncate the history.
         let loaded = settings::load_keeping(&root, &file_before);
         self.ivars().settings_state.replace(loaded.state());
+        let legacy = loaded.legacy_remote_integration();
         let (loaded, messages) = loaded.live();
         self.post_notices(Source::Settings, messages);
         if let Some(file) = loaded {
@@ -6536,6 +6547,21 @@ impl AppDelegate {
         // The file may have changed from outside too (vnode): an open settings window
         // shows the file's state on every run.
         self.refresh_settings_window();
+        if legacy {
+            self.update_legacy_remote_integration(&root);
+        }
+    }
+
+    /// `[remote] integration` is still the `true` or `false` of the earlier versions: it has
+    /// been read as `"ask"` or `"off"` just now, and the file is made to say so — through the
+    /// writer every edit uses, in place, a symbolic link followed, and not at all in a file
+    /// that cannot be written or parsed (the value is read the same either way). It is
+    /// written without applying: the settings hold the value already, and the watcher's read of
+    /// the new text finds nothing left to rewrite. Runs on every read that finds the old value,
+    /// the launch's and the watcher's: someone who types `true` again by hand gets it
+    /// rewritten again.
+    fn update_legacy_remote_integration(&self, root: &std::path::Path) {
+        let _ = settings::write_edit(root, &SettingsEdit::RemoteIntegrationUpdated);
     }
 
     /// Applies the settings `new` where `old` was: the **one** way settings reach the screen —

@@ -94,15 +94,6 @@ fn server(account: &str) -> Who {
         account: account.to_owned(),
         host: "dev-1".to_owned(),
         local: false,
-        production: false,
-    }
-}
-
-/// A server the settings keep as Production.
-fn production_server(account: &str) -> Who {
-    Who {
-        production: true,
-        ..server(account)
     }
 }
 
@@ -111,7 +102,6 @@ fn this_computer() -> Who {
         account: "local".to_owned(),
         host: String::new(),
         local: true,
-        production: false,
     }
 }
 
@@ -180,21 +170,17 @@ fn a_release_is_offered_with_what_the_machine_needs_to_judge_it_and_not_when_it_
 }
 
 #[test]
-fn an_offer_says_whether_the_server_is_kept_as_production_and_this_computer_never_is() {
+fn an_offer_never_says_production_whatever_the_servers_mark_is() {
+    // The mark colors a server and decides nothing else, so no offer asks a machine to leave
+    // updating off (a kablo that still reads the line gets none).
     let world = World::new("production");
     Release::new("demo", "1.0.0").publish(&world.net, SOURCE, &Author::new(1));
     let answerer = world.answerer();
 
     let says = |who: &Who| offered(world.ask(&answerer, who, offer(SOURCE, None))).production;
     assert!(!says(&server("u@h:22")));
-    assert!(says(&production_server("u@prod:22")));
-    // The word is the machine's own, not what the sources' cache held for the machine before.
-    assert!(!says(&server("u@h:22")));
-    // This computer is not a server, whatever its settings entry would say.
-    assert!(!says(&Who {
-        production: true,
-        ..this_computer()
-    }));
+    assert!(!says(&server("u@prod:22")));
+    assert!(!says(&this_computer()));
 }
 
 #[test]

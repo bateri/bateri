@@ -104,7 +104,7 @@
 //! "Edit" and the full-screen item to the one named "View"; to the Window menu
 //! registered with `setWindowsMenu` it adds the window list and placement items.
 
-use bt_core::{HostMark, KeepRunning, MarkSubject, SYSTEM_THEME, bare_host};
+use bt_core::{HostMark, KeepRunning, MarkSubject, RemoteIntegration, SYSTEM_THEME, bare_host};
 use bt_shell_common::shortcuts::{self, Resolved};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -194,25 +194,28 @@ pub(crate) fn forget_title(host: Option<&str>) -> String {
 pub(crate) struct IntegrationMenu {
     pub(crate) title: String,
     pub(crate) enabled: bool,
-    pub(crate) checked: bool,
+    /// The mark: checked for `auto` (the host's entry or the setting goes ahead), a dash for
+    /// `ask` (the first connection asks), none for `off`.
+    pub(crate) answer: RemoteIntegration,
 }
 
-/// The toggle's model: on a remote tab (`Some((host, on))`, `on` the
-/// **resolved** answer — `Settings::integration_for`, so a production-marked
-/// host without an entry of its own shows unchecked) the title carries the
-/// host without `user@`; locally "Shell Integration on Host", grey and
-/// unchecked. The action writes the opposite of `on` for this host.
-pub(crate) fn integration_menu(remote: Option<(&str, bool)>) -> IntegrationMenu {
+/// The toggle's model: on a remote tab (`Some((host, answer))`, `answer` the
+/// **resolved** one — `Settings::integration_for`, the host's own entry and
+/// otherwise the key) the title carries the host without `user@`; locally
+/// "Shell Integration on Host", grey and unmarked. The action turns it **on**
+/// for this host (its own entry, a yes that asks nothing) where the answer is
+/// `ask` or `off`, and off where it is `auto`.
+pub(crate) fn integration_menu(remote: Option<(&str, RemoteIntegration)>) -> IntegrationMenu {
     match remote {
-        Some((host, on)) => IntegrationMenu {
+        Some((host, answer)) => IntegrationMenu {
             title: format!("Shell Integration on \u{201c}{}\u{201d}", bare_host(host)),
             enabled: true,
-            checked: on,
+            answer,
         },
         None => IntegrationMenu {
             title: "Shell Integration on Host".to_owned(),
             enabled: false,
-            checked: false,
+            answer: RemoteIntegration::Off,
         },
     }
 }
@@ -1114,30 +1117,37 @@ mod tests {
             IntegrationMenu {
                 title: "Shell Integration on Host".to_owned(),
                 enabled: false,
-                checked: false,
+                answer: RemoteIntegration::Off,
             }
         );
-        // An unmarked host follows `[remote] integration` (on by default).
+        // An unmarked host follows `[remote] integration`, which asks by default.
         assert_eq!(
             model("", "deploy@web"),
             IntegrationMenu {
                 title: "Shell Integration on \u{201c}web\u{201d}".to_owned(),
                 enabled: true,
-                checked: true,
+                answer: RemoteIntegration::Ask,
             }
         );
-        assert!(!model("[remote]\nintegration = false\n", "web").checked);
-        // A production mark turns it off — through a glob too —, an entry of the
-        // host's own turns it back on.
+        assert_eq!(
+            model("[remote]\nintegration = \"auto\"\n", "web").answer,
+            RemoteIntegration::Auto
+        );
+        assert_eq!(
+            model("[remote]\nintegration = \"off\"\n", "web").answer,
+            RemoteIntegration::Off
+        );
+        // A production mark is a color: the host follows the key, a glob too, and an entry of the
+        // host's own decides for it.
         let prod = "[remote]\nhosts = [{ host = \"prod-*\", mark = \"production\" }]\n";
-        assert!(!model(prod, "prod-web").checked);
+        assert_eq!(model(prod, "prod-web").answer, RemoteIntegration::Ask);
         let edit = bt_core::SettingsEdit::RemoteHostIntegration {
             host: "prod-web".to_owned(),
             on: true,
         };
         let written = bt_core::Settings::with_edit(prod, &edit).expect("writable text");
-        assert!(model(&written, "prod-web").checked);
-        assert!(!model(&written, "prod-db").checked);
+        assert_eq!(model(&written, "prod-web").answer, RemoteIntegration::Auto);
+        assert_eq!(model(&written, "prod-db").answer, RemoteIntegration::Ask);
     }
 
     #[test]

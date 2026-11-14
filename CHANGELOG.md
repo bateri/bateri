@@ -15,6 +15,8 @@ of every installed copy. A version without a section is not released.
 ### Changed
 
 - **bateri keeps its program for your terminals in its own folder.** kablo, which keeps a terminal running when bateri quits or a connection drops, now lives in `~/.local/share/bateri/kablo/`, on this Mac and on a server, instead of a folder of its own next to bateri's. Terminals that were started before keep running and are moved on their own, and the old folder is removed once nothing runs from it.
+- **bateri asks before it puts anything on a server.** The first time you `ssh` to a server from this Mac, the terminal asks whether to keep it running if the connection drops, before the connection is made and before anything is written there. `[remote] integration` is now `"ask"` (the default), `"auto"` or `"off"`; the `true` and `false` of earlier versions read as `"ask"` and `"off"` and are rewritten in your file. The Servers page has the choice, and Shell ▸ Shell Integration on “host” shows it.
+- **A Production mark is only a color.** It no longer keeps bateri from setting a server up or offering its programs there, and updating there starts on like anywhere else.
 - **Messages about that program say bateri.** The notes about putting it on a server, the line shown when a server's copy cannot talk to this bateri, and the errors of `bateri` commands no longer call it kablo.
 - **Move the window from the top of the panes.** With the tabs at the side, drag the empty part of a top pane's header, or the space around it, to move the window; double-click zooms it. Panes are now carried by their icon and name, which light up under the pointer.
 

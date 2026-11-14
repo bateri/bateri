@@ -29,9 +29,10 @@ use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, CommandLevel,
     ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase,
     IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MinimizedPanes,
-    Osc52, ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
-    SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
-    SplitStyle, TabDetails, TabPosition, TabRunning, Theme, UnfocusedCaret,
+    Osc52, ReduceMotion, RemoteIntegration, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX,
+    STATS_INTERVAL_RANGE, SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, SplitStyle, TabDetails, TabPosition, TabRunning, Theme,
+    UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::{Retained, Weak};
@@ -931,9 +932,15 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         Key::Ports => Some("Click to list them, \u{2318}-click to open one."),
         Key::ClaudeIntegration => Some("Show its last reply"),
         Key::CommandLevel => Some(command_level_note(settings.commands_level)),
-        Key::RemoteIntegration => {
-            Some("Not on servers marked Production, unless the Shell menu turns it on.")
-        }
+        Key::RemoteIntegration => Some(match settings.remote_integration {
+            RemoteIntegration::Auto => {
+                "A plain ssh puts bateri on a server without asking, and a terminal there keeps running when the connection drops."
+            }
+            RemoteIntegration::Ask => {
+                "Asks the first time you reach a server, before anything is written there."
+            }
+            RemoteIntegration::Off => "bateri never writes to a server.",
+        }),
         Key::RemoteStats => match settings.remote_stats.mode {
             RemoteStatsMode::Sparkline => {
                 Some("CPU and memory as a line and numbers, in the ssh bar.")
@@ -980,6 +987,19 @@ impl Choice for ShellIntegration {
             ShellIntegration::Auto => "Auto",
             ShellIntegration::Blocks => "Blocks only",
             ShellIntegration::Off => "Off",
+        }
+    }
+}
+
+impl Choice for RemoteIntegration {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            RemoteIntegration::Auto => "Auto",
+            RemoteIntegration::Ask => "Ask first",
+            RemoteIntegration::Off => "Off",
         }
     }
 }
@@ -1197,6 +1217,7 @@ fn choice_labels(key: Key) -> Vec<&'static str> {
         Key::TabRunning => choice_titles::<TabRunning>(),
         Key::TabPosition => choice_titles::<TabPosition>(),
         Key::ShellIntegration => choice_titles::<ShellIntegration>(),
+        Key::RemoteIntegration => choice_titles::<RemoteIntegration>(),
         Key::CommandLevel => choice_titles::<CommandLevel>(),
         Key::Shape => choice_titles::<CaretShape>(),
         Key::Blink => choice_titles::<CursorBlink>(),
@@ -1775,7 +1796,7 @@ struct Controls {
     download_notify: Retained<ThemeSwitch>,
     remote_stats: Retained<NSPopUpButton>,
     stats_interval: Number,
-    remote_integration: Retained<ThemeSwitch>,
+    remote_integration: Retained<NSPopUpButton>,
     ports: Retained<ThemeSwitch>,
     python_env: Retained<ThemeSwitch>,
     node_version: Retained<ThemeSwitch>,
@@ -2288,7 +2309,6 @@ define_class!(
                     ScrollBounce::Off
                 })),
                 Some(Key::DownloadNotify) => Some(SettingsEdit::DownloadNotify(on)),
-                Some(Key::RemoteIntegration) => Some(SettingsEdit::RemoteIntegration(on)),
                 Some(Key::Ports) => Some(SettingsEdit::ShellPorts(on)),
                 Some(Key::PythonEnv) => Some(SettingsEdit::ShellPythonEnv(on)),
                 Some(Key::NodeVersion) => Some(SettingsEdit::ShellNodeVersion(on)),
@@ -2802,7 +2822,7 @@ impl SettingsWindow {
         select_choice(&c.erase, settings.erase);
         select_choice(&c.dock_arrival, settings.dock_arrival);
 
-        set_switch(&c.remote_integration, settings.remote_integration);
+        select_choice(&c.remote_integration, settings.remote_integration);
         set_switch(&c.ports, settings.shell_ports);
         set_switch(&c.python_env, settings.shell_python_env);
         set_switch(&c.node_version, settings.shell_node_version);
@@ -3170,6 +3190,7 @@ impl SettingsWindow {
             Key::TabRunning => choice_at(index).map(SettingsEdit::TabRunning),
             Key::TabPosition => choice_at(index).map(SettingsEdit::TabPosition),
             Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
+            Key::RemoteIntegration => choice_at(index).map(SettingsEdit::RemoteIntegration),
             Key::CommandLevel => choice_at(index).map(SettingsEdit::CommandLevel),
             Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
             Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
@@ -4046,7 +4067,7 @@ impl SettingsWindow {
         let erase = self.popup::<Erase>(Key::Erase);
         let dock_arrival = self.popup::<DockArrival>(Key::DockArrival);
 
-        let remote_integration = self.switch(Key::RemoteIntegration);
+        let remote_integration = self.popup::<RemoteIntegration>(Key::RemoteIntegration);
         let download_dir = self.folder(Key::DownloadDir);
         let download_conflict = self.popup::<DownloadConflict>(Key::DownloadConflict);
         let download_notify = self.switch(Key::DownloadNotify);
@@ -5703,7 +5724,7 @@ mod tests {
                 Key::DownloadNotify => SettingsEdit::DownloadNotify(false),
                 Key::RemoteStats => SettingsEdit::RemoteStats(RemoteStatsMode::Off),
                 Key::StatsInterval => SettingsEdit::StatsInterval(3),
-                Key::RemoteIntegration => SettingsEdit::RemoteIntegration(false),
+                Key::RemoteIntegration => SettingsEdit::RemoteIntegration(RemoteIntegration::Off),
                 Key::Ports => SettingsEdit::ShellPorts(false),
                 Key::PythonEnv => SettingsEdit::ShellPythonEnv(false),
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
@@ -5788,6 +5809,7 @@ mod tests {
         check::<TabRunning>();
         check::<TabPosition>();
         check::<ShellIntegration>();
+        check::<RemoteIntegration>();
         check::<CommandLevel>();
         check::<CaretShape>();
         check::<CursorBlink>();

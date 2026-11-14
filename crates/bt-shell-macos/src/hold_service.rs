@@ -21,7 +21,7 @@ use objc2::MainThreadMarker;
 use crate::app::delegate;
 use crate::pane::{KeptLogin, Login};
 use crate::{child, settings, ssh_route};
-use bt_core::PaneUuid;
+use bt_core::{PaneUuid, SettingsEdit};
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::install::Bundle;
 use bt_shell_common::kablo::ledger::Ledger;
@@ -469,6 +469,19 @@ fn link_changed(pane: &PaneUuid, link: PaneLink) {
     });
 }
 
+/// The person's answer to the question before a server is set up is for the settings (a "no" for
+/// the host, an "always"): written through the one path every edit takes, on the main queue,
+/// where the settings are.
+fn answer_saved(edit: SettingsEdit) {
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        if let Some(app) = delegate(mtm) {
+            app.save_edit(&edit);
+        }
+    });
+}
+
 /// What a server keeps in the background is not what it was: the application on the main
 /// queue, where the palette is, lists it afresh.
 fn background_changed(_account: &str) {
@@ -712,6 +725,10 @@ pub(crate) fn serve(
         // The same package serves this Mac's own account: its place is below the real home.
         home: Some(home.clone()),
         settings: Box::new(settings_of),
+        // The question before a server is set up is this very program, run on the pane's
+        // terminal (`bateri ssh-ask`).
+        asker: std::env::current_exe().ok(),
+        save: Box::new(answer_saved),
         panes: Box::new(pane_of),
         runner: Box::new(ssh_route::SystemSsh),
         name: computer_name(),

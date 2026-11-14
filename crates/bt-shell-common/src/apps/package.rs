@@ -53,10 +53,6 @@ pub struct Who {
     pub host: String,
     /// Whether the account is this computer's own.
     pub local: bool,
-    /// Whether the settings keep the machine as a Production server
-    /// ([`bt_core::HostMark::Production`]). Told to the machine in an offer, so that its first
-    /// install there leaves updating on its own off; never true for this computer.
-    pub production: bool,
 }
 
 /// How much the app goes to the internet for a machine.
@@ -328,7 +324,9 @@ impl Answerer {
             source: told,
             manifest: text(&chosen.bytes)?,
             signature: text(&chosen.signature)?,
-            production: who.production && !who.local,
+            // The mark colors a server and decides nothing else, so an offer never says
+            // Production (a kablo that reads the line still does, and acts on nothing).
+            production: false,
         }))
     }
 

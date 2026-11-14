@@ -35,18 +35,21 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bt_core::{CommandLevel, PaneUuid, RemoteKind, RemoteTarget, Settings};
+use bt_core::{
+    CommandLevel, PaneUuid, RemoteIntegration, RemoteKind, RemoteTarget, Settings, SettingsEdit,
+};
 
 use kablo_proto::SessionId;
 use kablo_proto::v1::stream::Command;
 
 use super::Cause;
+use super::ask::{self, Reply};
 use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
 use super::local::{self, LocalChannel};
 use super::remote::{RemoteCommand, RemoteStream};
 use super::served;
 use super::service::{
-    Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal, Streams,
+    Backend, Carried, Consent, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal, Streams,
 };
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost, Wants};
@@ -65,6 +68,11 @@ pub type ChangeNews = Box<dyn Fn(&PaneUuid) + Send + Sync>;
 
 /// Told the account whose terminals in the background are not what they were.
 pub type BackgroundNews = Box<dyn Fn(&str) + Send + Sync>;
+
+/// What the application does with a setting the person's answer to the question in a pane
+/// ([`Backend::consent`]) writes to the settings file: it hops to its own thread and saves the
+/// edit through the one path every edit takes.
+pub type Save = Box<dyn Fn(SettingsEdit) + Send + Sync>;
 
 /// What the application does with what a program on a server said to it
 /// ([`Backend::mail`]): it hops to its own thread and answers the letter there.
@@ -127,6 +135,13 @@ pub struct SshBackend {
     /// The application places what was left for it on a server ([`Backend::reachable`]): `Some`
     /// reads the server's notes when a connection to it comes up. `None`: it reads none.
     pub notes: Option<NotesNews>,
+    /// This program, which asks the question before a server is set up (`bateri ssh-ask HOST`,
+    /// [`Backend::consent`]). `None`: nothing can ask, and a server that would be asked about is
+    /// not set up.
+    pub asker: Option<PathBuf>,
+    /// Keeps what the question's answer is for the settings: a "no" for the host, an "always"
+    /// for every host ([`Backend::answered`]).
+    pub save: Save,
     /// The servers a program's reach has set up in this run ([`SshBackend::install_for_reach`]).
     pub filed: Mutex<std::collections::HashSet<String>>,
     /// What asks the service for programs and connections on a server ([`Backend::serving`]).
@@ -407,7 +422,8 @@ impl SshBackend {
     fn watch_wanted(&self, server: &KabloHost) -> bool {
         self.bundle.is_some()
             && self.agent_wanted(server)
-            && (local::is_account(&server.key) || (self.settings)().integration_for(&server.host))
+            && (local::is_account(&server.key)
+                || (self.settings)().integration_for(&server.host).is_on())
     }
 
     /// Starts `kablo bateri package watch` on the machine the connection is up to and waits for it
@@ -452,6 +468,43 @@ impl Backend for SshBackend {
         self.bundle.as_ref()?;
         let state = ssh_wrap::load(&self.state_path);
         ssh_wrap::kablo_path(args, &(self.settings)(), &*self.runner, &state)
+    }
+
+    fn consent(&self, server: &KabloHost) -> Consent {
+        // Nothing is put on this Mac, and a server the person's own entry or `auto` goes ahead
+        // for, or bateri has been to, is not asked about.
+        if local::is_account(&server.key) {
+            return Consent::Granted;
+        }
+        match (self.settings)().integration_for(&server.host) {
+            RemoteIntegration::Off => Consent::Refused,
+            RemoteIntegration::Auto => Consent::Granted,
+            RemoteIntegration::Ask => {
+                if ssh_wrap::load(&self.state_path).knows(Fact::Touched, &server.key) {
+                    return Consent::Granted;
+                }
+                match &self.asker {
+                    Some(program) => Consent::Ask(vec![
+                        program.as_os_str().as_encoded_bytes().to_vec(),
+                        ask::SUBCOMMAND.as_bytes().to_vec(),
+                        server.host.clone().into_bytes(),
+                    ]),
+                    None => Consent::Refused,
+                }
+            }
+        }
+    }
+
+    fn answered(&self, server: &KabloHost, reply: Reply) {
+        match reply {
+            // Kept by the install: it records the server before it writes to it.
+            Reply::Yes => {}
+            Reply::No => (self.save)(SettingsEdit::RemoteHostIntegration {
+                host: server.host.clone(),
+                on: false,
+            }),
+            Reply::Always => (self.save)(SettingsEdit::RemoteIntegration(RemoteIntegration::Auto)),
+        }
     }
 
     fn master(&self, server: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
@@ -500,9 +553,12 @@ impl Backend for SshBackend {
             argv: ssh_argv_for(&target, &self.route_of(&target)),
             limit: install::STEP_LIMIT,
         };
+        // Before anything is written, whatever the permission came from (the answer, `auto`, the
+        // host's own entry): a server the install fell over half way through still has our files
+        // on it, and what removes them finds it by this record.
+        self.remember(Fact::Touched, server);
         match install::ensure_for(&channel, bundle, self.wants(server)) {
             Ok(installed) => {
-                self.remember(Fact::Touched, server);
                 if installed.fresh {
                     // The binary was not there: terminals this user has on the
                     // server run an earlier one, and are renewed before a bridge

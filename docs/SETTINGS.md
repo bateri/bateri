@@ -545,13 +545,14 @@ claude_integration = true
 #   { host = "rasp", commands = "screen" },
 # ]
 hosts = []
-# true | false. Lets a plain ssh set up shell integration on the server, so
-# the folder (and later command blocks) follow you there too. bateri writes a
-# few small files to ~/.local/share/bateri/shell on the server and never
-# touches its rc files. A host is set up only after bateri has seen a shell
-# there once. A host marked "production" stays plain unless its entry says
-# integration = true; integration = false in an entry turns one host off.
-integration = true
+# "auto" | "ask" | "off". Whether a plain ssh sets up shell integration on
+# the server, so the folder (and later command blocks) follow you there too, and
+# a terminal there keeps running when the connection drops. bateri writes a few
+# small files under ~/.local/share/bateri on the server and never touches its
+# rc files. "ask" asks in the terminal the first time you reach a server from
+# this Mac; "auto" never asks; "off" never sets anything up. An entry of
+# hosts decides for its own host: integration = true or false.
+integration = "ask"
 # Folders start with / or ~/.
 # Where "Download to Downloads" puts a remote file or folder.
 download_dir = "~/Downloads"
@@ -2341,7 +2342,7 @@ hosts = [
   { host = "router*", integration = false },
   { host = "rasp", commands = "screen" },
 ]
-integration = true
+integration = "ask"
 ```
 
 | key | type | default | meaning |
@@ -2360,7 +2361,7 @@ pane to upload it, downloading a file, the load indicator, the
 server's ports, the ⌘ check of a path in the output, and the
 connection of its own that these ride on. The keys of this section that name
 them (`download_*`, `stats`, `stats_interval`) apply there. A plain
-`ssh` — `integration` off for the host, a `production` host, a server kablo
+`ssh` — `integration` off for the host, a server kablo
 cannot be kept on, a call that runs a command, mosh — is the `ssh` you know and
 nothing more: bateri puts nothing on that server and opens no connection to it,
 the pane does not take a dropped file (a path from this Mac would mean nothing
@@ -2493,7 +2494,7 @@ command line of a program running as root, so a script run with `sudo`
 
 #### Remote shell integration
 
-While `integration = true`, a plain `ssh` typed in the local zsh, fish or bash
+While `integration` is `"ask"` or `"auto"`, a plain `ssh` typed in the local zsh, fish or bash
 opens a terminal that **the server keeps**: it runs under kablo, bateri's
 companion program, which the first `ssh` to a server puts there (one file under
 `~/.local/share/bateri/kablo/`; nothing is installed system-wide and nothing needs
@@ -2564,14 +2565,36 @@ server, bateri also
 writes a few small files under `~/.local/share/bateri/shell/`; it does not touch
 the server's rc files.
 
+- **Three values.** `"ask"` (the default) asks the first time you reach a server
+  from this Mac, `"auto"` sets every server up without asking, `"off"` never
+  writes to a server. The question is in the pane, before the connection is made
+  and before anything is written to the server (so a *no* does not cost a second
+  password): *Keep this terminal running on prod if the connection drops? bateri
+  puts one folder there (~/.local/share/bateri). [Y]es / [n]o / [a]lways*. One
+  key answers it: Enter or `y` is yes, `n` is no, `a` is yes and `auto` for every
+  server from then on; Control-C opens no connection and keeps nothing. A *no*
+  writes `integration = false` in that host's entry of `hosts` (the line Shell ▸
+  Shell Integration on “{host}” writes) and the connection is the plain `ssh`;
+  *always* writes `integration = "auto"`. A server bateri has put its files on
+  from this Mac is not asked about again, and neither is one whose entry says
+  `integration = true`. A production mark colors the dock and decides nothing
+  else: a production host is asked about like the rest. Typing before the
+  question appears does not answer it.
+- **The earlier `true` and `false`.** `integration = true` and `false`, which
+  earlier versions wrote, are read as `"ask"` and `"off"`, and bateri writes
+  the new value in their place in the file the first time it reads it (the
+  comment above it too, when it is the template's own; one you changed stays).
+  Nothing is written to a file that cannot be parsed or written; a `true` typed
+  in by hand later is rewritten the same way.
 - **On which host**: the value of the first matching entry in `hosts` that
-  carries `integration`; if there is no such entry and the host's mark is
-  `"production"`, **off**; in every other case, this key.
-  So to turn it on for a host marked prod, write `integration = true` in its
-  entry.
-- **From the first connection**: kablo is put on the server by the first
-  `ssh` (a line above the prompt says so, once: "kablo is set up on …"), and
-  the directory and command blocks arrive with it. A server kablo cannot be kept
+  carries `integration` (`true` is a yes that asks nothing, `false` a no);
+  without one, this key.
+- **From the first connection**: bateri is put on the server by the first
+  `ssh` once it has been allowed to (a line above the prompt says so, once:
+  "bateri is set up on …"), and
+  the directory and command blocks arrive with it. The server is written down
+  as one bateri has put its files on before the first of them is written, so one
+  the setup fell over half way through is still found by what removes them. A server kablo cannot be kept
   on — a platform it is not built for (kablo runs on Linux and macOS, x86-64
   and ARM), a home directory that cannot be written, a login shell that does not
   run commands (a router, Windows) — gets a plain `ssh`: the pane shows the
@@ -2600,8 +2623,8 @@ the server's rc files.
   whose `~/.ssh/config` entry has `RemoteCommand`, `RequestTTY no` or
   `SessionType`.
 - **A plain `ssh` is just ssh.** Whatever is plain — the lines above, a host
-  `integration` is off for, a `production` host, a server kablo cannot be kept
-  on — gets no kept terminal, no command blocks and no remote dock, and none of
+  `integration` is off for (a *no* to the question included), a server kablo
+  cannot be kept on — gets no kept terminal, no command blocks and no remote dock, and none of
   what bateri does on a server either: no file drop (the pane refuses the file),
   no download, no load indicator, no ports, no ⌘ check of paths
   and no password kept in the Keychain for it; bateri opens no
@@ -2614,13 +2637,14 @@ the server's rc files.
   server silently.
 - The setting is read on every `ssh` at that moment; open windows do not wait.
 - **From the settings window**: Servers ▸ **Set up shell integration on
-  servers** writes this key (`[remote] integration`); changing the file by
-  hand changes the switch too.
+  servers** (Auto, Ask first, Off) writes this key (`[remote] integration`);
+  changing the file by hand changes the popup too.
 - **From the menu**: while in an ssh tab, **Shell ▸ Shell Integration on
-  “host”** turns integration on or off for that host. The check mark reflects
-  the host's current answer — its entry carrying `integration`, otherwise its
-  mark (off if `"production"`), otherwise this key; in a local tab the item is
-  grayed out. The choice is written to the file as that host's **own**
+  “host”** turns integration on or off for that host. The mark reflects
+  the host's current answer — its entry carrying `integration`, otherwise this
+  key: a check for `auto`, a dash for `ask`, none for `off`; in a local tab the
+  item is grayed out. A click turns it on where the mark is a dash or none, and
+  off where it is a check. The choice is written to the file as that host's **own**
   decision: if there is an entry for exactly that host, its `integration`
   line is added or changed in place (its mark is not touched); otherwise, or
   if a pattern carrying `integration` comes before it,
@@ -2832,7 +2856,7 @@ server as not wanted there (`bateri package not-here`) before the rest comes; on
 them again. Not Here (⌘Escape, Shell ▸ Don't Install
 Programs Here) tells that server none of them is wanted (`bateri package not-here`), and it does not ask about those
 again. The card takes no key, so you keep typing; it is over the first pane of that server that has a prompt, once for a
-server while bateri runs; it never comes on a server marked Production, one without shell integration, or this computer,
+server while bateri runs; it never comes on a server without shell integration or on this computer,
 and ⌘Return and ⌘Escape do nothing without a card.
 
 **`bateri package`**, in a terminal on a machine that has kablo and bateri's shell integration: `list` (what the machine
@@ -2848,10 +2872,8 @@ day, and at once at Check Now, whether there is a newer release, and takes it wi
 stays until the new one is whole, and a program that is running keeps running. A release signed with a different key
 than the one approved stops that program on that machine: the version there keeps running, one notification says so
 (*textpen stopped updating on dev-1*), and `bateri package update textpen` shows both keys and asks. `auto off` stops
-the updates of a machine; `bateri package update` there still looks when you ask. A server you marked Production (and
-turned shell integration on for by hand) starts with `auto off`: bateri says so when the first program is installed
-there, and `bateri package auto on` turns updating on; it stays on while the machine keeps a program (a machine left with
-none and installed to again starts over).
+the updates of a machine; `bateri package update` there still looks when you ask. A server marked Production updates
+like any other: the mark is a color.
 
 **The Apps page** (Settings ▸ Apps) begins with Files, a single row, Open with, whose choices are the followed programs
 that open files, and Nothing; when the program the file names is not among them the row says so in orange. Then
