@@ -803,6 +803,9 @@ define_class!(
             // and the clock again, one going away takes the turns off and
             // lets the clock lapse.
             self.refresh_bar();
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.settle_heads_later();
+            }
             // The big view's wake lapses with a window nobody sees and is set again with it.
             if visible && let Some(view) = self.ivars().root.overview() {
                 view.resume();
@@ -861,6 +864,8 @@ define_class!(
             // A press on a pane's header that had not become a carry goes with them.
             if let Some(app) = app::delegate(self.mtm()) {
                 app.key_window_resigned();
+                // Nor does the pointer's header hear that the application went behind.
+                app.settle_heads_later();
             }
             // The ⌘-hovered link clears too: ⌘'s release may go to
             // another application. The key window also resigns key when the

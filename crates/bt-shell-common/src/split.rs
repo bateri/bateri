@@ -301,11 +301,19 @@ pub enum HeadPress {
 
 /// What a press on a pane's header that is on neither a tool nor Quit does. `y_px` is the
 /// header's top edge (or the press) down the area's top edge, `on_name` whether the press is on
-/// the pane's name — its mark and its title. The pane is held by its name wherever the header
-/// stands; the rest of a header in the band holds the window; the rest of any other header holds
-/// nothing, because the same blank would otherwise do two things by where its pane stands.
-pub fn head_press(column_shown: bool, y_px: f64, spacing: Spacing, on_name: bool) -> HeadPress {
-    if on_name {
+/// the pane's name — its mark and its title —, `can_carry` whether the pane can be carried at
+/// all. A pane that can be is held by its name wherever the header stands; a pane that cannot
+/// has no handle, and its name is the rest of its header. The rest of a header in the band holds
+/// the window; the rest of any other header holds nothing, because the same blank would
+/// otherwise do two things by where its pane stands.
+pub fn head_press(
+    column_shown: bool,
+    y_px: f64,
+    spacing: Spacing,
+    on_name: bool,
+    can_carry: bool,
+) -> HeadPress {
+    if on_name && can_carry {
         HeadPress::CarryPane
     } else if in_band(column_shown, y_px, spacing) {
         HeadPress::MoveWindow
@@ -3690,7 +3698,7 @@ mod tests {
     fn a_press_on_a_header_is_decided_by_where_it_stands_and_whether_it_is_on_the_name() {
         let cards = beside_the_column();
         let lines = Spacing::DIVIDED.with_head(34.0, 2.0);
-        // (column shown, spacing, y, on the name) -> what it does.
+        // (column shown, spacing, y, on the name, the pane can be carried) -> what it does.
         let table = [
             // The column is shown: the name carries the pane, the rest of the band the window,
             // the rest of any lower header only the keyboard.
@@ -3715,7 +3723,7 @@ mod tests {
         ];
         for (shown, spacing, y, on_name, want) in table {
             assert_eq!(
-                head_press(shown, y, spacing, on_name),
+                head_press(shown, y, spacing, on_name, true),
                 want,
                 "column shown {shown}, y {y}, on the name {on_name}"
             );
@@ -3724,6 +3732,27 @@ mod tests {
                 band_depth(shown, spacing),
                 if shown { spacing.band_px() } else { 0.0 }
             );
+        }
+    }
+
+    #[test]
+    fn the_name_of_a_pane_that_cannot_be_carried_is_the_rest_of_its_header() {
+        let cards = beside_the_column();
+        // (column shown, y) on the name of a pane with nowhere to go: the band holds the window,
+        // under it only the keyboard, and with no column nothing holds a window.
+        for (shown, y, want) in [
+            (true, 0.0, HeadPress::MoveWindow),
+            (true, 83.0, HeadPress::MoveWindow),
+            (true, 84.0, HeadPress::Focus),
+            (false, 16.0, HeadPress::Focus),
+        ] {
+            assert_eq!(
+                head_press(shown, y, cards, true, false),
+                want,
+                "column shown {shown}, y {y}"
+            );
+            // The blank of the same header does what its name does.
+            assert_eq!(head_press(shown, y, cards, false, false), want);
         }
     }
 

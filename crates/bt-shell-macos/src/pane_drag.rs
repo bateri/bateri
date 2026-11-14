@@ -1195,6 +1195,9 @@ impl Session {
             strip.bar().dwell(None);
         }
         carry.take_down();
+        // A carry that ends where it began, or nowhere, moves no pane and so asks no layout: the
+        // header under the pointer asks where the pointer is.
+        app.settle_heads_later();
         if card.is_some() {
             NSCursor::pop_class();
         }

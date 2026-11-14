@@ -1116,6 +1116,9 @@ pub(crate) struct Ivars {
     /// A press with ⌥⌘ held that is, or may become, a pane's carry
     /// ([`crate::pane_drag`]). One at a time; its monitor lives with it.
     pane_drag: RefCell<Option<Session>>,
+    /// The headers are to be asked where the pointer is one turn of the main queue from now
+    /// ([`AppDelegate::settle_heads_later`]): one ask for any number of asks until then.
+    heads_settling: Cell<bool>,
 }
 
 define_class!(
@@ -2788,6 +2791,7 @@ impl AppDelegate {
             tab_drop: RefCell::new(None),
             undo: RefCell::new(None),
             pane_drag: RefCell::new(None),
+            heads_settling: Cell::new(false),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -3264,6 +3268,29 @@ impl AppDelegate {
     /// ([`AppDelegate::save_layout_later`]).
     pub(crate) fn layout_changed(&self) {
         self.save_layout_later();
+        // What a layout edge moves under a still pointer sends no mouse event: the headers ask.
+        self.settle_heads_later();
+    }
+
+    /// Has every pane header ask the pointer where it is ([`PaneHead::settle_pointer`]), one turn
+    /// of the main queue from now — the edge that asks is still writing the state the headers
+    /// read — and once for any number of asks until then: a tab or a window that goes, a window
+    /// or the application that stops being in front, a carry that ends, a pane that can or can no
+    /// longer be carried send no `mouseExited:` to the header the pointer was on.
+    pub(crate) fn settle_heads_later(&self) {
+        if self.ivars().heads_settling.replace(true) {
+            return;
+        }
+        DispatchQueue::main().exec_async(|| {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.ivars().heads_settling.set(false);
+                for tab in app.windows().iter().flat_map(|window| window.tabs()) {
+                    tab.container().settle_heads();
+                }
+            }
+        });
     }
 
     /// Schedules [`AppDelegate::settled`] [`SETTLE_DELAY`] after the first

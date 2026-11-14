@@ -399,6 +399,14 @@ define_class!(
             }
         }
 
+        /// The first press on a window behind takes the window where the press would: in the
+        /// band at the content's top, as the headers' blank on either side does. A divider
+        /// below the band only brings the window forward, as it always did.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, event: Option<&NSEvent>) -> bool {
+            event.is_some_and(|event| self.in_band(event))
+        }
+
         /// The press is swallowed (it must not climb the responder chain to
         /// the window) and the grabbed position is recorded. In the band at the content's top
         /// it takes the window instead, as the headers' blank on either side does.
@@ -835,6 +843,19 @@ define_class!(
             self.layout_panes();
         }
 
+        /// The first press on a window behind takes the window in the band at the content's top
+        /// (the cards' top margin), as the headers' blank does; elsewhere it only brings the
+        /// window forward, as it always did.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, event: Option<&NSEvent>) -> bool {
+            event.is_some_and(|event| {
+                self.in_band(
+                    self.convertPoint_fromView(event.locationInWindow(), None)
+                        .y,
+                )
+            })
+        }
+
         /// A press on the container itself, where no pane, header, handle or grip stands: in
         /// the band at the content's top (the cards' top margin) it takes the window, as the
         /// headers' blank and the dividers between them do; anywhere else it goes on up the
@@ -971,8 +992,13 @@ impl SplitView {
 
     /// What a press on a header whose top edge is `head_top` points down the container, off its
     /// tools and Quit, does ([`split::head_press`]); `on_name` is whether it is on the pane's
-    /// name.
-    pub(crate) fn head_press(&self, head_top: f64, on_name: bool) -> split::HeadPress {
+    /// name, `can_carry` whether the pane can be carried at all.
+    pub(crate) fn head_press(
+        &self,
+        head_top: f64,
+        on_name: bool,
+        can_carry: bool,
+    ) -> split::HeadPress {
         let scale = self.scale();
         let beside = self.beside_tabs();
         split::head_press(
@@ -980,6 +1006,7 @@ impl SplitView {
             head_top * scale,
             spacing(scale, self.style(), beside),
             on_name,
+            can_carry,
         )
     }
 
@@ -3708,6 +3735,15 @@ impl SplitView {
             if let Some(margins) = self.pane(id).and_then(|pane| pane.side_margins()) {
                 head.set_margins(margins);
             }
+        }
+    }
+
+    /// Has each header ask the pointer where it is ([`PaneHead::settle_pointer`]).
+    pub(crate) fn settle_heads(&self) {
+        // A copy: a header's answer lays it out, and nothing of the list is held meanwhile.
+        let heads: Vec<_> = self.ivars().heads.borrow().iter().cloned().collect();
+        for head in heads {
+            head.settle_pointer();
         }
     }
 

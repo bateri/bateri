@@ -14,7 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
-- **With the tabs at the side, the top pane header moves the window.** Drag the empty part of the headers along the top, or the gap between them, to move the window; double-click zooms it. A pane is now carried by its icon and name, which sit in a pill under the pointer while the icon turns into a move glyph; the empty part of any other header only focuses the pane.
+- **With the tabs at the side, the top pane header moves the window.** Drag the empty part of the headers along the top, or the gap between them, to move the window; double-click zooms it. A pane is now carried by its icon and name, which sit in a pill under the pointer while the icon turns into a move glyph; the empty part of any other header only focuses the pane. A pane with nowhere to go has no pill, and its name moves the window.
 
 ## [0.29.1] - 2026-11-14
 

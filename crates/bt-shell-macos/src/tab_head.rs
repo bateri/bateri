@@ -578,22 +578,21 @@ impl HeadPiece {
             .is_some_and(|now| now.opacity() > 0.01)
     }
 
-    /// Where it stands, in the band's space. A new size puts its pose on again: the shift of a
-    /// layer scaled about its middle is of its size. With `glide` a piece that shows goes to its
-    /// new place over [`TOOLS_SECS`], the pace of the tools that moved it.
+    /// Where it stands, in the band's space. A new frame puts its pose on again: AppKit gives a
+    /// layer-backed view's layer no transform when its frame changes — a move alone too —, and the
+    /// shift of a layer scaled about its middle is of its size. With `glide` a piece that shows
+    /// goes to its new place over [`TOOLS_SECS`], the pace of the tools that moved it.
     fn stand(&self, rect: NSRect, glide: bool) {
-        let size = self.frame().size;
-        if self.frame() != rect {
-            if glide && self.shows() {
-                let piece = self.retain();
-                animate(TOOLS_SECS, move || piece.animator().setFrame(rect));
-            } else {
-                self.setFrame(rect);
-            }
+        if self.frame() == rect {
+            return;
         }
-        if (size.width, size.height) != (rect.size.width, rect.size.height)
-            && let Some(layer) = self.layer()
-        {
+        if glide && self.shows() {
+            let piece = self.retain();
+            animate(TOOLS_SECS, move || piece.animator().setFrame(rect));
+        } else {
+            self.setFrame(rect);
+        }
+        if let Some(layer) = self.layer() {
             set_pose(&layer, self.ivars().pose.get());
         }
     }
@@ -832,13 +831,30 @@ define_class!(
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
-            self.ivars().hot.set(false);
-            self.ivars().tools.set_hot(None);
-            if self.ivars().quit_lit.replace(false) {
-                self.setNeedsDisplay(true);
-            }
-            self.ivars().over_name.set(false);
-            self.lay_out_parts();
+            self.leave();
+        }
+
+        // What takes the band off the screen — its tab, its window, a hiding — sends no
+        // `mouseExited:`; the pointer is asked where it is instead ([`PaneHead::settle_later`]).
+        #[unsafe(method(viewDidMoveToWindow))]
+        fn view_did_move_to_window(&self) {
+            // SAFETY: the superclass's own method, with no arguments.
+            let _: () = unsafe { msg_send![super(self), viewDidMoveToWindow] };
+            self.settle_later();
+        }
+
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            // SAFETY: the superclass's own method, with no arguments.
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            self.settle_later();
+        }
+
+        #[unsafe(method(viewDidUnhide))]
+        fn view_did_unhide(&self) {
+            // SAFETY: the superclass's own method, with no arguments.
+            let _: () = unsafe { msg_send![super(self), viewDidUnhide] };
+            self.settle_later();
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -862,13 +878,15 @@ define_class!(
                 container.begin_card_drag(self.pane(), None, event.locationInWindow());
                 return;
             }
-            // Otherwise the press is decided by the rule: the name may become a carry (the
-            // session watches the pointer from here and takes over once it travels), the blank
-            // of a band at the content's top takes the window, any other blank only focuses.
+            // Otherwise the press is decided by the rule: the name of a pane that can be carried
+            // may become a carry (the session watches the pointer from here and takes over once
+            // it travels), the rest of a band at the content's top takes the window — a pane
+            // with nowhere to go has no name to hold —, any other blank only focuses.
             let Some(container) = self.container() else {
                 return;
             };
-            match container.head_press(self.frame().origin.y, self.on_name(event)) {
+            let on_name = self.on_name(event);
+            match container.head_press(self.frame().origin.y, on_name, self.can_carry()) {
                 HeadPress::CarryPane => {
                     if let Some(app) = crate::app::delegate(self.mtm()) {
                         app.pane_press(self.pane(), event.locationInWindow());
@@ -1080,10 +1098,72 @@ impl PaneHead {
         )
     }
 
+    /// The pointer is off the band: no tool is lit, no tools show, no name is under it.
+    fn leave(&self) {
+        let iv = self.ivars();
+        iv.hot.set(false);
+        iv.tools.set_hot(None);
+        if iv.quit_lit.replace(false) {
+            self.setNeedsDisplay(true);
+        }
+        iv.over_name.set(false);
+        self.lay_out_parts();
+    }
+
+    /// Where the pointer is on the band, if it is on it: the band is on screen in a visible
+    /// window of the active application, which is when AppKit sends its pointer events.
+    fn pointer_here(&self) -> Option<NSPoint> {
+        let window = self.window()?;
+        if self.isHiddenOrHasHiddenAncestor()
+            || !window.isVisible()
+            || !NSApplication::sharedApplication(self.mtm()).isActive()
+        {
+            return None;
+        }
+        let at = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+        contains(self.bounds(), at).then_some(at)
+    }
+
+    /// Asks the pointer where it is, for what happens under it with no mouse event: a band that
+    /// goes with its tab, its window or a hiding, a window or the application that stops being
+    /// the one in front, a carry that ends over it, a pane that can or can no longer be carried.
+    /// Whatever the pointer's place decided — the tools, the lit part, the name under it — is
+    /// decided again, and the handle with it ([`PaneHead::sync_handle`]).
+    pub(crate) fn settle_pointer(&self) {
+        let iv = self.ivars();
+        match self.pointer_here() {
+            Some(at) => {
+                if !iv.hot.get() {
+                    iv.hot.set(true);
+                    self.lay_out_parts();
+                }
+                self.point_over(at);
+            }
+            None => {
+                if iv.hot.get() || iv.over_name.get() {
+                    self.leave();
+                }
+            }
+        }
+        self.sync_handle();
+    }
+
+    /// [`PaneHead::settle_pointer`] one turn of the main queue later, for what calls it from
+    /// inside AppKit's own changes of the views, where the pane's state is being written.
+    fn settle_later(&self) {
+        if let Some(app) = crate::app::delegate(self.mtm()) {
+            app.settle_heads_later();
+        }
+    }
+
     /// Whether the event's point is on the pane's name ([`PaneHead::name_rect`]).
     fn on_name(&self, event: &NSEvent) -> bool {
-        let at = self.convertPoint_fromView(event.locationInWindow(), None);
-        contains(self.name_rect(), at)
+        contains(self.name_rect(), self.point_of(event))
+    }
+
+    /// The event's point, in the band's space.
+    fn point_of(&self, event: &NSEvent) -> NSPoint {
+        self.convertPoint_fromView(event.locationInWindow(), None)
     }
 
     /// Places the title and the tools: the title after the mark, to the grid's right margin or
@@ -1216,7 +1296,12 @@ impl PaneHead {
     /// The pointer moved on the band: the tool or Quit under it is lit and named, and the name
     /// under it takes the carry's glyph.
     fn point_at(&self, event: &NSEvent) {
-        let part = self.part_at(event);
+        self.point_over(self.point_of(event));
+    }
+
+    /// [`PaneHead::point_at`] for the point `at`, in the band's space.
+    fn point_over(&self, at: NSPoint) {
+        let part = self.part_under(at);
         let iv = self.ivars();
         let tool = match part {
             Some(Part::Tool(tool)) => Some(tool),
@@ -1227,7 +1312,7 @@ impl PaneHead {
         if lit {
             self.setNeedsDisplay(true);
         }
-        let named = part.is_none() && self.on_name(event);
+        let named = part.is_none() && contains(self.name_rect(), at);
         if iv.over_name.replace(named) != named {
             self.sync_handle();
         }
@@ -1262,7 +1347,11 @@ impl PaneHead {
     /// The part under the event's point: Quit whenever a view is up, a tool while the tools
     /// show (the pointer is on the band, or the pane fills the tab).
     fn part_at(&self, event: &NSEvent) -> Option<Part> {
-        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.part_under(self.point_of(event))
+    }
+
+    /// [`PaneHead::part_at`] for the point `at`, in the band's space.
+    fn part_under(&self, at: NSPoint) -> Option<Part> {
         let inside = |rect: NSRect| {
             at.x >= rect.origin.x
                 && at.x <= rect.origin.x + rect.size.width
