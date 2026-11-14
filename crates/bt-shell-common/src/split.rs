@@ -278,7 +278,14 @@ impl Spacing {
 /// A header is in the band when it stands in it (its top edge is the point asked): the top row's
 /// does, the next row's starts under it.
 pub fn in_band(column_shown: bool, y_px: f64, spacing: Spacing) -> bool {
-    column_shown && y_px < spacing.band_px()
+    column_shown && y_px < band_depth(column_shown, spacing)
+}
+
+/// How far down the area the band reaches, in device pixels: nothing while the tab column is not
+/// beside the content. What [`in_band`] tests a point against, and where the container's cursor
+/// rectangles stop.
+pub fn band_depth(column_shown: bool, spacing: Spacing) -> f64 {
+    if column_shown { spacing.band_px() } else { 0.0 }
 }
 
 /// What a press on a pane's header does.
@@ -1766,8 +1773,8 @@ mod tests {
     use super::{
         Axis, Direction, Divider, HeadPress, Layout, MOST_PER_TAB, PANE_EDGE_SHARE, Placement,
         Rect, Removal, Room, SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict,
-        WINDOW_EDGE_SHARE, WINDOW_EDGE_STRIP, Zone, arrange, head_press, in_band, pushed,
-        pushed_room, slide, sliver, solve_share,
+        WINDOW_EDGE_SHARE, WINDOW_EDGE_STRIP, Zone, arrange, band_depth, head_press, in_band,
+        pushed, pushed_room, slide, sliver, solve_share,
     };
 
     fn area(rect: &Rect) -> f64 {
@@ -3713,6 +3720,10 @@ mod tests {
                 "column shown {shown}, y {y}, on the name {on_name}"
             );
             assert_eq!(in_band(shown, y, spacing), shown && y < spacing.band_px());
+            assert_eq!(
+                band_depth(shown, spacing),
+                if shown { spacing.band_px() } else { 0.0 }
+            );
         }
     }
 

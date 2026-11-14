@@ -988,11 +988,7 @@ impl SplitView {
     fn band_height(&self) -> f64 {
         let scale = self.scale();
         let beside = self.beside_tabs();
-        if beside {
-            spacing(scale, self.style(), beside).band_px() / scale
-        } else {
-            0.0
-        }
+        split::band_depth(beside, spacing(scale, self.style(), beside)) / scale
     }
 
     /// Whether pane `id` floats.

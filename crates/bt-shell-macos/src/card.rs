@@ -499,16 +499,22 @@ pub(crate) const IDENTITY: CATransform3D = CATransform3D {
     m44: 1.0,
 };
 
+/// The card slide's curve: quick, then slow to rest.
+pub(crate) fn slide_curve() -> Retained<CAMediaTimingFunction> {
+    CAMediaTimingFunction::functionWithControlPoints(0.2, 0.8, 0.2, 1.0)
+}
+
 /// One explicit animation of `key_path` on `layer`, from `from` to `to`, over
-/// `secs`. The layer's model value is already the end of it, and the animation
-/// removes itself on completion: there is nothing to clean up.
-fn play_for(
+/// `secs` on `curve`. The layer's model value is already the end of it, and the
+/// animation removes itself on completion: there is nothing to clean up.
+pub(crate) fn play_for(
     layer: &CALayer,
     key_path: &NSString,
     from: &AnyObject,
     to: &AnyObject,
     key: &NSString,
     secs: f64,
+    curve: &CAMediaTimingFunction,
 ) {
     let animation = CABasicAnimation::animationWithKeyPath(Some(key_path));
     // SAFETY: both values are the objects the key path's property takes
@@ -518,8 +524,7 @@ fn play_for(
         animation.setToValue(Some(to));
     }
     animation.setDuration(secs);
-    let curve = CAMediaTimingFunction::functionWithControlPoints(0.2, 0.8, 0.2, 1.0);
-    animation.setTimingFunction(Some(&curve));
+    animation.setTimingFunction(Some(curve));
     layer.addAnimation_forKey(&animation, Some(key));
 }
 
@@ -834,6 +839,7 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
     let Some(layer) = pane.layer() else {
         return;
     };
+    let curve = slide_curve();
     if let Some(start) = fitted(&layer, change.from, change.to) {
         // SAFETY: a plain `NSValue` around a `CATransform3D` value, nothing
         // retained or borrowed.
@@ -850,6 +856,7 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
             &to,
             ns_string!("bateri.slide"),
             secs,
+            &curve,
         );
     }
     if change.was_card == change.is_card {
@@ -866,6 +873,7 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
         corners(change.is_card).as_ref(),
         ns_string!("bateri.slide.corners"),
         secs,
+        &curve,
     );
     // Under a header the card's light is the header's and the frame stays unseen
     // (`TerminalPane::set_card`): playing its opacity would flash a light frame round a pane
@@ -881,6 +889,7 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
             opacity(change.is_card).as_ref(),
             ns_string!("bateri.slide.frame"),
             secs,
+            &curve,
         );
     }
 }

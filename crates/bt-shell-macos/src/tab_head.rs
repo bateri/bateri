@@ -9,11 +9,16 @@
 //! A press on the pane's **name** — its mark and its title, from the band's left edge to where
 //! the title ends — is the start of carrying it: past the slop the pane is carried (`pane_drag`,
 //! no key held) — to a region of a pane, onto a strip, out of the window; the band of a floating
-//! pane moves its card instead, inside the tab. The rest of the band is not the pane's: where
-//! the tab column stands beside the content, a band in the content's top row takes the window
-//! (`split::head_press`, the same band as the cards' top margin and the gap between two such
-//! bands), and any other band's blank only gives the keyboard, so one blank never does two
-//! things by where its pane stands. A press on a tool runs that command on this pane.
+//! pane moves its card instead, inside the tab. Under the pointer, on a name that can be held
+//! (the pane has somewhere to go, `pane_drag::can_carry`), a pill eases in round the mark and the
+//! title and the mark — a program's own icon too, and its dot — turns into the carry's glyph
+//! (`Handle`: three layer-backed pieces, Core Animation's, [`HANDLE_SECS`]; asked again after
+//! every layout, so a layout under a still pointer does not play it again). The rest of the
+//! band is not the pane's: where the tab column stands beside the content, a band in the
+//! content's top row takes the window (`split::head_press`, the same band as the cards' top
+//! margin and the gap between two such bands), and any other band's blank only gives the
+//! keyboard, so one blank never does two things by where its pane stands. A press on a tool
+//! runs that command on this pane.
 //!
 //! **The title is a tab's** ([`super::tab_title::Title`]): a title that does not fit fades at its
 //! end instead of ending in "…", and gives the tools its room while they show — the tools come in
@@ -39,25 +44,31 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSAttributedStringNSStringDrawing, NSBezierPath, NSEvent,
-    NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSGraphicsContext, NSTextAlignment, NSView,
+    NSAccessibility, NSAnimatablePropertyContainer, NSApplication,
+    NSAttributedStringNSStringDrawing, NSBezierPath, NSEvent, NSFont, NSFontWeightMedium,
+    NSFontWeightSemibold, NSGraphicsContext, NSTextAlignment, NSView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSMutableAttributedString, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString,
+    NSAttributedString, NSMutableAttributedString, NSNumber, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString, NSValue, ns_string,
+};
+use objc2_quartz_core::{
+    CALayer, CAMediaTimingFunction, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
 };
 
 use super::tab_title::Title;
 use super::{
-    Palette, ProgramKind, Tint, covering, draw_mark, draw_picture, fade, fitting, track_moves,
+    Palette, ProgramKind, Tint, animate, centre, contains, covering, draw_mark, draw_picture, fade,
+    fitting, stroke, track_moves,
 };
+use crate::card::{self, IDENTITY};
 use crate::palette::attributes;
 use crate::pane::TerminalPane;
 use crate::pencere_view::ViewHead;
 use crate::pencere_view::face::{self as program_face};
-use crate::split::HeadPress;
+use crate::split::{HeadPress, Rect};
 use crate::tabs::{self, Indicator};
 use bt_shell_common::view_icon::Lay;
 
@@ -84,6 +95,27 @@ const TOOL_RADIUS: f64 = 5.0;
 const FACE: f64 = 16.0;
 /// The corner of an icon that brings its own ground, points: a tab's tile's (5 on its 18).
 const FACE_CORNER: f64 = 4.5;
+/// The handle: under the pointer on a pane's name a pill comes round the mark and the title
+/// and the mark turns into the carry's glyph. How long it takes to come and go, seconds — a
+/// design constant, the canvas's 240 ms —, and the curve it takes (`cubic-bezier(0.2, 0, 0, 1)`).
+const HANDLE_SECS: f64 = 0.24;
+const HANDLE_CURVE: (f32, f32, f32, f32) = (0.2, 0.0, 0.0, 1.0);
+/// The pill's height, points: the band less 4.5 above and below, give or take the row's half
+/// point.
+const HANDLE_TALL: f64 = 24.0;
+/// The pill's room left of the mark (the mark stands on the grid's line, the pill 4.5 from
+/// the card's side, as far as from its top) and right of where the title ends.
+const HANDLE_PAD: f64 = 3.5;
+const HANDLE_END: f64 = 6.0;
+/// The pill's ground: the title's ink at this share, the tools' hover face being about twice.
+const HANDLE_FILL: f64 = 0.07;
+/// The pill comes in from this share of its size; the mark goes out to this share of its,
+/// and the carry's glyph comes in from it. Reduce Motion changes the opacity only.
+const HANDLE_SWELL: f64 = 0.96;
+const HANDLE_GROW: f64 = 0.82;
+/// How far a piece of the handle that draws the mark stands out of the mark's box on every side:
+/// the program's own icon is a little larger than the mark and the dot's ring reaches past it.
+const PIECE_ROOM: f64 = 3.0;
 /// What stands between the place, the program and the view's title: an en space and a thin
 /// one, about the strip's 8 points. Told apart by their inks, with no separator.
 const WORD_GAP: &str = "\u{2002}\u{2009}";
@@ -226,6 +258,60 @@ mod tests {
     }
 
     #[test]
+    fn the_pill_stands_as_far_from_the_cards_side_as_from_its_top_and_turns_round_its_corner() {
+        // The mark on the grid's line, 8 from the card's side, on a card with a 12.5 corner.
+        let pill = Pill::of(8.0, 60.0, 200.0, 12.5);
+        assert_eq!((pill.x, pill.y), (4.5, 4.5));
+        // Its corner and its distance from the edges add up to the card's: one centre.
+        assert_eq!(pill.radius + pill.x.min(pill.y), 12.5);
+        // It ends 6 after the title and is the band less its distance above and below tall.
+        assert_eq!(pill.x + pill.width, 60.0 + HANDLE_END);
+        assert_eq!(pill.rect().size.height, HANDLE_TALL);
+        // A card with no corner (full screen) leaves it square, and it is never rounder than a
+        // pill: half its height.
+        assert_eq!(Pill::of(8.0, 60.0, 200.0, 0.0).radius, 0.0);
+        assert_eq!(Pill::of(8.0, 60.0, 200.0, 40.0).radius, HANDLE_TALL / 2.0);
+    }
+
+    #[test]
+    fn the_handle_changes_the_marks_for_the_pill_and_the_glyph_and_keeps_its_size_when_still() {
+        let [pill, mark, carry] = handle_poses(true, false);
+        assert_eq!((pill.opacity, pill.scale), (1.0, 1.0));
+        assert_eq!((mark.opacity, mark.scale), (0.0, HANDLE_GROW));
+        assert_eq!((carry.opacity, carry.scale), (1.0, 1.0));
+        let [pill, mark, carry] = handle_poses(false, false);
+        assert_eq!((pill.opacity, pill.scale), (0.0, HANDLE_SWELL));
+        assert_eq!((mark.opacity, mark.scale), (1.0, 1.0));
+        assert_eq!((carry.opacity, carry.scale), (0.0, HANDLE_GROW));
+        // Under Reduce Motion only the opacity changes: every piece keeps its whole size, the
+        // pieces' opacities are the same as with motion.
+        for on in [true, false] {
+            let moving = handle_poses(on, false);
+            let still = handle_poses(on, true);
+            for (still, moving) in still.iter().zip(&moving) {
+                assert_eq!(still.scale, 1.0);
+                assert_eq!(still.opacity, moving.opacity);
+            }
+        }
+    }
+
+    #[test]
+    fn the_pill_ends_where_the_names_place_ends_at_the_latest() {
+        // A title that fits, with room to spare, ends 6 after it.
+        let roomy = Pill::of(8.0, 60.0, 200.0, 12.5);
+        assert_eq!(roomy.x + roomy.width, 60.0 + HANDLE_END);
+        // A title cut short by the tools fills its place, and the pill stops with it.
+        let cut = Pill::of(8.0, 120.0, 120.0, 12.5);
+        assert_eq!(cut.x + cut.width, 120.0);
+        // A title that ends 2 short of its place: the place's end, not 6 past the title.
+        let near = Pill::of(8.0, 118.0, 120.0, 12.5);
+        assert_eq!(near.x + near.width, 120.0);
+        // The place leaves less than the mark: the mark keeps its room on both sides.
+        let none = Pill::of(8.0, 8.0, 0.0, 12.5);
+        assert_eq!(none.x + none.width, 8.0 + MARK + HANDLE_PAD);
+    }
+
+    #[test]
     fn zoom_stands_left_of_close_on_every_pane_and_is_unzoom_while_the_pane_fills_the_tab() {
         for (alone, floating) in [(false, false), (true, false), (false, true), (true, true)] {
             for (zoomed, tool) in [(false, Tool::Zoom), (true, Tool::Unzoom)] {
@@ -311,6 +397,364 @@ pub(crate) struct HeadLook {
     pub(crate) view: Option<ViewHead>,
 }
 
+/// What a piece of the handle draws, in its own box.
+#[derive(Clone, Copy, PartialEq)]
+enum Paint {
+    /// The pill: `fill`'s ink at [`HANDLE_FILL`], round by `radius`.
+    Pill { fill: u32, radius: f64 },
+    /// The mark — over a view the program's own icon, when it gave one —, and the dot on its
+    /// corner: the status's `tone` and the `ground` the ring is cut in.
+    Mark {
+        kind: ProgramKind,
+        face: Option<program_face::FaceId>,
+        ink: u32,
+        dot: Option<(u32, u32)>,
+    },
+    /// The carry's glyph, where the mark stands.
+    Carry { ink: u32 },
+}
+
+/// Where a piece of the handle stands in the change: its opacity and its size's share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pose {
+    opacity: f32,
+    scale: f64,
+}
+
+/// The pill round the name: where it stands in the band and how round it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pill {
+    x: f64,
+    y: f64,
+    width: f64,
+    radius: f64,
+}
+
+impl Pill {
+    /// The pill for a mark at `mark_x` and a title that ends at `name_end` (both from the
+    /// band's left edge, the card's side), in a name's place that ends at `room_end`, on a card
+    /// whose corner is `corner`. It ends [`HANDLE_END`] after the title, but never past its
+    /// place: a title that did not fit stops at the tools or Quit, and so does the pill. It
+    /// stands as far from the card's side as from its top, and its corner is the card's less that
+    /// distance: the two turn round one centre. The number is the card's, never written here.
+    fn of(mark_x: f64, name_end: f64, room_end: f64, corner: f64) -> Self {
+        let x = mark_x - HANDLE_PAD;
+        let y = GUTTER + (TOOL_HEIGHT - HANDLE_TALL) / 2.0 - 0.5;
+        // The mark's own room is kept, whatever the place left.
+        let end = (name_end + HANDLE_END)
+            .min(room_end)
+            .max(mark_x + MARK + HANDLE_PAD);
+        Self {
+            x,
+            y,
+            width: end - x,
+            radius: (corner - x.min(y).max(0.0)).clamp(0.0, HANDLE_TALL / 2.0),
+        }
+    }
+
+    fn rect(&self) -> NSRect {
+        NSRect::new(
+            NSPoint::new(self.x, self.y),
+            NSSize::new(self.width, HANDLE_TALL),
+        )
+    }
+}
+
+pub(crate) struct PieceIvars {
+    paint: Cell<Option<Paint>>,
+    /// The pose it was last sent to: what it stands in when it is not on its way.
+    pose: Cell<Pose>,
+}
+
+define_class!(
+    /// A piece of the handle: a layer-backed view of its own, so the change is Core Animation's —
+    /// no frame is asked for and no waker touched. It never takes a press: the header does.
+    // SAFETY: NSView is designed for subclassing; HeadPiece implements no `Drop` and is born with
+    // `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPaneHeadPiece"]
+    #[ivars = PieceIvars]
+    struct HeadPiece;
+
+    unsafe impl NSObjectProtocol for HeadPiece {}
+
+    impl HeadPiece {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let Some(paint) = self.ivars().paint.get() else {
+                return;
+            };
+            // The mark's box in the piece's space: the piece stands [`PIECE_ROOM`] out of it.
+            let mark = NSRect::new(
+                NSPoint::new(PIECE_ROOM, PIECE_ROOM),
+                NSSize::new(MARK, MARK),
+            );
+            match paint {
+                // The layer's own fill ([`HeadPiece::paint`]): nothing to draw.
+                Paint::Pill { .. } => {}
+                Paint::Mark {
+                    kind,
+                    face,
+                    ink,
+                    dot,
+                } => {
+                    match face.and_then(program_face::face) {
+                        Some(face) => draw_face(&face, mark),
+                        None => draw_mark(kind, mark, &Tint::of(ink, 1.0).color()),
+                    }
+                    if let Some((tone, ground)) = dot {
+                        let centre = NSPoint::new(
+                            mark.origin.x + MARK - DOT / 2.0,
+                            mark.origin.y + DOT / 2.0,
+                        );
+                        for (side, color) in [(DOT + 2.0 * DOT_RING, ground), (DOT, tone)] {
+                            Tint::of(color, 1.0).color().setFill();
+                            NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                                NSPoint::new(centre.x - side / 2.0, centre.y - side / 2.0),
+                                NSSize::new(side, side),
+                            ))
+                            .fill();
+                        }
+                    }
+                }
+                Paint::Carry { ink } => draw_carry(mark, ink),
+            }
+        }
+    }
+);
+
+impl HeadPiece {
+    fn new(mtm: MainThreadMarker, pose: Pose) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PieceIvars {
+            paint: Cell::new(None),
+            pose: Cell::new(pose),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        this.setWantsLayer(true);
+        this.setAccessibilityElement(false);
+        if let Some(layer) = this.layer() {
+            set_pose(&layer, pose);
+        }
+        this
+    }
+
+    /// What it draws; redrawn only when that changed. The pill is the layer's own fill and
+    /// corner, so that a width that glides keeps its corner round.
+    fn paint(&self, paint: Paint) {
+        if self.ivars().paint.replace(Some(paint)) == Some(paint) {
+            return;
+        }
+        match (paint, self.layer()) {
+            (Paint::Pill { fill, radius }, Some(layer)) => {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                layer.setBackgroundColor(Some(&Tint::of(fill, HANDLE_FILL).color().CGColor()));
+                layer.setCornerRadius(radius);
+                CATransaction::commit();
+            }
+            _ => self.setNeedsDisplay(true),
+        }
+    }
+
+    /// Whether any of it is to be seen now: the layer as it is on screen, not as it was told
+    /// to be. A piece that was never drawn shows nothing.
+    fn shows(&self) -> bool {
+        // SAFETY: reading the layer's presentation layer, on the main thread; it is `None`
+        // before the layer has been drawn.
+        self.layer()
+            .and_then(|layer| unsafe { layer.presentationLayer() })
+            .is_some_and(|now| now.opacity() > 0.01)
+    }
+
+    /// Where it stands, in the band's space. A new size puts its pose on again: the shift of a
+    /// layer scaled about its middle is of its size. With `glide` a piece that shows goes to its
+    /// new place over [`TOOLS_SECS`], the pace of the tools that moved it.
+    fn stand(&self, rect: NSRect, glide: bool) {
+        let size = self.frame().size;
+        if self.frame() != rect {
+            if glide && self.shows() {
+                let piece = self.retain();
+                animate(TOOLS_SECS, move || piece.animator().setFrame(rect));
+            } else {
+                self.setFrame(rect);
+            }
+        }
+        if (size.width, size.height) != (rect.size.width, rect.size.height)
+            && let Some(layer) = self.layer()
+        {
+            set_pose(&layer, self.ivars().pose.get());
+        }
+    }
+
+    /// Goes to `pose` from wherever it is now, over [`HANDLE_SECS`]; Reduce Motion (`still`)
+    /// leaves its size as it was and changes only its opacity.
+    fn go(&self, pose: Pose, still: bool) {
+        self.ivars().pose.set(pose);
+        let Some(layer) = self.layer() else {
+            return;
+        };
+        // SAFETY: reading the layer's presentation layer, on the main thread; it is `None` before
+        // the layer has been drawn.
+        let now = unsafe { layer.presentationLayer() };
+        let from = (
+            now.as_ref()
+                .map_or_else(|| layer.opacity(), |now| now.opacity()),
+            if still {
+                IDENTITY
+            } else {
+                now.as_ref()
+                    .map_or_else(|| layer.transform(), |now| now.transform())
+            },
+        );
+        set_pose(&layer, pose);
+        glide(&layer, from, (layer.opacity(), layer.transform()));
+    }
+}
+
+/// The handle's three pieces and whether it is in.
+struct Handle {
+    pill: Retained<HeadPiece>,
+    mark: Retained<HeadPiece>,
+    carry: Retained<HeadPiece>,
+    on: Cell<bool>,
+}
+
+impl Handle {
+    fn new(mtm: MainThreadMarker) -> Self {
+        Self {
+            pill: HeadPiece::new(
+                mtm,
+                Pose {
+                    opacity: 0.0,
+                    scale: HANDLE_SWELL,
+                },
+            ),
+            mark: HeadPiece::new(
+                mtm,
+                Pose {
+                    opacity: 1.0,
+                    scale: 1.0,
+                },
+            ),
+            carry: HeadPiece::new(
+                mtm,
+                Pose {
+                    opacity: 0.0,
+                    scale: HANDLE_GROW,
+                },
+            ),
+            on: Cell::new(false),
+        }
+    }
+
+    /// Each piece with its pose, the handle `on` or off ([`handle_poses`]).
+    fn poses(&self, on: bool, still: bool) -> [(&HeadPiece, Pose); 3] {
+        let [pill, mark, carry] = handle_poses(on, still);
+        [(&self.pill, pill), (&self.mark, mark), (&self.carry, carry)]
+    }
+}
+
+/// The poses of the pill, the mark and the glyph with the handle `on` or off: the pill comes in
+/// and swells, the mark goes out and shrinks, the glyph comes in and grows — the same way back.
+/// Under Reduce Motion (`still`) no size changes.
+fn handle_poses(on: bool, still: bool) -> [Pose; 3] {
+    let size = |scale: f64| if still { 1.0 } else { scale };
+    let pose = |opacity: f32, scale: f64| Pose { opacity, scale };
+    if on {
+        [pose(1.0, 1.0), pose(0.0, size(HANDLE_GROW)), pose(1.0, 1.0)]
+    } else {
+        [
+            pose(0.0, size(HANDLE_SWELL)),
+            pose(1.0, 1.0),
+            pose(0.0, size(HANDLE_GROW)),
+        ]
+    }
+}
+
+/// The transform that scales `layer` by `scale` about its middle: [`card::fitted`]'s, which asks
+/// the layer itself which way its anchor and its axes lie, from the layer's frame scaled about
+/// its centre to the frame it has. `IDENTITY` when no reading lands — a piece that does not
+/// swell beats one that jumps.
+fn centred(layer: &CALayer, scale: f64) -> CATransform3D {
+    if (scale - 1.0).abs() < f64::EPSILON {
+        return IDENTITY;
+    }
+    // The layer's own frame, with none of the transform it still has on it.
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    layer.setTransform(IDENTITY);
+    let frame = layer.frame();
+    CATransaction::commit();
+    let whole = Rect::new(
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+    );
+    let shrunk = Rect::new(
+        whole.x + whole.width * (1.0 - scale) / 2.0,
+        whole.y + whole.height * (1.0 - scale) / 2.0,
+        whole.width * scale,
+        whole.height * scale,
+    );
+    card::fitted(layer, shrunk, whole).unwrap_or(IDENTITY)
+}
+
+/// Puts `layer` in `pose` at once: the model values the animation ends in.
+fn set_pose(layer: &CALayer, pose: Pose) {
+    let transform = centred(layer, pose.scale);
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    layer.setOpacity(pose.opacity);
+    layer.setTransform(transform);
+    CATransaction::commit();
+}
+
+/// Plays `layer` from `from` to `to` (opacity, transform) over [`HANDLE_SECS`] on
+/// [`HANDLE_CURVE`]. The model is already at `to`; the animations remove themselves.
+fn glide(layer: &CALayer, from: (f32, CATransform3D), to: (f32, CATransform3D)) {
+    let (a, b, c, d) = HANDLE_CURVE;
+    let curve = CAMediaTimingFunction::functionWithControlPoints(a, b, c, d);
+    let opacity = |value: f32| NSNumber::numberWithFloat(value);
+    card::play_for(
+        layer,
+        ns_string!("opacity"),
+        &opacity(from.0),
+        &opacity(to.0),
+        ns_string!("bateri.handle.opacity"),
+        HANDLE_SECS,
+        &curve,
+    );
+    // SAFETY: plain `NSValue`s around `CATransform3D` values, what `transform` takes.
+    let (from, to) = unsafe {
+        (
+            NSValue::valueWithCATransform3D(from.1),
+            NSValue::valueWithCATransform3D(to.1),
+        )
+    };
+    card::play_for(
+        layer,
+        ns_string!("transform"),
+        &from,
+        &to,
+        ns_string!("bateri.handle.transform"),
+        HANDLE_SECS,
+        &curve,
+    );
+}
+
 pub(crate) struct HeadIvars {
     pane: Cell<u64>,
     look: RefCell<Option<HeadLook>>,
@@ -330,10 +774,24 @@ pub(crate) struct HeadIvars {
     hot: Cell<bool>,
     /// The pointer is on Quit: it stands on a brighter face.
     quit_lit: Cell<bool>,
+    /// The pointer is on the pane's name ([`PaneHead::name_rect`]) and on no tool or Quit: where
+    /// a press holds the pane.
+    over_name: Cell<bool>,
+    /// The pill and the two glyphs it changes the mark for: what the pointer on a name that can
+    /// be held brings in.
+    handle: Handle,
     pressed: Cell<Option<Part>>,
     /// Where the title ends, from the band's left edge: the right end of the pane's name
     /// ([`PaneHead::name_rect`]), as the last layout of the parts left it.
     name_end: Cell<f64>,
+    /// Where the title's place ends, as the last layout left it: just before the tools while
+    /// they show, before Quit or the grid's margin when they do not. The pill ends there at the
+    /// latest ([`Pill::of`]).
+    room_end: Cell<f64>,
+    /// The band's width and `room_end` when the pill was last placed: a pill that is in and whose
+    /// place changed under a band of the same width — the tools came or went — glides to its new
+    /// end ([`PaneHead::place_handle`]), a resize does not.
+    placed: Cell<(f64, f64)>,
     title: Title,
     tools: Retained<HeadTools>,
 }
@@ -379,6 +837,7 @@ define_class!(
             if self.ivars().quit_lit.replace(false) {
                 self.setNeedsDisplay(true);
             }
+            self.ivars().over_name.set(false);
             self.lay_out_parts();
         }
 
@@ -463,6 +922,7 @@ impl PaneHead {
     pub(crate) fn new(mtm: MainThreadMarker, pane: u64) -> Retained<Self> {
         let title = Title::new(mtm, NSTextAlignment::Left);
         let tools = HeadTools::new(mtm);
+        let handle = Handle::new(mtm);
         let this = Self::alloc(mtm).set_ivars(HeadIvars {
             pane: Cell::new(pane),
             look: RefCell::new(None),
@@ -473,16 +933,24 @@ impl PaneHead {
             corners: Cell::new((true, true)),
             margins: Cell::new((GUTTER, GUTTER)),
             hot: Cell::new(false),
+            over_name: Cell::new(false),
+            handle,
             quit_lit: Cell::new(false),
             pressed: Cell::new(None),
             name_end: Cell::new(0.0),
+            room_end: Cell::new(0.0),
+            placed: Cell::new((0.0, 0.0)),
             title,
             tools: tools.clone(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        // The pill under the title, the mark and the glyph over it, the tools over all.
+        this.addSubview(&this.ivars().handle.pill);
         this.addSubview(this.ivars().title.view());
         this.ivars().title.field().setAccessibilityElement(false);
+        this.addSubview(&this.ivars().handle.mark);
+        this.addSubview(&this.ivars().handle.carry);
         tools.setAlphaValue(0.0);
         this.addSubview(&tools);
         // Entering, moving over the tools and leaving.
@@ -615,11 +1083,7 @@ impl PaneHead {
     /// Whether the event's point is on the pane's name ([`PaneHead::name_rect`]).
     fn on_name(&self, event: &NSEvent) -> bool {
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
-        let name = self.name_rect();
-        at.x >= name.origin.x
-            && at.x < name.origin.x + name.size.width
-            && at.y >= name.origin.y
-            && at.y < name.origin.y + name.size.height
+        contains(self.name_rect(), at)
     }
 
     /// Places the title and the tools: the title after the mark, to the grid's right margin or
@@ -650,6 +1114,7 @@ impl PaneHead {
         let natural = text.fittingSize();
         iv.name_end
             .set(x + natural.width.ceil().min((end - x).max(0.0)));
+        iv.room_end.set(end);
         iv.title.place(
             NSRect::new(
                 NSPoint::new(x, GUTTER + ((TOOL_HEIGHT - natural.height) / 2.0).max(0.0)),
@@ -685,9 +1150,71 @@ impl PaneHead {
             f64::from(u8::from(shown)),
             if still { 0.0 } else { TOOLS_SECS },
         );
+        self.place_handle(look, palette, still);
     }
 
-    /// The pointer moved on the band: the tool or Quit under it is lit and named.
+    /// Where the handle's pieces stand and what they draw, after every layout (`still`: Reduce
+    /// Motion is on); then whether the pointer brings the handle in or out is asked again
+    /// ([`PaneHead::sync_handle`]).
+    fn place_handle(&self, look: &HeadLook, palette: Palette, still: bool) {
+        let iv = self.ivars();
+        let handle = &iv.handle;
+        let mark = self.mark_rect();
+        let name_end = iv.name_end.get().max(mark.origin.x + MARK);
+        let pill = Pill::of(
+            mark.origin.x,
+            name_end,
+            iv.room_end.get(),
+            card::corner_pt(),
+        );
+        // The tools coming or going move the pill's end; it follows them at their pace while it
+        // shows, and at once when it does not or when the band itself changed size.
+        let span = (self.bounds().size.width, iv.room_end.get());
+        let before = iv.placed.replace(span);
+        let glide = !still && before.0 == span.0 && before.1 != span.1;
+        let ink = if look.focused {
+            palette.title
+        } else {
+            palette.dim
+        };
+        let room = |rect: NSRect| card::grown(rect, PIECE_ROOM);
+        handle.pill.stand(pill.rect(), glide);
+        handle.pill.paint(Paint::Pill {
+            fill: palette.title,
+            radius: pill.radius,
+        });
+        handle.mark.stand(room(mark), false);
+        handle.mark.paint(Paint::Mark {
+            kind: look.kind,
+            face: look.view.as_ref().and_then(|view| view.face),
+            ink,
+            dot: look
+                .indicator
+                .map(|indicator| (palette.tone(tabs::list_dot(indicator), 0), iv.ground.get())),
+        });
+        handle.carry.stand(room(mark), false);
+        handle.carry.paint(Paint::Carry { ink });
+        self.sync_handle();
+    }
+
+    /// Brings the handle in when the pointer is on a name that can be held and out when it is
+    /// not, over [`HANDLE_SECS`]. Asked after every layout too, and a handle already where it
+    /// is asked to be is left alone: a layout under a still pointer does not play it again.
+    fn sync_handle(&self) {
+        let iv = self.ivars();
+        let on = iv.over_name.get() && self.can_carry();
+        let handle = &iv.handle;
+        if handle.on.replace(on) == on {
+            return;
+        }
+        let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        for (piece, pose) in handle.poses(on, still) {
+            piece.go(pose, still);
+        }
+    }
+
+    /// The pointer moved on the band: the tool or Quit under it is lit and named, and the name
+    /// under it takes the carry's glyph.
     fn point_at(&self, event: &NSEvent) {
         let part = self.part_at(event);
         let iv = self.ivars();
@@ -699,6 +1226,10 @@ impl PaneHead {
         let lit = iv.quit_lit.replace(quit) != quit;
         if lit {
             self.setNeedsDisplay(true);
+        }
+        let named = part.is_none() && self.on_name(event);
+        if iv.over_name.replace(named) != named {
+            self.sync_handle();
         }
         if iv.tools.set_hot(tool) | lit {
             let look = iv.look.borrow();
@@ -755,6 +1286,13 @@ impl PaneHead {
             .find_map(|(tool, rect)| inside(rect).then_some(Part::Tool(tool)))
     }
 
+    /// Whether a press on the name would carry the pane: it has somewhere to go and does not
+    /// float (a floating pane's band moves its card) — the carry's own answer.
+    fn can_carry(&self) -> bool {
+        crate::app::delegate(self.mtm())
+            .is_some_and(|app| crate::pane_drag::can_carry(&app, self.pane()))
+    }
+
     /// The container the band and its pane are in.
     fn container(&self) -> Option<Retained<crate::split_view::SplitView>> {
         // SAFETY: reading the superview; we are on the main thread.
@@ -806,8 +1344,8 @@ impl PaneHead {
         self.ivars().tools.set_hot(None);
     }
 
-    /// The band: its ground, the card's light on its top edge, the mark and its dot. The title
-    /// and the tools are views of their own over it.
+    /// The band: its ground, the card's light on its top edge, and Quit over a view. The pill,
+    /// the mark with its dot, the glyph, the title and the tools are views of their own over it.
     fn draw(&self) {
         let iv = self.ivars();
         let look = iv.look.borrow();
@@ -846,35 +1384,6 @@ impl PaneHead {
             Tint::of(tone, alpha).color().setFill();
             edge.fill();
             NSGraphicsContext::restoreGraphicsState_class();
-        }
-        // The mark on the grid's left line — over a view the program's own icon, when it gave
-        // one —, the dot on its corner.
-        let ink = if look.focused {
-            palette.title
-        } else {
-            palette.dim
-        };
-        let mark = self.mark_rect();
-        match look
-            .view
-            .as_ref()
-            .and_then(|view| view.face)
-            .and_then(program_face::face)
-        {
-            Some(face) => draw_face(&face, mark),
-            None => draw_mark(look.kind, mark, &Tint::of(ink, 1.0).color()),
-        }
-        if let Some(indicator) = look.indicator {
-            let tone = palette.tone(tabs::list_dot(indicator), 0);
-            let centre = NSPoint::new(mark.origin.x + MARK - DOT / 2.0, mark.origin.y + DOT / 2.0);
-            for (side, color) in [(DOT + 2.0 * DOT_RING, iv.ground.get()), (DOT, tone)] {
-                Tint::of(color, 1.0).color().setFill();
-                NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                    NSPoint::new(centre.x - side / 2.0, centre.y - side / 2.0),
-                    NSSize::new(side, side),
-                ))
-                .fill();
-            }
         }
         if let Some(quit) = self.quit_box() {
             draw_quit(quit, iv.quit_lit.get(), palette);
@@ -1198,15 +1707,68 @@ fn top_rounded(rect: NSRect, (left, right): (f64, f64)) -> Retained<NSBezierPath
     path
 }
 
+/// The design's 12-unit grid drawn 14 pt ([`MARK`]) and centred on a box: where a glyph's points
+/// stand and how its strokes are made, for the tools' glyphs and the carry's alike.
+struct Grid {
+    middle: NSPoint,
+}
+
+impl Grid {
+    /// Points to a grid unit.
+    const UNIT: f64 = 14.0 / 12.0;
+
+    fn of(rect: NSRect) -> Self {
+        Self {
+            middle: centre(rect),
+        }
+    }
+
+    /// The point at grid coordinates `x`, `y`.
+    fn at(&self, x: f64, y: f64) -> NSPoint {
+        NSPoint::new(
+            self.middle.x + (x - 6.0) * Self::UNIT,
+            self.middle.y + (y - 6.0) * Self::UNIT,
+        )
+    }
+
+    /// Strokes `path` in the glyphs' one line: round, 1.15 units thick, at `strength`.
+    fn stroke(&self, path: &NSBezierPath, color: u32, strength: f64) {
+        stroke(path, 1.15 * Self::UNIT, Tint::of(color, strength));
+    }
+}
+
+/// The glyph of a pane that can be taken: two lines across the box with an arrowhead at each of
+/// their four ends, in the mark's place.
+fn draw_carry(rect: NSRect, color: u32) {
+    let grid = Grid::of(rect);
+    let path = NSBezierPath::bezierPath();
+    // How far in from the grid's edge an arrow's tip is, and how far back each side of its head.
+    const REACH: f64 = 0.9;
+    const HEAD: f64 = 1.6;
+    path.moveToPoint(grid.at(6.0, REACH));
+    path.lineToPoint(grid.at(6.0, 12.0 - REACH));
+    path.moveToPoint(grid.at(REACH, 6.0));
+    path.lineToPoint(grid.at(12.0 - REACH, 6.0));
+    for (tip, inward) in [
+        ((6.0, REACH), (0.0, 1.0)),
+        ((6.0, 12.0 - REACH), (0.0, -1.0)),
+        ((REACH, 6.0), (1.0, 0.0)),
+        ((12.0 - REACH, 6.0), (-1.0, 0.0)),
+    ] {
+        let (x, y) = tip;
+        let (dx, dy) = inward;
+        path.moveToPoint(grid.at(x + (dx - dy) * HEAD, y + (dy + dx) * HEAD));
+        path.lineToPoint(grid.at(x, y));
+        path.lineToPoint(grid.at(x + (dx + dy) * HEAD, y + (dy - dx) * HEAD));
+    }
+    grid.stroke(&path, color, 1.0);
+}
+
 /// A tool's glyph in its box, on the design's 12-unit grid drawn 14 pt, at `strength`.
 fn draw_tool(tool: Tool, rect: NSRect, color: u32, strength: f64) {
-    let unit = 14.0 / 12.0;
-    let middle = NSPoint::new(
-        rect.origin.x + rect.size.width / 2.0,
-        rect.origin.y + rect.size.height / 2.0,
-    );
-    let at =
-        |x: f64, y: f64| NSPoint::new(middle.x + (x - 6.0) * unit, middle.y + (y - 6.0) * unit);
+    let unit = Grid::UNIT;
+    let grid = Grid::of(rect);
+    let at = |x: f64, y: f64| grid.at(x, y);
     let path = NSBezierPath::bezierPath();
     let window = |path: &NSBezierPath| {
         path.appendBezierPathWithRoundedRect_xRadius_yRadius(
@@ -1316,9 +1878,5 @@ fn draw_tool(tool: Tool, rect: NSRect, color: u32, strength: f64) {
             path.lineToPoint(at(3.4, 8.6));
         }
     }
-    path.setLineWidth(1.15 * unit);
-    path.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
-    path.setLineJoinStyle(objc2_app_kit::NSLineJoinStyle::Round);
-    Tint::of(color, strength).color().setStroke();
-    path.stroke();
+    grid.stroke(&path, color, strength);
 }

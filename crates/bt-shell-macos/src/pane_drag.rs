@@ -775,7 +775,7 @@ enum Step {
 /// Whether a pane can be carried from where it stands: not while it floats (its card moves
 /// where it stands, and a pane that leaves docks first) and not when it has nowhere to go (the
 /// only pane of the only tab of the only window). The one answer for a press that starts a
-/// carry (and, later, for a header that shows the pane can be taken).
+/// carry and for a header that shows the pane can be taken.
 fn carry_open(floating: bool, tabs: usize, panes: usize, windows: usize) -> bool {
     !floating && (tabs > 1 || panes > 1 || windows > 1)
 }
@@ -796,6 +796,12 @@ fn carry_from(
         windows.len(),
     )
     .then_some((window, tab))
+}
+
+/// Whether `pane` can be carried from where it stands ([`carry_from`]): what a press on its
+/// name does, and what its header shows by the glyph under the pointer.
+pub(crate) fn can_carry(app: &AppDelegate, pane: u64) -> bool {
+    carry_from(app, pane).is_some()
 }
 
 impl Session {
