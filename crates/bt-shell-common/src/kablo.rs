@@ -71,6 +71,7 @@ use kablo_proto::v1::{Capture, ClientName, MAX_HISTORY, Message, OFFSET_END, Pac
 use kablo_proto::{NOISE_LIMIT, WIRE};
 
 pub mod ask;
+pub mod census;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod hub;

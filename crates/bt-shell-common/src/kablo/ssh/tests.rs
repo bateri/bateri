@@ -14,11 +14,13 @@ use crate::settings::TempRoot;
 use crate::ssh_route::SystemSsh;
 use kablo_proto::install::Target;
 
-/// kablo, as a script: it says its version, `attach` echoes, `upgrade` writes down what it was
-/// asked beside the binary, and `bateri --next-number` counts the way kablo's counter does
+/// kablo, as a script: it says its version, `attach` echoes, `list` says what is in `listing` in the
+/// home directory (the terminals of the machine, as [`sessions`] writes them), `upgrade` writes down
+/// what it was asked beside the binary, and `bateri --next-number` counts the way kablo's counter does
 /// (`~/.local/share/bateri/next`, the number to give next, written before it is given).
 const KABLO: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.0 wire_min=1 wire_max=2\";; attach) exec cat;; \
      upgrade) echo \"$*\" >>\"$(dirname \"$0\")/upgrades\";; \
+     list) cat \"$HOME/listing\" 2>/dev/null || exit 1;; \
      bateri) [ \"$2\" = --next-number ] || exit 64; s=$HOME/.local/share/bateri; n=1; \
      [ -f \"$s/next\" ] && n=$(cat \"$s/next\"); mkdir -p \"$s\" && echo $((n + 1)) >\"$s/next\" && echo $n;; esac\n";
 
@@ -28,6 +30,25 @@ fn ids(names: &[&str]) -> Vec<SessionId> {
         .iter()
         .map(|name| SessionId::new(name).expect("an id"))
         .collect()
+}
+
+/// Says what the stand-in machine whose home is `home` has running: each terminal, the release its
+/// relay and its warden run from, and nobody attached.
+fn sessions(home: &Path, runs: &[(&str, &str)]) {
+    let objects: Vec<String> = runs
+        .iter()
+        .map(|(id, version)| {
+            format!(
+                "{{\"id\":\"{id}\",\"state\":\"running\",\"clients\":0,\
+                 \"version\":\"{version}\",\"warden_version\":\"{version}\"}}"
+            )
+        })
+        .collect();
+    std::fs::write(
+        home.join("listing"),
+        format!("[\n{}\n]\n", objects.join(",\n")),
+    )
+    .expect("a listing");
 }
 
 struct World {
@@ -291,6 +312,7 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
     let argv = backend.master(&host).expect("plan").expect("step");
     assert_eq!(run_argv(&argv), 0);
 
+    sessions(&world.home, &[("t1", "0.1.0"), ("t2", "0.1.0")]);
     let installed = backend
         .install(&host, &ids(&["t1", "t2"]))
         .expect("installed");
@@ -310,7 +332,16 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
             "upgrade t2 .local/share/bateri/kablo/0.2.0/kablo"
         ]
     );
-    // The second time finds it, and renews nothing.
+    // The second time finds it, and renews nothing: the terminals run it now.
+    sessions(&world.home, &[("t1", "0.2.0"), ("t2", "0.2.0")]);
+    let channel_calls = |world: &World| {
+        world
+            .calls()
+            .iter()
+            .filter(|call| call.contains(" sh -c "))
+            .count()
+    };
+    let before = channel_calls(&world);
     assert!(
         !backend
             .install(&host, &ids(&["t1", "t2"]))
@@ -318,6 +349,9 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
             .fresh
     );
     assert_eq!(world.upgrades("0.2.0").len(), 2);
+    // A connection that finds nothing to do makes the two calls the look has always made (what
+    // the server is, and the one that finds kablo and lists the machine), and no more.
+    assert_eq!(channel_calls(&world), before + 2, "{:?}", world.calls());
 
     // Every command went over the master and could not ask or become one.
     let channels: Vec<String> = world
@@ -550,6 +584,7 @@ fn the_steps_of_a_server_whose_connection_is_up_run_over_it_and_start_no_ssh() {
         version: "0.2.0".to_owned(),
         path: ".local/share/bateri/kablo/0.2.0/kablo".to_owned(),
         fresh: false,
+        census: None,
     };
     backend.files(&host, &installed);
     assert!(
@@ -956,6 +991,7 @@ fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
         version: "0.2.0".into(),
         path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: false,
+        census: None,
     };
     backend.files(&host, &installed);
     let shell = world.home.join(".local/share/bateri/shell");
@@ -1046,6 +1082,7 @@ fn a_kablo_of_an_older_release_is_replaced_under_the_terminals_it_runs() {
     std::fs::create_dir_all(old.parent().expect("dir")).expect("dir");
     std::fs::write(&old, "#!/bin/sh\n").expect("old kablo");
 
+    sessions(&world.home, &[("t1", "0.1.0")]);
     let installed = backend.refresh(&host, &ids(&["t1"])).expect("renewed");
     assert_eq!(installed.version, "0.2.0");
     assert_eq!(installed.path, ".local/share/bateri/kablo/0.2.0/kablo");
@@ -1129,6 +1166,7 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
 
     // kablo is put below this Mac's home, and the terminals of the ledger are renewed with it
     // (by the file that was just written, from that home).
+    sessions(&mac, &[("t1", "0.1.0"), ("t2", "0.1.0")]);
     let installed = backend
         .install(&here, &ids(&["t1", "t2"]))
         .expect("installed");
@@ -1147,7 +1185,8 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
     // Nothing of the stand-in server's was touched, and no ssh ran.
     assert!(!world.home.join(".local/share/bateri/kablo").exists());
     assert!(world.calls().is_empty(), "{:?}", world.calls());
-    // The second time finds it, and renews nothing.
+    // The second time finds it, and renews nothing: the terminals run it now.
+    sessions(&mac, &[("t1", "0.2.0"), ("t2", "0.2.0")]);
     assert!(!backend.install(&here, &ids(&["t1"])).expect("found").fresh);
     assert_eq!(
         std::fs::read_to_string(mac.join(".local/share/bateri/kablo/0.2.0/upgrades"))
@@ -1198,6 +1237,7 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
     let old = mac.join(".local/share/bateri/kablo/0.1.0/kablo");
     std::fs::create_dir_all(old.parent().expect("dir")).expect("dir");
     std::fs::write(&old, "#!/bin/sh\n").expect("an old kablo");
+    sessions(&mac, &[("t1", "0.1.0")]);
     let renewed = backend.refresh(&here, &ids(&["t1"])).expect("renewed");
     assert_eq!(renewed.version, "0.2.0");
     assert!(old.exists());
@@ -1285,6 +1325,7 @@ fn reaching_a_server_sets_it_up_with_this_builds_kablo_and_command_once_a_run() 
     std::fs::create_dir_all(script.parent().expect("a directory")).expect("bin");
     std::fs::write(&script, "an earlier build's").expect("the old command");
 
+    sessions(&world.home, &[("t1", "0.1.0"), ("t2", "0.1.0")]);
     backend
         .reach(&args, Ask::Never, &|_| ids(&["t1", "t2"]))
         .expect("reached");

@@ -429,9 +429,12 @@ pub trait Backend: Send + Sync + 'static {
     /// Called with how the program of [`Backend::master`] ended.
     fn master_made(&self, server: &KabloHost, status: u8) -> Result<(), Refusal>;
 
-    /// Puts kablo on the server (or finds it there). `live` are the account's terminals the
-    /// ledger has: when the kablo written is not the one they run, they are the ones renewed
-    /// with it (never the machine's other terminals).
+    /// Puts kablo on the server (or finds it there), and tidies it as every connection does:
+    /// the terminals that run an earlier release are renewed, the versions nothing runs from go
+    /// ([`super::install::tidy`]). `live` are the account's terminals the ledger has, the ones
+    /// renewed whoever has them open. The answer says what the server's terminals are when the
+    /// look at it was a whole one ([`Installed::census`]), and the service forgets the
+    /// ledger's rows that are not among them ([`forget_gone`]).
     fn install(&self, server: &KabloHost, live: &[SessionId]) -> Result<Installed, Refusal>;
 
     /// The number of the next terminal on the server (`7` for the `p7` an agent there is told
@@ -473,9 +476,11 @@ pub trait Backend: Send + Sync + 'static {
     }
 
     /// Puts the version this computer brings on a server that has had another
-    /// (a ledger's account after bateri was updated) and has the terminals it
-    /// runs renewed with it, without ending any; the answer is what is on the
-    /// server now. `live` are the account's terminals the ledger has ([`Backend::install`]).
+    /// (a ledger's account after bateri was updated) and tidies it as [`Backend::install`]
+    /// does, without ending any terminal; the answer is what is on the server now. `live` are
+    /// the account's terminals the ledger has ([`Backend::install`]). Called for an account the
+    /// ledger brought back at its first dial of every run, whether or not its version is
+    /// the one this computer brings.
     /// Called on the thread that makes the bridge, **before** it is
     /// made: a bridge that runs is not replaced by the renewal. `None`: it could
     /// not be done now (no connection, a login nobody saved, a server that will
@@ -1154,6 +1159,10 @@ struct Account {
     /// The kablo the server was last known to have is not the version this
     /// computer brings: the next dial renews it first ([`Backend::refresh`]).
     stale: bool,
+    /// The account was brought back by the ledger and has not been looked at in this run: its
+    /// first dial tidies the server's kablo, as every connection does ([`Backend::refresh`]),
+    /// whatever version it has. Unlike `stale`, it does not hold the shells' files back.
+    tidy_due: bool,
     /// Which bridge messages are current.
     generation: u64,
     bridge: Option<Bridge>,
@@ -3252,7 +3261,7 @@ impl Core {
             let (server, installed) = (entry.server.clone(), entry.installed.clone());
             // A kablo that could not be run is written again at every dial, for as long as it
             // takes: the dial after the server has room again is the one that brings it back.
-            let stale = entry.stale;
+            let tidy = entry.stale || entry.tidy_due;
             let shared = Arc::clone(&self.shared);
             let started = thread::Builder::new()
                 .name("ssh-hold dials".into())
@@ -3261,9 +3270,11 @@ impl Core {
                     move || {
                         // The terminals are renewed before any bridge exists:
                         // the renewal does not replace one that runs.
-                        let refreshed = if stale {
+                        let refreshed = if tidy {
                             let live = shared.ledger.terminals_of(&account);
-                            shared.backend.refresh(&server, &live)
+                            shared.backend.refresh(&server, &live).map(|installed| {
+                                forget_gone(&shared.ledger, &account, installed, &live)
+                            })
                         } else {
                             None
                         };
@@ -3314,6 +3325,7 @@ impl Core {
                 ..installed
             };
             entry.stale = false;
+            entry.tidy_due = false;
             // The look that renewed it wrote the shells' files too.
             entry.files = true;
             self.shared.ledger.remember(&entry.server, &entry.installed);
@@ -3544,7 +3556,12 @@ impl Core {
                 let pending = Arc::clone(&pending);
                 move || {
                     let live = shared.ledger.terminals_of(local::ACCOUNT);
-                    let outcome = shared.backend.install(&local::host(), &live);
+                    let outcome = shared
+                        .backend
+                        .install(&local::host(), &live)
+                        .map(|installed| {
+                            forget_gone(&shared.ledger, local::ACCOUNT, installed, &live)
+                        });
                     let _ = shared.tx.send(Msg::HereMade { outcome, pending });
                 }
             });
@@ -3899,6 +3916,9 @@ impl Core {
 
     /// A client for the server and the account it stands for.
     fn make_account(&mut self, server: KabloHost, installed: Installed, files: bool, now: Instant) {
+        // An account the ledger brought back has not been looked at in this run; one a pane made
+        // by a look (`files`) has.
+        let tidy_due = !files;
         let key = server.key.clone();
         let name = self.shared.backend.name();
         // An account whose kablo is in the former root is renewed too, whatever its version: the
@@ -3921,6 +3941,7 @@ impl Core {
                 server,
                 installed,
                 stale,
+                tidy_due,
                 generation: 0,
                 bridge: None,
                 dialing: false,
@@ -4221,6 +4242,28 @@ pub(crate) fn program_session(program: &[String], directory: Option<&str>) -> Ne
     spec
 }
 
+/// The rows of the ledger for terminals the server does not have are gone from it: a terminal
+/// that ended while no bateri was looking (`live` is what the ledger had when the look began, so
+/// a row written since is not judged) is the same as one whose end was seen ([`Core::finished`]).
+/// Only a look that was a whole one says so ([`Installed::census`]); the look is spent here and
+/// the account keeps none of it.
+fn forget_gone(
+    ledger: &Ledger,
+    account: &str,
+    installed: Installed,
+    live: &[SessionId],
+) -> Installed {
+    if let Some(census) = &installed.census {
+        for terminal in live.iter().filter(|terminal| !census.has(terminal)) {
+            ledger.gone(account, terminal);
+        }
+    }
+    Installed {
+        census: None,
+        ..installed
+    }
+}
+
 /// The slow steps of a first terminal, on a thread of its own: the master
 /// connection on the holder's terminal, then kablo on the server, then its number
 /// (when `numbered`: the holder can be told it).
@@ -4264,7 +4307,12 @@ fn prepare(
         backend.master_made(&server, status)?;
     }
     let live = shared.ledger.terminals_of(&server.key);
-    let installed = backend.install(&server, &live)?;
+    let installed = forget_gone(
+        &shared.ledger,
+        &server.key,
+        backend.install(&server, &live)?,
+        &live,
+    );
     let note = installed.fresh.then(|| {
         format!(
             "bateri is set up on {}; if the connection drops, this terminal keeps running",

@@ -14,7 +14,8 @@ use kablo_proto::SessionId;
 
 use super::*;
 use crate::kablo::install::{
-    self, Bundle, Failure, Root, ensure_here, prune_versions, unused_versions, upgrade_sessions,
+    self, Bundle, Failure, Root, ensure_here, prune_versions, tidy, unused_versions,
+    upgrade_sessions,
 };
 use crate::kablo::ledger::Ledger;
 use crate::kablo::service::{Backend, PaneInfo, Peer, Refusal, Service};
@@ -75,6 +76,7 @@ fn a_bridge_here_whose_kablo_is_not_there_is_a_program_not_found() {
         version: "0.2.0".into(),
         path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: false,
+        census: None,
     };
     let error = carry(&ground.home, &installed)
         .err()
@@ -102,6 +104,7 @@ fn a_bridge_here_is_the_installed_kablo_run_as_attach_and_ending_it_ends_only_it
         version: "0.2.0".into(),
         path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: false,
+        census: None,
     };
 
     let Carried {
@@ -659,6 +662,149 @@ fn a_terminal_started_in_the_former_root_comes_back_from_it_and_is_renewed_into_
     last.hang_up();
 }
 
+/// Every look at this Mac's account tidies its kablo, not only the one that wrote the binary: a
+/// terminal the ledger has no row of, that nobody has open and that runs an earlier release is
+/// renewed by the look the next connection makes.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_look_at_this_mac_renews_a_terminal_nobody_keeps_though_the_binary_was_there_already() {
+    let real = release().expect(
+        "a kablo release to run: the one the pinned revision made (../kablo/dist or KABLO_DIST; `make kablo-bump` makes it)",
+    );
+    let mut ground = Ground::new("tidy-each-look");
+    // The package is a release (a build for development moves only what the ledger has): the
+    // release's own file under a release's name.
+    let bundle = as_release(&real, "99.0.0", &ground.root.join("pkg"));
+    let sockets = EnvChannel {
+        inner: LocalChannel::new(ground.home.clone()),
+        sockets: ground.sockets.clone(),
+    };
+    let current = match ensure_here(&sockets, &bundle, true) {
+        Ok(installed) => installed,
+        Err(Failure::Impossible(why)) => {
+            eprintln!("SKIPPED: this machine is not one kablo is built for: {why:?}");
+            return;
+        }
+        Err(other) => panic!("kablo was not installed: {other:?}"),
+    };
+    assert!(current.fresh && current.census.is_none());
+
+    // The release's file again, as an earlier release's, in the current root.
+    let old_dir = ground.home.join(".local/share/bateri/kablo/0.0.9");
+    std::fs::create_dir_all(&old_dir).expect("an earlier release");
+    std::fs::copy(ground.home.join(&current.path), old_dir.join("kablo")).expect("a copy");
+    std::fs::set_permissions(
+        old_dir.join("kablo"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("runnable");
+    let old = Installed {
+        version: "0.0.9".into(),
+        path: Root::Current.path("0.0.9").expect("a path"),
+        ..current.clone()
+    };
+    ground.kept = Some(ground.home.join(&old.path));
+
+    // A terminal that the earlier release made, and nobody has open.
+    let id = SessionId::new("t1").expect("an id");
+    ground.made.push(id.clone());
+    let mut wire = Wire::open(ground.bridge(&old, Some("0.0.9")));
+    wire.until("the link", |w| w.has(|e| matches!(e, Event::Linked)));
+    let mut spec = NewSession::default();
+    spec.argv = vec![b"/bin/cat".to_vec()];
+    wire.client
+        .new_terminal(id.clone(), spec, Attach::new(SIZE))
+        .expect("a request");
+    wire.until("the terminal", |w| {
+        w.has(|e| matches!(e, Event::Attached { terminal, .. } if *terminal == id))
+    });
+    wire.hang_up();
+    // The relay has seen the bridge go.
+    let mut idle = false;
+    for _ in 0..100 {
+        let (_, listed) = ground.run(&current, &["list", "--json"]);
+        if listed.contains("\"clients\":0") {
+            idle = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(idle, "nobody has the terminal open");
+
+    // The next connection: kablo is found, the machine is listed by the same call, and what runs
+    // the earlier release is renewed.
+    let found = ensure_here(&sockets, &bundle, true).expect("found");
+    assert!(!found.fresh);
+    let seen = found
+        .census
+        .clone()
+        .expect("the machine, in the call that found kablo");
+    assert!(seen.runs("0.0.9") && seen.has(&id));
+    let tidied = tidy(&sockets, &found, &[]);
+    assert_eq!(
+        tidied.renewed,
+        std::slice::from_ref(&id),
+        "no row of the ledger's, and renewed: {seen:?}"
+    );
+
+    // What runs for the terminal is the package's file now, relay and warden both (a warden is
+    // replaced when it is quiet, so it takes a moment). The terminal says the name it was given
+    // when it was started (the test's variable) whatever file it runs from, so the directory of
+    // the earlier release stays here; that it goes when nothing says its name is the machine
+    // tests' (`prune_versions`).
+    let from = ground.home.join(".local/share/bateri/kablo/99.0.0");
+    let mut moved = false;
+    for _ in 0..100 {
+        let lines = ground.processes();
+        if !lines.is_empty()
+            && lines
+                .iter()
+                .all(|line| line.contains(&from.to_string_lossy().into_owned()))
+        {
+            moved = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        moved,
+        "the terminal runs from the package's file: {:?}",
+        ground.processes()
+    );
+    // The terminal is where it was.
+    let (status, listed) = ground.run(&current, &["list", "--json"]);
+    assert_eq!(status, Some(0));
+    assert!(listed.contains("\"id\":\"t1\""), "{listed}");
+}
+
+/// The binary this machine runs, from `real`, under every target's name of a package of
+/// `version`.
+fn as_release(real: &Bundle, version: &str, dir: &Path) -> Bundle {
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => kablo_proto::install::Target::MacosAarch64,
+        ("macos", _) => kablo_proto::install::Target::MacosX86_64,
+        (_, "aarch64") => kablo_proto::install::Target::LinuxAarch64,
+        _ => kablo_proto::install::Target::LinuxX86_64,
+    };
+    let bytes = real
+        .read(
+            &real
+                .artifact(target)
+                .expect("the release has this machine's"),
+        )
+        .expect("its binary");
+    std::fs::create_dir_all(dir).expect("package dir");
+    let mut sums = String::new();
+    for target in kablo_proto::install::Target::ALL {
+        let name = kablo_proto::install::artifact_name(version, target).expect("name");
+        std::fs::write(dir.join(&name), &bytes).expect("binary");
+        sums.push_str(&format!("{}  {name}\n", install::sha256_hex(&bytes)));
+    }
+    sums.push_str(&format!("{}  LICENSE\n", install::sha256_hex(b"license")));
+    std::fs::write(dir.join(kablo_proto::install::CHECKSUMS), sums).expect("sums");
+    Bundle::open(dir).expect("a package")
+}
+
 /// A [`Channel`] that points the machine's kablo at the test's socket directory.
 struct EnvChannel {
     inner: LocalChannel,
@@ -742,6 +888,17 @@ impl Write for Late {
     }
 }
 
+impl RealMac {
+    /// The machine's kablo, pointed at the test's socket directory: the look at it lists the
+    /// test's terminals, never the user's.
+    fn channel(&self) -> EnvChannel {
+        EnvChannel {
+            inner: LocalChannel::new(self.home.clone()),
+            sockets: self.sockets.clone(),
+        }
+    }
+}
+
 impl Backend for RealMac {
     fn pane(&self, _: &Peer) -> Option<PaneInfo> {
         self.stand_in.panes.then(PaneInfo::default)
@@ -760,8 +917,7 @@ impl Backend for RealMac {
     }
 
     fn install(&self, _: &KabloHost, _: &[SessionId]) -> Result<Installed, Refusal> {
-        ensure_here(&LocalChannel::new(self.home.clone()), &self.bundle, true)
-            .map_err(|_| Refusal::plain())
+        ensure_here(&self.channel(), &self.bundle, true).map_err(|_| Refusal::plain())
     }
 
     fn version(&self) -> Option<String> {
@@ -770,7 +926,7 @@ impl Backend for RealMac {
 
     /// The same look as the first one: kablo is written where it is not.
     fn refresh(&self, _: &KabloHost, _: &[SessionId]) -> Option<Installed> {
-        ensure_here(&LocalChannel::new(self.home.clone()), &self.bundle, true).ok()
+        ensure_here(&self.channel(), &self.bundle, true).ok()
     }
 
     fn carry(&self, _: &KabloHost, installed: &Installed) -> io::Result<Carried> {
@@ -2288,6 +2444,7 @@ impl Backend for RaspBackend {
             path: kablo_proto::install::install_path(&self.version)
                 .map_err(|_| Refusal::plain())?,
             fresh: false,
+            census: None,
         })
     }
     fn version(&self) -> Option<String> {
@@ -3747,6 +3904,7 @@ mod relayed {
                 path: kablo_proto::install::install_path(&self.version)
                     .map_err(|_| Refusal::plain())?,
                 fresh: false,
+                census: None,
             })
         }
 

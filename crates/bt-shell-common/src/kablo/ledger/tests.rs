@@ -34,6 +34,7 @@ fn installed() -> Installed {
         version: "0.2.0".to_owned(),
         path: ".local/share/kablo/0.2.0/kablo".to_owned(),
         fresh: true,
+        census: None,
     }
 }
 
@@ -375,6 +376,7 @@ fn the_view_of_a_pane_and_the_departure_for_an_update_outlive_the_process() {
         version: "0.2.0-dev+222309ff9090".to_owned(),
         path: String::new(),
         fresh: true,
+        census: None,
     };
     let ledger = Ledger::open(path.clone());
     ledger.remember(&local::host(), &mac_installed);
@@ -428,6 +430,7 @@ fn the_account_of_this_mac_is_remembered_like_a_servers_and_starts_no_ssh() {
         version: "0.2.0-dev+222309ff9090".to_owned(),
         path: ".local/share/kablo/0.2.0-dev+222309ff9090/kablo".to_owned(),
         fresh: true,
+        census: None,
     };
     ledger.remember(&local::host(), &mac_installed);
     let known = ledger.known(local::ACCOUNT).expect("remembered");

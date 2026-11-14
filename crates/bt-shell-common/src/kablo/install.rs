@@ -24,14 +24,16 @@
 //! sent.
 //!
 //! **A new binary replaces the old one under running terminals**
-//! ([`upgrade_sessions`]): the terminals bateri keeps there, which run from an earlier
-//! release, are renewed with the one just written (`kablo upgrade <id>`, one per
-//! terminal of the ledger — never `--all`: the machine's other terminals are not
-//! bateri's to move), without ending a shell or dropping a client. A *running bridge*
-//! (`kablo attach`) is not replaced by it, so a bridge is made only after the renewal;
-//! one that was made before it stays what it was and speaks to the new relay under the
-//! rule that a release reads the one before it. The version the renewal left behind goes
-//! when no terminal of the machine runs from it ([`prune_versions`]).
+//! ([`upgrade_sessions`]): the terminals that run from an earlier release are renewed with the
+//! one that is there (`kablo upgrade <id>`, one per terminal — never `--all`), without ending a
+//! shell or dropping a client. Which terminals is the rule of [`Census::renewable`]: the ledger's,
+//! and the ones nobody has open. A *running bridge* (`kablo attach`) is not replaced by it, so a
+//! bridge is made only after the renewal; one that was made before it stays what it was and
+//! speaks to the new relay under the rule that a release reads the one before it. The version
+//! the renewal left behind goes when no terminal of the machine runs from it
+//! ([`prune_versions`]). **Both happen at every connection** ([`tidy`]), not only when the
+//! binary was just written: the machine is looked at by the call that looks for the binary, and
+//! a machine that has nothing to do is asked for nothing more.
 //!
 //! **This Mac is a place kablo is put too** ([`ensure_here`], [`super::local`]): the same
 //! steps through a channel that is `sh` in the home directory, without the shells' files.
@@ -59,6 +61,7 @@ use kablo_proto::SessionId;
 use kablo_proto::install::{self, Target};
 use kablo_proto::v1::Exit;
 
+use super::census::{self, Census};
 use super::remote::RemoteCommand;
 use crate::ssh_wrap::Wants;
 use crate::upload::sq;
@@ -267,6 +270,11 @@ pub struct Installed {
     pub path: String,
     /// The binary was written now (it was not there): the user is told once.
     pub fresh: bool,
+    /// What the call that looked for the binary also saw of the machine: the versions that are
+    /// installed and the terminals that run ([`Census`]). Only when the binary was there already
+    /// and the answer was a whole one; the one who asked about the machine keeps none of it
+    /// ([`tidy`] asks again when there is none, and nothing is kept from one look to the next).
+    pub census: Option<Census>,
 }
 
 impl Installed {
@@ -379,6 +387,7 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
         version: bundle.version().to_owned(),
         path: bundle.remote_path(),
         fresh: false,
+        census: None,
     };
     // The shells' files ride the call that looks for kablo: no step of their own, on a connection
     // that has no limit on how many bytes one call carries ([`probe_and_files_script`]).
@@ -393,9 +402,15 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
     // is part of the file: two packages of the same kablo have two sums. What
     // such a file says its version is has to do.
     let resigned = matches!(target, Target::MacosAarch64 | Target::MacosX86_64);
-    match look(&probe, &artifact.sha256, bundle.version(), resigned) {
+    let (found, census) = split_look(&probe);
+    match look(&found, &artifact.sha256, bundle.version(), resigned) {
         Look::Absent => {}
-        Look::Matches => return Ok(installed),
+        Look::Matches => {
+            return Ok(Installed {
+                census,
+                ..installed
+            });
+        }
         Look::Differs => {
             // A binary is there that is not the package's: terminals may run
             // from it, so it is left alone, and so is the connection's
@@ -478,10 +493,38 @@ pub fn probe_script(version: &str) -> String {
 /// output is dropped and the call ends well, so [`look`] reads the probe alone; a file that could
 /// not be written is found missing by the bootstrap. The agent's command in them names the place
 /// kablo has when the package's is the one the server ends up with; where [`look`] finds another
-/// binary there, [`ensure`] fails and the `ssh` is the plain one, which runs none of them. One
-/// line of `sh`, like the others.
+/// binary there, [`ensure`] fails and the `ssh` is the plain one, which runs none of them.
+///
+/// What the machine has of kablo — the versions that are installed and the terminals that run
+/// ([`census_script`]) — is said by the same call, after [`PROBE_END`]: the cleanup that goes
+/// with every connection ([`tidy`]) chooses by it and asks nothing of the server in a call of
+/// its own when there is nothing to do. One line of `sh`, like the others.
 pub fn probe_and_files_script(version: &str) -> String {
-    format!("{}; sh -s >/dev/null 2>&1; :", probe_script(version))
+    format!(
+        "{}; sh -s >/dev/null 2>&1; echo {PROBE_END}; {}; :",
+        probe_script(version),
+        census_script(version)
+    )
+}
+
+/// The line between what the call that looks for kablo says of the place of the version and what
+/// it says of the machine ([`probe_and_files_script`]).
+const PROBE_END: &str = "===";
+
+/// The look of [`probe_and_files_script`]'s answer, and the census after it: the census is
+/// `None` where it is not there or not a whole one, and an answer that has no [`PROBE_END`] (a
+/// stand-in's, a server that ended the call early) is the look alone.
+fn split_look(reply: &Reply) -> (Reply, Option<Census>) {
+    match reply.out.split_once(&format!("{PROBE_END}\n")) {
+        Some((found, rest)) => (
+            Reply {
+                out: found.to_owned(),
+                ..reply.clone()
+            },
+            Census::parse(rest),
+        ),
+        None => (reply.clone(), None),
+    }
 }
 
 /// Writes the shells' files alone, to a server whose kablo is where `installed` says (the
@@ -708,8 +751,8 @@ pub fn upload_script(version: &str, sha256: &str) -> String {
 /// The script that has the terminals `ids` renewed with the binary of `version`, which is
 /// there: the relay of each is replaced by the one in that binary and the warden follows, with
 /// the shell, its programs and the clients attached to it staying as they are. Only the
-/// terminals bateri keeps (its ledger's), never `--all`: the machine's other terminals — those
-/// a person made by hand, those another build of bateri keeps — are theirs to move. The path is
+/// terminals [`Census::renewable`] names, never `--all`: what it says of a terminal that is not
+/// the ledger's, and of one that runs a build for development, is its rule. The path is
 /// the one relative to the home directory the commands start in; kablo makes it absolute
 /// itself. One line of `sh`, like the others, and a failure of one terminal (it ended meanwhile)
 /// is not the others': the status is 1 if any was not renewed. An id that could be read as an
@@ -750,21 +793,18 @@ pub fn upgrade_sessions(channel: &dyn Channel, installed: &Installed, ids: &[Ses
 /// it — and the machine's terminals say nothing of it yet.
 const PRUNE_AGE_MINUTES: u32 = 10;
 
-/// The marker between the two halves of [`census_script`]'s answer.
-const CENSUS_MARK: &str = "---";
-
 /// The script that says which versions of kablo are installed and which terminals run from
 /// which: the directories of [`kablo_proto::install::ROOT`] and of
 /// [`kablo_proto::install::FORMER_ROOT`] that hold a binary (each as its path under the home
-/// directory), [`CENSUS_MARK`], then what the binary of `version` (the one that stays, in
+/// directory), [`census::MARK`], then what the binary of `version` (the one that stays, in
 /// `ROOT`) lists as the machine's terminals — **all** of them, this user's, whoever started
 /// them. Its status is that of the listing: a listing that failed is not an empty one, and
-/// [`unused_versions`] is not asked about it. One line of `sh`, like the others.
+/// [`Census::parse`] is not given one. One line of `sh`, like the others.
 pub fn census_script(version: &str) -> String {
-    let (root, former) = (install::ROOT, install::FORMER_ROOT);
+    let (root, former, mark) = (install::ROOT, install::FORMER_ROOT, census::MARK);
     format!(
         "for r in {root} {former}; do for d in $r/*/; do [ -x $d/kablo ] && echo ${{d%/}}; done; done; \
-         echo {CENSUS_MARK}; {root}/{version}/kablo list --json"
+         echo {mark}; {root}/{version}/kablo list --json"
     )
 }
 
@@ -781,23 +821,17 @@ pub fn unused_versions(reply: &Reply, keep: &str) -> Vec<String> {
     if reply.status != Some(0) {
         return Vec::new();
     }
-    let Some((dirs, listing)) = reply.out.split_once(&format!("{CENSUS_MARK}\n")) else {
-        return Vec::new();
-    };
-    // `kablo list --json` is an array of objects; one that is not one is not read.
-    if !listing.trim_start().starts_with('[') || !listing.trim_end().ends_with(']') {
-        return Vec::new();
-    }
-    let used = |name: &str| {
-        ["version", "warden_version"]
-            .iter()
-            .any(|key| listing.contains(&format!("\"{key}\":\"{name}\"")))
-    };
-    dirs.lines()
-        .map(str::trim)
+    Census::parse(&reply.out).map_or_else(Vec::new, |census| unused(&census, keep))
+}
+
+/// [`unused_versions`] of a census that is whole.
+pub fn unused(census: &Census, keep: &str) -> Vec<String> {
+    census
+        .dirs
+        .iter()
         .filter_map(|line| {
             let (root, name) = version_dir(line)?;
-            (!(root == install::ROOT && name == keep) && !used(name)).then(|| line.to_owned())
+            (!(root == install::ROOT && name == keep) && !census.runs(name)).then(|| line.clone())
         })
         .collect()
 }
@@ -848,14 +882,75 @@ pub fn prune_script(dirs: &[String]) -> Option<String> {
 /// nothing it has not been told is unused by a whole answer. The same rule on this Mac and on a
 /// server; the answer is the directories that were asked to go, for a test and a log.
 pub fn prune_versions(channel: &dyn Channel, installed: &Installed) -> Vec<String> {
-    let Ok(reply) = channel.run(&census_script(&installed.version), &[]) else {
-        return Vec::new();
-    };
-    let unused = unused_versions(&reply, &installed.version);
+    match look_at(channel, &installed.version) {
+        Some(census) => prune_unused(channel, &census, &installed.version),
+        None => Vec::new(),
+    }
+}
+
+/// The machine as it is now ([`census_script`]), when the answer is a whole one.
+fn look_at(channel: &dyn Channel, version: &str) -> Option<Census> {
+    let reply = channel.run(&census_script(version), &[]).ok()?;
+    if reply.status != Some(0) {
+        return None;
+    }
+    Census::parse(&reply.out)
+}
+
+/// Asks the machine to remove [`unused`] of `census`, and says which.
+fn prune_unused(channel: &dyn Channel, census: &Census, keep: &str) -> Vec<String> {
+    let unused = unused(census, keep);
     if let Some(script) = prune_script(&unused) {
         let _ = channel.run(&script, &[]);
     }
     unused
+}
+
+/// What [`tidy`] asked of the machine and what it saw of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tidy {
+    /// The terminals it had renewed.
+    pub renewed: Vec<SessionId>,
+    /// The version directories it had removed.
+    pub pruned: Vec<String>,
+    /// The last whole look it had at the machine; none when it had none.
+    pub census: Option<Census>,
+}
+
+/// What every connection to a machine does for its kablo, whether or not the binary was just
+/// written: the terminals that run from an earlier release are renewed with the one in `installed`
+/// ([`Census::renewable`]; `ledger` is the terminals this application keeps there), and then the
+/// versions nothing runs from any more are removed ([`prune_unused`]).
+///
+/// The machine is looked at once, by the call that looked for the binary (`installed.census`); a
+/// call of its own is made only when that did not (the binary was just written), and again when
+/// terminals were renewed, since what removal goes by is what runs now. A machine that has
+/// nothing to renew and nothing to remove is asked for nothing at all. **Best effort**: an answer
+/// that is not a whole one renews and removes nothing, and nothing it does is told to the user.
+/// Terminals are only renewed, never ended.
+pub fn tidy(channel: &dyn Channel, installed: &Installed, ledger: &[SessionId]) -> Tidy {
+    let mut census = installed
+        .census
+        .clone()
+        .or_else(|| look_at(channel, &installed.version));
+    let mut renewed = Vec::new();
+    if let Some(seen) = &census {
+        renewed = seen.renewable(ledger, &installed.version);
+        if !renewed.is_empty() {
+            upgrade_sessions(channel, installed, &renewed);
+            if let Some(again) = look_at(channel, &installed.version) {
+                census = Some(again);
+            }
+        }
+    }
+    let pruned = census.as_ref().map_or_else(Vec::new, |seen| {
+        prune_unused(channel, seen, &installed.version)
+    });
+    Tidy {
+        renewed,
+        pruned,
+        census,
+    }
 }
 
 // ─── the number of a terminal ────────────────────────────────────────────

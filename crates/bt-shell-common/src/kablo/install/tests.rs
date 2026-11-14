@@ -542,6 +542,7 @@ fn a_renewal_that_cannot_be_asked_is_nothing_more_than_a_no() {
         version: "0.2.0".into(),
         path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
         fresh: true,
+        census: None,
     };
     assert!(!upgrade_sessions(&Failing, &installed, &ids(&["t1"])));
 }
@@ -876,6 +877,211 @@ fn nothing_is_unused_by_an_answer_that_is_not_a_whole_one() {
     assert!(unused_versions(&unmarked, "0.2.0").is_empty());
 }
 
+// ─── what every connection does ──────────────────────────────────────────
+
+/// A terminal as `kablo list --json` writes it (the keys [`Census`] reads, in their order).
+fn terminal(name: &str, state: &str, clients: u32, relay: &str, warden: &str) -> String {
+    format!(
+        "{{\"id\":\"{name}\",\"state\":\"{state}\",\"clients\":{clients},\
+         \"version\":\"{relay}\",\"warden_version\":\"{warden}\"}}"
+    )
+}
+
+fn machine_says(dirs: &[&str], terminals: &[String]) -> String {
+    let listing = if terminals.is_empty() {
+        "[]\n".to_owned()
+    } else {
+        format!("[\n{}\n]\n", terminals.join(",\n"))
+    };
+    census(Some(0), dirs, &listing).out
+}
+
+/// A machine that answers from a table, and says what it was asked: `now` is what a look at it
+/// says (`after` once an `upgrade` was asked, for terminals that are renewed by it).
+struct Machine {
+    now: RefCell<String>,
+    after: Option<String>,
+    calls: RefCell<Vec<String>>,
+    /// The look fails.
+    down: bool,
+}
+
+impl Machine {
+    fn new(now: String) -> Machine {
+        Machine {
+            now: RefCell::new(now),
+            after: None,
+            calls: RefCell::new(Vec::new()),
+            down: false,
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.borrow().clone()
+    }
+
+    fn upgrades(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter(|script| script.contains(" upgrade "))
+            .collect()
+    }
+
+    fn removals(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter(|script| script.contains("rm -rf"))
+            .collect()
+    }
+}
+
+impl Channel for Machine {
+    fn run(&self, script: &str, _: &[u8]) -> io::Result<Reply> {
+        self.calls.borrow_mut().push(script.to_owned());
+        if script.contains(" upgrade ")
+            && let Some(after) = &self.after
+        {
+            *self.now.borrow_mut() = after.clone();
+        }
+        let out = if script.starts_with("for r in") {
+            if self.down {
+                return Ok(Reply {
+                    status: Some(1),
+                    out: String::new(),
+                    err: "kablo: cannot connect".into(),
+                });
+            }
+            self.now.borrow().clone()
+        } else {
+            String::new()
+        };
+        Ok(Reply {
+            status: Some(0),
+            out,
+            err: String::new(),
+        })
+    }
+}
+
+/// What a look that found kablo says: the package's `0.2.0`, in `ROOT`.
+fn found(dirs: &[&str], terminals: &[String]) -> Installed {
+    Installed {
+        target: Target::LinuxX86_64,
+        version: "0.2.0".into(),
+        path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
+        fresh: false,
+        census: Census::parse(&machine_says(dirs, terminals)),
+    }
+}
+
+#[test]
+fn a_connection_that_has_nothing_to_do_asks_the_machine_for_nothing() {
+    let terminals = [
+        terminal("mine", "running", 1, "0.2.0", "0.2.0"),
+        // Somebody else has it open: it renews itself.
+        terminal("theirs", "running", 2, "0.1.0", "0.1.0"),
+        // A newer release and a build for development are never moved back or over.
+        terminal("newer", "running", 0, "0.3.0", "0.3.0"),
+        terminal(
+            "dev",
+            "running",
+            0,
+            "0.1.0-dev+0123456789ab",
+            "0.1.0-dev+0123456789ab",
+        ),
+    ];
+    let installed = found(&["0.1.0", "0.2.0"], &terminals);
+    assert!(installed.census.is_some(), "the control");
+    let machine = Machine::new(String::new());
+    let tidied = tidy(&machine, &installed, &ids(&["mine"]));
+    assert!(machine.calls().is_empty(), "{:?}", machine.calls());
+    assert!(tidied.renewed.is_empty() && tidied.pruned.is_empty());
+    assert_eq!(tidied.census, installed.census);
+}
+
+#[test]
+fn an_idle_terminal_of_an_earlier_release_is_renewed_and_its_version_goes_with_the_next_look() {
+    let before = [
+        terminal("idle", "running", 0, "0.1.0", "0.1.0"),
+        terminal("theirs", "running", 2, "0.1.5", "0.1.5"),
+    ];
+    let after = [
+        terminal("idle", "running", 0, "0.2.0", "0.2.0"),
+        terminal("theirs", "running", 2, "0.1.5", "0.1.5"),
+    ];
+    let dirs = ["0.1.0", "0.1.5", "0.2.0"];
+    let installed = found(&dirs, &before);
+    let mut machine = Machine::new(machine_says(&dirs, &before));
+    machine.after = Some(machine_says(&dirs, &after));
+    let tidied = tidy(&machine, &installed, &[]);
+    assert_eq!(tidied.renewed, ids(&["idle"]));
+    assert_eq!(
+        machine.upgrades(),
+        [
+            "f=.local/share/bateri/kablo/0.2.0/kablo; s=0; for i in idle; do $f upgrade $i $f || s=1; done; exit $s"
+        ],
+        "the one that nobody has open, and no other"
+    );
+    // The look after the renewal is what the removal goes by: 0.1.0 is nobody's now, 0.1.5 is
+    // the terminal somebody has open.
+    assert_eq!(tidied.pruned, [current("0.1.0")]);
+    assert_eq!(machine.removals().len(), 1);
+    assert!(machine.removals()[0].contains(".local/share/bateri/kablo/0.1.0"));
+    assert!(!machine.removals()[0].contains("0.1.5"));
+    // upgrade, the look again, the removal: nothing else crossed to the server.
+    assert_eq!(machine.calls().len(), 3);
+}
+
+#[test]
+fn the_ledgers_terminals_are_renewed_whoever_has_them_open_and_a_development_build_moves_only_them()
+{
+    let terminals = [
+        terminal("ours", "running", 3, "0.1.0", "0.1.0"),
+        terminal("idle", "running", 0, "0.1.0", "0.1.0"),
+    ];
+    let installed = found(&["0.1.0", "0.2.0"], &terminals);
+    let machine = Machine::new(machine_says(&["0.1.0", "0.2.0"], &terminals));
+    tidy(&machine, &installed, &ids(&["ours"]));
+    let asked = machine.upgrades();
+    assert_eq!(asked.len(), 1);
+    assert!(
+        asked[0].contains("for i in ours idle;"),
+        "the ledger's, though somebody has it open, and the idle one: {asked:?}"
+    );
+
+    // A package that is a build for development: the ledger's alone, and the ones that are
+    // behind it.
+    let dev = Installed {
+        version: "0.2.0-dev+0123456789ab".into(),
+        ..found(&["0.1.0"], &terminals)
+    };
+    let machine = Machine::new(machine_says(&["0.1.0"], &terminals));
+    tidy(&machine, &dev, &ids(&["ours"]));
+    let asked = machine.upgrades();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].contains("for i in ours;"), "{asked:?}");
+}
+
+#[test]
+fn a_look_that_is_not_a_whole_one_renews_and_removes_nothing_and_a_missing_one_is_made_once() {
+    // The look that found kablo was not whole: tidy asks for it, once, and the machine's answer
+    // is not one either.
+    let mut installed = found(&["0.1.0", "0.2.0"], &[]);
+    installed.census = None;
+    let mut machine = Machine::new("garbage".into());
+    machine.down = true;
+    let tidied = tidy(&machine, &installed, &ids(&["t1"]));
+    assert_eq!(machine.calls().len(), 1, "one look, nothing after it");
+    assert_eq!(tidied, Tidy::default());
+
+    // It answers the second time: the same rules, on what it says.
+    let terminals = [terminal("idle", "running", 0, "0.1.0", "0.1.0")];
+    let machine = Machine::new(machine_says(&["0.2.0"], &terminals));
+    let tidied = tidy(&machine, &installed, &[]);
+    assert_eq!(tidied.renewed, ids(&["idle"]));
+    assert_eq!(machine.upgrades().len(), 1);
+}
+
 /// A kablo that lists what is in `listing` beside it, or fails when `broken` is there.
 const KABLO_LISTING: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.0 wire_min=1 wire_max=2\";; \
      list) [ -e \"$(dirname \"$0\")/broken\" ] && exit 1; cat \"$(dirname \"$0\")/listing\";; esac\n";
@@ -917,6 +1123,52 @@ fn kept(home: &Home, version: &str) -> bool {
 
 fn kept_in_the_former_root(home: &Home, version: &str) -> bool {
     home.dir.join(former(version)).exists()
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_call_that_finds_kablo_also_lists_the_machine_and_a_look_that_finds_nothing_to_do_costs_no_call()
+ {
+    let root = TempRoot::new("kablo-census-call");
+    let (home, installed) = home_with(&root.0, &[("0.1.0", true)], &[]);
+    // The binary was written by this call: the machine was not looked at.
+    assert!(installed.fresh && installed.census.is_none());
+    let dir = home.installed("0.2.0").parent().expect("dir").to_owned();
+    std::fs::write(
+        dir.join("listing"),
+        format!(
+            "[\n{}\n]\n",
+            terminal("idle", "running", 0, "0.1.0", "0.1.0")
+        ),
+    )
+    .expect("a listing");
+
+    let bundle = package(&root.0, "0.2.0", KABLO_LISTING);
+    let before = home.calls.borrow().len();
+    let again = ensure(&home, &bundle).expect("found");
+    assert!(!again.fresh);
+    assert_eq!(
+        home.calls.borrow().len(),
+        before + 2,
+        "what the server is, and the one look that finds kablo and says what the machine has"
+    );
+    let census = again.census.clone().expect("the machine, in the same call");
+    assert_eq!(census.terminals.len(), 1);
+    assert!(census.has(&ids(&["idle"])[0]));
+    assert!(census.dirs.contains(&current("0.1.0")));
+
+    // Tidying on it asks for the renewal and the look after it, and nothing for the versions: the
+    // terminal still runs 0.1.0 (this kablo's `upgrade` does nothing).
+    let calls = home.calls.borrow().len();
+    let tidied = tidy(&home, &again, &[]);
+    assert_eq!(tidied.renewed, ids(&["idle"]));
+    assert_eq!(home.calls.borrow().len(), calls + 2);
+    assert!(kept(&home, "0.1.0"));
+
+    // A kablo that cannot list: the look is not a whole one and the call still found kablo.
+    std::fs::write(dir.join("broken"), "").expect("broken");
+    let again = ensure(&home, &bundle).expect("found");
+    assert!(!again.fresh && again.census.is_none());
 }
 
 #[test]

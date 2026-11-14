@@ -44,6 +44,7 @@ use kablo_proto::v1::stream::Command;
 
 use super::Cause;
 use super::ask::{self, Reply};
+use super::census::Census;
 use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
 use super::local::{self, LocalChannel};
 use super::remote::{RemoteCommand, RemoteStream};
@@ -234,8 +235,8 @@ impl SshBackend {
     /// starts it: a program that reaches a server before any terminal of this run did would run
     /// what an earlier build left (or, with no package's kablo there, nothing). So a program's
     /// reach does the whole of the install ([`install::ensure_for`]: kablo, the shells' files and
-    /// the command) once a run, and renews what runs from an earlier kablo (`live`, the ledger's
-    /// terminals of the server) when it wrote the binary. Once a run, since `send` and `capture`
+    /// the command) once a run, and tidies the server's kablo as every connection does
+    /// ([`install::tidy`]; `live` is the ledger's terminals of the server). Once a run, since `send` and `capture`
     /// reach too; one that failed is tried by the next, and says nothing: the program's own line
     /// says what is wrong on that server.
     fn install_for_reach(
@@ -262,9 +263,7 @@ impl SshBackend {
         let Ok(installed) = install::ensure_for(&channel, bundle, wants) else {
             return;
         };
-        if installed.fresh {
-            renew(argv, &installed, &live(&server.key));
-        }
+        renew(argv, &installed, &live(&server.key));
         if let Ok(mut filed) = self.filed.lock() {
             filed.insert(done);
         }
@@ -372,11 +371,13 @@ impl SshBackend {
         let channel = LocalChannel::new(home.to_owned());
         let installed = install::ensure_here(&channel, bundle, self.wants(&local::host()))
             .map_err(|_| Refusal::plain())?;
-        if installed.fresh {
-            // The binary was not there: terminals this user has here run an earlier one.
-            settle(&here_channel(home), &installed, live);
-        }
-        Ok(installed)
+        // Terminals this user has here may run an earlier one, whether or not the binary was
+        // there.
+        let census = settle(&here_channel(home), &installed, live);
+        Ok(Installed {
+            census,
+            ..installed
+        })
     }
 
     /// What a program on the server left for the app while no connection was up
@@ -559,13 +560,14 @@ impl Backend for SshBackend {
         self.remember(Fact::Touched, server);
         match install::ensure_for(&channel, bundle, self.wants(server)) {
             Ok(installed) => {
-                if installed.fresh {
-                    // The binary was not there: terminals this user has on the
-                    // server run an earlier one, and are renewed before a bridge
-                    // exists to be left behind.
-                    renew(&channel.argv, &installed, live);
-                }
-                Ok(installed)
+                // Terminals this user has on the server may run an earlier release, whether or
+                // not the binary was there: they are renewed before a bridge exists to be left
+                // behind.
+                let census = renew(&channel.argv, &installed, live);
+                Ok(Installed {
+                    census,
+                    ..installed
+                })
             }
             Err(Failure::Impossible(_)) => {
                 // This server is a plain one from now on.
@@ -719,8 +721,11 @@ impl Backend for SshBackend {
                 self.wants(server),
             )
             .ok()?;
-            settle(&here_channel(home), &installed, live);
-            return Some(installed);
+            let census = settle(&here_channel(home), &installed, live);
+            return Some(Installed {
+                census,
+                ..installed
+            });
         }
         let bundle = self.bundle.as_ref()?;
         let target = self.target(server);
@@ -737,8 +742,11 @@ impl Backend for SshBackend {
         // can: terminals are running there, and what `install` would write down
         // changes what the next `ssh` is.
         let installed = install::ensure_for(&channel, bundle, self.wants(server)).ok()?;
-        renew(&argv, &installed, live);
-        Some(installed)
+        let census = renew(&argv, &installed, live);
+        Some(Installed {
+            census,
+            ..installed
+        })
     }
 
     fn name(&self) -> Option<String> {
@@ -881,22 +889,22 @@ impl Backend for SshBackend {
     }
 }
 
-/// The server's terminals that bateri keeps (`live`, the ledger's) are renewed with the binary
-/// just checked ([`install::upgrade_sessions`]) and the version they left is removed when
-/// nothing runs from it ([`install::prune_versions`]), on a channel of its own that is let less
-/// time than the install: what is waiting for it is a pane that shows a connection being made.
-fn renew(argv: &[String], installed: &Installed, live: &[SessionId]) {
+/// What every connection does for the kablo on a server ([`install::tidy`]): the terminals that
+/// run from an earlier release are renewed with the binary just checked (`live` is the ledger's
+/// terminals of the server) and the versions nothing runs from any more are removed, on a channel
+/// of its own that is let less time than the install: what is waiting for it is a pane that shows
+/// a connection being made. What it saw of the server's terminals comes back, for the ledger.
+fn renew(argv: &[String], installed: &Installed, live: &[SessionId]) -> Option<Census> {
     let channel = SshChannel {
         argv: argv.to_vec(),
         limit: install::UPGRADE_LIMIT,
     };
-    settle(&channel, installed, live);
+    settle(&channel, installed, live)
 }
 
-/// [`renew`] on any channel: the same two steps for a server and for this Mac.
-fn settle(channel: &dyn Channel, installed: &Installed, live: &[SessionId]) {
-    install::upgrade_sessions(channel, installed, live);
-    install::prune_versions(channel, installed);
+/// [`renew`] on any channel: the same step for a server and for this Mac.
+fn settle(channel: &dyn Channel, installed: &Installed, live: &[SessionId]) -> Option<Census> {
+    install::tidy(channel, installed, live).census
 }
 
 /// This Mac's channel for [`settle`]: the bound of a renewal, not of an install.

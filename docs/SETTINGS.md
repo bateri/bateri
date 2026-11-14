@@ -2611,13 +2611,19 @@ the server's rc files.
   forgotten with Shell ▸ Shell Integration on “{host}” (the item deletes this
   record on every click).
 - **When bateri is updated**: the kablo on a server is the one in bateri's package,
-  put beside the one that is there (a version never overwrites another), and
-  the terminals running under the older one are renewed with it without
-  ending a shell or a program — by the first `ssh` to a server that had none of
-  this version, and by the first connection of a pane that comes back after the
-  update. A renewal that cannot be made then (no connection, a password nobody
-  saved) is made the next time the connection is made; until then the terminals
-  keep running under the kablo they have, which the new one understands.
+  put beside the one that is there (a version never overwrites another). Every
+  connection to a server — the first `ssh` of a run, and the first connection
+  of a pane that comes back — looks at what the server keeps and tidies it,
+  whether or not anything was written: the terminals running under an older
+  release are renewed with the new one without ending a shell or a program
+  (the ones bateri keeps, and the ones nobody has open; one somebody else has
+  open renews itself, and one running a build for development or a newer
+  release is left alone), the versions nothing runs from are removed, and a
+  terminal bateri remembers that the server no longer has is forgotten. No
+  terminal is ended. A renewal that cannot be made then (no connection, a
+  password nobody saved) is made the next time the connection is made; until
+  then the terminals keep running under the kablo they have, which the new one
+  understands.
 - **Always plain**: ssh with a remote command or non-interactive ssh (`ssh
   host command`, `-N`, `-T`, `-W`, a pipe), `scp`/`rsync`/`git`, mosh, and a host
   whose `~/.ssh/config` entry has `RemoteCommand`, `RequestTTY no` or

@@ -147,6 +147,7 @@ impl Known {
             version: self.version.clone(),
             path: self.root.path(&self.version).unwrap_or_default(),
             fresh: false,
+            census: None,
         }
     }
 }

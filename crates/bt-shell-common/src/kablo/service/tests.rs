@@ -43,6 +43,23 @@ fn until(message: &str, mut ready: impl FnMut() -> bool) {
 }
 
 /// The names of terminals, joined by commas.
+/// A whole look at a server whose terminals are `names`, all running the version of the package.
+fn census_of(names: &[&str]) -> crate::kablo::census::Census {
+    crate::kablo::census::Census {
+        dirs: Vec::new(),
+        terminals: names
+            .iter()
+            .map(|name| crate::kablo::census::Terminal {
+                id: SessionId::new(name).expect("an id"),
+                running: true,
+                clients: 0,
+                version: "0.2.0".into(),
+                warden_version: "0.2.0".into(),
+            })
+            .collect(),
+    }
+}
+
 fn names(ids: &[SessionId]) -> String {
     ids.iter()
         .map(SessionId::as_str)
@@ -91,6 +108,9 @@ struct Fake {
     /// when it is not a plain yes, so that the order of every other test's steps is as it was.
     consent: Mutex<Consent>,
     fresh: AtomicBool,
+    /// The terminals the server says it has, when the look at it is a whole one
+    /// ([`Installed::census`]); none, when the look is not.
+    listing: Mutex<Option<Vec<&'static str>>>,
     /// The server cannot be renewed now ([`Backend::refresh`] has no answer).
     refresh_fails: AtomicBool,
     /// A renewal that is done mends what kept a bridge from starting ([`Fake::carry_fails_with`]).
@@ -162,6 +182,7 @@ impl Fake {
             master: Mutex::new(None),
             consent: Mutex::new(Consent::Granted),
             fresh: AtomicBool::new(false),
+            listing: Mutex::new(None),
             refresh_fails: AtomicBool::new(false),
             refresh_mends: AtomicBool::new(false),
             carry_fails: AtomicU32::new(0),
@@ -189,6 +210,12 @@ impl Fake {
     }
 
     /// The server's counter works and gives `n` next.
+    /// What a look at the server says of its terminals ([`Fake::listing`]).
+    fn census(&self) -> Option<crate::kablo::census::Census> {
+        let listing = self.listing.lock().expect("lock").clone()?;
+        Some(census_of(&listing))
+    }
+
     fn counts_from(&self, n: u64) {
         self.next_number.store(n, Ordering::SeqCst);
     }
@@ -393,6 +420,7 @@ impl Backend for Fake {
             version: "0.2.0".into(),
             path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
             fresh: self.fresh.load(Ordering::SeqCst),
+            census: self.census(),
         })
     }
 
@@ -428,6 +456,7 @@ impl Backend for Fake {
             version: "0.2.0".into(),
             path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
             fresh: true,
+            census: self.census(),
         })
     }
 
@@ -855,9 +884,10 @@ fn a_numbered_terminal_is_found_again_by_its_number_after_a_restart() {
     second.stop();
 }
 
-/// The look for kablo writes the shells' files (`install`); an account the ledger brings back is
-/// not looked at, so its first new terminal writes them on the way to its number — once, and not
-/// for an account made by a look.
+/// The look for kablo writes the shells' files (`install`, and the first dial of an account the
+/// ledger brings back, which tidies it); an account whose look could not be made has them written
+/// by its first new terminal on the way to its number — once, and not for an account made by a
+/// look.
 #[test]
 fn the_files_of_a_restarted_account_are_written_for_its_first_new_terminal_only() {
     let ledger = Arc::new(Ledger::memory());
@@ -873,7 +903,9 @@ fn the_files_of_a_restarted_account_are_written_for_its_first_new_terminal_only(
     first.service.stop();
     drop(first);
 
-    // The restored pane takes its terminal back: that brings the account back, unlooked at.
+    // The restored pane takes its terminal back: that brings the account back, and its first dial
+    // is not able to look at the server.
+    world.refresh_fails.store(true, Ordering::SeqCst);
     let again = Rig::kept("files-2", world.clone(), ledger.clone(), END_GRACE);
     let resumed = Holder::start(
         &again.socket(),
@@ -902,6 +934,125 @@ fn the_files_of_a_restarted_account_are_written_for_its_first_new_terminal_only(
         world.count("number") == numbered + 2
     });
     assert_eq!(world.count("files"), 1, "once");
+}
+
+/// An account the ledger brings back is looked at by its first dial of the run, whatever version it
+/// has, and by no other dial of it: what ended while no bateri was there is tidied, and the look
+/// wrote the shells' files, so no terminal writes them again.
+#[test]
+fn an_account_the_ledger_brings_back_is_looked_at_by_its_first_dial_only() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept("tidy-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    assert_eq!(
+        world.count("refresh"),
+        0,
+        "a look made it: nothing to tidy again"
+    );
+    first.service.stop();
+    drop(first);
+
+    let again = Rig::kept("tidy-2", world.clone(), ledger.clone(), END_GRACE);
+    let resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("the pane is back", || resumed.shown.bytes() == b"def");
+    assert_eq!(world.count("refresh"), 1);
+    assert_eq!(
+        world.lives().last().map(String::as_str),
+        Some("refresh:b-1")
+    );
+    let numbered = world.count("number");
+    let _third = Holder::new(&again.socket(), "b-3");
+    until("the new terminal was numbered", || {
+        world.count("number") == numbered + 1
+    });
+    assert_eq!(world.count("refresh"), 1, "once");
+    assert_eq!(world.count("files"), 0, "the look wrote them");
+}
+
+/// A terminal the ledger holds that the server does not list is gone from the ledger, and only
+/// the rows the ledger had when the look began are judged.
+#[test]
+fn the_ledger_forgets_the_terminals_a_whole_look_does_not_list() {
+    let ledger = Ledger::memory();
+    let installed = |census| Installed {
+        target: kablo_proto::install::Target::LinuxX86_64,
+        version: "0.2.0".into(),
+        path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
+        fresh: false,
+        census,
+    };
+    let id = |name: &str| SessionId::new(name).expect("an id");
+    ledger.remember(&host("u@rasp:22"), &installed(None));
+    for name in ["p1", "p2", "p3"] {
+        ledger.shown("u@rasp:22", &id(name), None);
+    }
+    let live = ledger.terminals_of("u@rasp:22");
+    // A row written after the look began (`p4`) is not the look's to judge.
+    ledger.shown("u@rasp:22", &id("p4"), None);
+
+    // No whole look: nothing is forgotten.
+    let kept = forget_gone(&ledger, "u@rasp:22", installed(None), &live);
+    assert_eq!(ledger.terminals_of("u@rasp:22").len(), 4);
+    assert_eq!(kept.census, None);
+
+    // A whole one: what it does not list goes, what it does stays, and the look is spent.
+    let kept = forget_gone(
+        &ledger,
+        "u@rasp:22",
+        installed(Some(census_of(&["p1", "other"]))),
+        &live,
+    );
+    assert_eq!(kept.census, None);
+    assert_eq!(ledger.terminals_of("u@rasp:22"), [id("p1"), id("p4")]);
+}
+
+/// The look that comes with the first terminal of a server (`prepare`) is the one that forgets
+/// what the server no longer has.
+#[test]
+fn the_first_terminal_of_a_server_forgets_the_rows_the_server_has_lost() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    *world.listing.lock().expect("lock") = Some(vec!["p1"]);
+    pane_named(&world);
+    let id = |name: &str| SessionId::new(name).expect("an id");
+    ledger.remember(
+        &host("u@rasp:22"),
+        &Installed {
+            target: kablo_proto::install::Target::LinuxX86_64,
+            version: "0.2.0".into(),
+            path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
+            fresh: false,
+            census: None,
+        },
+    );
+    ledger.shown("u@rasp:22", &id("p1"), None);
+    ledger.shown("u@rasp:22", &id("p2"), None);
+    let rig = Rig::kept("lost-rows", world.clone(), ledger.clone(), END_GRACE);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    assert!(
+        ledger.keeps("u@rasp:22", &terminal),
+        "the new terminal is written"
+    );
+    assert!(ledger.keeps("u@rasp:22", &id("p1")));
+    assert!(
+        !ledger.keeps("u@rasp:22", &id("p2")),
+        "the server does not have it"
+    );
+    assert_eq!(world.lives()[0], "install:p1,p2");
 }
 
 /// The folder a server's programs are offered is made once per account, after the step that
@@ -2997,8 +3148,9 @@ fn a_restarted_bateri_shows_the_terminal_the_one_before_made() {
     });
     assert_eq!(
         world.log()[before..],
-        ["pane", "carry"],
-        "no route, no master, no install: the ledger knew the server"
+        ["pane", "refresh", "carry"],
+        "no route, no master, no install: the ledger knew the server; the one look every \
+         connection has is the first dial's"
     );
     assert!(second.service.shown(&pane).is_some());
     world.bridge().exit(&terminal, Exit::Code(0));
@@ -3019,6 +3171,7 @@ fn the_old_release(ledger: &Ledger) {
             version: "0.1.0".into(),
             path: ".local/share/bateri/kablo/0.1.0/kablo".into(),
             fresh: false,
+            census: None,
         },
     );
 }
@@ -3142,6 +3295,7 @@ fn the_former_root(ledger: &Ledger) {
             version: "0.2.0".into(),
             path: ".local/share/kablo/0.2.0/kablo".into(),
             fresh: false,
+            census: None,
         },
     );
 }
@@ -3253,6 +3407,7 @@ fn a_terminal_marked_to_end_is_not_shown_again() {
             version: "0.2.0".into(),
             path: ".local/share/bateri/kablo/0.2.0/kablo".into(),
             fresh: false,
+            census: None,
         },
     );
     let terminal = SessionId::new("b-1").expect("an id");
@@ -5224,6 +5379,7 @@ fn a_terminal_the_server_does_not_have_is_made_again_for_the_pane_and_the_old_on
             version: "0.2.0".to_owned(),
             path: String::new(),
             fresh: false,
+            census: None,
         },
     );
     ledger.shown(local::ACCOUNT, &lost, Some(&pane));
@@ -5928,6 +6084,7 @@ fn a_server_the_ledger_knows_and_no_pane_of_this_run_uses_is_connected_for_a_pro
             version: "0.2.0".to_owned(),
             path: String::new(),
             fresh: false,
+            census: None,
         },
     );
     let command = rig
