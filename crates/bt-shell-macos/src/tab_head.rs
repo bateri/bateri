@@ -5,10 +5,15 @@
 //! its right: Split Right, Split Down, Float Pane (Dock Pane while it floats), Open in New Tab
 //! (with other panes beside it), Zoom Pane (Unzoom Pane while it fills the tab) and Close Split.
 //! The tools of a pane that fills the tab stay in view, the lit one among them: nothing else on
-//! the screen says that panes are out of sight. A press on the band gives the pane the keyboard
-//! and is the start of carrying it: past the slop the pane is carried (`pane_drag`, no key
-//! held) — to a region of a pane, onto a strip, out of the window; the band of a floating pane
-//! moves its card instead, inside the tab. A press on a tool runs that command on this pane.
+//! the screen says that panes are out of sight. A press on the band gives the pane the keyboard.
+//! A press on the pane's **name** — its mark and its title, from the band's left edge to where
+//! the title ends — is the start of carrying it: past the slop the pane is carried (`pane_drag`,
+//! no key held) — to a region of a pane, onto a strip, out of the window; the band of a floating
+//! pane moves its card instead, inside the tab. The rest of the band is not the pane's: where
+//! the tab column stands beside the content, a band in the content's top row takes the window
+//! (`split::head_press`, the same band as the cards' top margin and the gap between two such
+//! bands), and any other band's blank only gives the keyboard, so one blank never does two
+//! things by where its pane stands. A press on a tool runs that command on this pane.
 //!
 //! **The title is a tab's** ([`super::tab_title::Title`]): a title that does not fit fades at its
 //! end instead of ending in "…", and gives the tools its room while they show — the tools come in
@@ -52,6 +57,7 @@ use crate::palette::attributes;
 use crate::pane::TerminalPane;
 use crate::pencere_view::ViewHead;
 use crate::pencere_view::face::{self as program_face};
+use crate::split::HeadPress;
 use crate::tabs::{self, Indicator};
 use bt_shell_common::view_icon::Lay;
 
@@ -325,6 +331,9 @@ pub(crate) struct HeadIvars {
     /// The pointer is on Quit: it stands on a brighter face.
     quit_lit: Cell<bool>,
     pressed: Cell<Option<Part>>,
+    /// Where the title ends, from the band's left edge: the right end of the pane's name
+    /// ([`PaneHead::name_rect`]), as the last layout of the parts left it.
+    name_end: Cell<f64>,
     title: Title,
     tools: Retained<HeadTools>,
 }
@@ -394,10 +403,24 @@ define_class!(
                 container.begin_card_drag(self.pane(), None, event.locationInWindow());
                 return;
             }
-            // Otherwise the press may become a carry: the session watches the pointer from
-            // here and takes over once it travels.
-            if let Some(app) = crate::app::delegate(self.mtm()) {
-                app.pane_press(self.pane(), event.locationInWindow());
+            // Otherwise the press is decided by the rule: the name may become a carry (the
+            // session watches the pointer from here and takes over once it travels), the blank
+            // of a band at the content's top takes the window, any other blank only focuses.
+            let Some(container) = self.container() else {
+                return;
+            };
+            match container.head_press(self.frame().origin.y, self.on_name(event)) {
+                HeadPress::CarryPane => {
+                    if let Some(app) = crate::app::delegate(self.mtm()) {
+                        app.pane_press(self.pane(), event.locationInWindow());
+                    }
+                }
+                HeadPress::MoveWindow => {
+                    if let Some(window) = self.window() {
+                        super::move_window(&window, event);
+                    }
+                }
+                HeadPress::Focus => {}
             }
         }
 
@@ -452,6 +475,7 @@ impl PaneHead {
             hot: Cell::new(false),
             quit_lit: Cell::new(false),
             pressed: Cell::new(None),
+            name_end: Cell::new(0.0),
             title,
             tools: tools.clone(),
         });
@@ -575,6 +599,29 @@ impl PaneHead {
         )
     }
 
+    /// The pane's name, in the band's space: the mark and the title, from the band's left edge
+    /// (the card's corner is the pane's too) to where the title ends — its natural width, or
+    /// what is left of it for the tools or Quit — and the band's whole height. A pane without a
+    /// title keeps the mark's. What a press must be on to hold the pane.
+    fn name_rect(&self) -> NSRect {
+        let mark = self.mark_rect();
+        let right = self.ivars().name_end.get().max(mark.origin.x + MARK);
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(right, self.bounds().size.height),
+        )
+    }
+
+    /// Whether the event's point is on the pane's name ([`PaneHead::name_rect`]).
+    fn on_name(&self, event: &NSEvent) -> bool {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let name = self.name_rect();
+        at.x >= name.origin.x
+            && at.x < name.origin.x + name.size.width
+            && at.y >= name.origin.y
+            && at.y < name.origin.y + name.size.height
+    }
+
     /// Places the title and the tools: the title after the mark, to the grid's right margin or
     /// Quit — or, while the tools show, to just before them; the tools come in or go.
     fn lay_out_parts(&self) {
@@ -601,6 +648,8 @@ impl PaneHead {
         let text = iv.title.field();
         text.setAttributedStringValue(&title_text(look, palette));
         let natural = text.fittingSize();
+        iv.name_end
+            .set(x + natural.width.ceil().min((end - x).max(0.0)));
         iv.title.place(
             NSRect::new(
                 NSPoint::new(x, GUTTER + ((TOOL_HEIGHT - natural.height) / 2.0).max(0.0)),

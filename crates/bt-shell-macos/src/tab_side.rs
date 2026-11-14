@@ -24,8 +24,11 @@
 //! painted over them, which would lighten a card's shadow falling under the column.
 //!
 //! **A press on the column's empty part moves the window** (the bar's `mouseDown:`,
-//! `performWindowDragWithEvent:`), as it does on the bar's. The band of the title row over the
-//! content is claimed by a [`RowClaim`] of the root view, so a press there is the pane's.
+//! [`move_window`](super::move_window)), as it does on the bar's. The band of the title row over
+//! the content is claimed by a [`RowClaim`] of the root view, so a press there is not the window
+//! server's but the view's under it: the blank of a pane header in the content's top band, the
+//! gap between two such headers and the cards' top margin hand the window over through the same
+//! helper (`split::in_band`), while the pane is carried by its name alone.
 //!
 //! **The summary card** opens at the row's right, [`CARD_BESIDE`](super::CARD_BESIDE) off the
 //! column and level with the row, slid to fit the window (`card_beside`): the same card, the

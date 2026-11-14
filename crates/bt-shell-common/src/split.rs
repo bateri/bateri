@@ -261,6 +261,50 @@ impl Spacing {
             (rect.height - self.around - self.top).max(0.0),
         )
     }
+
+    /// How far down the area the **band** reaches, in device pixels: the top margin and one
+    /// header. The band is the strip along the content's top where the window is taken when the
+    /// tab column stands beside the content (see [`in_band`]).
+    pub fn band_px(self) -> f64 {
+        self.top + self.head
+    }
+}
+
+/// Whether a point `y_px` device pixels down the area's top edge is in the band where a press
+/// takes the window: the top margin of the cards, the headers of the top row (a lone pane's and a
+/// zoomed one's too) and what lies between two of them. Only while the tab column is shown, since
+/// otherwise the title row above the content is the window's handle and the band is not.
+///
+/// A header is in the band when it stands in it (its top edge is the point asked): the top row's
+/// does, the next row's starts under it.
+pub fn in_band(column_shown: bool, y_px: f64, spacing: Spacing) -> bool {
+    column_shown && y_px < spacing.band_px()
+}
+
+/// What a press on a pane's header does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadPress {
+    /// The press holds the pane: moving the pointer past the slop carries it.
+    CarryPane,
+    /// The press holds the window.
+    MoveWindow,
+    /// The press only gives the pane the keyboard.
+    Focus,
+}
+
+/// What a press on a pane's header that is on neither a tool nor Quit does. `y_px` is the
+/// header's top edge (or the press) down the area's top edge, `on_name` whether the press is on
+/// the pane's name — its mark and its title. The pane is held by its name wherever the header
+/// stands; the rest of a header in the band holds the window; the rest of any other header holds
+/// nothing, because the same blank would otherwise do two things by where its pane stands.
+pub fn head_press(column_shown: bool, y_px: f64, spacing: Spacing, on_name: bool) -> HeadPress {
+    if on_name {
+        HeadPress::CarryPane
+    } else if in_band(column_shown, y_px, spacing) {
+        HeadPress::MoveWindow
+    } else {
+        HeadPress::Focus
+    }
 }
 
 /// How much of the room a pane let go beside another pane asks for: half, the plain split. A
@@ -1720,9 +1764,10 @@ pub fn arrange(ids: &[u64], room: &Room<'_>) -> Vec<Tree> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Axis, Direction, Divider, Layout, MOST_PER_TAB, PANE_EDGE_SHARE, Placement, Rect, Removal,
-        Room, SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict, WINDOW_EDGE_SHARE,
-        WINDOW_EDGE_STRIP, Zone, arrange, pushed, pushed_room, slide, sliver, solve_share,
+        Axis, Direction, Divider, HeadPress, Layout, MOST_PER_TAB, PANE_EDGE_SHARE, Placement,
+        Rect, Removal, Room, SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict,
+        WINDOW_EDGE_SHARE, WINDOW_EDGE_STRIP, Zone, arrange, head_press, in_band, pushed,
+        pushed_room, slide, sliver, solve_share,
     };
 
     fn area(rect: &Rect) -> f64 {
@@ -3617,5 +3662,81 @@ mod tests {
         assert_eq!(leaves, [10, 20, 30]);
         assert_eq!(trees.len(), 3);
         assert!(arrange(&[], &room).is_empty(), "no terminals, no tabs");
+    }
+
+    /// The cards beside the tab column at 2x: an 8 pt top margin and a 34 pt header.
+    fn beside_the_column() -> Spacing {
+        Spacing::gapped(8.0, 8.0, 2.0)
+            .with_left(0.0, 2.0)
+            .with_head(34.0, 2.0)
+    }
+
+    #[test]
+    fn the_band_is_the_top_margin_and_one_header() {
+        assert_eq!(beside_the_column().band_px(), (8.0 + 34.0) * 2.0);
+        // Lines have no margin at the top: the band is the header.
+        assert_eq!(Spacing::DIVIDED.with_head(34.0, 2.0).band_px(), 68.0);
+        assert_eq!(Spacing::DIVIDED.band_px(), 0.0);
+    }
+
+    #[test]
+    fn a_press_on_a_header_is_decided_by_where_it_stands_and_whether_it_is_on_the_name() {
+        let cards = beside_the_column();
+        let lines = Spacing::DIVIDED.with_head(34.0, 2.0);
+        // (column shown, spacing, y, on the name) -> what it does.
+        let table = [
+            // The column is shown: the name carries the pane, the rest of the band the window,
+            // the rest of any lower header only the keyboard.
+            (true, cards, 0.0, false, HeadPress::MoveWindow),
+            (true, cards, 16.0, false, HeadPress::MoveWindow),
+            (true, cards, 83.0, false, HeadPress::MoveWindow),
+            (true, cards, 84.0, false, HeadPress::Focus),
+            (true, cards, 400.0, false, HeadPress::Focus),
+            (true, cards, 16.0, true, HeadPress::CarryPane),
+            (true, cards, 400.0, true, HeadPress::CarryPane),
+            (true, lines, 0.0, false, HeadPress::MoveWindow),
+            (true, lines, 67.0, false, HeadPress::MoveWindow),
+            (true, lines, 68.0, false, HeadPress::Focus),
+            (true, lines, 0.0, true, HeadPress::CarryPane),
+            // The column is not shown (the tabs are above, or the column is hidden): the title
+            // row is the window's handle and no header is.
+            (false, cards, 0.0, false, HeadPress::Focus),
+            (false, cards, 16.0, false, HeadPress::Focus),
+            (false, lines, 0.0, false, HeadPress::Focus),
+            (false, cards, 16.0, true, HeadPress::CarryPane),
+            (false, cards, 400.0, true, HeadPress::CarryPane),
+        ];
+        for (shown, spacing, y, on_name, want) in table {
+            assert_eq!(
+                head_press(shown, y, spacing, on_name),
+                want,
+                "column shown {shown}, y {y}, on the name {on_name}"
+            );
+            assert_eq!(in_band(shown, y, spacing), shown && y < spacing.band_px());
+        }
+    }
+
+    #[test]
+    fn the_headers_of_the_top_row_are_in_the_band_and_the_rows_under_them_are_not() {
+        // Two panes side by side over a third: the first two stand in the top row.
+        let mut tree = Tree::Leaf(1);
+        assert!(tree.split(1, Axis::Horizontal, 2));
+        assert!(tree.split(1, Axis::Vertical, 3));
+        let cards = beside_the_column();
+        let lines = Spacing::DIVIDED.with_head(34.0, 2.0);
+        for spacing in [cards, lines] {
+            let bounds = Rect::new(0.0, 0.0, 1200.0, 900.0);
+            let layout = tree.layout_spaced(bounds, 2.0, spacing);
+            // A header stands over its pane: its top edge is the pane's less the header (the
+            // layout is in points, the spacing in device pixels).
+            let head_top =
+                |layout: &Layout, id: u64| frame_of(layout, id).y * 2.0 - spacing.head_px();
+            assert!(in_band(true, head_top(&layout, 1), spacing), "{spacing:?}");
+            assert!(in_band(true, head_top(&layout, 2), spacing), "{spacing:?}");
+            assert!(!in_band(true, head_top(&layout, 3), spacing), "{spacing:?}");
+            // The zoomed pane stands at the top, so it is in.
+            let zoomed = tree.layout_zoomed_spaced(bounds, 2.0, Some(3), spacing);
+            assert!(in_band(true, head_top(&zoomed, 3), spacing), "{spacing:?}");
+        }
     }
 }

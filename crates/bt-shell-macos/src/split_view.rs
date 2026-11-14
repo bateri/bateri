@@ -106,7 +106,7 @@ use crate::sheets::{self, OwnerSlot};
 use crate::split::{
     self, Axis, Direction, Divider, Placement, Rect, Removal, Room, Size, Spacing, Tree, Verdict,
 };
-use crate::tab_bar::{Capsule, HeadLook, PaneHead};
+use crate::tab_bar::{Capsule, HeadLook, PaneHead, move_window};
 use crate::window::RootView;
 use crate::zoom_motion::{self, Hold, Run, Stage, Still, Way};
 
@@ -327,6 +327,9 @@ pub(crate) struct HandleIvars {
     /// The offset between the pointer and the line at press: the line must not
     /// jump under the pointer, it moves from where it was grabbed.
     grab: Cell<f64>,
+    /// The press in progress came in the band and took the window: nothing of it is the
+    /// divider's, and `grab` is not this press's.
+    windowed: Cell<bool>,
 }
 
 define_class!(
@@ -359,12 +362,18 @@ define_class!(
                 return;
             };
             let own = self.ivars().card.get();
-            let covers: Vec<Rect> = container
+            let mut covers: Vec<Rect> = container
                 .outlines_with_cards()
                 .into_iter()
                 .filter(|(card, _)| own.is_none_or(|own| *card > own))
                 .map(|(_, rect)| rect)
                 .collect();
+            // The band is the window's, not the divider's: no resize arrow where a press takes
+            // the window. A floating card's divider stands in the card, not in the band.
+            let band = container.band_height();
+            if own.is_none() && band > 0.0 {
+                covers.push(Rect::new(0.0, 0.0, container.bounds().size.width, band));
+            }
             let frame = self.frame();
             for open in uncovered(
                 Rect::new(
@@ -391,9 +400,18 @@ define_class!(
         }
 
         /// The press is swallowed (it must not climb the responder chain to
-        /// the window) and the grabbed position is recorded.
+        /// the window) and the grabbed position is recorded. In the band at the content's top
+        /// it takes the window instead, as the headers' blank on either side does.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            let windowed = self.in_band(event);
+            self.ivars().windowed.set(windowed);
+            if windowed {
+                if let Some(window) = self.window() {
+                    move_window(&window, event);
+                }
+                return;
+            }
             if let Some(along) = self.along(event) {
                 self.ivars().grab.set(along - self.ivars().line.get());
             }
@@ -401,6 +419,9 @@ define_class!(
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
+            if self.ivars().windowed.get() {
+                return;
+            }
             let Some(along) = self.along(event) else {
                 return;
             };
@@ -417,6 +438,9 @@ define_class!(
         /// (once per drag, not per step).
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
+            if self.ivars().windowed.replace(false) {
+                return;
+            }
             if let Some(app) = crate::app::delegate(self.mtm()) {
                 app.layout_changed();
             }
@@ -425,6 +449,19 @@ define_class!(
 );
 
 impl DividerHandle {
+    /// Whether the press is in the band at the content's top ([`SplitView::in_band`]) — which a
+    /// floating card's divider never is: it stands in its card.
+    fn in_band(&self, event: &NSEvent) -> bool {
+        if self.ivars().card.get().is_some() {
+            return false;
+        }
+        let Some(container) = self.container() else {
+            return false;
+        };
+        let at = container.convertPoint_fromView(event.locationInWindow(), None);
+        container.in_band(at.y)
+    }
+
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(HandleIvars {
             card: Cell::new(None),
@@ -432,6 +469,7 @@ impl DividerHandle {
             axis: Cell::new(Axis::Horizontal),
             line: Cell::new(0.0),
             grab: Cell::new(0.0),
+            windowed: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -796,6 +834,23 @@ define_class!(
         fn resize_subviews(&self, _old: NSSize) {
             self.layout_panes();
         }
+
+        /// A press on the container itself, where no pane, header, handle or grip stands: in
+        /// the band at the content's top (the cards' top margin) it takes the window, as the
+        /// headers' blank and the dividers between them do; anywhere else it goes on up the
+        /// chain as it always did.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            if self.in_band(at.y)
+                && let Some(window) = self.window()
+            {
+                move_window(&window, event);
+                return;
+            }
+            // SAFETY: the superclass's own `mouseDown:`, with the event it was given.
+            let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+        }
     }
 );
 
@@ -902,6 +957,41 @@ impl SplitView {
         Layers {
             flat: self.ivars().tree.borrow().clone(),
             cards: self.ivars().cards.borrow().clone(),
+        }
+    }
+
+    /// Whether a point `y` points down the container is in the band along the content's top
+    /// that takes the window ([`split::in_band`]): asked with the spacing the panes are laid
+    /// out with, so the band, the headers and the cards' margin agree where it ends.
+    pub(crate) fn in_band(&self, y: f64) -> bool {
+        let scale = self.scale();
+        let beside = self.beside_tabs();
+        split::in_band(beside, y * scale, spacing(scale, self.style(), beside))
+    }
+
+    /// What a press on a header whose top edge is `head_top` points down the container, off its
+    /// tools and Quit, does ([`split::head_press`]); `on_name` is whether it is on the pane's
+    /// name.
+    pub(crate) fn head_press(&self, head_top: f64, on_name: bool) -> split::HeadPress {
+        let scale = self.scale();
+        let beside = self.beside_tabs();
+        split::head_press(
+            beside,
+            head_top * scale,
+            spacing(scale, self.style(), beside),
+            on_name,
+        )
+    }
+
+    /// How far down the container the band reaches, points; nothing while there is none (the
+    /// tab column is not beside the content).
+    fn band_height(&self) -> f64 {
+        let scale = self.scale();
+        let beside = self.beside_tabs();
+        if beside {
+            spacing(scale, self.style(), beside).band_px() / scale
+        } else {
+            0.0
         }
     }
 

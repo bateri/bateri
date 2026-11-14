@@ -772,23 +772,38 @@ enum Step {
     End,
 }
 
+/// Whether a pane can be carried from where it stands: not while it floats (its card moves
+/// where it stands, and a pane that leaves docks first) and not when it has nowhere to go (the
+/// only pane of the only tab of the only window). The one answer for a press that starts a
+/// carry (and, later, for a header that shows the pane can be taken).
+fn carry_open(floating: bool, tabs: usize, panes: usize, windows: usize) -> bool {
+    !floating && (tabs > 1 || panes > 1 || windows > 1)
+}
+
+/// The window and the tab `pane` can be carried from, if it can ([`carry_open`]).
+fn carry_from(
+    app: &AppDelegate,
+    pane: u64,
+) -> Option<(Retained<TerminalWindow>, Retained<crate::tab::TerminalTab>)> {
+    let windows = app.windows();
+    let (window, tab) = windows
+        .iter()
+        .find_map(|window| window.tab_holding(pane).map(|tab| (window.clone(), tab)))?;
+    carry_open(
+        tab.container().floating(pane),
+        window.tab_count(),
+        tab.panes().len(),
+        windows.len(),
+    )
+    .then_some((window, tab))
+}
+
 impl Session {
     /// A press on pane `pane` at `at` (window coordinates), if the pane has
     /// anywhere to go: another tab, another pane to be let go beside or
     /// another window.
     pub(crate) fn press(app: &AppDelegate, pane: u64, at: NSPoint) -> Option<Self> {
-        let windows = app.windows();
-        let (window, tab) = windows
-            .iter()
-            .find_map(|window| window.tab_holding(pane).map(|tab| (window.clone(), tab)))?;
-        // A floating pane is not carried to a place among the splits, a tab or a window: its
-        // card moves where it stands, and a pane that leaves docks first.
-        if tab.container().floating(pane) {
-            return None;
-        }
-        if window.tab_count() <= 1 && tab.panes().len() <= 1 && windows.len() <= 1 {
-            return None;
-        }
+        let (window, tab) = carry_from(app, pane)?;
         Some(Self {
             window: window.id(),
             tab: tab.id(),
@@ -1739,6 +1754,27 @@ mod tests {
         assert_eq!(lands_at(Some(PaneTarget::Tab(1)), 1), Lands::Back);
         assert_eq!(lands_at(Some(PaneTarget::Between(0)), 1), Lands::NewTab(0));
         assert_eq!(lands_at(None, 1), Lands::Panes);
+    }
+
+    #[test]
+    fn a_pane_is_carried_only_where_it_has_somewhere_to_go() {
+        // (floating, tabs, panes, windows) -> whether it can be carried.
+        let table = [
+            (false, 1, 1, 1, false),
+            (false, 2, 1, 1, true),
+            (false, 1, 2, 1, true),
+            (false, 1, 1, 2, true),
+            (false, 3, 4, 2, true),
+            (true, 1, 1, 1, false),
+            (true, 2, 2, 2, false),
+        ];
+        for (floating, tabs, panes, windows, want) in table {
+            assert_eq!(
+                carry_open(floating, tabs, panes, windows),
+                want,
+                "floating {floating}, {tabs} tabs, {panes} panes, {windows} windows"
+            );
+        }
     }
 
     #[test]

@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- **With the tabs at the side, the top pane header moves the window.** Drag the empty part of the headers along the top, or the gap between them, to move the window; double-click zooms it. A pane is now carried by its icon and name; the empty part of any other header only focuses the pane.
+
 ## [0.29.1] - 2026-11-14
 
 ### Fixed

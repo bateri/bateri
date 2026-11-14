@@ -157,7 +157,7 @@ use objc2_app_kit::{
     NSGraphicsContext, NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSLineCapStyle,
     NSLineJoinStyle, NSMenu, NSMenuItem, NSShadow, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindingRule, NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindingRule, NSWindow, NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGContext, CGImage};
@@ -364,6 +364,28 @@ pub(crate) fn title_double_click(action: Option<&str>, legacy_minimize: bool) ->
         Some(_) => TitleAction::Zoom,
         None if legacy_minimize => TitleAction::Minimize,
         None => TitleAction::Zoom,
+    }
+}
+
+/// A press that takes the window: one click moves it, a double click does what the system's
+/// setting says. The one place a press hands the window to the system's drag, so what a press on
+/// the bar's empty part, on a pane header's blank in the band, on the divider between two such
+/// headers and on the cards' top margin do is the same thing. The caller has decided that the
+/// press is the window's.
+pub(crate) fn move_window(window: &NSWindow, event: &NSEvent) {
+    if event.clickCount() < 2 {
+        window.performWindowDragWithEvent(event);
+        return;
+    }
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let action = defaults
+        .stringForKey(ns_string!("AppleActionOnDoubleClick"))
+        .map(|action| action.to_string());
+    let legacy = defaults.boolForKey(ns_string!("AppleMiniaturizeOnDoubleClick"));
+    match title_double_click(action.as_deref(), legacy) {
+        TitleAction::Zoom => window.performZoom(None),
+        TitleAction::Minimize => window.performMiniaturize(None),
+        TitleAction::Nothing => {}
     }
 }
 
@@ -6279,22 +6301,8 @@ define_class!(
         /// system's setting says.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            let Some(window) = self.window() else {
-                return;
-            };
-            if event.clickCount() < 2 {
-                window.performWindowDragWithEvent(event);
-                return;
-            }
-            let defaults = NSUserDefaults::standardUserDefaults();
-            let action = defaults
-                .stringForKey(ns_string!("AppleActionOnDoubleClick"))
-                .map(|action| action.to_string());
-            let legacy = defaults.boolForKey(ns_string!("AppleMiniaturizeOnDoubleClick"));
-            match title_double_click(action.as_deref(), legacy) {
-                TitleAction::Zoom => window.performZoom(None),
-                TitleAction::Minimize => window.performMiniaturize(None),
-                TitleAction::Nothing => {}
+            if let Some(window) = self.window() {
+                move_window(&window, event);
             }
         }
 
@@ -9103,6 +9111,40 @@ mod tests {
         assert_eq!(title_double_click(Some("None"), true), TitleAction::Nothing);
         assert_eq!(title_double_click(None, true), TitleAction::Minimize);
         assert_eq!(title_double_click(None, false), TitleAction::Zoom);
+    }
+
+    /// The system's window drag is asked for in one place, so that what a press that takes the
+    /// window does — one click moves, a double click does the system's setting — is the same on
+    /// the bar, on a pane header's blank, on the divider between two headers and on the cards'
+    /// top margin. The call is looked for, not the selector a comment names.
+    #[test]
+    fn the_window_is_handed_to_the_system_drag_in_one_place() {
+        let call = ["performWindowDrag", "WithEvent("].concat();
+        let mut dirs = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
+        let mut found = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the source directory") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("a source file");
+                    for _ in text.match_indices(&call) {
+                        found.push(path.file_name().expect("a file name").to_owned());
+                    }
+                }
+            }
+        }
+        assert_eq!(found, ["tab_bar.rs"], "the one call stands in the helper");
+        let source = include_str!("tab_bar.rs");
+        let at = source
+            .find("pub(crate) fn move_window(")
+            .expect("the helper");
+        let end = source[at..].find("\n}\n").expect("its end");
+        assert!(source[at..at + end].contains(&call));
     }
 
     /// One tab keeps the diagnostic beside its title, the old subtitle's
