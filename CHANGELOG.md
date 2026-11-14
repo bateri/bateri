@@ -12,9 +12,11 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-11-14
+
 ### Fixed
 
-- **A program started with `bateri split`, `tab` or `window` is known by its tab.** A pane a command opened for a program, like Claude Code started by linearpen, showed a shell's icon and no running ring for as long as the program ran. It now shows the program's icon and ring, as for a program you start by hand. Programs a ⌘-click opens get the same.
+- **A program that `bateri split`, `tab` or `window` starts shows its own icon.** Such a pane, like Claude Code started by linearpen, showed a shell's icon and no running ring. It now shows the program's, as does a file you ⌘-click open, and quitting bateri asks about it like any program.
 
 ## [0.29.0] - 2026-11-12
 
