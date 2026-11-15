@@ -350,8 +350,8 @@ pub enum Fact {
     /// bootstrap's nonce'd `8133;i;up` arrived (older builds also counted
     /// the helper session's greeting).
     Posix,
-    /// bateri's bootstrap ran there — the list of servers with bateri's files
-    /// (the remove button comes later).
+    /// bateri's bootstrap ran there — the list of servers with bateri's files (Shell ▸ Remove
+    /// bateri from “{host}” takes them off and forgets the row: [`forget_server`]).
     Touched,
     /// A wrapped connection ended without the bootstrap's `up` and not with
     /// ssh's own error ([`fell_back`]): the login shell does not run
@@ -1586,6 +1586,23 @@ pub fn forget_plain(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::
     rewrite(path, LOCK_PATIENCE, |state| state.forget(Fact::Plain, &key)).map(|()| true)
 }
 
+/// The key of the server behind `ssh` (an argv like [`record_posix`]'s): the `user@host:port`
+/// that `ssh -G` resolves, the one every row of the state file is under. `None` if `ssh -G`
+/// cannot read the argv.
+pub fn server_key(runner: &dyn SshRunner, ssh: &[String]) -> Option<String> {
+    key_of(runner, ssh)
+}
+
+/// Forgets **everything** the state file knows of the server `key` — that bateri has put its
+/// files there, that it runs a POSIX shell, that kablo cannot be kept on it: Shell ▸ Remove
+/// bateri from “{host}”, which takes the files off the server, so that none of it is left to be
+/// believed. The rows of other servers stay.
+pub fn forget_server(path: &Path, key: &str) -> io::Result<()> {
+    rewrite(path, LOCK_PATIENCE, |state| {
+        state.rows.retain(|(_, row, _)| row != key);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1899,6 +1916,29 @@ mod tests {
             "one row per fact and key"
         );
         assert_eq!(state.rows.len(), 4);
+    }
+
+    #[test]
+    fn forgetting_a_server_takes_every_row_of_it_and_no_row_of_another() {
+        let dir = scratch("forget-server");
+        let path = dir.join("remote-hosts");
+        for (fact, key) in [
+            (Fact::Posix, "a@h:22"),
+            (Fact::Touched, "a@h:22"),
+            (Fact::NoKablo, "a@h:22"),
+            (Fact::Touched, "b@h:22"),
+        ] {
+            record(&path, fact, key, 1, LOCK_PATIENCE).expect("a row");
+        }
+        forget_server(&path, "a@h:22").expect("forgotten");
+        let state = load(&path);
+        assert!(!state.knows(Fact::Posix, "a@h:22"));
+        assert!(!state.knows(Fact::Touched, "a@h:22"));
+        assert!(!state.knows(Fact::NoKablo, "a@h:22"));
+        assert!(state.knows(Fact::Touched, "b@h:22"));
+        // A server that is not there, and a file that is not, are no trouble.
+        forget_server(&path, "c@h:22").expect("nothing to forget");
+        forget_server(&dir.join("none"), "a@h:22").expect("no file");
     }
 
     fn scratch(name: &str) -> PathBuf {

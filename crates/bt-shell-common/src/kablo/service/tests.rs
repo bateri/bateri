@@ -1806,6 +1806,49 @@ fn a_bridge_that_ends_for_a_missing_kablo_has_it_written_again_before_the_next_d
     assert_eq!(rig.world.count("refresh"), 1, "not written over and over");
 }
 
+/// The terminals a removal ends cut the account's bridge and the removal deletes the kablo the
+/// bridge runs: the dial after that finds no kablo and would write it again over the server
+/// bateri is being taken off. Nothing is dialed or written for the account from the question's
+/// yes until the removal ends — and a removal that failed leaves the account as any other whose
+/// kablo is missing: written again.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn an_account_bateri_is_being_removed_from_is_not_dialed_or_written_until_the_removal_ends() {
+    let rig = Rig::new("removing");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+
+    rig.service.removing("u@rasp:22");
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Missing;
+    rig.world.break_connection();
+    until("the loss told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+    });
+    rig.service.retry_account("u@rasp:22");
+    thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        rig.world.count("refresh"),
+        0,
+        "nothing is written to a server that is being taken off"
+    );
+    assert_eq!(
+        rig.world.links().last(),
+        Some(&(pane.clone(), PaneLink::Reconnecting)),
+        "and no bridge is made"
+    );
+
+    // The removal failed half way: the account is served again, and the kablo it lost is written.
+    rig.service.removal_failed("u@rasp:22");
+    rig.service.retry_account("u@rasp:22");
+    until("kablo written again", || rig.world.count("refresh") == 1);
+    until("the pane back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+}
+
 /// A pane that asks for a new terminal on a server whose kablo cannot be written is not left
 /// waiting: after the dial that wrote it again and found nothing to run it falls back to a plain
 /// `ssh`, which says why; the terminal is never made and the ledger has no row for it, and the
@@ -3061,7 +3104,8 @@ fn a_bridge_that_ends_for_its_login_or_its_key_says_so() {
     rig.world
         .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
     rig.world.break_connection();
-    assert!(matches!(holder.outcome(), Outcome::Exit(_)));
+    let outcome = holder.outcome();
+    assert!(matches!(outcome, Outcome::Exit(_)), "{outcome:?}");
     until("the pane let go of", || rig.service.shown(&pane).is_none());
     let links = rig.world.links();
     assert!(
@@ -3462,6 +3506,40 @@ fn a_quit_that_ends_the_terminals_waits_for_them_to_have_ended() {
         "it ended: nothing to remember"
     );
     assert!(ledger.known("u@rasp:22").is_none());
+}
+
+/// bateri was taken off the server: the pane that showed a terminal of it ends with the line, the
+/// ledger lets go of the account and a quit that waited for its terminals has nothing to wait for.
+#[test]
+fn an_account_bateri_was_removed_from_is_let_go_of_with_what_waited_on_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "removed",
+        Fake::new(Bridge::new(Age::Current).stubborn()),
+        ledger.clone(),
+        Duration::from_secs(60),
+    );
+    let pane = pane_named(&rig.world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    assert!(ledger.known("u@rasp:22").is_some());
+
+    rig.service.removed("u@rasp:22");
+    assert_eq!(holder.outcome(), Outcome::Exit(1));
+    assert!(
+        String::from_utf8_lossy(&holder.shown.bytes()).contains("was removed from this server"),
+        "the pane says why it ends"
+    );
+    until("the account forgotten", || {
+        ledger.known("u@rasp:22").is_none() && rig.service.shown(&pane).is_none()
+    });
+    assert!(ledger.terminals().is_empty());
+
+    // Another account is not touched, and one that is not there is no trouble.
+    rig.service.removed("nobody@nowhere:22");
 }
 
 /// A server that does not answer does not hold the quit: the wait is bounded, and the

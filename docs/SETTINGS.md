@@ -2634,7 +2634,8 @@ the server's rc files.
   what bateri does on a server either: no file drop (the pane refuses the file),
   no download, no load indicator, no ports, no ⌘ check of paths
   and no password kept in the Keychain for it; bateri opens no
-  connection of its own to that host. The remote session is still detected, so
+  connection of its own to that host — except for Shell ▸ Remove bateri from
+  “{host}”, which you start and confirm. The remote session is still detected, so
   the dock says `host`, colored by `hosts`, and the tab and the title name
   the server. Turning `integration` on for the host (Shell ▸ Shell Integration
   on “{host}”) is the way to get all of it back, from the next `ssh`.
@@ -2661,6 +2662,26 @@ the server's rc files.
   the array's formatting are not touched, and if the file cannot be parsed or
   the list is broken, nothing is written. The change takes effect on the
   **next** `ssh`; an open connection stays as it is.
+- **Taking bateri off a server**: while the pane has an `ssh` running, **Shell ▸
+  Remove bateri from “host”** removes everything bateri put on that server. It
+  can be used where this Mac has put bateri's files (the record that keeps
+  *ask* from asking again), and is grayed out elsewhere and in a local tab. It
+  always asks first: the question says how many terminals running on the server
+  end with it — the server's own list, so a terminal another of your Macs
+  started counts — and that bateri's folder there (`~/.local/share/bateri`, the
+  one under `XDG_DATA_HOME` when that is set, and the folder kablo had before
+  it moved in) goes, with the programs bateri installed in it. Nothing else on
+  the server is touched. Then the terminals end, the folders are deleted, this
+  Mac forgets the server, and the host's entry gets `integration = false`, so
+  that no later `ssh` (`"auto"` included) puts it back; turning Shell
+  Integration on for the host undoes that. For this command bateri opens a
+  connection of its own to the server — the one time it does in a plain `ssh`
+  pane, and also in a pane that shows one of the server's terminals, since the
+  kept connection is made of the terminals the command ends — and asks for the
+  login in a sheet if it needs one. If the settings file cannot be written, the
+  sheet at the end says so, since `"auto"` would set the server up again. Nothing is removed
+  from a server whose terminals could not be listed, and a removal that fails
+  half way forgets nothing here, so it can be made again.
 
 #### Remote load indicator
 

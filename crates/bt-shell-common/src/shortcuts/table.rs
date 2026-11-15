@@ -237,6 +237,9 @@ pub const COMMANDS: &[Command] = &[
     command("mark_development", "markHost:2", &[]),
     command("mark_none", "markHost:3", &[]),
     command("shell_integration", "toggleHostIntegration", &[]),
+    // Everything bateri put on the focused pane's server comes off it, after a question: grey
+    // unless this Mac put it there.
+    command("remove_from_host", "removeFromHost", &[]),
     // The terminals the focused pane's server keeps that no pane shows, together in a new tab.
     command("open_all_background", "openAllBackground", &[]),
     // The card a new server asks about the programs the person follows with: its two buttons,
@@ -669,17 +672,17 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_six_new() {
+    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_seven_new() {
         let none: Vec<&str> = COMMANDS
             .iter()
             .filter(|command| command.defaults.is_empty())
             .map(|command| command.name)
             .collect();
-        // The twenty-eight items of the menu that have no key today, and the six that
+        // The twenty-eight items of the menu that have no key today, and the seven that
         // join the menu: Command History…, Themes… and Open Themes Folder (which the theme
-        // list builds every time it opens), Open All in New Tab, Go to Waiting Tab and New
-        // Floating Pane (Float Pane has ⌥⌘↩).
-        assert_eq!(none.len(), 28 + 6, "{none:?}");
+        // list builds every time it opens), Open All in New Tab, Go to Waiting Tab, New
+        // Floating Pane (Float Pane has ⌥⌘↩) and Remove bateri from Host.
+        assert_eq!(none.len(), 28 + 7, "{none:?}");
         for new in [
             "command_history",
             "themes",
@@ -687,6 +690,7 @@ mod tests {
             "open_all_background",
             "go_to_waiting",
             "new_floating_pane",
+            "remove_from_host",
         ] {
             assert!(none.contains(&new), "{new}");
         }

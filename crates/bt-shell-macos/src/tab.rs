@@ -256,6 +256,16 @@ impl PaneHost for TabHost {
         });
     }
 
+    fn removals(&self) -> Option<std::sync::Arc<dyn crate::pane::Removals>> {
+        Some(std::sync::Arc::new(crate::hold_service::Gate))
+    }
+
+    fn menu_changed(&self) {
+        if let Some(app) = app::delegate(Self::mtm()) {
+            app.refresh_menu_bar();
+        }
+    }
+
     fn open_all_background(&self, _pane: u64, host: &str) {
         self.go(bt_shell_common::palette::Go::OpenAllBackground(
             host.to_owned(),

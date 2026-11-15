@@ -567,6 +567,29 @@ fn an_account_is_there_from_its_making_to_its_last_terminal() {
 }
 
 #[test]
+fn a_server_bateri_was_removed_from_is_forgotten_with_every_terminal_of_it_and_no_other() {
+    let ledger = Ledger::memory();
+    ledger.remember(&server("ada@rasp:2222", &["ssh", "rasp"]), &installed());
+    ledger.remember(&server("ada@pi:22", &["ssh", "pi"]), &installed());
+    ledger.shown("ada@pi:22", &id("b-3"), Some(&other_pane()));
+    ledger.shown("ada@rasp:2222", &id("b-1"), Some(&pane()));
+    ledger.shown("ada@rasp:2222", &id("b-2"), None);
+    ledger.end("ada@rasp:2222", &id("b-2"));
+
+    ledger.forget_account("ada@rasp:2222");
+    assert!(ledger.known("ada@rasp:2222").is_none());
+    assert!(ledger.terminals_of("ada@rasp:2222").is_empty());
+    assert!(
+        ledger.ending("ada@rasp:2222").is_empty(),
+        "nothing is left there to end"
+    );
+    assert!(ledger.known("ada@pi:22").is_some());
+    assert!(ledger.keeps("ada@pi:22", &id("b-3")));
+    // A server that is not there is no trouble.
+    ledger.forget_account("nobody@nowhere:22");
+}
+
+#[test]
 fn every_live_terminal_can_be_marked_to_end_at_once() {
     let ledger = Ledger::memory();
     ledger.remember(&server("ada@rasp:2222", &["ssh", "rasp"]), &installed());

@@ -544,6 +544,18 @@ impl Ledger {
         });
     }
 
+    /// The server has nothing of bateri's any more (Shell ▸ Remove bateri from “{host}”): its
+    /// account and all of its terminals, those meant to live and those to end, are forgotten —
+    /// there is nothing left on it to show again or to end.
+    pub fn forget_account(&self, account: &str) {
+        self.change(|rows| {
+            let before = (rows.accounts.len(), rows.terminals.len());
+            rows.accounts.remove(account);
+            rows.terminals.retain(|row| row.account != account);
+            ((rows.accounts.len(), rows.terminals.len()) != before, ())
+        });
+    }
+
     /// Whether a terminal is meant to live and its account is known: a pane that
     /// shows it can be started again.
     pub fn keeps(&self, account: &str, terminal: &SessionId) -> bool {

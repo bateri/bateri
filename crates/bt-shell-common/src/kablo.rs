@@ -81,6 +81,7 @@ pub mod local;
 pub mod mail;
 pub mod quit;
 pub mod remote;
+pub mod removal;
 pub mod roster;
 pub mod served;
 pub mod service;

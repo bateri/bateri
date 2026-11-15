@@ -19,7 +19,7 @@ use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 
 use crate::app::delegate;
-use crate::pane::{KeptLogin, Login};
+use crate::pane::{KeptLogin, Login, Removals};
 use crate::{child, settings, ssh_route};
 use bt_core::{PaneUuid, SettingsEdit};
 use bt_shell_common::kablo::SessionId;
@@ -337,6 +337,14 @@ pub(crate) fn end(pane: &PaneUuid) {
     }
 }
 
+/// bateri was taken off the server of `account` (Shell ▸ Remove bateri from “{host}”): the
+/// service lets go of the account and everything that waited on it.
+fn removed(account: &str) {
+    if let Some(service) = SERVICE.get() {
+        service.removed(account);
+    }
+}
+
 /// The user closed the pane and chose *Leave Running*: the terminal it shows is not ended, and
 /// the ledger lets go of it — no quit and no launch after a crash ends what the user left
 /// running. Called, like [`end`], **before** the pane's program is signalled.
@@ -453,6 +461,41 @@ impl KeptLogin for Gate {
         MainThreadMarker::new()
             .and_then(delegate)
             .is_some_and(|delegate| delegate.raise_pane(pane))
+    }
+}
+
+impl Removals for Gate {
+    fn removing(&self, account: &str) {
+        if let Some(service) = SERVICE.get() {
+            service.removing(account);
+        }
+    }
+
+    fn removal_failed(&self, account: &str) {
+        if let Some(service) = SERVICE.get() {
+            service.removal_failed(account);
+        }
+    }
+
+    fn account_removed(&self, account: &str) {
+        removed(account);
+    }
+
+    fn entry_off(&self, host: &str) -> Result<(), String> {
+        let (answer, answered) = std::sync::mpsc::channel();
+        let edit = bt_shell_common::kablo::removal::entry_off_edit(host);
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let written = match delegate(mtm) {
+                Some(app) => app.save_edits(std::slice::from_ref(&edit)),
+                None => Err("the settings are not available".to_owned()),
+            };
+            let _ = answer.send(written);
+        });
+        answered
+            .recv()
+            .unwrap_or_else(|_| Err("the settings were not written".to_owned()))
     }
 }
 

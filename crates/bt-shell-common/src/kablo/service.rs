@@ -950,6 +950,12 @@ enum Msg {
     End(PaneUuid),
     /// The user closed the pane and chose to leave the terminal it shows running.
     Leave(PaneUuid),
+    /// bateri is being taken off the server of this account ([`Service::removing`]).
+    Removing(String),
+    /// The removal could not be finished ([`Service::removal_failed`]).
+    RemovalFailed(String),
+    /// bateri was taken off the server of this account ([`Service::removed`]).
+    Removed(String),
     /// The user cleared the pane's scrollback: its terminals forget theirs.
     Forget(PaneUuid),
     /// Someone waits for this Mac's account to be there ([`Service::when_local`]).
@@ -1336,6 +1342,7 @@ impl Service {
             refresh: false,
             takes: BTreeMap::new(),
             ending: Vec::new(),
+            removing: BTreeSet::new(),
             drafts: BTreeMap::new(),
             letters: BTreeMap::new(),
             opening: Vec::new(),
@@ -1522,6 +1529,32 @@ impl Service {
     /// pane that shows nothing, and a connection that is down, do nothing.
     pub fn end(&self, pane: &PaneUuid) {
         let _ = self.tx.send(Msg::End(pane.clone()));
+    }
+
+    /// bateri is about to be taken off the server of `account` (Shell ▸ Remove bateri from
+    /// “{host}”, after the question was answered): until [`Service::removed`] or
+    /// [`Service::removal_failed`] the service writes nothing to that server. The terminals the
+    /// removal ends cut the account's bridge, and a bridge whose kablo is gone is a missing
+    /// kablo, which the next dial would write again — over a server the person is taking
+    /// bateri off.
+    pub fn removing(&self, account: &str) {
+        let _ = self.tx.send(Msg::Removing(account.to_owned()));
+    }
+
+    /// The removal that [`Service::removing`] announced did not finish: the account is served
+    /// as before, and what is missing of the server is written again as it is for any
+    /// kablo that cannot be run.
+    pub fn removal_failed(&self, account: &str) {
+        let _ = self.tx.send(Msg::RemovalFailed(account.to_owned()));
+    }
+
+    /// bateri was taken off the server of `account` (Shell ▸ Remove bateri from “{host}”: its
+    /// terminals ended and its folders deleted): the service lets go of the account — the
+    /// panes that showed its terminals end with a line, the connection is closed, and the ledger,
+    /// the quits that waited for its terminals and the card of what it kept forget it. Nothing is
+    /// asked of the server.
+    pub fn removed(&self, account: &str) {
+        let _ = self.tx.send(Msg::Removed(account.to_owned()));
     }
 
     /// The user closed the pane and chose **Leave Running**: the terminal it shows is not
@@ -1914,6 +1947,9 @@ struct Core {
     takes: BTreeMap<(String, SessionId), Instant>,
     /// Terminals asked to hang up that are killed if they are still there.
     ending: Vec<Ending>,
+    /// The accounts bateri is being taken off the servers of ([`Service::removing`]): nothing is
+    /// dialed, renewed or written for them.
+    removing: BTreeSet<String>,
     /// What programs on the servers are saying to the application, until each has said
     /// all it had ([`Letter`]).
     drafts: BTreeMap<(String, Talk), Draft>,
@@ -2034,6 +2070,9 @@ impl Core {
     /// there): no connection is made for a file, and what the setting asks is written by the first
     /// new terminal's step ([`Backend::files`]), since `files` is false again either way.
     fn rewrite(&mut self, account: &str, connected: bool) {
+        if self.removing.contains(account) {
+            return;
+        }
         let Some(entry) = self.accounts.get_mut(account) else {
             return;
         };
@@ -2108,6 +2147,13 @@ impl Core {
             }
             Msg::End(pane) => self.end(&pane, now),
             Msg::Leave(pane) => self.leave(&pane, now),
+            Msg::Removing(account) => {
+                self.removing.insert(account);
+            }
+            Msg::RemovalFailed(account) => {
+                self.removing.remove(&account);
+            }
+            Msg::Removed(account) => self.removed(&account),
             Msg::WhenLocal(done) => self.when_local(done, now),
             Msg::Forget(pane) => {
                 for (account, terminal) in self.terminals_of(&pane) {
@@ -3031,6 +3077,25 @@ impl Core {
         }
     }
 
+    /// [`Service::removed`]: the account goes, and with it everything that waited on it.
+    fn removed(&mut self, account: &str) {
+        self.removing.remove(account);
+        self.shared.ledger.forget_account(account);
+        self.ending.retain(|ending| ending.account != account);
+        for waiter in &mut self.waiters {
+            waiter.pending.retain(|(owner, _)| owner != account);
+            if waiter.pending.is_empty() {
+                let _ = waiter.done.send(());
+            }
+        }
+        self.waiters.retain(|waiter| !waiter.pending.is_empty());
+        self.hub
+            .drop_account(account, "bateri: bateri was removed from this server");
+        self.accounts.remove(account);
+        self.roster.remove(account);
+        self.write_background();
+    }
+
     /// A terminal no pane shows is ended ([`Service::end_terminal`]): the ledger
     /// keeps the request until it is seen to be carried out, and the list stops
     /// offering it at once — an ending terminal is not in the background.
@@ -3245,6 +3310,7 @@ impl Core {
             .iter()
             .filter(|(account, entry)| {
                 !entry.dialing
+                    && !self.removing.contains(account.as_str())
                     && entry.bridge.is_none()
                     && self
                         .hub

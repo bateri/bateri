@@ -1760,3 +1760,228 @@ fn a_step_over_the_kept_connection_that_takes_too_long_is_ended() {
     std::thread::sleep(Duration::from_secs(6).saturating_sub(asked.elapsed()));
     assert!(!marker.exists(), "the program ran on after its step");
 }
+
+// ─── taking bateri off a server ──────────────────────────────────────────
+
+/// A kablo that says its version (the removal asks, to know a binary runs; not logged), lists what
+/// is in `$HOME/listing`, says what else it was asked in `$HOME/calls`, and cannot end the
+/// terminal `p3` without being made to.
+const REMOVAL_KABLO: &str = "#!/bin/sh\n\
+    [ \"$1\" = version ] && { echo \"version=0.2.0 wire_min=1 wire_max=2\"; exit 0; }\n\
+    echo \"$*\" >> \"$HOME/calls\"\n\
+    case \"$1\" in list) cat \"$HOME/listing\";; end) [ \"$*\" = \"end p3\" ] && exit 1;; esac\nexit 0\n";
+
+/// A home with bateri's folders, the folder kablo had before it, and things that are not bateri's
+/// (one of them named like its folder).
+fn removal_home(name: &str, listing: &str) -> (TempRoot, Home) {
+    let (root, home) = staging_home(name);
+    for (path, body) in [
+        (current("0.2.0") + "/kablo", REMOVAL_KABLO),
+        (".local/share/bateri/shell/boot.sh".to_owned(), "boot"),
+        (
+            ".local/share/bateri/apps/textpen/1.0.0/textpen".to_owned(),
+            "app",
+        ),
+        (former("0.1.0") + "/kablo", REMOVAL_KABLO),
+        (".local/share/other/keep".to_owned(), "keep"),
+        (".local/share/bateri-notes/keep".to_owned(), "keep"),
+        (".config/keep".to_owned(), "keep"),
+        ("listing".to_owned(), listing),
+    ] {
+        let file = home.dir.join(path);
+        std::fs::create_dir_all(file.parent().expect("a folder")).expect("folder");
+        std::fs::write(&file, body).expect("file");
+        if body == REMOVAL_KABLO {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+                .expect("runnable");
+        }
+    }
+    (root, home)
+}
+
+fn calls_of(home: &Home) -> Vec<String> {
+    let mut calls: Vec<String> = std::fs::read_to_string(home.dir.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    calls.sort();
+    calls
+}
+
+fn only_what_is_not_bateris_is_left(home: &Home) {
+    assert!(!home.dir.join(".local/share/bateri").exists());
+    assert!(!home.dir.join(".local/share/kablo").exists());
+    for keep in [
+        ".local/share/other/keep",
+        ".local/share/bateri-notes/keep",
+        ".config/keep",
+    ] {
+        assert!(home.dir.join(keep).exists(), "{keep} was not bateri's");
+    }
+}
+
+#[test]
+fn the_removal_is_one_line_of_plain_sh_that_names_the_folders_from_the_two_constants() {
+    let script = remove::script("0.2.0", &ids(&["p1", "p2"]));
+    assert!(!script.contains('\n'), "{script}");
+    assert!(script.contains(kablo_bateri::paths::DIR), "{script}");
+    assert!(script.contains(install::FORMER_ROOT), "{script}");
+    // The script is the shell's one word: nothing in it needs the login shell to read it a
+    // particular way.
+    assert!(!script.contains('\''), "{script}");
+    // With no terminal there is no kablo to find.
+    assert!(!remove::script("0.2.0", &[]).contains("end"));
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_removal_ends_the_terminals_it_is_given_and_a_stuck_one_is_killed_then_the_folders_go() {
+    let (_root, home) = removal_home("kablo-remove", "[]\n");
+    remove::remove(&home, "0.2.0", &ids(&["p1", "p3"])).expect("removed");
+    assert_eq!(
+        calls_of(&home),
+        ["end --force p3", "end p1", "end p3"],
+        "every terminal is asked to end and p3, which cannot, is killed"
+    );
+    only_what_is_not_bateris_is_left(&home);
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_machine_with_no_kablo_and_no_terminal_is_cleaned_all_the_same() {
+    let (_root, home) = removal_home("kablo-remove-none", "[]\n");
+    std::fs::remove_file(home.dir.join(current("0.2.0")).join("kablo")).expect("no binary");
+    std::fs::remove_file(home.dir.join(former("0.1.0")).join("kablo")).expect("no binary");
+    remove::remove(&home, "0.2.0", &[]).expect("removed");
+    assert!(calls_of(&home).is_empty());
+    only_what_is_not_bateris_is_left(&home);
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_folder_under_xdg_data_home_goes_with_the_others_and_only_that_one() {
+    let (_root, mut home) = removal_home("kablo-remove-xdg", "[]\n");
+    home.prefix = "XDG_DATA_HOME=$HOME/xdg; export XDG_DATA_HOME; ";
+    for path in ["xdg/bateri/shell/boot.sh", "xdg/other/keep"] {
+        let file = home.dir.join(path);
+        std::fs::create_dir_all(file.parent().expect("a folder")).expect("folder");
+        std::fs::write(file, "x").expect("file");
+    }
+    remove::remove(&home, "0.2.0", &[]).expect("removed");
+    assert!(!home.dir.join("xdg/bateri").exists());
+    assert!(home.dir.join("xdg/other/keep").exists());
+    only_what_is_not_bateris_is_left(&home);
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_home_that_is_empty_or_the_root_has_nothing_removed_even_from_the_folder_the_script_runs_in() {
+    for (prefix, name) in [
+        ("HOME=; ", "kablo-remove-empty"),
+        ("HOME=/; ", "kablo-remove-root"),
+    ] {
+        let (_root, mut home) = removal_home(name, "[]\n");
+        home.prefix = prefix;
+        let error = remove::remove(&home, "0.2.0", &ids(&["p1"])).expect_err("refused");
+        assert!(error.contains("home directory"), "{error}");
+        assert!(home.dir.join(".local/share/bateri/shell/boot.sh").exists());
+        assert!(home.dir.join(former("0.1.0")).exists());
+        assert!(calls_of(&home).is_empty(), "nothing was ended either");
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_look_lists_the_machine_with_the_kablo_that_is_there_whichever_root_it_is_in() {
+    let listing = format!(
+        "[\n{},\n{}\n]\n",
+        terminal("p1", "running", 1, "0.2.0", "0.2.0"),
+        terminal("p2", "ended", 0, "0.2.0", "0.2.0"),
+    );
+    let (_root, home) = removal_home("kablo-remove-look", &listing);
+    let census = remove::look(&home, "0.2.0").expect("a whole look");
+    assert_eq!(
+        remove::running(&census),
+        ids(&["p1"]),
+        "p2 is kept to be read"
+    );
+    assert!(census.dirs.contains(&current("0.2.0")));
+    assert!(census.dirs.contains(&former("0.1.0")));
+    // The kablo of the version this bateri brings is not there: the one that is, is asked.
+    std::fs::remove_dir_all(home.dir.join(current("0.2.0"))).expect("gone");
+    let census = remove::look(&home, "0.3.0").expect("a whole look");
+    assert_eq!(remove::running(&census), ids(&["p1"]));
+    // No kablo at all: no terminal, and the look is whole.
+    std::fs::remove_dir_all(home.dir.join(".local/share/kablo")).expect("gone");
+    let census = remove::look(&home, "0.3.0").expect("a whole look");
+    assert!(census.terminals.is_empty());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_kablo_that_will_not_run_is_no_kablo_and_does_not_stop_the_removal() {
+    let (_root, home) = removal_home("kablo-remove-broken", "[]\n");
+    // Every binary on the machine is there and will not run (an install that fell over, a
+    // platform it was not built for): nothing is listed, and what bateri keeps still goes.
+    for path in [current("0.2.0") + "/kablo", former("0.1.0") + "/kablo"] {
+        std::fs::write(home.dir.join(path), "#!/nonexistent/interpreter\n").expect("broken");
+    }
+    let census = remove::look(&home, "0.2.0").expect("a whole look");
+    assert!(census.terminals.is_empty());
+    remove::remove(&home, "0.2.0", &ids(&["p1"])).expect("removed");
+    assert!(
+        calls_of(&home).is_empty(),
+        "no binary that runs, nothing to ask"
+    );
+    only_what_is_not_bateris_is_left(&home);
+}
+
+#[test]
+fn a_look_that_is_not_a_whole_answer_is_none_and_a_removal_that_failed_says_what_the_machine_said()
+{
+    struct Said(Reply);
+    impl Channel for Said {
+        fn run(&self, _: &str, _: &[u8]) -> io::Result<Reply> {
+            Ok(self.0.clone())
+        }
+    }
+    struct Broken;
+    impl Channel for Broken {
+        fn run(&self, _: &str, _: &[u8]) -> io::Result<Reply> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the connection went",
+            ))
+        }
+    }
+    let said = |status: Option<i32>, out: &str, err: &str| {
+        Said(Reply {
+            status,
+            out: out.to_owned(),
+            err: err.to_owned(),
+        })
+    };
+    assert!(remove::look(&said(Some(1), "---\n[]\n", ""), "0.2.0").is_none());
+    assert!(remove::look(&said(Some(0), "no mark", ""), "0.2.0").is_none());
+    assert!(remove::look(&said(Some(0), "---\n[{\"id\":", ""), "0.2.0").is_none());
+    assert!(remove::look(&Broken, "0.2.0").is_none());
+    assert_eq!(
+        remove::remove(
+            &said(Some(1), "", "rm: cannot remove: busy\n"),
+            "0.2.0",
+            &[]
+        ),
+        Err("rm: cannot remove: busy".to_owned())
+    );
+    assert!(
+        remove::remove(&said(Some(1), "", ""), "0.2.0", &[])
+            .expect_err("the folders are still there")
+            .contains("still there")
+    );
+    assert!(
+        remove::remove(&Broken, "0.2.0", &[])
+            .expect_err("broken")
+            .contains("connection")
+    );
+}

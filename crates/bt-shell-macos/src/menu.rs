@@ -1,7 +1,7 @@
 //! Main menu: the app menu (About, Check for Updates…, Settings…, Open settings.toml, Hide, Quit
 //! and — ⌥ held, under `keep_running = "quit"` only — Quit and End Programs), Shell (New
-//! Window, New Tab, New Local Tab, Mark Host as ▸, Shell Integration on Host,
-//! Forget Password, Cancel Upload, Open Port ▸, Go to Folder…, Copy Folder Path, Show Folder in
+//! Window, New Tab, New Local Tab, Mark Host as ▸, Shell Integration on Host, Remove bateri from
+//! Host, Forget Password, Cancel Upload, Open Port ▸, Go to Folder…, Copy Folder Path, Show Folder in
 //! Finder, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Undo Move, Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Copy Last Command, Copy Last Output, Command History…, Clear to Start, Clear Scrollback, Find ▸
@@ -216,6 +216,30 @@ pub(crate) fn integration_menu(remote: Option<(&str, RemoteIntegration)>) -> Int
             title: "Shell Integration on Host".to_owned(),
             enabled: false,
             answer: RemoteIntegration::Off,
+        },
+    }
+}
+
+/// Shell ▸ Remove bateri from “{host}”: the item's title and whether it can be used, pure.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RemovalMenu {
+    pub(crate) title: String,
+    pub(crate) enabled: bool,
+}
+
+/// The item's model: on a remote tab (`Some((host, touched))`) the title carries the host without
+/// `user@`, and the item can be used when this Mac has put bateri's files on the server
+/// (`touched`; a server it never wrote to has nothing of bateri's that this Mac may take off);
+/// locally "Remove bateri from Host", grey.
+pub(crate) fn removal_menu(remote: Option<(&str, bool)>) -> RemovalMenu {
+    match remote {
+        Some((host, touched)) => RemovalMenu {
+            title: format!("Remove bateri from \u{201c}{}\u{201d}", bare_host(host)),
+            enabled: touched,
+        },
+        None => RemovalMenu {
+            title: "Remove bateri from Host".to_owned(),
+            enabled: false,
         },
     }
 }
@@ -611,6 +635,10 @@ pub(crate) fn install(
                 &integration_menu(None).title,
                 sel!(toggleHostIntegration:),
             ),
+            // Takes everything bateri put on the tab's server off it, after a question: handled
+            // by the app delegate (`removeFromHost:`), its title and grey state from its
+            // `validateMenuItem:` (grey unless this Mac put it there).
+            item(mtm, &removal_menu(None).title, sel!(removeFromHost:)),
             // The terminals the focused pane's server keeps that no pane shows, together in a
             // new tab: handled by the app delegate (`openAllBackground:`), grey unless the
             // pane is on a server with some waiting (its `validateMenuItem:`).
@@ -1148,6 +1176,29 @@ mod tests {
         let written = bt_core::Settings::with_edit(prod, &edit).expect("writable text");
         assert_eq!(model(&written, "prod-web").answer, RemoteIntegration::Auto);
         assert_eq!(model(&written, "prod-db").answer, RemoteIntegration::Ask);
+    }
+
+    #[test]
+    fn the_removal_item_is_for_a_server_this_mac_put_bateri_on_and_grey_everywhere_else() {
+        assert_eq!(
+            removal_menu(None),
+            RemovalMenu {
+                title: "Remove bateri from Host".to_owned(),
+                enabled: false,
+            }
+        );
+        assert_eq!(
+            removal_menu(Some(("deploy@web", true))),
+            RemovalMenu {
+                title: "Remove bateri from \u{201c}web\u{201d}".to_owned(),
+                enabled: true,
+            }
+        );
+        assert!(!removal_menu(Some(("web", false))).enabled);
+        assert_eq!(
+            shortcuts::by_name("remove_from_host").map(|c| c.id),
+            Some("removeFromHost")
+        );
     }
 
     #[test]

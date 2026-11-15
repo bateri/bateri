@@ -1210,5 +1210,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.iter().map(|word| format!("{word:08x}")).collect()
 }
 
+pub mod remove;
+
 #[cfg(test)]
 mod tests;

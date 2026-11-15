@@ -76,6 +76,7 @@ mod pointer;
 mod program_wait;
 mod promise;
 mod remote_ports;
+mod remove_host;
 #[cfg(debug_assertions)]
 mod sample_page;
 mod screens;

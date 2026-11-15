@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Shell ▸ Remove bateri from “host”.** Takes everything bateri put on a server off it, after asking: the terminals running there end, bateri's folder is deleted, and the host stops being set up (`integration = false` in its entry). It works from any `ssh` pane of a server this Mac set up, kept terminal or plain.
+
 ### Changed
 
 - **bateri keeps its program for your terminals in its own folder.** kablo, which keeps a terminal running when bateri quits or a connection drops, now lives in `~/.local/share/bateri/kablo/`, on this Mac and on a server, instead of a folder of its own next to bateri's. Terminals that were started before keep running and are moved on their own, and the old folder is removed once nothing runs from it.

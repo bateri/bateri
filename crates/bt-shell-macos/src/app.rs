@@ -1588,6 +1588,19 @@ define_class!(
                     RemoteIntegration::Off => NSControlStateValueOff,
                 });
                 model.enabled
+            } else if item.action() == Some(sel!(removeFromHost:)) {
+                // Shell ▸ Remove bateri from “{host}”: the key pane's server, usable when this
+                // Mac put bateri on it; locally grey.
+                let state = self
+                    .key_tab()
+                    .and_then(|tab| tab.focused_pane().removal_state());
+                let model = crate::menu::removal_menu(
+                    state
+                        .as_ref()
+                        .map(|(host, touched)| (host.as_str(), *touched)),
+                );
+                item.setTitle(&NSString::from_str(&model.title));
+                model.enabled
             } else if let Some(details) = [
                 (sel!(tabDetailsOff:), TabDetails::Off),
                 (sel!(tabDetailsSmart:), TabDetails::Smart),
@@ -1875,6 +1888,15 @@ define_class!(
                     self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: true });
                     self.forget_plain(None);
                 }
+            }
+        }
+
+        /// Shell ▸ Remove bateri from “{host}”: the key pane's server is cleaned of everything
+        /// bateri put on it, after a question (`TerminalPane::remove_bateri_from_host`).
+        #[unsafe(method(removeFromHost:))]
+        fn remove_from_host(&self, _sender: Option<&AnyObject>) {
+            if let Some(tab) = self.key_tab() {
+                tab.focused_pane().remove_bateri_from_host();
             }
         }
 
@@ -3093,6 +3115,21 @@ impl AppDelegate {
     /// The active tab: the key window's selected tab.
     pub(crate) fn key_tab(&self) -> Option<Retained<TerminalTab>> {
         Some(self.key_window()?.selected_tab())
+    }
+
+    /// The menu bar asks its items again (`validateMenuItem:`): what they say of the key pane
+    /// was not known when it was last asked.
+    pub(crate) fn refresh_menu_bar(&self) {
+        if let Some(menu) = NSApplication::sharedApplication(self.mtm()).mainMenu() {
+            // `update` validates the items of the menu it is sent to, not those of its submenus:
+            // each of the bar's menus is asked.
+            for item in menu.itemArray() {
+                if let Some(submenu) = item.submenu() {
+                    submenu.update();
+                }
+            }
+            menu.update();
+        }
     }
 
     /// The active tab's remote host and its resolved mark; `None` in a local tab or

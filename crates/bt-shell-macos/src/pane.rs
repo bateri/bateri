@@ -259,6 +259,13 @@ pub trait PaneHost {
     /// The card's row of a terminal another Mac has open: the terminal `terminal` of `account`
     /// is taken from that Mac and opens in a new tab of the pane's window.
     fn move_here(&self, _pane: u64, _account: &str, _terminal: &str) {}
+    /// What the removal of bateri from a server ([`Removals`]) tells the application once the server
+    /// is clean. The default is an owner that keeps no accounts and writes no settings.
+    fn removals(&self) -> Option<Arc<dyn Removals>> {
+        None
+    }
+    /// What the menu says of the pane's server is not what it said: it is asked again.
+    fn menu_changed(&self) {}
     /// The card's *Open All in New Tab*: every terminal the server `host` keeps that no pane
     /// shows, together in a new tab of the pane's window.
     fn open_all_background(&self, _pane: u64, _host: &str) {}
@@ -347,6 +354,26 @@ pub trait KeptLogin: Send + Sync {
     /// Brings the tab of `pane` forward, the keyboard to the pane; `false` if it
     /// is gone. Main thread.
     fn raise(&self, pane: &PaneUuid) -> bool;
+}
+
+/// What the application does once bateri has been taken off a server (Shell ▸ Remove bateri from
+/// “{host}”): the removal's steps after the server is clean. It is the owner's, not a pane's —
+/// ending the terminals of the server ends the pane the person asked from, and a tab can be
+/// closed while the removal waits for a login; these two must still be done.
+/// Shared with the removal's thread, so `Send + Sync`.
+pub trait Removals: Send + Sync {
+    /// The question was answered yes: the service writes nothing to the server's account until
+    /// the removal ends (`account_removed`, or `removal_failed`).
+    fn removing(&self, account: &str);
+    /// The removal did not finish: the account is served as before.
+    fn removal_failed(&self, account: &str);
+    /// The service lets go of the server's account: the panes that showed its terminals end with
+    /// a line, the ledger forgets it.
+    fn account_removed(&self, account: &str);
+    /// The host's entry in the settings says `integration = false`
+    /// ([`bt_shell_common::kablo::removal::entry_off_edit`]), so that no later `ssh` puts bateri
+    /// back. Waits for the write; `Err` is the line it could not be written for.
+    fn entry_off(&self, host: &str) -> Result<(), String>;
 }
 
 /// A host with no terminals a server keeps: nothing waits for a login.
@@ -7592,6 +7619,7 @@ impl TerminalPane {
         }
         self.refresh_stage();
         self.offer_owed_view();
+        self.warm_removal_key();
     }
 
     /// The folder the pane's programs are offered, for the bytes of a file to cross through: the
@@ -8833,6 +8861,22 @@ mod tests {
             let end = rest.find("\n    }\n").expect("its end");
             rest[..end].to_owned()
         };
+        // The one named exception (`rules/kablo.md`): Shell ▸ Remove bateri from “{host}” is
+        // offered in any pane that has an `ssh` running, plain or kept, and opens a connection of
+        // bateri's own when none is kept — a command the person chose and confirms. It asks
+        // `remote_target` in one place, and goes through the steps that ask before they write.
+        let removal = include_str!("remove_host.rs");
+        let removal = &removal[..removal.find("#[cfg(test)]").unwrap_or(removal.len())];
+        assert_eq!(removal.matches("remote_target()").count(), 1, "one place");
+        assert!(entry(removal, "fn removal_target(").contains("remote_target()"));
+        assert!(
+            removal.contains("removal::run("),
+            "the steps are the module's"
+        );
+        assert!(
+            removal.contains("Job::Remove"),
+            "the login says what it is for"
+        );
         let uploader = include_str!("uploader.rs");
         for signature in [
             "pub(crate) fn upload_drop(",

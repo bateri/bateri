@@ -64,6 +64,9 @@ pub(crate) enum Job {
     Reconnect,
     /// A program in this pane asked for a terminal on the server (`bateri split -S`).
     Command,
+    /// Shell ▸ Remove bateri from “{host}”: the login comes before the question, which says what
+    /// the server has.
+    Remove,
 }
 
 impl Job {
@@ -74,6 +77,9 @@ impl Job {
             Self::Finder => "Log in to copy the file to Finder.".to_owned(),
             Self::Reconnect => format!("Log in to reconnect the terminals on {host}."),
             Self::Command => format!("Log in so that a program in this pane can use {host}."),
+            Self::Remove => {
+                format!("Log in to see what bateri keeps on {host}, before it is removed.")
+            }
         }
     }
 }
