@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A very long line no longer freezes a program's editor.** Opening a file with one long line, like minified JavaScript or JSON, in an editor such as textpen froze bateri: half a minute for a line of a hundred thousand characters. Such a line now opens at once.
+
 ### Changed
 
 - **Move the window from the top of the panes.** With the tabs at the side, drag the empty part of a top pane's header, or the space around it, to move the window; double-click zooms it. Panes are now carried by their icon and name, which light up under the pointer.

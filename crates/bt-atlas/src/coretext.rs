@@ -7,7 +7,7 @@
 //! family name the opened font reports about itself is compared with the one
 //! requested (`rules::open_chain`).
 
-use std::ffi::c_void;
+use std::ffi::{c_double, c_int, c_ulong, c_void};
 use std::path::Path;
 use std::ptr::{self, NonNull};
 
@@ -106,6 +106,141 @@ fn line_of(font: &CTFont, text: &str) -> Option<CFRetained<CTLine>> {
         unsafe { CFAttributedString::new(None, Some(&string), Some(attributes.as_opaque())) }?;
     // SAFETY: `attributed` is alive; the line copies it.
     Some(unsafe { CTLine::with_attributed_string(&attributed) })
+}
+
+/// A block as the C blocks ABI lays one out (`Block_layout`): the header the
+/// blocks runtime reads, then what the block holds — here the two sides of a
+/// line's carets ([`caret_edges`]). It is made the way a compiler makes a block
+/// literal on the stack, with nothing to copy or dispose (flags 0), and lives
+/// for the one call it is handed to. Written out rather than taken from
+/// `block2`: this backend reaches CoreText through its C API alone and does
+/// not link the Objective-C core `block2` brings. That the layout is right is
+/// what `the_carets_of_one_pass_are_the_ones_asked_one_at_a_time` shows: the
+/// carets it collects are CoreText's own, one index at a time.
+#[repr(C)]
+struct CaretBlock {
+    isa: *const c_void,
+    flags: c_int,
+    reserved: c_int,
+    invoke: unsafe extern "C" fn(*mut CaretBlock, c_double, CFIndex, bool, *mut bool),
+    descriptor: *const BlockDescriptor,
+    /// The two sides, `(Vec<f64>, Vec<f64>)`.
+    edges: *mut c_void,
+}
+
+/// The descriptor of a block with no helpers: a reserved word and the size of
+/// the block.
+#[repr(C)]
+struct BlockDescriptor {
+    reserved: c_ulong,
+    size: c_ulong,
+}
+
+static CARET_BLOCK: BlockDescriptor = BlockDescriptor {
+    reserved: 0,
+    size: size_of::<CaretBlock>() as c_ulong,
+};
+
+unsafe extern "C" {
+    /// The class of a block on the stack, from the blocks runtime in
+    /// libSystem; only its address is used.
+    static _NSConcreteStackBlock: [*const c_void; 32];
+    fn CTLineEnumerateCaretOffsets(line: &CTLine, block: *mut CaretBlock);
+}
+
+/// What [`CaretBlock`] does for each caret of the line: puts its offset on
+/// the leading or the trailing side of its UTF-16 index.
+unsafe extern "C" fn caret_at(
+    block: *mut CaretBlock,
+    offset: c_double,
+    index: CFIndex,
+    leading: bool,
+    _stop: *mut bool,
+) {
+    // SAFETY: CoreText calls the block with the block itself (or a copy of
+    // it, which holds the same pointer), and `edges` points at the sides
+    // `caret_edges` keeps alive and leaves alone until the call returns.
+    let (lead, trail) = unsafe { &mut *(*block).edges.cast::<(Vec<f64>, Vec<f64>)>() };
+    let side = if leading { lead } else { trail };
+    if let Some(edge) = usize::try_from(index).ok().and_then(|i| side.get_mut(i)) {
+        *edge = offset;
+    }
+}
+
+/// How many places of one line [`carets_of`] asks CoreText for one at a
+/// time, where the line's own pass leaves the caret open. Each such question
+/// walks the line from its start, so a long line with no bound on them would
+/// be quadratic again.
+const ASKED: usize = 64;
+
+/// The two edges `line` puts at each of its `units` UTF-16 indices: where the
+/// caret stands on the leading side of that character and on its trailing
+/// side, in one pass over the line; NaN where the line puts none (inside a
+/// cluster).
+fn caret_edges(line: &CTLine, units: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut edges = (vec![f64::NAN; units], vec![f64::NAN; units]);
+    let mut block = CaretBlock {
+        isa: (&raw const _NSConcreteStackBlock).cast(),
+        flags: 0,
+        reserved: 0,
+        invoke: caret_at,
+        descriptor: &raw const CARET_BLOCK,
+        edges: (&raw mut edges).cast(),
+    };
+    // SAFETY: `block` is a block laid out as the ABI says, of the stack
+    // block's class, with its own size and no helpers; it and `edges` live
+    // past the call, which calls the block (or a copy of it, holding the same
+    // pointer) only before it returns, and nothing touches `edges` but the
+    // block until then.
+    unsafe { CTLineEnumerateCaretOffsets(line, &raw mut block) };
+    edges
+}
+
+/// [`FontSystem::caret_offsets`] on a line already made, and how many places
+/// it asked CoreText for one at a time.
+///
+/// `CTLineGetOffsetForStringIndex` walks the line's carets from its start for
+/// each index it is asked; asked for every place of a long line it is
+/// quadratic (a single line of a minified file froze the app for seconds). The
+/// line's carets are read in one pass instead, and a place is answered from
+/// them where the two edges that meet there agree — the trailing edge of the
+/// character before it and the leading edge of the one after. Where they do
+/// not (where the text changes direction, at the line's end, inside a
+/// cluster), which of the two is the caret is the line's rule, so CoreText is
+/// asked, up to [`ASKED`] times; past that the edge of the character before
+/// it stands.
+fn carets_of(line: &CTLine, text: &str, at: &[usize], width: f64) -> (Vec<f64>, usize) {
+    let (lead, trail) = caret_edges(line, text.encode_utf16().count());
+    let edge = |side: &[f64], unit: usize| side.get(unit).copied().filter(|x| !x.is_nan());
+    let mut asked = 0;
+    let (mut byte, mut unit) = (0, 0);
+    let offsets = at
+        .iter()
+        .map(|&place| {
+            if place < byte {
+                (byte, unit) = (0, 0);
+            }
+            let Some(between) = text.get(byte..place) else {
+                return width;
+            };
+            unit += between.encode_utf16().count();
+            byte = place;
+            let before = unit.checked_sub(1).and_then(|before| edge(&trail, before));
+            let after = edge(&lead, unit);
+            match (before, after) {
+                (Some(before), Some(after)) if before.to_bits() == after.to_bits() => after,
+                _ if asked < ASKED => {
+                    asked += 1;
+                    let index = CFIndex::try_from(unit).unwrap_or(CFIndex::MAX);
+                    // SAFETY: `line` is alive; the secondary offset may be null.
+                    unsafe { line.offset_for_string_index(index, ptr::null_mut()) }
+                }
+                (Some(before), _) => before,
+                (None, after) => after.unwrap_or(width),
+            }
+        })
+        .collect();
+    (offsets, asked)
 }
 
 impl FontSystem for CoreText {
@@ -829,30 +964,14 @@ impl FontSystem for CoreText {
     /// line puts a caret in it, not an end of the glyph, and one line is
     /// shaped for all of them. A place that is not a character's boundary
     /// is the line's end. The places come in order from an editor; one that
-    /// goes back is counted from the start again.
+    /// goes back is counted from the start again. A long line costs one pass
+    /// over its carets ([`carets_of`]), not one per place.
     fn caret_offsets(font: &Self::Font, text: &str, at: &[usize]) -> Option<Vec<f64>> {
         let line = line_of(font, text)?;
         // SAFETY: `line` is alive; the three out pointers may be null.
         let width =
             unsafe { line.typographic_bounds(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
-        let (mut byte, mut unit) = (0, 0);
-        let offsets = at
-            .iter()
-            .map(|&place| {
-                if place < byte {
-                    (byte, unit) = (0, 0);
-                }
-                let Some(between) = text.get(byte..place) else {
-                    return width;
-                };
-                unit += between.encode_utf16().count();
-                byte = place;
-                let index = CFIndex::try_from(unit).unwrap_or(CFIndex::MAX);
-                // SAFETY: `line` is alive; the secondary offset may be null.
-                unsafe { line.offset_for_string_index(index, ptr::null_mut()) }
-            })
-            .collect();
-        Some(offsets)
+        Some(carets_of(&line, text, at, width).0)
     }
 
     /// The bitmap is the glyph's ink box widened to whole pixels at the
@@ -1182,5 +1301,100 @@ mod tests {
             (slant - 0.21).abs() < 1e-6,
             "the face with its rules leans {slant}, not 0.21"
         );
+    }
+
+    /// The carets one at a time, as CoreText answers each index: what
+    /// [`carets_of`] must give back.
+    fn asked_one_at_a_time(line: &CTLine, text: &str, at: &[usize], width: f64) -> Vec<f64> {
+        at.iter()
+            .map(|&place| {
+                let Some(before) = text.get(..place) else {
+                    return width;
+                };
+                let index = CFIndex::try_from(before.encode_utf16().count()).unwrap_or(0);
+                // SAFETY: `line` is alive; the secondary offset may be null.
+                unsafe { line.offset_for_string_index(index, ptr::null_mut()) }
+            })
+            .collect()
+    }
+
+    fn width_of(line: &CTLine) -> f64 {
+        // SAFETY: `line` is alive; the three out pointers may be null.
+        unsafe { line.typographic_bounds(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) }
+    }
+
+    /// Every place of a line: each character's start, the end, and one
+    /// byte inside the first character wider than a byte.
+    fn places(text: &str) -> Vec<usize> {
+        let mut at: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        at.push(text.len());
+        if let Some((i, c)) = text.char_indices().find(|(_, c)| c.len_utf8() > 1) {
+            at.push(i + c.len_utf8() / 2);
+        }
+        at.push(0);
+        at
+    }
+
+    /// Read in one pass, the carets are the ones CoreText gives one index at
+    /// a time — where the edges agree and where it is asked: a change of
+    /// direction either way, a paragraph that runs right to left, a cluster
+    /// of several characters, a mark on a letter, a place inside a
+    /// character, and a place that goes back.
+    #[test]
+    fn the_carets_of_one_pass_are_the_ones_asked_one_at_a_time() {
+        let (font, _) = CoreText::open("Helvetica", 20.0);
+        for text in [
+            "Ab😀ç ",
+            "office fi ffl",
+            "abc שלום def",
+            "שלום",
+            "שלום abc",
+            "e\u{301}x",
+            "👨\u{200d}👩\u{200d}👧 🇹🇷 x",
+            "日本語",
+            "مرحبا world",
+            "a\tb",
+        ] {
+            let line = line_of(&font, text).expect("a line");
+            let width = width_of(&line);
+            let at = places(text);
+            let (read, _) = carets_of(&line, text, &at, width);
+            assert_eq!(
+                read,
+                asked_one_at_a_time(&line, text, &at, width),
+                "{text:?} at {at:?}"
+            );
+        }
+    }
+
+    /// A long line of one direction is read in one pass: CoreText is asked
+    /// at most for its end, whatever the script, so the carets of a line of
+    /// N characters cost N steps and not N²/2. A line that changes direction
+    /// at every word asks no more than [`ASKED`] times.
+    #[test]
+    fn a_long_lines_carets_are_read_in_one_pass() {
+        let (font, _) = CoreText::open("Helvetica", 13.0);
+        for (word, most) in [
+            ("{\"key\":[1,2,3]}, ", 1),
+            ("日本語の文章、", 1),
+            ("😀🎉🚀", 1),
+            ("שלום abc ", ASKED),
+        ] {
+            let text = word.repeat(20_000 / word.chars().count());
+            let line = line_of(&font, &text).expect("a line");
+            let width = width_of(&line);
+            let at: Vec<usize> = text.char_indices().map(|(i, c)| i + c.len_utf8()).collect();
+            let (read, asked) = carets_of(&line, &text, &at, width);
+            assert_eq!(read.len(), at.len());
+            assert!(asked <= most, "{word:?}: asked {asked} times");
+            if most == 1 {
+                assert!(read.windows(2).all(|pair| pair[0] <= pair[1]), "{word:?}");
+                let last = read.last().copied().unwrap_or(0.0);
+                assert!(
+                    (last - width).abs() < 0.5,
+                    "{word:?}: {last} against {width}"
+                );
+            }
+        }
     }
 }
