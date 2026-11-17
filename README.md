@@ -51,7 +51,8 @@ brew install bateri/tap/bateri
 - **Agent aware.** Claude Code, Codex or any program on a server you `ssh` into
   can open panes and tabs in bateri, list what is open, close what it opened and
   send a notification, with the `bateri` command bateri puts on that server (see
-  [Agents on a server](#agents-on-a-server)).
+  [Agents on a server](#agents-on-a-server)). Turn on Settings ▸ Agents ▸ bateri
+  command and Claude Code learns the command itself, for that session alone.
 - **Modern text rendering.** Emoji sequences (flags, ZWJ families, skin tones),
   wide characters, and box-drawing, block and Braille characters drawn to fit
   the cell exactly.

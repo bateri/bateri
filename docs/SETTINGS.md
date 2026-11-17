@@ -525,10 +525,13 @@ level = "own"
 claude_integration = true
 # true | false. Teaches Claude Code the `bateri` command: a skill that tells it
 # how to open a pane beside itself, run something there and read what another
-# pane shows. The skill reaches only the Claude Code sessions started from a
-# bateri terminal after the change, for that session alone: nothing is written
-# to Claude Code's own files. It needs the `bateri` command ([commands] level is
-# not "off"), and a Claude Code started from inside another one is left as it is.
+# pane shows. With it, Claude Code also starts a dev server or a watcher in a
+# capsule you can open with a click, and opens a login it cannot answer in a
+# floating pane for you to type in. The skill reaches only the Claude Code
+# sessions started from a bateri terminal after the change, for that session
+# alone: nothing is written to Claude Code's own files. It needs the `bateri`
+# command ([commands] level is not "off"), and a Claude Code started from inside
+# another one is left as it is.
 claude_skill = false
 
 [remote]
