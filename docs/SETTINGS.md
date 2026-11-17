@@ -520,8 +520,16 @@ level = "own"
 # its shell up there) starts it with the hook through its `claude` command.
 # A `claude` function of your own, an alias that names the program by its path,
 # a --settings you pass yourself and a Claude Code started from inside another
-# one are left exactly as they are.
+# one are left exactly as they are. A Claude Code that a program of yours or the
+# `bateri` command starts in a terminal (`bateri split -- claude`) gets the hook too.
 claude_integration = true
+# true | false. Teaches Claude Code the `bateri` command: a skill that tells it
+# how to open a pane beside itself, run something there and read what another
+# pane shows. The skill reaches only the Claude Code sessions started from a
+# bateri terminal after the change, for that session alone: nothing is written
+# to Claude Code's own files. It needs the `bateri` command ([commands] level is
+# not "off"), and a Claude Code started from inside another one is left as it is.
+claude_skill = false
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a

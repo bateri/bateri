@@ -1032,6 +1032,7 @@ impl SettingsWindow {
                     tab_position: position,
                     tab_details: details,
                     agents_claude_integration: on,
+                    agents_claude_skill: !on,
                     ..Settings::default()
                 };
                 self.refresh(&settings, resolved, &FileState::Missing, &[], themes);
@@ -1053,6 +1054,11 @@ impl SettingsWindow {
                 if controls.claude_integration.is_on() != on {
                     say(format!(
                         "the switch does not show the file's value ({case})"
+                    ));
+                }
+                if controls.claude_skill.is_on() == on {
+                    say(format!(
+                        "the skill's switch does not show the file's value ({case})"
                     ));
                 }
                 if line.open.isHidden() == said.button {

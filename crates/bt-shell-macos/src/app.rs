@@ -6576,12 +6576,13 @@ impl AppDelegate {
         if old.commands_level != new.commands_level {
             crate::hold_service::rewrite_files(bt_shell_common::kablo::local::ACCOUNT);
         }
-        // The agents' hooks are files too, on every machine: one that was turned on or off (an
-        // agent's last reply) is written or taken away on this Mac and each server known.
-        if crate::program::reply::REPLIERS
-            .iter()
-            .any(|agent| (agent.wanted)(old) != (agent.wanted)(&new))
-        {
+        // The agents' hooks and skills are files too, on every machine: one that was turned on or
+        // off (an agent's last reply, the `bateri` command's skill) is written or taken away on
+        // this Mac and each server known.
+        if crate::program::reply::REPLIERS.iter().any(|agent| {
+            (agent.wanted)(old) != (agent.wanted)(&new)
+                || (agent.skill_wanted)(old) != (agent.skill_wanted)(&new)
+        }) {
             crate::hold_service::rewrite_all_files();
         }
         if changes.terminal {

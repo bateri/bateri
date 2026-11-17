@@ -192,14 +192,17 @@ const SERVERS: &[Group] = &[
 /// The Agents page: the switch of each agent, then what it does and where it shows. The two rows
 /// under the switch are no rows of their own to the eye — they read as the switch's own
 /// explanation, so they have no rule above them.
-const AGENTS: &[Group] = &[group(
-    None,
-    &[
-        row(Key::ClaudeIntegration),
-        Item::AgentAbout,
-        Item::AgentWhere,
-    ],
-)];
+const AGENTS: &[Group] = &[
+    group(
+        None,
+        &[
+            row(Key::ClaudeIntegration),
+            Item::AgentAbout,
+            Item::AgentWhere,
+        ],
+    ),
+    group(None, &[row(Key::ClaudeSkill)]),
+];
 
 fn files_aside(_: &Settings) -> Option<&'static str> {
     Some("⌘-click a file or a folder in a terminal")
@@ -297,6 +300,7 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::DownloadConflict => "If the name exists",
         Key::DownloadNotify => "Notify when done",
         Key::ClaudeIntegration => "Claude Code",
+        Key::ClaudeSkill => "bateri command",
     }
 }
 

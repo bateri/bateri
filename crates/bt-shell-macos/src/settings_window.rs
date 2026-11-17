@@ -305,12 +305,13 @@ enum Key {
     NodeVersion,
     CommandLevel,
     ClaudeIntegration,
+    ClaudeSkill,
     OpenWith,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 53] = [
+    const ALL: [Key; 54] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -363,6 +364,7 @@ impl Key {
         Key::NodeVersion,
         Key::CommandLevel,
         Key::ClaudeIntegration,
+        Key::ClaudeSkill,
         Key::OpenWith,
     ];
 
@@ -431,6 +433,7 @@ impl Key {
             Key::NodeVersion => "shell.node_version",
             Key::CommandLevel => "commands.level",
             Key::ClaudeIntegration => "agents.claude_integration",
+            Key::ClaudeSkill => "agents.claude_skill",
             Key::OpenWith => "apps.open_with",
         }
     }
@@ -931,6 +934,7 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         }
         Key::Ports => Some("Click to list them, \u{2318}-click to open one."),
         Key::ClaudeIntegration => Some("Show its last reply"),
+        Key::ClaudeSkill => Some("Teach Claude Code to open panes and read terminals"),
         Key::CommandLevel => Some(command_level_note(settings.commands_level)),
         Key::RemoteIntegration => Some(match settings.remote_integration {
             RemoteIntegration::Auto => {
@@ -1801,6 +1805,7 @@ struct Controls {
     python_env: Retained<ThemeSwitch>,
     node_version: Retained<ThemeSwitch>,
     claude_integration: Retained<ThemeSwitch>,
+    claude_skill: Retained<ThemeSwitch>,
     /// The Agents page's line on where the reply shows, with the button beside it.
     agent_where: Option<AgentWhere>,
     dim_splits: Retained<ThemeSwitch>,
@@ -2313,6 +2318,7 @@ define_class!(
                 Some(Key::PythonEnv) => Some(SettingsEdit::ShellPythonEnv(on)),
                 Some(Key::NodeVersion) => Some(SettingsEdit::ShellNodeVersion(on)),
                 Some(Key::ClaudeIntegration) => Some(SettingsEdit::AgentsClaudeIntegration(on)),
+                Some(Key::ClaudeSkill) => Some(SettingsEdit::AgentsClaudeSkill(on)),
                 Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
                 Some(Key::FocusFrame) => Some(SettingsEdit::FocusFrame(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
@@ -2827,6 +2833,7 @@ impl SettingsWindow {
         set_switch(&c.python_env, settings.shell_python_env);
         set_switch(&c.node_version, settings.shell_node_version);
         set_switch(&c.claude_integration, settings.agents_claude_integration);
+        set_switch(&c.claude_skill, settings.agents_claude_skill);
         set_switch(&c.dim_splits, settings.dim_unfocused_splits);
         set_switch(&c.focus_frame, settings.focus_frame);
         set_switch(&c.resize_in_steps, settings.resize_in_steps);
@@ -4001,6 +4008,7 @@ impl SettingsWindow {
         let python_env = self.switch(Key::PythonEnv);
         let node_version = self.switch(Key::NodeVersion);
         let claude_integration = self.switch(Key::ClaudeIntegration);
+        let claude_skill = self.switch(Key::ClaudeSkill);
         let command_level = self.popup::<CommandLevel>(Key::CommandLevel);
 
         let theme_mode = self.theme_mode();
@@ -4132,6 +4140,7 @@ impl SettingsWindow {
             python_env,
             node_version,
             claude_integration,
+            claude_skill,
             agent_where: None,
             dim_splits,
             focus_frame,
@@ -4658,6 +4667,7 @@ impl Controls {
             Key::PythonEnv => Parts::of(&self.python_env),
             Key::NodeVersion => Parts::of(&self.node_version),
             Key::ClaudeIntegration => Parts::of(&self.claude_integration),
+            Key::ClaudeSkill => Parts::of(&self.claude_skill),
             Key::DimSplits => Parts::of(&self.dim_splits),
             Key::FocusFrame => Parts::of(&self.focus_frame),
             Key::ResizeInSteps => Parts::of(&self.resize_in_steps),
@@ -5667,7 +5677,7 @@ mod tests {
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
-                    [agents]\nclaude_integration = []\n\
+                    [agents]\nclaude_integration = []\nclaude_skill = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
                     [commands]\nlevel = []\n\
                     [apps]\nopen_with = []\n\
@@ -5729,6 +5739,7 @@ mod tests {
                 Key::PythonEnv => SettingsEdit::ShellPythonEnv(false),
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
                 Key::ClaudeIntegration => SettingsEdit::AgentsClaudeIntegration(true),
+                Key::ClaudeSkill => SettingsEdit::AgentsClaudeSkill(true),
                 Key::CommandLevel => SettingsEdit::CommandLevel(CommandLevel::Off),
                 Key::OpenWith => SettingsEdit::AppsOpenWith(String::new()),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
@@ -6398,6 +6409,7 @@ mod tests {
         assert_eq!(page_of(Key::StatsInterval), Category::Servers);
         assert_eq!(page_of(Key::DownloadNotify), Category::Servers);
         assert_eq!(page_of(Key::ClaudeIntegration), Category::Agents);
+        assert_eq!(page_of(Key::ClaudeSkill), Category::Agents);
     }
 
     /// The Agents page is the table's: the row is named as the table names its agent, and wears
@@ -6420,7 +6432,7 @@ mod tests {
                 .all(|key| pages::lead(key).is_none())
         );
         let groups = pages::groups(Category::Agents);
-        assert_eq!(groups.len(), 1);
+        assert_eq!(groups.len(), 2);
         assert_eq!(
             groups[0].items,
             [
@@ -6429,6 +6441,9 @@ mod tests {
                 pages::Item::AgentWhere,
             ]
         );
+        // The skill is a switch of its own, in a group of its own.
+        assert_eq!(groups[1].items, [pages::Item::Key(Key::ClaudeSkill)]);
+        assert_eq!(Key::ClaudeSkill.path(), "agents.claude_skill");
         assert_eq!(Category::Agents.title(), "Agents");
         assert_eq!(Key::ClaudeIntegration.path(), "agents.claude_integration");
         let resolved = Resolved {

@@ -520,7 +520,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 41] = [
+static CATALOG: [Setting; 42] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -979,6 +979,16 @@ static CATALOG: [Setting; 41] = [
         |s| s.agents_claude_integration,
         SettingsEdit::AgentsClaudeIntegration
     ),
+    toggle!(
+        "agents.claude_skill",
+        Agents,
+        "Claude Code bateri Command",
+        "agent anthropic skill command split pane open terminal",
+        false,
+        Some("new Claude Code sessions only"),
+        |s| s.agents_claude_skill,
+        SettingsEdit::AgentsClaudeSkill
+    ),
 ];
 
 #[cfg(test)]
@@ -1008,8 +1018,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_forty_one_settings_once_each() {
-        assert_eq!(all().len(), 41);
+    fn the_catalog_lists_the_forty_two_settings_once_each() {
+        assert_eq!(all().len(), 42);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -1149,8 +1159,8 @@ mod tests {
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
         // The font's own options are the machine's, so only the table is counted.
-        assert_eq!(all().len(), 41);
-        assert_eq!(rows(&settings).len(), 41 + font_rows(&settings).len());
+        assert_eq!(all().len(), 42);
+        assert_eq!(rows(&settings).len(), 42 + font_rows(&settings).len());
     }
 
     #[test]
@@ -1163,6 +1173,26 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(claude.row(&off).toggle, Some(false));
+    }
+
+    #[test]
+    fn the_claude_code_skill_is_a_switch_of_its_own_that_is_off_until_the_file_turns_it_on() {
+        let skill = find("agents.claude_skill").expect("the row");
+        assert_eq!(skill.section(), Section::Agents);
+        assert_eq!(skill.row(&Settings::default()).toggle, Some(false));
+        let on = Settings {
+            agents_claude_skill: true,
+            ..Settings::default()
+        };
+        assert_eq!(skill.row(&on).toggle, Some(true));
+        // The two Claude Code switches are two rows: one does not read the other.
+        let claude = find("agents.claude_integration").expect("the row");
+        assert_eq!(claude.row(&on).toggle, Some(true));
+        let neither = Settings {
+            agents_claude_integration: false,
+            ..Settings::default()
+        };
+        assert_eq!(skill.row(&neither).toggle, Some(false));
     }
 
     #[test]

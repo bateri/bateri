@@ -1672,6 +1672,11 @@ pub struct Settings {
     /// On by default; the file turns it off, and then nothing is added to a session. Doesn't
     /// enter `TerminalOptions`.
     pub agents_claude_integration: bool,
+    /// `[agents] claude_skill`: whether the Claude Code sessions bateri starts are taught the
+    /// `bateri` command, by a skill the session alone is given (`--plugin-dir`; nothing is written
+    /// to Claude Code's own files). Off by default; the file turns it on. Doesn't enter
+    /// `TerminalOptions`.
+    pub agents_claude_skill: bool,
     /// `[terminal] scrollbar`: when the scroll bar shows ([`Scrollbar`]).
     /// Doesn't enter `TerminalOptions`.
     pub scrollbar: Scrollbar,
@@ -1764,6 +1769,7 @@ impl Default for Settings {
             keep_running: KeepRunning::default(),
             commands_level: CommandLevel::default(),
             agents_claude_integration: true,
+            agents_claude_skill: false,
             scrollbar: Scrollbar::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -1876,6 +1882,9 @@ pub enum SettingsEdit {
     CommandLevel(CommandLevel),
     /// The settings window's "Show its last reply" of Claude Code: `[agents] claude_integration`.
     AgentsClaudeIntegration(bool),
+    /// The settings window's "bateri command" of Claude Code ("Teach Claude Code to open panes and
+    /// read terminals"): `[agents] claude_skill`.
+    AgentsClaudeSkill(bool),
     Scrollbar(Scrollbar),
     Theme(String),
     LightTheme(String),
@@ -2029,6 +2038,7 @@ impl SettingsEdit {
             Self::AgentsClaudeIntegration(_) => {
                 ("agents", "claude_integration", "agents.claude_integration")
             }
+            Self::AgentsClaudeSkill(_) => ("agents", "claude_skill", "agents.claude_skill"),
             Self::Scrollbar(_) => ("terminal", "scrollbar", "terminal.scrollbar"),
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
@@ -2159,6 +2169,7 @@ impl SettingsEdit {
             | Self::ShellPythonEnv(on)
             | Self::ShellNodeVersion(on)
             | Self::AgentsClaudeIntegration(on)
+            | Self::AgentsClaudeSkill(on)
             | Self::DimUnfocusedSplits(on)
             | Self::FocusFrame(on)
             | Self::ResizeInSteps(on)
@@ -2484,8 +2495,16 @@ level = "own"
 # its shell up there) starts it with the hook through its `claude` command.
 # A `claude` function of your own, an alias that names the program by its path,
 # a --settings you pass yourself and a Claude Code started from inside another
-# one are left exactly as they are.
+# one are left exactly as they are. A Claude Code that a program of yours or the
+# `bateri` command starts in a terminal (`bateri split -- claude`) gets the hook too.
 claude_integration = true
+# true | false. Teaches Claude Code the `bateri` command: a skill that tells it
+# how to open a pane beside itself, run something there and read what another
+# pane shows. The skill reaches only the Claude Code sessions started from a
+# bateri terminal after the change, for that session alone: nothing is written
+# to Claude Code's own files. It needs the `bateri` command ([commands] level is
+# not "off"), and a Claude Code started from inside another one is left as it is.
+claude_skill = false
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
@@ -3165,9 +3184,19 @@ open_with = "textpen"
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = agents.get("claude_skill") {
+                    parsed.settings.agents_claude_skill = boolean(
+                        text,
+                        item,
+                        "agents.claude_skill",
+                        fallback.agents_claude_skill,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("agents") => {
                 parsed.settings.agents_claude_integration = fallback.agents_claude_integration;
+                parsed.settings.agents_claude_skill = fallback.agents_claude_skill;
             }
             None => {}
         }
@@ -5156,6 +5185,7 @@ mod tests {
             ("terminal", "scrollbar"),
             ("commands", "level"),
             ("agents", "claude_integration"),
+            ("agents", "claude_skill"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -5422,6 +5452,7 @@ mod tests {
             keep_running: KeepRunning::Quit,
             commands_level: CommandLevel::Own,
             agents_claude_integration: true,
+            agents_claude_skill: false,
             scrollbar: Scrollbar::Always,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -6691,6 +6722,54 @@ found 1.5; using 0.1"
         assert!(!parsed.settings.agents_claude_integration);
         // Unknown keys of the section are ignored like everywhere else.
         assert!(clean("[agents]\nfuture = 1\n").agents_claude_integration);
+    }
+
+    #[test]
+    fn claude_skill_is_off_until_the_file_turns_it_on_and_is_its_own_key() {
+        assert!(!Settings::default().agents_claude_skill);
+        assert!(!clean("").agents_claude_skill);
+        assert!(clean("[agents]\nclaude_skill = true\n").agents_claude_skill);
+        assert!(!clean("[agents]\nclaude_skill = false\n").agents_claude_skill);
+        // The two keys do not move each other.
+        let both = clean("[agents]\nclaude_integration = false\nclaude_skill = true\n");
+        assert!(!both.agents_claude_integration);
+        assert!(both.agents_claude_skill);
+        let only = clean("[agents]\nclaude_skill = true\n");
+        assert!(only.agents_claude_integration, "its default stays");
+        // A value that is not a boolean is named and keeps the one given (the default: off).
+        for text in [
+            "[agents]\nclaude_skill = \"on\"\n",
+            "[agents]\nclaude_skill = 1\n",
+        ] {
+            let (settings, diagnostic) = rejected(text);
+            assert!(!settings.agents_claude_skill, "{text}");
+            assert_eq!(diagnostic.key, Some("agents.claude_skill"), "{text}");
+        }
+        let current = Settings {
+            agents_claude_skill: true,
+            ..Settings::default()
+        };
+        let parsed =
+            Settings::parse_keeping("[agents]\nclaude_skill = \"x\"\n", &current).expect("parses");
+        assert!(parsed.settings.agents_claude_skill, "the one given is kept");
+        // The section is not one: nothing is turned back off.
+        let parsed = Settings::parse_keeping("agents = 3\n", &current).expect("parses");
+        assert!(parsed.settings.agents_claude_skill);
+        // Written in place, the rest of the file as it was.
+        let text = "[agents]\n# mine\nclaude_skill = false\nclaude_integration = false\n";
+        let on = Settings::with_edit(text, &SettingsEdit::AgentsClaudeSkill(true)).expect("edits");
+        assert_eq!(
+            on,
+            "[agents]\n# mine\nclaude_skill = true\nclaude_integration = false\n"
+        );
+        assert!(clean(&on).agents_claude_skill);
+        let added = Settings::with_edit(
+            "[font]\nsize = 15\n",
+            &SettingsEdit::AgentsClaudeSkill(true),
+        )
+        .expect("edits");
+        assert!(added.starts_with("[font]\nsize = 15\n"), "{added}");
+        assert!(clean(&added).agents_claude_skill);
     }
 
     #[test]
@@ -8836,6 +8915,7 @@ cursor = \"spring\"
             SettingsEdit::KeepRunning(keep) => settings.keep_running = keep,
             SettingsEdit::CommandLevel(level) => settings.commands_level = level,
             SettingsEdit::AgentsClaudeIntegration(on) => settings.agents_claude_integration = on,
+            SettingsEdit::AgentsClaudeSkill(on) => settings.agents_claude_skill = on,
             SettingsEdit::Scrollbar(scrollbar) => settings.scrollbar = scrollbar,
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
@@ -8962,6 +9042,7 @@ cursor = \"spring\"
             SettingsEdit::RestoreWindows(RestoreWindows::Layout),
             SettingsEdit::KeepRunning(KeepRunning::Quit),
             SettingsEdit::AgentsClaudeIntegration(false),
+            SettingsEdit::AgentsClaudeSkill(true),
             SettingsEdit::Scrollbar(Scrollbar::Always),
             SettingsEdit::Theme("paper".to_owned()),
             SettingsEdit::LightTheme("paper".to_owned()),

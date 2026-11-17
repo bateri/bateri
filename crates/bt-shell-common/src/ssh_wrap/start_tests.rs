@@ -248,11 +248,48 @@ fn a_terminal_kept_open_goes_on_with_the_login_shell_that_has_no_marks() {
     assert!(lines.contains(&"login:-l".to_owned()), "{lines:?}");
 }
 
+#[test]
+fn a_kept_terminal_survives_the_ctrl_c_that_ends_its_program_and_runs_no_builtin_for_it() {
+    use std::os::unix::process::CommandExt as _;
+    let machine = Machine::new("start-keeps-ctrl-c");
+    let login = machine.program("login", "echo login-shell\n");
+    // The program is in the group of the terminal's foreground, as a program in a pane is: the
+    // Ctrl-C of the terminal is a signal to every process of it, this one and `start` too.
+    machine.program(
+        "interrupted",
+        "echo before\nkill -INT 0\nsleep 5\necho not-reached\n",
+    );
+    let run = |words: &[&str]| -> String {
+        let output = Command::new("sh")
+            .arg(machine.shell.join("start"))
+            .arg("1")
+            .args(words)
+            .process_group(0)
+            .env_clear()
+            .env("HOME", &machine.home)
+            .env("PATH", format!("{}:/usr/bin:/bin", machine.bin.display()))
+            .env("SHELL", &login)
+            .stdin(Stdio::null())
+            .output()
+            .expect("sh");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let said = run(&["interrupted"]);
+    assert_eq!(
+        said, "before\nlogin-shell\n",
+        "the program was not left to end alone"
+    );
+    // A word that is a builtin of `sh` is the program of that name, not the builtin: `exit` here
+    // would end `start` and skip the login shell.
+    machine.program("exit", "echo the-program-exit\n");
+    assert_eq!(run(&["exit", "3"]), "the-program-exit\nlogin-shell\n");
+}
+
 /// A `claude` that says what it was started with and the process it is.
 fn claude_stand_in(machine: &Machine) {
     machine.program(
         "claude",
-        "printf 'PID=%s\\n' \"$$\"\nprintf 'N=%s\\n' \"$#\"\nfor a in \"$@\"; do printf '<%s>\\n' \"$a\"; done\nprintf 'CLAUDECODE=%s\\n' \"${CLAUDECODE-unset}\"\n",
+        "[ \"$1\" = --help ] && { echo asked >> \"$HOME/help-asked\"; cat \"$HOME/help.txt\" 2>/dev/null; exit 0; }\nprintf 'PID=%s\\n' \"$$\"\nprintf 'N=%s\\n' \"$#\"\nfor a in \"$@\"; do printf '<%s>\\n' \"$a\"; done\nprintf 'CLAUDECODE=%s\\n' \"${CLAUDECODE-unset}\"\n",
     );
 }
 
@@ -376,5 +413,133 @@ fn the_files_are_text_that_sh_reads_and_nothing_in_them_writes_a_startup_file() 
         for rc in [".zshrc", ".bashrc", ".profile", "config.fish"] {
             assert!(!text.contains(rc), "{name} names {rc}");
         }
+    }
+}
+
+const HELP_WITH_THE_FLAG: &str = "Usage: claude [options]\n\nOptions:\n  --settings <file>  Load settings. Not used with --plugin-dir here.\n  --plugin-dir <path>  Load a plugin from a directory\n";
+/// A help that only names the flag: in another option's line, and in the line that goes on with one
+/// (indented far in, as the real help does it).
+const HELP_WITHOUT_THE_FLAG: &str = "Usage: claude [options]\n\nOptions:\n  --settings <file>  Load settings, like --plugin-dir does not.\n  --add-dir <path>  A folder (a plugin has its own:\n                                        --plugin-dir A --plugin-dir B.zip)\n  --model <name>  The model\n";
+
+#[test]
+fn the_wrapper_of_claude_gives_the_plugin_only_where_the_skill_is_and_claude_knows_the_flag() {
+    let machine = Machine::new("wrap-claude-plugin");
+    claude_stand_in(&machine);
+    let hook = "{\"hooks\":{}}";
+    std::fs::write(machine.shell.join("agents/claude.json"), hook).expect("the hook");
+    let skill = machine
+        .shell
+        .join("agents/claude-plugin/skills/bateri/SKILL.md");
+    let help = machine.home.join("help.txt");
+    let folder = format!("{}/wrap/../agents/claude-plugin", machine.shell.display());
+    let wrapper = machine.shell.join("wrap/claude");
+    let run = |words: &[&str], claudecode: bool| -> Vec<String> {
+        let mut command = Command::new("sh");
+        command
+            .arg(&wrapper)
+            .args(words)
+            .env_clear()
+            .env("HOME", &machine.home)
+            .env("PATH", format!("{}:/usr/bin:/bin", machine.bin.display()));
+        if claudecode {
+            command.env("CLAUDECODE", "1");
+        }
+        let output = command.output().expect("sh");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .skip(1)
+            .map(str::to_owned)
+            .collect()
+    };
+    let with_plugin = |rest: &[&str]| -> Vec<String> {
+        let mut lines = vec![
+            format!("N={}", rest.len() + 2),
+            "<--plugin-dir>".to_owned(),
+            format!("<{folder}>"),
+        ];
+        lines.extend(rest.iter().map(|word| format!("<{word}>")));
+        lines.push("CLAUDECODE=unset".to_owned());
+        lines
+    };
+    let hooked_with_plugin = [
+        "N=5".to_owned(),
+        "<--plugin-dir>".to_owned(),
+        format!("<{folder}>"),
+        "<--settings>".to_owned(),
+        format!("<{hook}>"),
+        "<one>".to_owned(),
+        "CLAUDECODE=unset".to_owned(),
+    ];
+    let hooked = [
+        "N=3",
+        "<--settings>",
+        &format!("<{hook}>"),
+        "<one>",
+        "CLAUDECODE=unset",
+    ]
+    .map(str::to_owned);
+    // The skill is not there: no flag, and `claude --help` is not even asked.
+    let asked = machine.home.join("help-asked");
+    std::fs::write(&help, HELP_WITH_THE_FLAG).expect("help");
+    assert_eq!(run(&["claude", "one"], false), hooked);
+    assert!(!asked.exists(), "the help was asked without the skill");
+    // The skill is there and this Claude Code lists the flag: both, the plugin first.
+    std::fs::create_dir_all(skill.parent().expect("dir")).expect("dir");
+    std::fs::write(&skill, "---\nname: bateri\n---\n").expect("skill");
+    assert_eq!(run(&["claude", "one"], false), hooked_with_plugin);
+    // The user's own `--settings` does not keep the plugin from it.
+    let mut theirs = with_plugin(&["--settings", "mine", "one"]);
+    theirs[0] = "N=5".to_owned();
+    assert_eq!(run(&["claude", "--settings", "mine", "one"], false), theirs);
+    // A Claude Code that does not list the flag (or only names it in another option's line) is
+    // not given it.
+    std::fs::write(&help, HELP_WITHOUT_THE_FLAG).expect("help");
+    assert_eq!(run(&["claude", "one"], false), hooked);
+    std::fs::write(&help, "").expect("help");
+    assert_eq!(run(&["claude", "one"], false), hooked);
+    std::fs::remove_file(&help).expect("help");
+    assert_eq!(run(&["claude", "one"], false), hooked);
+    // Claude Code's own shell: as it was typed, and the help is not asked.
+    std::fs::write(&help, HELP_WITH_THE_FLAG).expect("help");
+    std::fs::remove_file(&asked).ok();
+    assert_eq!(
+        run(&["claude", "-p", "hi"], true),
+        ["N=2", "<-p>", "<hi>", "CLAUDECODE=1"]
+    );
+    assert!(!asked.exists(), "the help was asked inside Claude Code");
+    // Without the hook's file the skill still goes.
+    std::fs::remove_file(machine.shell.join("agents/claude.json")).expect("removed");
+    assert_eq!(run(&["claude", "one"], false), with_plugin(&["one"]));
+    // The skill taken away: the same call without it.
+    std::fs::remove_file(&skill).expect("removed");
+    assert_eq!(
+        run(&["claude", "one"], false),
+        ["N=1", "<one>", "CLAUDECODE=unset"]
+    );
+}
+
+#[test]
+fn the_wrapper_names_the_folder_and_the_file_of_the_skill_the_table_names() {
+    for row in crate::program::reply::REPLIERS {
+        assert!(
+            CLAUDE_WRAPPER.contains(&format!("agents/{}", row.skill_dir)),
+            "the wrapper does not name {}",
+            row.skill_dir
+        );
+        assert!(
+            CLAUDE_WRAPPER.contains(row.skill_file),
+            "the wrapper does not name {}",
+            row.skill_file
+        );
+        assert!(
+            row.skill.iter().any(|(path, _)| *path == row.skill_file),
+            "{} is not a file of the skill",
+            row.skill_file
+        );
+        assert!(
+            CLAUDE_WRAPPER.contains(&format!("agents/{}", row.file)),
+            "the wrapper does not name {}",
+            row.file
+        );
     }
 }

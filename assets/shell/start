@@ -29,44 +29,56 @@
 #   3. The program runs, in the place of this process (KEEP 0), or before this process hands the
 #      terminal to the login shell (KEEP 1).
 
-# Drops the names after the marker when the marker is set: `drop MARKER NAME...`.
-drop() {
-  eval "marked=\${$1-}"
+# Every name here starts with `bt_`: a plain `name` or `keep` that the environment carries (they
+# are exported to what this runs) would be written over, and the program would get the new value.
+
+# Drops the names after the marker when the marker is set: `bt_drop MARKER NAME...`.
+bt_drop() {
+  eval "bt_marked=\${$1-}"
   shift
-  [ -n "$marked" ] && unset "$@"
+  [ -n "$bt_marked" ] && unset "$@"
+  unset bt_marked
+  return 0
 }
 
-drop CLAUDECODE CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_SESSION_ID CLAUDE_EFFORT CLAUDE_PID AI_AGENT GIT_EDITOR COREPACK_ENABLE_AUTO_PIN NoDefaultCurrentDirectoryInExePath
+bt_drop CLAUDECODE CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_SESSION_ID CLAUDE_EFFORT CLAUDE_PID AI_AGENT GIT_EDITOR COREPACK_ENABLE_AUTO_PIN NoDefaultCurrentDirectoryInExePath
 
 [ $# -ge 2 ] || { echo "start: KEEP and a program are needed" >&2; exit 64; }
-keep=$1
+bt_keep=$1
 shift
 
 # The folder this file is in: the wrappers are beside it.
 case $0 in
-  */*) here=${0%/*} ;;
-  *) here=. ;;
+  */*) bt_here=${0%/*} ;;
+  *) bt_here=. ;;
 esac
 
 # What the program is called to find its wrapper: a name, or a path directly inside the folder of
 # bateri's programs.
 case $1 in
   */*)
-    apps=${HOME-}/.local/share/bateri/apps/bin
-    name=${1#"$apps"/}
-    case $name in
-      "$1" | */* | '') name= ;;
+    bt_apps=${HOME-}/.local/share/bateri/apps/bin
+    bt_name=${1#"$bt_apps"/}
+    case $bt_name in
+      "$1" | */* | '') bt_name= ;;
     esac
     ;;
-  *) name=$1 ;;
+  *) bt_name=$1 ;;
 esac
 
-wrapper=
-[ -n "$name" ] && [ -f "$here/wrap/$name" ] && [ -r "$here/wrap/$name" ] && wrapper=$here/wrap/$name
+bt_wrapper=
+[ -n "$bt_name" ] && [ -f "$bt_here/wrap/$bt_name" ] && [ -r "$bt_here/wrap/$bt_name" ] && bt_wrapper=$bt_here/wrap/$bt_name
 
-if [ "$keep" = 1 ]; then
-  if [ -n "$wrapper" ]; then sh "$wrapper" "$@"; else "$@"; fi
+# Kept open, the program is run in a subshell that `exec`s it: `exec` runs a program, where a
+# plain `"$@"` would run a function or a builtin of this file or of `sh` (`exit`, `cd`, `set`)
+# first. Ctrl-C reaches this process as well as the program (they share the terminal's foreground
+# group); a caught signal is what the program does not inherit, so the program ends and this goes
+# on to the login shell instead of ending with it.
+if [ "$bt_keep" = 1 ]; then
+  trap : INT
+  if [ -n "$bt_wrapper" ]; then sh "$bt_wrapper" "$@"; else (exec "$@"); fi
+  trap - INT
   exec "${SHELL:-/bin/sh}" -l
 fi
-if [ -n "$wrapper" ]; then exec sh "$wrapper" "$@"; fi
+if [ -n "$bt_wrapper" ]; then exec sh "$bt_wrapper" "$@"; fi
 exec "$@"

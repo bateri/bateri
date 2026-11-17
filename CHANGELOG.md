@@ -14,6 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Teach Claude Code the `bateri` command.** A new switch in Settings ▸ Agents, off by default, gives each Claude Code you start in a bateri terminal a skill for the `bateri` command, so asking it to run something beside it opens a pane there. The skill lasts for that session, and nothing is written to Claude Code's own files.
 - **Shell ▸ Remove bateri from “host”.** Takes everything bateri put on a server off it, after asking: the terminals running there end, bateri's folder is deleted, and the host stops being set up (`integration = false` in its entry). It works from any `ssh` pane of a server this Mac set up, kept terminal or plain.
 
 ### Changed

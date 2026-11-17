@@ -19,31 +19,56 @@
 #   - `CLAUDECODE` is set: Claude Code started this, and a `claude -p` it opens must not have its
 #     own settings overridden.
 # The flag goes before the user's arguments, whatever they are: a subcommand does not care.
+#
+# Claude Code is also given `--plugin-dir <folder>` when the skill is on (Settings › Agents), so
+# that it learns the `bateri` command from the skill in that folder, for that session alone. The
+# folder is `agents/claude-plugin`, beside the hook's file, written and removed by the app the
+# same way; its skill file is what this looks for, at every start. A Claude Code that does not list
+# `--plugin-dir` in its `--help` is not given the flag (it refuses an option it does not know), so
+# each start asks it: one call that ends at once, paid only by whoever turned the skill on. The
+# flag does not depend on the user's `--settings` (it can be given more than once), and it is not
+# added when `CLAUDECODE` is set, for the reason above.
 
-program=$1
+# Every name here starts with `bt_`: a plain `file` or `hook` that the environment carries (it is
+# exported to what this runs) would be written over, and Claude Code would get the new value.
+
+bt_program=$1
 shift
 
 case $0 in
-  */*) shell=${0%/*}/.. ;;
-  *) shell=.. ;;
+  */*) bt_shell=${0%/*}/.. ;;
+  *) bt_shell=.. ;;
 esac
-file=$shell/agents/claude.json
+bt_file=$bt_shell/agents/claude.json
 
-hook=
-if [ -z "${CLAUDECODE-}" ] && [ -r "$file" ]; then
-  hook=$(cat "$file")
-  for arg in "$@"; do
-    case $arg in
-      --) break ;;
-      --settings | --settings=*)
-        hook=
-        break
-        ;;
-    esac
-  done
+bt_hook=
+bt_plugin=
+if [ -z "${CLAUDECODE-}" ]; then
+  if [ -r "$bt_file" ]; then
+    bt_hook=$(cat "$bt_file")
+    for bt_arg in "$@"; do
+      case $bt_arg in
+        --) break ;;
+        --settings | --settings=*)
+          bt_hook=
+          break
+          ;;
+      esac
+    done
+  fi
+  bt_folder=$bt_shell/agents/claude-plugin
+  # The option's own line of the help (`  --plugin-dir <path>  Load a plugin…`), not another
+  # option's text that names it, nor the line that continues one.
+  if [ -r "$bt_folder/skills/bateri/SKILL.md" ] \
+    && "$bt_program" --help 2>/dev/null < /dev/null | grep -q -E '^ {1,6}(-[A-Za-z], )?--plugin-dir([ =<[,]|$)'; then
+    bt_plugin=$bt_folder
+  fi
 fi
 
-if [ -n "$hook" ]; then
-  exec "$program" --settings "$hook" "$@"
+if [ -n "$bt_hook" ]; then
+  set -- --settings "$bt_hook" "$@"
 fi
-exec "$program" "$@"
+if [ -n "$bt_plugin" ]; then
+  set -- --plugin-dir "$bt_plugin" "$@"
+fi
+exec "$bt_program" "$@"

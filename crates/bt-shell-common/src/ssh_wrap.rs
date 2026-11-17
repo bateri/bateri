@@ -780,8 +780,10 @@ const MAGIC: &str = "bateri_boot=1";
 /// the Mac's own wrapper (`zsh/dock.zsh`, `bash/dock.bash`, `fish/dock.fish`: the
 /// same bytes, not a copy) and the agents' function each of the three shares too
 /// (`zsh/agents.zsh`, `bash/agents.bash`, `fish/agents.fish`), the agent's command, the files a
-/// program is started through (`start`, `wrap/claude`), and the bootstrap. The hook the agents' function reads (`agents/claude.json`) is not here: it is
-/// the settings' and is written by [`files_script_of`] ([`Wants`]).
+/// program is started through (`start`, `wrap/claude`), and the bootstrap. The hook that
+/// `wrap/claude` reads (`agents/claude.json`) and the skill it hands to the agent
+/// (`agents/claude-plugin/`) are not here: they are the settings' and are written by
+/// [`files_script_of`] ([`Wants`]).
 const REMOTE_FILES: [(&str, &str); 18] = [
     (
         "zsh/.zshenv",
@@ -854,15 +856,18 @@ const REMOTE_FILES: [(&str, &str); 18] = [
 const HERE_FILES: [&str; 3] = AGENT_FILES;
 
 /// What the files of a server, or of this Mac, hold beside those that are always there: whether
-/// the `bateri` command is wanted (`agent`, `[commands] level` is not `off`) and the hook of each
-/// agent whose setting is on ([`reply::REPLIERS`]). A hook is a file under `agents/` that the
-/// agents' function reads when it starts the agent, so it is written where the setting asks for
-/// it and removed where it does not — and never without the command, which the hook calls.
+/// the `bateri` command is wanted (`agent`, `[commands] level` is not `off`), and the hook and the
+/// skill of each agent whose setting is on ([`reply::REPLIERS`]). A hook is a file under `agents/`
+/// that the agent's wrapper (`wrap/claude`) reads when it starts the agent; a skill is the folder
+/// of files the agent is given for its session. Each is written where the setting asks for it and
+/// removed where it does not — and never without the command, which both are about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Wants {
     pub agent: bool,
-    /// Bit `i` is [`reply::REPLIERS`]`[i]`: its setting is on. Kept 0 without `agent`.
+    /// Bit `i` is [`reply::REPLIERS`]`[i]`: its hook's setting is on. Kept 0 without `agent`.
     replies: u32,
+    /// Bit `i` is [`reply::REPLIERS`]`[i]`: its skill's setting is on. Kept 0 without `agent`.
+    skills: u32,
 }
 
 impl Wants {
@@ -870,21 +875,36 @@ impl Wants {
     pub const COMMAND: Self = Self {
         agent: true,
         replies: 0,
+        skills: 0,
     };
 
     /// What `settings` ask for, where the command is wanted (`agent`) or not.
     pub fn of(settings: &Settings, agent: bool) -> Self {
-        let replies = reply::REPLIERS
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| agent && (row.wanted)(settings))
-            .fold(0, |bits, (index, _)| bits | 1 << index);
-        Self { agent, replies }
+        let mut replies = 0;
+        let mut skills = 0;
+        for (index, row) in reply::REPLIERS.iter().enumerate() {
+            if agent && (row.wanted)(settings) {
+                replies |= 1 << index;
+            }
+            if agent && (row.skill_wanted)(settings) {
+                skills |= 1 << index;
+            }
+        }
+        Self {
+            agent,
+            replies,
+            skills,
+        }
     }
 
     /// Whether `REPLIERS[index]`'s hook is to be written.
     fn replies(self, index: usize) -> bool {
         self.replies >> index & 1 == 1
+    }
+
+    /// Whether `REPLIERS[index]`'s skill is to be written.
+    fn skills(self, index: usize) -> bool {
+        self.skills >> index & 1 == 1
     }
 }
 
@@ -894,7 +914,11 @@ impl Wants {
 impl From<bool> for Wants {
     /// The command alone: no hook.
     fn from(agent: bool) -> Self {
-        Self { agent, replies: 0 }
+        Self {
+            agent,
+            replies: 0,
+            skills: 0,
+        }
     }
 }
 
@@ -903,8 +927,13 @@ fn hook_path(row: &reply::Replier) -> String {
     format!("{}/{}", HOOKS_DIR, row.file)
 }
 
-/// The folder of the hooks, below the shell directory: the agents' function reads
-/// `~/.local/share/bateri/shell/agents/<file>`.
+/// Where a file of an agent's skill is, below the shell directory.
+fn skill_path(row: &reply::Replier, file: &str) -> String {
+    format!("{}/{}/{}", HOOKS_DIR, row.skill_dir, file)
+}
+
+/// The folder of the hooks and the skills, below the shell directory: the agent's wrapper reads
+/// `~/.local/share/bateri/shell/agents/<file>` and is given `agents/<skill folder>`.
 const HOOKS_DIR: &str = "agents";
 
 /// Files the writer does not write, on a server and on this Mac, and removes where it finds
@@ -940,13 +969,13 @@ pub fn files_script_for(kablo: Option<&str>, wants: impl Into<Wants>) -> String 
     files_script_of(kablo, wants.into(), false)
 }
 
-/// [`files_script_for`] for this Mac (`kablo::install::ensure_here`): only the agent's command,
-/// which is all the Mac needs of a server's files — a terminal here starts from
-/// the application's own shells, and the bootstrap is a server pane's. There is no login shell to
-/// ask after (the script is `sh`'s in the home directory, not an ssh command), so none is
-/// looked at. Without the command (`agent` false: `[commands] level = "off"`) it is not
-/// written, and is removed if an earlier call left it: nothing of the command is left to be
-/// found.
+/// [`files_script_for`] for this Mac (`kablo::install::ensure_here`): the agent's command and the
+/// two files a program is started through (`start`, `wrap/claude`), which is all the Mac needs of a
+/// server's files — a terminal here starts from the application's own shells, and the bootstrap is
+/// a server pane's. There is no login shell to ask after (the script is `sh`'s in the home
+/// directory, not an ssh command), so none is looked at. Without the command (`agent` false:
+/// `[commands] level = "off"`) they are not written, and are removed if an earlier call left
+/// them: nothing of the command is left to be found.
 pub fn files_script_here(kablo: Option<&str>, wants: impl Into<Wants>) -> String {
     files_script_of(kablo, wants.into(), true)
 }
@@ -990,28 +1019,60 @@ fn files_script_of(kablo: Option<&str>, wants: Wants, here: bool) -> String {
     };
     let mut dirs: Vec<&str> = Vec::new();
     for (path, _) in &files {
+        // Without the command its files are not written, so no folder is made for them.
+        if !agent && AGENT_FILES.contains(path) {
+            continue;
+        }
         if let Some((dir, _)) = path.rsplit_once('/')
             && !dirs.contains(&dir)
         {
             dirs.push(dir);
         }
     }
-    // The hooks: those whose setting is on are written (their folder made), the others are taken
-    // away where an earlier call left them.
-    let (kept, dropped): (Vec<_>, Vec<_>) = reply::REPLIERS
-        .iter()
-        .enumerate()
-        .partition(|(index, _)| wants.replies(*index));
-    let kept: Vec<(String, &str)> = kept
-        .into_iter()
-        .map(|(_, row)| (hook_path(row), row.hook))
-        .collect();
-    let dropped: Vec<String> = dropped.into_iter().map(|(_, row)| hook_path(row)).collect();
-    if !kept.is_empty() && !dirs.contains(&HOOKS_DIR) {
-        dirs.push(HOOKS_DIR);
+    // The hooks and the skills: those whose setting is on are written (their folders made), the
+    // others are taken away where an earlier call left them.
+    let mut kept: Vec<(String, &str)> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    // The folders a skill that is taken away leaves behind, the deepest first.
+    let mut emptied: Vec<String> = Vec::new();
+    for (index, row) in reply::REPLIERS.iter().enumerate() {
+        if wants.replies(index) {
+            kept.push((hook_path(row), row.hook));
+        } else {
+            dropped.push(hook_path(row));
+        }
+        for (file, content) in row.skill {
+            if wants.skills(index) {
+                kept.push((skill_path(row, file), content));
+            } else {
+                let path = skill_path(row, file);
+                let mut dir = path.as_str();
+                while let Some((above, _)) = dir.rsplit_once('/') {
+                    if above == HOOKS_DIR {
+                        break;
+                    }
+                    if !emptied.iter().any(|known| known == above) {
+                        emptied.push(above.to_owned());
+                    }
+                    dir = above;
+                }
+                dropped.push(path);
+            }
+        }
+    }
+    emptied.sort_by_key(|dir| std::cmp::Reverse(dir.matches('/').count()));
+    let mut kept_dirs: Vec<String> = Vec::new();
+    for (path, _) in &kept {
+        if let Some((dir, _)) = path.rsplit_once('/')
+            && !kept_dirs.iter().any(|known| known == dir)
+        {
+            kept_dirs.push(dir.to_owned());
+        }
     }
     let made = dirs
         .iter()
+        .map(|dir| dir.to_string())
+        .chain(kept_dirs)
         .map(|dir| format!("\"$bt_dir/{dir}\""))
         .collect::<Vec<_>>()
         .join(" ");
@@ -1034,10 +1095,24 @@ fn files_script_of(kablo: Option<&str>, wants: Wants, here: bool) -> String {
         gone.extend(dropped.iter().map(String::as_str));
         quoted(&gone)
     };
+    // The folders of a skill that is taken away go with it when nothing else is in them (`rmdir`
+    // does not remove a folder that is not empty).
+    let emptied = emptied
+        .iter()
+        .map(|dir| format!("\"$bt_dir/{dir}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rmdir = if emptied.is_empty() {
+        String::new()
+    } else {
+        format!("rmdir {emptied} || :; ")
+    };
     if here && !agent {
         // Nothing to write; what an earlier call wrote goes.
         let gone = quoted(&HERE_FILES);
-        return format!("{served}{PRELUDE}rm -f {gone} {retired} 2>/dev/null\nexit 0\n");
+        return format!(
+            "{served}{PRELUDE}{{ rm -f {gone} {retired}; {rmdir}:; }} 2>/dev/null\nexit 0\n"
+        );
     }
     let mut text = format!("{served}{PRELUDE}(umask 077 && mkdir -p {made} && \\\n");
     for (path, content) in &files {
@@ -1066,12 +1141,12 @@ fn files_script_of(kablo: Option<&str>, wants: Wants, here: bool) -> String {
     let command = quoted(&[AGENT_COMMAND_PATH]);
     if agent {
         text.push_str(&format!(
-            "  {{ chmod u+x {command} || :; rm -f {retired} || :; }}) 2>/dev/null\nexit 0\n"
+            "  {{ chmod u+x {command} || :; rm -f {retired} || :; {rmdir}:; }}) 2>/dev/null\nexit 0\n"
         ));
     } else {
         let gone = quoted(&AGENT_FILES);
         text.push_str(&format!(
-            "  {{ rm -f {gone} {retired} || :; }}) 2>/dev/null\nexit 0\n"
+            "  {{ rm -f {gone} {retired} || :; {rmdir}:; }}) 2>/dev/null\nexit 0\n"
         ));
     }
     text
@@ -3441,6 +3516,132 @@ mod remote_shells {
         assert!(file(&mac).is_file());
         assert!(super::seed_files_here(&mac, Some("k/kablo"), Wants::of(&on, false)).success());
         assert!(!file(&mac).exists());
+    }
+
+    /// The skill is the hook's twin: the folder of files the agent is given for its session is
+    /// written where its own setting asks for it (on a server and on this Mac), taken away where
+    /// it does not, independent of the hook's setting, and never without the command.
+    #[test]
+    fn the_agents_skill_is_written_where_asked_and_taken_away_where_not() {
+        use super::Wants;
+        use bt_core::Settings;
+        let root = TempRoot::new("remote-files-skill");
+        let base = std::fs::canonicalize(&root.0).expect("root");
+        let sh = Path::new("/bin/sh");
+        let shell = Path::new("/usr/bin/bash");
+        let row = &super::reply::REPLIERS[0];
+        let dir = |home: &Path| {
+            home.join(".local/share/bateri/shell/agents")
+                .join(row.skill_dir)
+        };
+        let hook = |home: &Path| home.join(".local/share/bateri/shell/agents").join(row.file);
+        let home = |name: String| {
+            let home = base.join(name);
+            std::fs::create_dir_all(&home).expect("home");
+            home
+        };
+        let both = Settings {
+            agents_claude_skill: true,
+            ..Settings::default()
+        };
+        let skill_only = Settings {
+            agents_claude_integration: false,
+            agents_claude_skill: true,
+            ..Settings::default()
+        };
+        let hook_only = Settings::default();
+        // (what is wanted, whether the skill is there afterwards, whether the hook is)
+        let cases = [
+            (Wants::of(&both, true), true, true),
+            (Wants::of(&skill_only, true), true, false),
+            (Wants::of(&hook_only, true), false, true),
+            // Both are about the command: without it neither is written.
+            (Wants::of(&both, false), false, false),
+            (Wants::from(true), false, false),
+        ];
+        for (index, (wants, skill, hooked)) in cases.into_iter().enumerate() {
+            let server = home(format!("server-{index}"));
+            assert!(
+                super::seed_files_for(sh, shell, &server, &[], Some("k/kablo"), wants).success()
+            );
+            let mac = home(format!("mac-{index}"));
+            assert!(super::seed_files_here(&mac, Some("k/kablo"), wants).success());
+            for (name, home) in [("server", &server), ("this Mac", &mac)] {
+                for (file, content) in row.skill {
+                    let there = dir(home).join(file);
+                    assert_eq!(there.is_file(), skill, "{name}, case {index}: {file}");
+                    if skill {
+                        assert_eq!(
+                            std::fs::read_to_string(&there).expect("a file"),
+                            *content,
+                            "{name}, case {index}: {file}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    hook(home).is_file(),
+                    hooked,
+                    "{name}, case {index}: the hook"
+                );
+            }
+        }
+        // Without the command no folder is made for its files (case 3: the command is off).
+        for name in ["server-3", "mac-3"] {
+            let shell_dir = base.join(name).join(".local/share/bateri/shell");
+            for part in ["bin", "wrap", "agents"] {
+                assert!(
+                    !shell_dir.join(part).exists(),
+                    "{name}: an empty `{part}` folder"
+                );
+            }
+        }
+        // The folders are the owner's.
+        use std::os::unix::fs::PermissionsExt as _;
+        let server = base.join("server-0");
+        for part in ["", "skills", "skills/bateri", ".claude-plugin"] {
+            let mode = std::fs::metadata(dir(&server).join(part))
+                .expect("a folder")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "{part}");
+        }
+        // The setting turned off after a call that wrote it: the next call takes the skill away
+        // (the hook stays while its own setting is on), and the other files stay.
+        for here in [false, true] {
+            let turned = home(format!("turned-off-{here}"));
+            let seed = |wants: Wants| {
+                if here {
+                    super::seed_files_here(&turned, Some("k/kablo"), wants).success()
+                } else {
+                    super::seed_files_for(sh, shell, &turned, &[], Some("k/kablo"), wants).success()
+                }
+            };
+            assert!(seed(Wants::of(&both, true)));
+            assert!(dir(&turned).join(row.skill_file).is_file());
+            assert!(seed(Wants::of(&hook_only, true)));
+            for (file, _) in row.skill {
+                assert!(
+                    !dir(&turned).join(file).exists(),
+                    "{file} stayed after the setting went off (here: {here})"
+                );
+            }
+            // The folders of the skill go with it; the hook's folder is the hook's and stays.
+            assert!(
+                !dir(&turned).exists(),
+                "the skill's folder stayed empty after the setting went off (here: {here})"
+            );
+            assert!(hook(&turned).is_file());
+            assert!(
+                turned
+                    .join(".local/share/bateri/shell/bin/bateri")
+                    .is_file()
+            );
+            // The command off takes the hook and (a second time) finds the skill gone.
+            assert!(seed(Wants::of(&both, true)));
+            assert!(seed(Wants::from(false)));
+            assert!(!dir(&turned).join(row.skill_file).exists());
+            assert!(!hook(&turned).exists());
+        }
     }
 
     /// The counter file a machine got from an earlier call goes with the next call, on a server
