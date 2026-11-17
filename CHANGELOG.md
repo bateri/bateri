@@ -30,6 +30,7 @@ of every installed copy. A version without a section is not released.
 ### Fixed
 
 - **A very long line no longer freezes a program's editor.** Opening a file with one long line, like minified JavaScript or JSON, in an editor such as textpen froze bateri: half a minute for a line of a hundred thousand characters. Such a line now opens at once.
+- **Wrapped lines no longer hide the lines below them.** In an editor with wrapping on, a long line scrolled partly off the top left the lines under it blank until it scrolled out of view. They are now drawn.
 
 ## [0.29.1] - 2026-11-14
 
