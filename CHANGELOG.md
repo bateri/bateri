@@ -29,6 +29,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A pane Claude Code opens starts clean.** A Claude started there with `bateri split -- claude` got no last-message hook, and the pane carried Claude's own marks, so the new Claude did not save its transcript and `git commit` in the shell left after `--keep-open` failed with an empty message. The hook is added and the marks are dropped.
 - **A very long line no longer freezes a program's editor.** Opening a file with one long line, like minified JavaScript or JSON, in an editor such as textpen froze bateri: half a minute for a line of a hundred thousand characters. Such a line now opens at once.
 - **Wrapped lines no longer hide the lines below them.** In an editor with wrapping on, a long line scrolled partly off the top left the lines under it blank until it scrolled out of view. They are now drawn.
 

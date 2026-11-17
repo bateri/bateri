@@ -124,6 +124,15 @@ pub fn bin_here(home: &Path) -> PathBuf {
 /// a pane that takes longer than this to come is answered for, as before.
 pub const CLIENT_WAIT_MS: u32 = 1500;
 
+/// What the request for the terminal of a program a click opens says of it: its first questions
+/// are kept for the pane that asked ([`CLIENT_WAIT_MS`]), and it is a program somebody asked for
+/// that ends with the terminal: kablo looks for it before it starts anything and runs it through
+/// bateri's `start` when the machine has one. A kablo from before this skips the key.
+pub fn ask_for_program(spec: &mut kablo_proto::v1::NewSession) {
+    spec.wait_for_client = Some(CLIENT_WAIT_MS);
+    spec.program = Some(kablo_proto::v1::ProgramEnd::Closes);
+}
+
 /// The one line of shell a server runs, a constant: the link of the program `$0` under the home
 /// folder ([`BIN_UNDER_HOME`]), run with the other words as its arguments. Nothing of the path or
 /// the name is in it.

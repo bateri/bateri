@@ -1467,7 +1467,7 @@ fn a_name_that_is_not_a_version_is_never_handed_to_rm() {
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents_two() {
+fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents_three() {
     let root = TempRoot::new("kablo-here");
     let bundle = package(&root.0, "0.2.0", KABLO);
     let home = root.0.join("mac");
@@ -1488,8 +1488,9 @@ fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents
         0o755,
         "runnable"
     );
-    // The Mac's home holds kablo's place, and of a server's files only the agent's command (not
-    // the bootstrap and not the shells' own).
+    // The Mac's home holds kablo's place, and of a server's files only the agent's command and the
+    // two files a program that was asked for is started through (`start`, `wrap/claude`): not the
+    // bootstrap and not the shells' own.
     let names = |dir: &std::path::Path| -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("a directory")
@@ -1503,15 +1504,26 @@ fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents
     // kablo is inside bateri's own directory: one folder is all bateri leaves of its own.
     assert_eq!(names(&home.join(".local/share")), ["bateri"]);
     assert_eq!(names(&home.join(".local/share/bateri/kablo")), ["0.2.0"]);
-    assert_eq!(names(&home.join(".local/share/bateri/shell")), ["bin"]);
+    assert_eq!(
+        names(&home.join(".local/share/bateri/shell")),
+        ["bin", "start", "wrap"]
+    );
     assert_eq!(
         names(&home.join(".local/share/bateri/shell/bin")),
         ["bateri"]
     );
+    assert_eq!(
+        names(&home.join(".local/share/bateri/shell/wrap")),
+        ["claude"]
+    );
     // Its level `off`: they are taken away.
     ensure_here(&channel, &bundle, false).expect("found");
     assert!(names(&home.join(".local/share/bateri/shell/bin")).is_empty());
-    assert_eq!(names(&home.join(".local/share/bateri/shell")), ["bin"]);
+    assert!(names(&home.join(".local/share/bateri/shell/wrap")).is_empty());
+    assert_eq!(
+        names(&home.join(".local/share/bateri/shell")),
+        ["bin", "wrap"]
+    );
     ensure_here(&channel, &bundle, true).expect("found");
 
     // The second time finds it.

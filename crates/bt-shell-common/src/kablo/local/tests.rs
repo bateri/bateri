@@ -1443,6 +1443,206 @@ exit 7
     service.stop();
 }
 
+/// A program that was asked for ([`crate::open_with::ask_for_program`]) is started through the
+/// `start` bateri writes, over a real kablo: a `claude` of Claude Code's own shell loses what
+/// marks it and is given the hook, its process is the one `start` was (nothing is left between),
+/// and a program that is not there is told the way it was before `start` (nothing is started).
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_that_was_asked_for_is_started_by_start_in_a_real_kablo() {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("start");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+        streams: Default::default(),
+        stand_in: Default::default(),
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+
+    // The files of the machine are the ones the files script writes when the account is made (the
+    // hook is the setting's, which this backend does not turn on: it is written after).
+    let shell = ground.home.join(".local/share/bateri/shell");
+    let hook = r#"{"hooks":{}}"#;
+    let bin = ground.home.join("fakebin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    let program = bin.join("claude");
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+{
+  printf 'N:%s\n' "$#"
+  for word in "$@"; do printf 'ARG:%s\n' "$word"; done
+  printf 'CLAUDECODE:%s\n' "${CLAUDECODE-unset}"
+  printf 'SESSION:%s\n' "${CLAUDE_CODE_SESSION_ID-unset}"
+  printf 'MINE:%s\n' "${CLAUDE_MINE-unset}"
+  printf 'PARENT:%s\n' "$(ps -o comm= -p "$PPID" | tr -d ' ' | sed 's|.*/||')"
+} > "$BT_RECORD"
+exit 5
+"#,
+    )
+    .expect("the program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    let folder = ground.root.join("work");
+    std::fs::create_dir(&folder).expect("the folder");
+    let directory = folder.to_str().expect("text").to_owned();
+
+    let open = |ground: &mut Ground, words: &[&str], pane: &str, record: &Path| {
+        let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+        let mut options = bt_core::SessionOptions {
+            command: Some((words[0].clone(), words[1..].to_vec())),
+            working_directory: Some(PathBuf::from(&directory)),
+            pane_uuid: bt_core::PaneUuid::parse(pane),
+            ..plain_options("", &folder)
+        };
+        options.env.insert(
+            "BT_RECORD".to_owned(),
+            record.to_str().expect("text").to_owned(),
+        );
+        let (spec, size) = new_session(&options.child_launch(), 100);
+        let mut asked = crate::kablo::service::program_session(&words, Some(&directory));
+        asked.history = spec.history;
+        asked.env = spec.env;
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        for (name, value) in [
+            ("HOME", ground.home.to_str().expect("text")),
+            ("PATH", path.as_str()),
+            // What Claude Code's own shell has, and what is the person's.
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_SESSION_ID", "abc"),
+            ("CLAUDE_MINE", "kept"),
+        ] {
+            asked
+                .env
+                .push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
+        }
+        assert_eq!(
+            asked.program,
+            Some(kablo_proto::v1::ProgramEnd::Closes),
+            "a program that was asked for says so"
+        );
+        let pane = options.pane_uuid.clone().expect("a pane");
+        let stream = service.open_local(&pane, asked, size, Duration::from_secs(30));
+        for id in ledger.terminals_of(ACCOUNT) {
+            if !ground.made.contains(&id) {
+                ground.made.push(id);
+            }
+        }
+        ground.kept = Some(PathBuf::from(&kablo));
+        stream.map(|stream| (options, stream))
+    };
+
+    // The first terminal makes the account, which writes the files; nothing of it is looked at.
+    let warm = ground.root.join("record-warm");
+    let (options, stream) = open(
+        &mut ground,
+        &["true"],
+        "6B2A3E4D-5C6B-4A89-9EA0-B6C5D4E30288",
+        &warm,
+    )
+    .expect("a terminal of this Mac");
+    let ends = Arc::new(Ends::default());
+    let session =
+        bt_core::Session::streamed(options, Arc::clone(&ends) as Arc<dyn bt_core::Wake>, stream)
+            .expect("a session over the stream");
+    assert_eq!(ends.waits(), Some(Some(0)));
+    drop(session);
+    for file in ["start", "wrap/claude"] {
+        assert!(
+            shell.join(file).is_file(),
+            "{file} is written with the account"
+        );
+    }
+    std::fs::create_dir_all(shell.join("agents")).expect("agents");
+    std::fs::write(shell.join("agents/claude.json"), hook).expect("the hook");
+
+    // The words are one each, a space in one of them too.
+    let record = ground.root.join("record-claude");
+    let (options, stream) = open(
+        &mut ground,
+        &["claude", "one", "two words"],
+        "7C3A4F5E-6D7C-4B9A-AFB1-C7D6E5F40399",
+        &record,
+    )
+    .expect("a terminal of this Mac");
+    let ends = Arc::new(Ends::default());
+    let session =
+        bt_core::Session::streamed(options, Arc::clone(&ends) as Arc<dyn bt_core::Wake>, stream)
+            .expect("a session over the stream");
+    assert_eq!(ends.waits(), Some(Some(5)));
+    drop(session);
+    let said = std::fs::read_to_string(&record).unwrap_or_default();
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        [
+            "N:4".to_owned(),
+            "ARG:--settings".to_owned(),
+            format!("ARG:{hook}"),
+            "ARG:one".to_owned(),
+            "ARG:two words".to_owned(),
+            // What marks Claude Code's own shell is not in what it started; the person's own
+            // names are.
+            "CLAUDECODE:unset".to_owned(),
+            "SESSION:unset".to_owned(),
+            "MINE:kept".to_owned(),
+            // `start` and the wrapper ended in the program: its parent is kablo's, not a shell.
+            "PARENT:kablo".to_owned(),
+        ]
+    );
+
+    // No `start` on the machine: the program as it was asked for, with what it was given.
+    std::fs::remove_file(shell.join("start")).expect("removed");
+    let record = ground.root.join("record-plain");
+    let (options, stream) = open(
+        &mut ground,
+        &["claude", "one"],
+        "8D4B5A6F-7E8D-4CAB-B0C2-D8E7F6A51499",
+        &record,
+    )
+    .expect("a terminal of this Mac");
+    let ends = Arc::new(Ends::default());
+    let session =
+        bt_core::Session::streamed(options, Arc::clone(&ends) as Arc<dyn bt_core::Wake>, stream)
+            .expect("a session over the stream");
+    assert_eq!(ends.waits(), Some(Some(5)));
+    drop(session);
+    let said = std::fs::read_to_string(&record).unwrap_or_default();
+    assert_eq!(
+        said.lines().take(2).collect::<Vec<_>>(),
+        ["N:1", "ARG:one"],
+        "no `start`, no hook"
+    );
+
+    // A program that is not there is refused, and nothing is started.
+    let record = ground.root.join("record-none");
+    let refused = open(
+        &mut ground,
+        &["no-such-program-here", "x"],
+        "9E5C6B70-8F9E-4DBC-81D3-E9F8A7B62500",
+        &record,
+    );
+    assert!(
+        refused.is_err(),
+        "a program that is not there is not started"
+    );
+    assert!(!record.exists());
+    service.stop();
+}
+
 /// The options of a session whose program is `script` run by `/bin/sh`, the way a pane's shell is
 /// started on this machine: behind `login(1)` on macOS (the program is its child, and `login`
 /// is root's), the program itself elsewhere.

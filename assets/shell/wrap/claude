@@ -1,0 +1,49 @@
+# bateri's wrapper of `claude` — what bateri adds to Claude Code's command line, the same on this
+# computer and on a server.
+#
+# It is run by name, `sh wrap/claude claude [ARGUMENT]...`: by the `claude` function of the shell
+# (`agents.*`) and by `start`, when something bateri was asked to run is `claude`. The first word
+# is the program to run, and the last thing this does is run it (`exec`), so that nothing stays
+# between the terminal and Claude Code.
+#
+# Claude Code is started with `--settings '<hook>'`, so that the end of each turn reaches `bateri
+# message` and the tab can show what the agent last said (Settings › Agents). The hook lives and
+# ends with that one session: nothing is written to Claude Code's own files. The text of the hook
+# is the file `agents/claude.json`, beside the folder this file is in, which the app writes when
+# the setting is on and removes when it is off; this reads it at every start, so a change in
+# Settings reaches the next `claude` without a new shell. No file, no flag.
+#
+# The flag is NOT added, and `claude` runs as it was typed, when
+#   - the user passed `--settings` themselves (the last one given wins, so theirs would have run,
+#     but then the hook would be half there). What follows a `--` is not looked at;
+#   - `CLAUDECODE` is set: Claude Code started this, and a `claude -p` it opens must not have its
+#     own settings overridden.
+# The flag goes before the user's arguments, whatever they are: a subcommand does not care.
+
+program=$1
+shift
+
+case $0 in
+  */*) shell=${0%/*}/.. ;;
+  *) shell=.. ;;
+esac
+file=$shell/agents/claude.json
+
+hook=
+if [ -z "${CLAUDECODE-}" ] && [ -r "$file" ]; then
+  hook=$(cat "$file")
+  for arg in "$@"; do
+    case $arg in
+      --) break ;;
+      --settings | --settings=*)
+        hook=
+        break
+        ;;
+    esac
+  done
+fi
+
+if [ -n "$hook" ]; then
+  exec "$program" --settings "$hook" "$@"
+fi
+exec "$program" "$@"

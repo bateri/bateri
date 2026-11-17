@@ -6,44 +6,26 @@
 # else. It sits one level above `vendor_conf.d` on purpose, like `dock.fish`: fish reads every
 # file in that directory by itself, and this one is read only by the wrappers that mean to. It
 # defines one function and prints nothing. The bytes are the same in both places (`make bundle`
-# and a test hold it): what differs between a Mac and a server is the data file below, not this
-# code.
+# and a test hold it).
 #
-# `claude` starts Claude Code with `--settings '<hook>'`, so that the end of each turn reaches
-# `bateri message` and the tab can show what the agent last said (Settings › Agents). The hook
-# lives and ends with that one session: nothing is written to Claude Code's own files. The text of
-# the hook is the file `~/.local/share/bateri/shell/agents/claude.json`, which the app writes when
-# the setting is on and removes when it is off; the function reads it at every start, so a change
-# in Settings reaches the next `claude` without a new shell. No file, no flag.
+# `claude` is started through `wrap/claude` (`~/.local/share/bateri/shell/wrap/claude`), which
+# decides what bateri adds to Claude Code's command line (the hook of Settings › Agents) and runs
+# it: the same file starts a `claude` that the `bateri` command or the app opens, so a `claude`
+# typed in a pane and one a program opens in it start alike. Without that file (the command is
+# turned off, or an update has not written it yet) `claude` runs as it was typed. The user's own
+# words go on whole.
 #
-# The flag is NOT added, and `claude` runs as it was typed, when
-#   - the user has a `claude` function of their own (an alias is a function in fish): this file
-#     does not replace it. The wrappers are read before the user's `config.fish` and before the
-#     functions folder is looked in, so the function is defined at the first prompt, after them,
-#     and only if there is none by then;
-#   - the user passed `--settings` themselves (the last one given wins, so theirs would have run,
-#     but then the hook would be half there);
-#   - `CLAUDECODE` is set: this shell was started by Claude Code itself, and a `claude -p` it
-#     opens must not have its own settings overridden.
-# The flag goes before the user's arguments, whatever they are: a subcommand does not care.
+# This file defines nothing when the user has a `claude` function of their own (an alias is a
+# function in fish): it does not replace it. The wrappers are read before the user's `config.fish`
+# and before the functions folder is looked in, so the function is defined at the first prompt,
+# after them, and only if there is none by then.
 function __bateri_agents_define --on-event fish_prompt
     functions -e __bateri_agents_define
     functions -q claude; and return
-    function claude --description 'Claude Code, started with the hook bateri asks for'
-        set -l file $HOME/.local/share/bateri/shell/agents/claude.json
-        set -l hook
-        if test -z "$CLAUDECODE"; and test -r $file
-            set hook (string join '' < $file)
-            for arg in $argv
-                test "$arg" = --; and break
-                if test "$arg" = --settings; or string match -q -- '--settings=*' "$arg"
-                    set hook
-                    break
-                end
-            end
-        end
-        if test -n "$hook"
-            command claude --settings $hook $argv
+    function claude --description 'Claude Code, started the way bateri asks'
+        set -l wrap $HOME/.local/share/bateri/shell/wrap/claude
+        if test -r $wrap
+            sh $wrap claude $argv
         else
             command claude $argv
         end

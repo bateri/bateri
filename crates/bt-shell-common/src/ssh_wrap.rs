@@ -746,6 +746,23 @@ const AGENT_COMMAND: &str = include_str!("../../../assets/shell/remote/bin/bater
 /// Where it lives under the shell directory on a server.
 const AGENT_COMMAND_PATH: &str = "bin/bateri";
 
+/// What starts a program that was asked for (`assets/shell/start`): kablo runs a program the
+/// `bateri` command or the app starts as `sh start KEEP PROGRAM...` when this file is there. It
+/// lives and goes with the command, since what it hands a program is the command's world.
+pub(crate) const START_SCRIPT: &str = include_str!("../../../assets/shell/start");
+/// Where it lives under the shell directory ([`kablo_bateri::paths::START`]).
+const START_PATH: &str = "start";
+
+/// What `claude` is started through (`assets/shell/wrap/claude`): the function of the three
+/// shells and `start` run it as `sh wrap/claude claude [ARGUMENT]...`.
+pub(crate) const CLAUDE_WRAPPER: &str = include_str!("../../../assets/shell/wrap/claude");
+/// Where it lives under the shell directory.
+const CLAUDE_WRAPPER_PATH: &str = "wrap/claude";
+
+/// The files that are there only with the `bateri` command (`[commands] level` is not `off`):
+/// the command, and the two files a program the command starts is started through.
+const AGENT_FILES: [&str; 3] = [AGENT_COMMAND_PATH, START_PATH, CLAUDE_WRAPPER_PATH];
+
 /// The word in [`AGENT_COMMAND`] that [`files_script`] replaces with kablo's place.
 /// Left as it is when the place is not known (or not one [`is_kablo_path`]
 /// takes): the command then looks for `kablo` on `PATH`.
@@ -762,10 +779,10 @@ const MAGIC: &str = "bateri_boot=1";
 /// `vendor_conf.d` file, with the dock's functions each of the three shares with
 /// the Mac's own wrapper (`zsh/dock.zsh`, `bash/dock.bash`, `fish/dock.fish`: the
 /// same bytes, not a copy) and the agents' function each of the three shares too
-/// (`zsh/agents.zsh`, `bash/agents.bash`, `fish/agents.fish`), the agent's command, and the
-/// bootstrap. The hook the agents' function reads (`agents/claude.json`) is not here: it is
+/// (`zsh/agents.zsh`, `bash/agents.bash`, `fish/agents.fish`), the agent's command, the files a
+/// program is started through (`start`, `wrap/claude`), and the bootstrap. The hook the agents' function reads (`agents/claude.json`) is not here: it is
 /// the settings' and is written by [`files_script_of`] ([`Wants`]).
-const REMOTE_FILES: [(&str, &str); 16] = [
+const REMOTE_FILES: [(&str, &str); 18] = [
     (
         "zsh/.zshenv",
         include_str!("../../../assets/shell/zsh/.zshenv"),
@@ -823,15 +840,18 @@ const REMOTE_FILES: [(&str, &str); 16] = [
         include_str!("../../../assets/shell/fish/agents.fish"),
     ),
     (AGENT_COMMAND_PATH, AGENT_COMMAND),
+    (START_PATH, START_SCRIPT),
+    (CLAUDE_WRAPPER_PATH, CLAUDE_WRAPPER),
     // The bootstrap itself, for the terminals an agent opens without a
     // program: `kablo bateri` runs this file where the one-liner's text ran.
     ("boot.sh", BOOT_SCRIPT),
 ];
 
-/// The files this Mac gets of [`REMOTE_FILES`]: the agent's command ([`files_script_here`]). The
-/// agents' function files are not among them: a terminal here starts from the application's own
-/// shells, which read theirs from the package.
-const HERE_FILES: [&str; 1] = [AGENT_COMMAND_PATH];
+/// The files this Mac gets of [`REMOTE_FILES`]: the agent's command and the files a program is
+/// started through ([`files_script_here`]): kablo looks for `start` here, and the application's
+/// own shells call `wrap/claude` from here. The agents' function files are not among them: a
+/// terminal here starts from the application's own shells, which read theirs from the package.
+const HERE_FILES: [&str; 3] = AGENT_FILES;
 
 /// What the files of a server, or of this Mac, hold beside those that are always there: whether
 /// the `bateri` command is wanted (`agent`, `[commands] level` is not `off`) and the hook of each
@@ -1021,7 +1041,7 @@ fn files_script_of(kablo: Option<&str>, wants: Wants, here: bool) -> String {
     }
     let mut text = format!("{served}{PRELUDE}(umask 077 && mkdir -p {made} && \\\n");
     for (path, content) in &files {
-        if !agent && *path == AGENT_COMMAND_PATH {
+        if !agent && AGENT_FILES.contains(path) {
             continue;
         }
         let content = match kablo {
@@ -1049,8 +1069,9 @@ fn files_script_of(kablo: Option<&str>, wants: Wants, here: bool) -> String {
             "  {{ chmod u+x {command} || :; rm -f {retired} || :; }}) 2>/dev/null\nexit 0\n"
         ));
     } else {
+        let gone = quoted(&AGENT_FILES);
         text.push_str(&format!(
-            "  {{ rm -f {command} {retired} || :; }}) 2>/dev/null\nexit 0\n"
+            "  {{ rm -f {gone} {retired} || :; }}) 2>/dev/null\nexit 0\n"
         ));
     }
     text
@@ -1668,6 +1689,9 @@ pub fn forget_server(path: &Path, key: &str) -> io::Result<()> {
         state.rows.retain(|(_, row, _)| row != key);
     })
 }
+
+#[cfg(test)]
+mod start_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3468,6 +3492,77 @@ mod remote_shells {
         }
     }
 
+    /// `start` and `wrap/claude` go with the command, on a server and on this Mac: written
+    /// while it is wanted (the bytes of the embedded files), and gone with it when it is not.
+    #[test]
+    fn start_and_the_wrapper_of_claude_are_written_and_taken_away_with_the_command() {
+        let root = TempRoot::new("remote-files-start");
+        let base = std::fs::canonicalize(&root.0).expect("root");
+        let sh = Path::new("/bin/sh");
+        let shell = Path::new("/usr/bin/bash");
+        let files = |home: &Path| {
+            [
+                (
+                    home.join(".local/share/bateri/shell/start"),
+                    super::START_SCRIPT,
+                ),
+                (
+                    home.join(".local/share/bateri/shell/wrap/claude"),
+                    super::CLAUDE_WRAPPER,
+                ),
+            ]
+        };
+        for here in [false, true] {
+            let name = if here { "mac" } else { "server" };
+            let home = base.join(name);
+            std::fs::create_dir_all(&home).expect("home");
+            let seed = |agent: bool| {
+                if here {
+                    super::seed_files_here(&home, Some("k/kablo"), agent).success()
+                } else {
+                    super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), agent).success()
+                }
+            };
+            assert!(seed(true), "{name}");
+            for (file, content) in files(&home) {
+                assert_eq!(
+                    std::fs::read_to_string(&file).unwrap_or_default(),
+                    content,
+                    "{name}: {}",
+                    file.display()
+                );
+            }
+            // The command turned off: the files go, and the call that finds them gone is quiet.
+            assert!(seed(false), "{name}");
+            for (file, _) in files(&home) {
+                assert!(!file.exists(), "{name}: {} stayed", file.display());
+            }
+            assert!(seed(false), "{name}");
+            // Turned on again: back.
+            assert!(seed(true), "{name}");
+            for (file, _) in files(&home) {
+                assert!(file.is_file(), "{name}: {}", file.display());
+            }
+            // A home that never had the command does not get them either.
+            let never = base.join(format!("never-{name}"));
+            std::fs::create_dir_all(&never).expect("home");
+            if here {
+                assert!(super::seed_files_here(&never, Some("k/kablo"), false).success());
+            } else {
+                assert!(
+                    super::seed_files_for(sh, shell, &never, &[], Some("k/kablo"), false).success()
+                );
+            }
+            for (file, _) in files(&never) {
+                assert!(
+                    !file.exists(),
+                    "{name}: {} written without the command",
+                    file.display()
+                );
+            }
+        }
+    }
+
     /// The writer and the readers of a machine's files name them once: what the writer puts
     /// where, `kablo-bateri::paths` says.
     #[test]
@@ -3476,6 +3571,7 @@ mod remote_shells {
             super::AGENT_COMMAND_PATH,
             format!("{}/{}", paths::BIN, paths::COMMAND)
         );
+        assert_eq!(super::START_PATH, paths::START);
         assert!(
             super::REMOTE_FILES
                 .iter()
@@ -4292,6 +4388,13 @@ mod remote_shells {
     fn agents_function_in(world: &str, home: &Path, shells: &Path) -> usize {
         let hook_dir = home.join(".local/share/bateri/shell/agents");
         std::fs::create_dir_all(&hook_dir).expect("agents");
+        // What the function starts `claude` through: written where the files script writes it
+        // (on a server it is there already).
+        let wrapper = home
+            .join(".local/share/bateri/shell")
+            .join(super::CLAUDE_WRAPPER_PATH);
+        std::fs::create_dir_all(wrapper.parent().expect("dir")).expect("wrap");
+        std::fs::write(&wrapper, super::CLAUDE_WRAPPER).expect("the wrapper");
         let hook_file = hook_dir.join(super::reply::REPLIERS[0].file);
         let hook = super::reply::REPLIERS[0].hook;
         let bin = home.join("fakebin");
@@ -4491,6 +4594,16 @@ mod remote_shells {
                 plain,
                 "{name}: without the file"
             );
+            // No wrapper (the command is off, or an update has not written it yet): `claude` is
+            // the agent's own, hook file or not.
+            std::fs::write(&hook_file, hook).expect("hook");
+            std::fs::remove_file(&wrapper).expect("removed");
+            assert_eq!(
+                run(shell, "", words, false).expect("ran"),
+                plain,
+                "{name}: without the wrapper"
+            );
+            std::fs::write(&wrapper, super::CLAUDE_WRAPPER).expect("the wrapper");
         }
         ran
     }

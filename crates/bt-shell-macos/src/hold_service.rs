@@ -751,7 +751,8 @@ fn service() -> Option<&'static Service> {
 /// built for, a service that did not come up): the pane is an ordinary one. `program` is a
 /// terminal whose child is a program started in a shell's place: it asks the moment it starts,
 /// so its questions are kept for the pane, which attaches a moment later
-/// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]).
+/// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]), and it is a program somebody asked for
+/// ([`bt_shell_common::open_with::ask_for_program`]).
 pub(crate) fn open_local(
     pane: &PaneUuid,
     launch: &bt_core::ChildLaunch,
@@ -760,7 +761,9 @@ pub(crate) fn open_local(
 ) -> Option<bt_core::Stream> {
     let service = service()?;
     let (mut spec, size) = local::new_session(launch, history);
-    spec.wait_for_client = program.then_some(bt_shell_common::open_with::CLIENT_WAIT_MS);
+    if program {
+        bt_shell_common::open_with::ask_for_program(&mut spec);
+    }
     service.open_local(pane, spec, size, LOCAL_WAIT).ok()
 }
 

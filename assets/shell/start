@@ -1,0 +1,72 @@
+# bateri's `start` — how a program that somebody asked bateri to run begins, the same on this
+# computer and on a server.
+#
+# kablo starts every program the `bateri` command or the app asks for as
+#
+#     sh start KEEP PROGRAM [ARGUMENT]...
+#
+# when this file is there (`~/.local/share/bateri/shell/start`), and runs PROGRAM itself when it is
+# not. KEEP is 1 when the terminal carries on with the user's login shell after the program, 0 when
+# it ends with it. This is plain `sh`, run by that name: nothing here needs the execute bit, and
+# nothing here reads a startup file.
+#
+# Three things happen, in this order:
+#
+#   1. The one who asked is an agent (its marker is set): the names it puts in the environment of
+#      the programs it starts are dropped. A program that an agent opens a pane for is the user's
+#      program, not the agent's: a Claude Code that is started in a pane an agent opened would
+#      otherwise find `CLAUDE_CODE_CHILD_SESSION` and not save its transcript, and `GIT_EDITOR=true`
+#      would fail every `git commit` typed there. Everything else of the environment goes on (a
+#      virtual environment, `PATH`, `AWS_PROFILE`). One line per agent in `drop` below; the lists
+#      are exact names, not prefixes, so that a `CLAUDE_*` the person set themselves stays.
+#   2. PROGRAM is a name (`claude`) or a path inside bateri's folder of programs
+#      (`~/.local/share/bateri/apps/bin/<name>`, which is how the app starts what a click opens),
+#      and `wrap/<name>` is here: that file starts the program, `sh wrap/<name> PROGRAM
+#      [ARGUMENT]...`, and gives it what bateri adds. Any other path is not wrapped (`./claude` is
+#      not Claude), and neither is `sh` of the line a server's click starts a program with. A
+#      wrapper does not look for the program again: it is given the word to run and ends by running
+#      it (`exec`).
+#   3. The program runs, in the place of this process (KEEP 0), or before this process hands the
+#      terminal to the login shell (KEEP 1).
+
+# Drops the names after the marker when the marker is set: `drop MARKER NAME...`.
+drop() {
+  eval "marked=\${$1-}"
+  shift
+  [ -n "$marked" ] && unset "$@"
+}
+
+drop CLAUDECODE CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_SESSION_ID CLAUDE_EFFORT CLAUDE_PID AI_AGENT GIT_EDITOR COREPACK_ENABLE_AUTO_PIN NoDefaultCurrentDirectoryInExePath
+
+[ $# -ge 2 ] || { echo "start: KEEP and a program are needed" >&2; exit 64; }
+keep=$1
+shift
+
+# The folder this file is in: the wrappers are beside it.
+case $0 in
+  */*) here=${0%/*} ;;
+  *) here=. ;;
+esac
+
+# What the program is called to find its wrapper: a name, or a path directly inside the folder of
+# bateri's programs.
+case $1 in
+  */*)
+    apps=${HOME-}/.local/share/bateri/apps/bin
+    name=${1#"$apps"/}
+    case $name in
+      "$1" | */* | '') name= ;;
+    esac
+    ;;
+  *) name=$1 ;;
+esac
+
+wrapper=
+[ -n "$name" ] && [ -f "$here/wrap/$name" ] && [ -r "$here/wrap/$name" ] && wrapper=$here/wrap/$name
+
+if [ "$keep" = 1 ]; then
+  if [ -n "$wrapper" ]; then sh "$wrapper" "$@"; else "$@"; fi
+  exec "${SHELL:-/bin/sh}" -l
+fi
+if [ -n "$wrapper" ]; then exec sh "$wrapper" "$@"; fi
+exec "$@"
