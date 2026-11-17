@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use block2::RcBlock;
-use bt_core::{RemoteKind, RemoteTarget};
+use bt_core::{RemoteIntegration, RemoteKind, RemoteTarget};
 use bt_shell_common::kablo::install;
 use bt_shell_common::kablo::removal::{self, Outcome, Reach, World};
 use bt_shell_common::kablo::service::Backend;
@@ -253,25 +253,50 @@ impl TerminalPane {
     }
 
     /// The menu's question for Shell ▸ Set Up bateri on “{host}”: the server of the pane's `ssh`
-    /// and whether the item is **grey** — this Mac has put bateri on it, or it is not known yet
-    /// whether it has (the key is asked of `ssh` once; one `ssh -G` cannot read never is). `None`
-    /// locally.
-    pub(crate) fn set_up_state(&self) -> Option<(String, bool)> {
+    /// and whether the item is **grey** — the next connection sets the server up as it is
+    /// ([`ssh_wrap::sets_up_next`], `integration` being the setting for a host as typed), or it is
+    /// not known yet whether it does (the key is asked of `ssh` once; one `ssh -G` cannot read
+    /// never is). `None` locally. Independent of Shell ▸ Remove: both can be usable.
+    pub(crate) fn set_up_state(
+        &self,
+        integration: &dyn Fn(&str) -> RemoteIntegration,
+    ) -> Option<(String, bool)> {
         let target = self.removal_target()?;
-        let grey = self.touched(&target) != Some(false);
+        let grey = self.sets_up_next(&target, integration) != Some(false);
         Some((target.label, grey))
     }
 
-    /// Whether this Mac has put bateri on the server of `target`; `None` while its key is not
-    /// known ([`Self::plain_key`]).
-    fn touched(&self, target: &Target) -> Option<bool> {
+    /// The server of `target`'s key and what bateri's state file knows of the servers, read once;
+    /// `None` while the key is not known ([`Self::plain_key`]) or there is no home to read from.
+    fn server_state(&self, target: &Target) -> Option<(String, ssh_wrap::HostState)> {
         let key = match &target.kept {
             Some(kept) => Some(kept.key.clone()),
             None => self.plain_key(target),
         }?;
-        Some(crate::child::home().is_some_and(|home| {
-            ssh_wrap::load(&crate::remote_hosts_path(&home)).knows(Fact::Touched, &key)
-        }))
+        let home = crate::child::home()?;
+        Some((key, ssh_wrap::load(&crate::remote_hosts_path(&home))))
+    }
+
+    /// Whether the next connection to the server of `target` sets it up; `None` while it is not
+    /// known ([`Self::server_state`]).
+    fn sets_up_next(
+        &self,
+        target: &Target,
+        integration: &dyn Fn(&str) -> RemoteIntegration,
+    ) -> Option<bool> {
+        let (key, state) = self.server_state(target)?;
+        Some(ssh_wrap::sets_up_next(
+            integration(&target.host),
+            &state,
+            &key,
+        ))
+    }
+
+    /// Whether this Mac has put bateri on the server of `target`; `None` while it is not known
+    /// ([`Self::server_state`]).
+    fn touched(&self, target: &Target) -> Option<bool> {
+        let (key, state) = self.server_state(target)?;
+        Some(state.knows(Fact::Touched, &key))
     }
 
     /// A plain `ssh` has been found in the pane: its server's key is asked of `ssh` now, so that
@@ -389,12 +414,15 @@ impl TerminalPane {
     }
 
     /// Shell ▸ Set Up bateri on “{host}”: asks, as a sheet of the pane, and on *Set Up* writes the
-    /// host's entry `integration = true` ([`crate::app::AppDelegate::set_up_host`]): the next
-    /// connection to it sets bateri up without asking, and shows it in the dock. The terminal open
-    /// is not touched. A beep when the pane has no `ssh`, this Mac has put bateri on the server
-    /// already (or that is not known yet), or a sheet is up.
-    pub(crate) fn set_up_bateri_on_host(&self) {
-        let (Some(target), Some((_, false))) = (self.removal_target(), self.set_up_state()) else {
+    /// host's entry `integration = true` and forgets the stamps that kept the server's `ssh`
+    /// plain ([`crate::app::AppDelegate::set_up_host`]): the next connection to it sets bateri up
+    /// without asking, and shows it in the dock. The terminal open is not touched. A beep when the
+    /// pane has no `ssh`, the next connection sets the server up already (or that is not known
+    /// yet), or a sheet is up.
+    pub(crate) fn set_up_bateri_on_host(&self, integration: &dyn Fn(&str) -> RemoteIntegration) {
+        let (Some(target), Some((_, false))) =
+            (self.removal_target(), self.set_up_state(integration))
+        else {
             beep();
             return;
         };

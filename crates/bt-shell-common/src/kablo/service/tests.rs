@@ -1487,16 +1487,38 @@ fn a_pane_that_cannot_be_answered_to_is_not_asked() {
     assert_eq!(holder.outcome(), Outcome::FallBack);
     assert_eq!(rig.world.log(), ["pane", "route", "consent"]);
 
-    // A pane that says which it is but has no dock (a pane opened for a program reserves none) has
-    // no row to be asked in either: no login, no question.
+    // A pane that says which it is but has no dock has no row to be asked in either: no login, no
+    // question — and no text question in the terminal. It is told once, in a dim line, where
+    // bateri can be set up from; nothing is written to the server.
     pane_named(&rig.world);
     rig.world.info.lock().expect("lock").rows = false;
+    // A pane opened for a program is told nothing: nobody typed the `ssh` there.
+    rig.world.info.lock().expect("lock").program = Some(vec!["htop".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1p");
+    let _ = holder.outcome();
+    let program = String::from_utf8_lossy(&holder.shown.bytes()).into_owned();
+    assert!(!program.contains("can keep terminals"), "{program:?}");
+    rig.world.info.lock().expect("lock").program = None;
     let mut holder = Holder::new(&rig.socket(), "b-2");
     assert_eq!(holder.outcome(), Outcome::FallBack);
     assert_eq!(
         rig.world.log(),
-        ["pane", "route", "consent", "pane", "route", "consent"]
+        [
+            "pane", "route", "consent", "pane", "route", "consent", "pane", "route", "consent"
+        ]
     );
+    let told = String::from_utf8_lossy(&holder.shown.bytes()).into_owned();
+    assert!(
+        told.contains(
+            "bateri can keep terminals on rasp running: Shell \u{25b8} Set Up bateri on \u{201c}rasp\u{201d}."
+        ),
+        "{told:?}"
+    );
+    assert!(told.contains("\x1b[2m"), "dim: {told:?}");
+    // The same server is not told again while bateri runs.
+    let mut holder = Holder::new(&rig.socket(), "b-3");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(holder.shown.bytes(), b"", "once per server");
 }
 
 /// The person who is asked is waited for for as long as they take, and not longer than the pane:

@@ -853,11 +853,7 @@ const PRUNE_AGE_MINUTES: u32 = 10;
 /// them. Its status is that of the listing: a listing that failed is not an empty one, and
 /// [`Census::parse`] is not given one. One line of `sh`, like the others.
 pub fn census_script(version: &str) -> String {
-    let (root, former, mark) = (install::ROOT, install::FORMER_ROOT, census::MARK);
-    format!(
-        "for r in {root} {former}; do for d in $r/*/; do [ -x $d/kablo ] && echo ${{d%/}}; done; done; \
-         echo {mark}; {root}/{version}/kablo list --json"
-    )
+    census::script(&format!("{}/{version}/kablo list --json", install::ROOT))
 }
 
 /// The installed versions nothing runs from, given what [`census_script`] said, each as its
@@ -942,11 +938,7 @@ pub fn prune_versions(channel: &dyn Channel, installed: &Installed) -> Vec<Strin
 
 /// The machine as it is now ([`census_script`]), when the answer is a whole one.
 fn look_at(channel: &dyn Channel, version: &str) -> Option<Census> {
-    let reply = channel.run(&census_script(version), &[]).ok()?;
-    if reply.status != Some(0) {
-        return None;
-    }
-    Census::parse(&reply.out)
+    census::look(channel, &census_script(version))
 }
 
 /// Asks the machine to remove [`unused`] of `census`, and says which.

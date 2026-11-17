@@ -268,8 +268,8 @@ pub trait PaneHost {
     /// What the menu says of the pane's server is not what it said: it is asked again.
     fn menu_changed(&self) {}
     /// The person said *Set Up* to Shell ▸ Set Up bateri on “{host}” in the pane whose `ssh` is
-    /// `argv`: the host's entry says yes, and the server's record of a shell it does not have is
-    /// forgotten. The default is an owner that writes no settings.
+    /// `argv`: the host's entry says yes, and the server's stamps that kept its `ssh` a plain one
+    /// (no shell, no kablo) are forgotten. The default is an owner that writes no settings.
     fn set_up_host(&self, _host: String, _argv: Vec<String>) {}
     /// The card's *Open All in New Tab*: every terminal the server `host` keeps that no pane
     /// shows, together in a new tab of the pane's window.

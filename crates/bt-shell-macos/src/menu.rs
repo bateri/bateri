@@ -196,10 +196,11 @@ pub(crate) struct SetUpMenu {
     pub(crate) enabled: bool,
 }
 
-/// The item's model, the reverse of [`removal_menu`]'s: on a remote tab (`Some((host, grey))`) the
-/// title carries the host without `user@`, and the item can be used unless `grey` — this Mac has
-/// put bateri's files on the server (a server bateri is on has nothing to set up), or does not
-/// know yet whether it has; locally "Set Up bateri on Host", grey.
+/// The item's model: on a remote tab (`Some((host, grey))`) the title carries the host without
+/// `user@`, and the item can be used unless `grey` — the next connection sets the server up as it
+/// is (`ssh_wrap::sets_up_next`), or it is not known yet whether it does; locally "Set Up bateri
+/// on Host", grey. **Independent of [`removal_menu`]'s item**: a server with bateri's files and a
+/// setting that says off has both usable.
 pub(crate) fn set_up_menu(remote: Option<(&str, bool)>) -> SetUpMenu {
     match remote {
         Some((host, grey)) => SetUpMenu {
@@ -1118,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn the_set_up_item_is_for_a_server_bateri_is_not_on_and_grey_locally() {
+    fn the_set_up_item_is_for_a_server_the_next_connection_does_not_set_up_and_grey_locally() {
         assert_eq!(
             set_up_menu(None),
             SetUpMenu {
@@ -1133,8 +1134,12 @@ mod tests {
                 enabled: true,
             }
         );
-        // Where this Mac has put bateri, Remove is the item that is usable and this one is not.
+        // Where the next connection sets the server up anyway there is nothing to do.
         assert!(!set_up_menu(Some(("web", true))).enabled);
+        // The two items do not depend on each other: a server bateri is on and a setting that
+        // would not use it has both.
+        assert!(set_up_menu(Some(("web", false))).enabled);
+        assert!(removal_menu(Some(("web", true))).enabled);
         assert_eq!(
             shortcuts::by_name("set_up_on_host").map(|c| c.id),
             Some("setUpOnHost")

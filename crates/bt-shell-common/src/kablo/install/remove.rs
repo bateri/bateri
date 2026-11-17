@@ -51,22 +51,15 @@ fn pick(version: &str) -> String {
 /// `[]`. The status is that of the listing, so a listing that failed (a socket directory that is
 /// not the user's own) is not an empty one. One line of `sh`, like the others.
 pub fn look_script(version: &str) -> String {
-    let (root, former, mark) = (install::ROOT, install::FORMER_ROOT, census::MARK);
-    let pick = pick(version);
-    format!(
-        "for r in {root} {former}; do for d in $r/*/; do [ -x $d/kablo ] && echo ${{d%/}}; done; done; \
-         echo {mark}; {pick}; \
-         if [ -n \"$k\" ]; then $k list --json; else echo '[]'; fi"
-    )
+    census::script(&format!(
+        "{}; if [ -n \"$k\" ]; then $k list --json; else echo '[]'; fi",
+        pick(version)
+    ))
 }
 
-/// The machine as it is now, when the answer is a whole one.
+/// The machine as it is now, when the answer is a whole one ([`census::look`]).
 pub fn look(channel: &dyn Channel, version: &str) -> Option<Census> {
-    let reply = channel.run(&look_script(version), &[]).ok()?;
-    if reply.status != Some(0) {
-        return None;
-    }
-    Census::parse(&reply.out)
+    census::look(channel, &look_script(version))
 }
 
 /// The terminals of the machine that run: the ones [`script`] ends, and the ones the question

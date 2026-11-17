@@ -2588,9 +2588,13 @@ the server's rc files.
   answer is this setting. A server bateri has put its files on from this Mac is
   not asked about again, and neither is one whose entry says `integration =
   true`. A production mark colors the dock and decides nothing else: a
-  production host is asked about like the rest. A pane that has no row (one
-  opened for a program, with no dock) is not asked and no login is made for it:
-  it is a plain `ssh`.
+  production host is asked about like the rest. A pane that has no row is not
+  asked and no login is made for it: it is a plain `ssh`. Where there is no dock
+  (`[shell] integration` is `"blocks"` or `"off"`, or the shell has no integration,
+  such as bash before 4.4) one dim line is printed above the prompt, once for each server for as long as bateri runs:
+  *bateri can keep terminals on rasp running: Shell ▸ Set Up bateri on “rasp”.*
+  Nothing is written to the server. A pane opened for a program is told
+  nothing.
 - **The earlier `true` and `false`.** `integration = true` and `false`, which
   earlier versions wrote, are read as `"ask"` and `"off"`, and bateri writes
   the new value in their place in the file the first time it reads it (the
@@ -2619,9 +2623,9 @@ the server's rc files.
   in bateri's own file
   (`~/Library/Application Support/bateri/remote-hosts`), not in
   `settings.toml`; a server is identified by the `user@host:port` that
-  `~/.ssh/config` resolves. A server remembered as "shell-less" by mistake is
-  forgotten with Shell ▸ Set Up bateri on “{host}” (answering *Set Up* deletes this
-  record).
+  `~/.ssh/config` resolves. A server remembered by mistake as "shell-less", or as
+  one kablo cannot be kept on, is forgotten with Shell ▸ Set Up bateri on
+  “{host}” (answering *Set Up* deletes both records).
 - **When bateri is updated**: the kablo on a server is the one in bateri's package,
   put beside the one that is there (a version never overwrites another). Every
   connection to a server — the first `ssh` of a run, and the first connection
@@ -2673,10 +2677,15 @@ the server's rc files.
   only that is deleted entirely, a marked one keeps its mark). The pattern is the
   host without its `user@`; comments and the array's formatting are not touched,
   and if the file cannot be parsed or the list is broken, nothing is written. It
-  also forgets a "shell-less" record of the server. The item is grayed out in a
-  local tab and where this Mac has put bateri's files already (Remove is the
-  item that can be used there). The next `ssh` sets the server up without asking
-  and shows it in the row; an open connection stays as it is.
+  also forgets the records of a server taken for "shell-less" or for one kablo
+  cannot be kept on. The item can be used where the next connection would not
+  set the server up: its `integration` is `off` or it is one of those two
+  records, or `ask` has not been answered for it (whether or not bateri's files
+  are on it). It is grayed out in a local tab and where the next `ssh` sets the
+  server up anyway (`auto`, an entry that says yes, or files bateri put there
+  with `ask`). Remove, below, does not depend on it: both can be usable at once.
+  The next `ssh` sets the server up without asking and shows it in the row; an
+  open connection stays as it is.
 - **Taking bateri off a server**: while the pane has an `ssh` running, **Shell ▸
   Remove bateri from “host”** removes everything bateri put on that server. It
   can be used where this Mac has put bateri's files (the record that keeps

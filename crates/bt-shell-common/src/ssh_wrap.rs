@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bt_core::{PaneUuid, Settings, TERM_PROGRAM_VERSION};
+use bt_core::{PaneUuid, RemoteIntegration, Settings, TERM_PROGRAM_VERSION};
 
 use kablo_bateri::paths;
 
@@ -564,10 +564,7 @@ fn eligible(
         return None;
     }
     let key = host_key(&config)?;
-    if [Fact::Plain, Fact::NoKablo]
-        .iter()
-        .any(|fact| state.knows(*fact, &key))
-    {
+    if STAMPS.iter().any(|stamp| state.knows(*stamp, &key)) {
         return None;
     }
     Some(Eligible { call, config, key })
@@ -1618,17 +1615,41 @@ pub fn ssh_fell_back_main(
     0
 }
 
-/// Forgets that the server behind `ssh` (an argv like [`record_posix`]'s) has
-/// no shell: the Shell menu's integration toggle — the one way back
-/// from a `plain` row learned wrongly. `Ok(true)` if a row was removed.
-pub fn forget_plain(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<bool> {
+/// The facts that make the `ssh` to a server a plain one and are only ever learned: a connection
+/// that fell back ([`Fact::Plain`]) and a server kablo cannot be kept on ([`Fact::NoKablo`]).
+/// Shell ▸ Set Up bateri on “{host}” takes them back ([`forget_stamps`]).
+const STAMPS: [Fact; 2] = [Fact::Plain, Fact::NoKablo];
+
+/// Whether the next connection **sets the server `key` up** — puts bateri on it
+/// without asking: the integration is on for the host (`integration`, [`Settings::integration_for`]),
+/// no stamp ([`STAMPS`]) keeps its `ssh` a plain one, and the person either said so (`auto`, the
+/// host's own entry) or bateri is on the server already ([`Fact::Touched`]). When it does not, the
+/// connection is a plain `ssh` or asks first, and Shell ▸ Set Up bateri on “{host}” is the way to
+/// the other.
+pub fn sets_up_next(integration: RemoteIntegration, state: &HostState, key: &str) -> bool {
+    integration.is_on()
+        && !STAMPS.iter().any(|stamp| state.knows(*stamp, key))
+        && (integration == RemoteIntegration::Auto || state.knows(Fact::Touched, key))
+}
+
+/// Forgets what makes the server behind `ssh` (an argv like [`record_posix`]'s) a plain one — that
+/// it has no shell ([`Fact::Plain`]) and that kablo cannot be kept on it ([`Fact::NoKablo`]), the
+/// stamps a connection that went wrong left: Shell ▸ Set Up bateri on “{host}”, the one way back
+/// from a stamp learned wrongly. `Ok(true)` if a row was removed.
+pub fn forget_stamps(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<bool> {
     let Some(key) = key_of(runner, ssh) else {
         return Ok(false);
     };
-    if !load(path).knows(Fact::Plain, &key) {
+    let state = load(path);
+    if !STAMPS.iter().any(|stamp| state.knows(*stamp, &key)) {
         return Ok(false);
     }
-    rewrite(path, LOCK_PATIENCE, |state| state.forget(Fact::Plain, &key)).map(|()| true)
+    rewrite(path, LOCK_PATIENCE, |state| {
+        for stamp in STAMPS {
+            state.forget(stamp, &key);
+        }
+    })
+    .map(|()| true)
 }
 
 /// The key of the server behind `ssh` (an argv like [`record_posix`]'s): the `user@host:port`
@@ -2695,20 +2716,53 @@ mod tests {
         assert!(!record_posix(&Gconfig::new("garbage"), &ssh, &path).unwrap());
         assert!(!record_posix(&runner, &[], &path).unwrap());
 
-        // Forgetting: only the `plain` row of that server goes.
+        // Forgetting: only the stamps (`plain`, `nokablo`) of that server go.
         assert!(
-            !forget_plain(&runner, &ssh, &path).unwrap(),
+            !forget_stamps(&runner, &ssh, &path).unwrap(),
             "nothing to forget"
         );
         record(&path, Fact::Plain, "u@h:22", 2, LOCK_PATIENCE).unwrap();
+        record(&path, Fact::NoKablo, "u@h:22", 2, LOCK_PATIENCE).unwrap();
+        record(&path, Fact::Touched, "u@h:22", 2, LOCK_PATIENCE).unwrap();
         record(&path, Fact::Plain, "v@h:22", 2, LOCK_PATIENCE).unwrap();
-        assert!(forget_plain(&runner, &ssh, &path).unwrap());
+        assert!(forget_stamps(&runner, &ssh, &path).unwrap());
         let state = load(&path);
         assert!(!state.knows(Fact::Plain, "u@h:22"));
+        assert!(!state.knows(Fact::NoKablo, "u@h:22"));
         assert!(state.knows(Fact::Plain, "v@h:22"));
         assert!(state.knows(Fact::Posix, "u@h:22"));
-        assert!(!forget_plain(&Gconfig::new("garbage"), &ssh, &path).unwrap());
+        assert!(
+            state.knows(Fact::Touched, "u@h:22"),
+            "files are still there"
+        );
+        assert!(!forget_stamps(&runner, &ssh, &path).unwrap(), "once");
+        assert!(!forget_stamps(&Gconfig::new("garbage"), &ssh, &path).unwrap());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Whether the next connection sets a server up: only where the person's setting and what
+    /// bateri knows of the server both say yes (Shell ▸ Set Up is the item for the rest).
+    #[test]
+    fn the_next_connection_sets_a_server_up_only_when_nothing_keeps_it_from_it() {
+        use RemoteIntegration::{Ask, Auto, Off};
+        let mut state = HostState::default();
+        // Nobody answered: `auto` sets up, `ask` asks, `off` does neither.
+        assert!(sets_up_next(Auto, &state, "u@h:22"));
+        assert!(!sets_up_next(Ask, &state, "u@h:22"));
+        assert!(!sets_up_next(Off, &state, "u@h:22"));
+        // bateri is on the server: `ask` does not ask again; `off` still writes nothing.
+        state.note(Fact::Touched, "u@h:22", 1);
+        assert!(sets_up_next(Ask, &state, "u@h:22"));
+        assert!(!sets_up_next(Off, &state, "u@h:22"));
+        // A stamp keeps the `ssh` plain, whatever the setting says and whether bateri was there.
+        for stamp in [Fact::Plain, Fact::NoKablo] {
+            let mut stamped = state.clone();
+            stamped.note(stamp, "u@h:22", 1);
+            assert!(!sets_up_next(Auto, &stamped, "u@h:22"), "{stamp:?}");
+            assert!(!sets_up_next(Ask, &stamped, "u@h:22"), "{stamp:?}");
+        }
+        // Another server's rows say nothing of this one.
+        assert!(!sets_up_next(Ask, &state, "v@h:22"));
     }
 
     /// The seen nonces: a file per nonce beside the state file,

@@ -14,9 +14,35 @@
 //! ledger holds is gone ([`Census::has`]).
 
 use kablo_proto::SessionId;
+use kablo_proto::install;
+
+use super::install::Channel;
 
 /// The line between the directories and the listing in a look's answer.
 pub const MARK: &str = "---";
+
+/// The script of a look: the directories of both roots that hold a kablo, [`MARK`], then
+/// `listing`, the shell words that print the machine's terminals as `kablo list --json` does. The
+/// one owner of the roots' loop: a look that is told by a connection and one that is made to take
+/// bateri off a machine read the same answer ([`Census::parse`]). One line of `sh`, like the
+/// others.
+pub fn script(listing: &str) -> String {
+    let (root, former) = (install::ROOT, install::FORMER_ROOT);
+    format!(
+        "for r in {root} {former}; do for d in $r/*/; do [ -x $d/kablo ] && echo ${{d%/}}; done; done; \
+         echo {MARK}; {listing}"
+    )
+}
+
+/// The machine as it is now, as the look `script` ([`script`]) says it, when the answer is a
+/// whole one: a script that failed is no answer.
+pub fn look(channel: &dyn Channel, script: &str) -> Option<Census> {
+    let reply = channel.run(script, &[]).ok()?;
+    if reply.status != Some(0) {
+        return None;
+    }
+    Census::parse(&reply.out)
+}
 
 /// A terminal of the machine, as `kablo list --json` says it (the keys that are not named here
 /// are not read).

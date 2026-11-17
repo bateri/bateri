@@ -1568,12 +1568,14 @@ define_class!(
                 item.setTitle(&NSString::from_str(window::close_title(1)));
             }
 
-            // Shell ▸ Set Up bateri on “{host}”: the key pane's server, usable while this Mac
-            // has not put bateri on it (and that is known); locally grey.
+            // Shell ▸ Set Up bateri on “{host}”: the key pane's server, usable while the next
+            // connection would not set it up (and that is known), whether or not bateri's files
+            // are there: Remove's own rule is not this one; locally grey.
             if item.action() == Some(sel!(setUpOnHost:)) {
-                let state = self
-                    .key_tab()
-                    .and_then(|tab| tab.focused_pane().set_up_state());
+                let state = self.key_tab().and_then(|tab| {
+                    tab.focused_pane()
+                        .set_up_state(&|host| self.settings().integration_for(host))
+                });
                 let model = crate::menu::set_up_menu(
                     state
                         .as_ref()
@@ -1862,7 +1864,8 @@ define_class!(
         #[unsafe(method(setUpOnHost:))]
         fn set_up_on_host(&self, _sender: Option<&AnyObject>) {
             if let Some(tab) = self.key_tab() {
-                tab.focused_pane().set_up_bateri_on_host();
+                tab.focused_pane()
+                    .set_up_bateri_on_host(&|host| self.settings().integration_for(host));
             }
         }
 
@@ -3160,8 +3163,8 @@ impl AppDelegate {
     /// The yes of the question Shell ▸ Set Up bateri on “{host}” asks: writes the host's own
     /// `[remote] hosts` entry (`SettingsEdit::RemoteHostIntegration`, a yes that asks nothing) —
     /// the Mark … as ▸ path: the menu only writes, nothing is written to an unparseable file, and
-    /// the next `ssh` reads the file — and forgets the server's `plain` row, the one way back
-    /// for a server branded shell-less by mistake (`ssh_wrap::forget_plain`: `ssh -G` and the
+    /// the next `ssh` reads the file — and forgets the server's `plain` and `nokablo` rows, the one
+    /// way back for a server branded by mistake (`ssh_wrap::forget_stamps`: `ssh -G` and the
     /// state file, on a thread of its own; not in a timed run). `argv` is the `ssh` of the pane that
     /// was asked, as it was then: the key tab may be another by now. The terminal open now is not
     /// touched.
@@ -3174,7 +3177,7 @@ impl AppDelegate {
             .name("remote plain".into())
             .spawn(move || {
                 if let Some(home) = crate::child::home() {
-                    let _ = bt_shell_common::ssh_wrap::forget_plain(
+                    let _ = bt_shell_common::ssh_wrap::forget_stamps(
                         &crate::ssh_route::SystemSsh,
                         &argv,
                         &crate::remote_hosts_path(&home),

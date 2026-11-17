@@ -354,6 +354,9 @@ pub struct Refusal {
     pub fall_back: bool,
     /// What to tell the user when it does not fall back.
     pub text: String,
+    /// A dim line for the pane's terminal before the plain `ssh`, told once per server (its
+    /// account) while bateri runs: `(account, line)`.
+    pub note: Option<(String, String)>,
 }
 
 impl Refusal {
@@ -362,6 +365,22 @@ impl Refusal {
         Refusal {
             fall_back: true,
             text: String::new(),
+            note: None,
+        }
+    }
+
+    /// The plain `ssh` of a pane that has no dock to ask in, with the line that says what the
+    /// server could have ([`Service::prepared`] tells it once per server).
+    pub fn unasked(server: &KabloHost) -> Refusal {
+        let host = bt_core::bare_host(&server.host);
+        Refusal {
+            note: Some((
+                server.key.clone(),
+                format!(
+                    "bateri can keep terminals on {host} running: Shell \u{25b8} Set Up bateri on \u{201c}{host}\u{201d}."
+                ),
+            )),
+            ..Refusal::plain()
         }
     }
 
@@ -370,6 +389,7 @@ impl Refusal {
         Refusal {
             fall_back: false,
             text: text.into(),
+            note: None,
         }
     }
 }
@@ -1414,6 +1434,7 @@ impl Service {
             fresh: BTreeSet::new(),
             reached: Vec::new(),
             told: BTreeMap::new(),
+            unasked: BTreeSet::new(),
             background: Arc::clone(&background),
             exited: Arc::clone(&exited),
             refresh: false,
@@ -2029,6 +2050,9 @@ struct Core {
     /// The terminals in the background the last line to a new terminal named, by account
     /// ([`background_note`]): for as long as the service lives, which is the application's.
     told: BTreeMap<String, Vec<SessionId>>,
+    /// The servers a pane that has no dock was told bateri can be set up on ([`Refusal::unasked`]),
+    /// by account: once for as long as the service lives, which is the application's.
+    unasked: BTreeSet<String>,
     /// What [`Service::background`] and [`Service::elsewhere`] read.
     background: Arc<Mutex<BTreeMap<String, Kept>>>,
     /// What [`Service::exited`] reads.
@@ -4352,6 +4376,12 @@ impl Core {
         let ready = match outcome {
             Ok(ready) => ready,
             Err(refusal) => {
+                if let Some((account, line)) = &refusal.note
+                    && !self.unasked.contains(account)
+                    && self.hub.say(hold, line)
+                {
+                    self.unasked.insert(account.clone());
+                }
                 self.hub.refuse(hold, refusal.fall_back, &refusal.text);
                 return;
             }
@@ -4494,9 +4524,15 @@ fn prepare(
         return Err(Refusal::plain());
     }
     // A pane that cannot say which it is, or has no dock to put the row in, cannot be asked in,
-    // nor answered to: no login is made for it either.
+    // nor answered to: no login is made for it either. A pane the person typed `ssh` in whose dock
+    // is off is told, once, where bateri can be set up from (they closed the dock themselves:
+    // nothing is asked and no band is put up for it). A pane opened for a program is told nothing.
     if consent == Consent::Ask && !pane.can_show_row() {
-        return Err(Refusal::plain());
+        return Err(if pane.tab.is_some() && pane.program.is_none() {
+            Refusal::unasked(&server)
+        } else {
+            Refusal::plain()
+        });
     }
     // The login first: ssh's own questions (the server's key, a password) are asked in the pane
     // as they always were, and what is asked of the person after it needs no second password.
