@@ -14,8 +14,8 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
-- **Teach Claude Code the `bateri` command.** A new switch in Settings ▸ Agents, off by default, gives each Claude Code you start in a bateri terminal a skill for the `bateri` command, so asking it to run something beside it opens a pane there. On its own it runs a dev server or a watcher in a minimized floating pane you can open with a click (a capsule from the start), and opens a login it cannot answer in a floating pane for you to type in. The skill lasts for that session, and nothing is written to Claude Code's own files.
-- **`bateri split --float --minimized` opens a floating pane as a capsule.** Its card is never seen, so a program that only has to run does not cover your panes, and the pane stays open when the program ends.
+- **Claude Code can use the `bateri` command.** A new switch in Settings ▸ Agents, off by default, teaches each Claude Code you start in bateri to open and read panes: ask it to run something beside it and a pane opens there. It also starts a dev server or a watcher in a capsule you can open with a click, and opens a login it cannot answer in a floating pane for you to type in. Nothing is written to Claude Code's own files.
+- **`bateri split --float --minimized` opens a floating pane as a capsule.** Its card never shows, so a program that only has to run does not cover your panes, and the pane stays open when the program ends so its last output is there.
 - **Shell ▸ Remove bateri from “host”.** Takes everything bateri put on a server off it, after asking: the terminals running there end, bateri's folder is deleted, and the host stops being set up (`integration = false` in its entry). It works from any `ssh` pane of a server this Mac set up, kept terminal or plain.
 
 ### Changed
@@ -31,7 +31,8 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
-- **A pane Claude Code opens starts clean.** A Claude started there with `bateri split -- claude` got no last-message hook, and the pane carried Claude's own marks, so the new Claude did not save its transcript and `git commit` in the shell left after `--keep-open` failed with an empty message. The hook is added and the marks are dropped.
+- **`bateri split` with a program that is not there opens no pane.** It says the program cannot be started and exits 1, also with `--keep-open`, which used to open a pane with the error in it.
+- **A pane Claude Code opens starts clean.** A pane opened with the `bateri` command used to inherit the marks of the Claude Code that opened it, so a Claude started there did not save its conversation or show its last reply, and `git commit` in it failed. Panes opened by the command now start without them.
 - **A very long line no longer freezes a program's editor.** Opening a file with one long line, like minified JavaScript or JSON, in an editor such as textpen froze bateri: half a minute for a line of a hundred thousand characters. Such a line now opens at once.
 - **Wrapped lines no longer hide the lines below them.** In an editor with wrapping on, a long line scrolled partly off the top left the lines under it blank until it scrolled out of view. They are now drawn.
 
