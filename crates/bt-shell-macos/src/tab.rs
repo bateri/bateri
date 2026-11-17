@@ -224,6 +224,14 @@ impl PaneHost for TabHost {
         crate::hold_service::retry(pane);
     }
 
+    fn answer_setup(
+        &self,
+        pane: &bt_core::PaneUuid,
+        answer: bt_shell_common::kablo::service::Answer,
+    ) {
+        crate::hold_service::answer_setup(pane, answer);
+    }
+
     fn bring_back_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::bring_back(pane);
     }
@@ -263,6 +271,12 @@ impl PaneHost for TabHost {
     fn menu_changed(&self) {
         if let Some(app) = app::delegate(Self::mtm()) {
             app.refresh_menu_bar();
+        }
+    }
+
+    fn set_up_host(&self, host: String, argv: Vec<String>) {
+        if let Some(app) = app::delegate(Self::mtm()) {
+            app.set_up_host(host, argv);
         }
     }
 
@@ -2498,7 +2512,7 @@ impl TerminalTab {
     /// host, else the server or Kubernetes context a guide bar names
     /// (`Session::program_mark`); with its resolved mark and how the
     /// patterns meet it. Only the marks read this — "Forget Password" and
-    /// "Shell Integration on" are ssh's and stay on [`Self::remote_mark`].
+    /// "Set Up bateri on" are ssh's and stay on [`Self::remote_mark`].
     pub(crate) fn mark_target(&self) -> Option<(String, HostMark, MarkSubject)> {
         let pane = self.focused_pane();
         let session = pane.session()?;

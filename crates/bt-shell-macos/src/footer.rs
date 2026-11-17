@@ -39,6 +39,7 @@ use std::sync::OnceLock;
 use std::path::Path;
 
 use bt_core::{DockEnvironment, FooterControl, FooterPort};
+use bt_shell_common::kablo::service::Answer;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -140,6 +141,8 @@ impl TerminalPane {
             }
             FooterControl::List => self.toggle_upload_list(span),
             FooterControl::Cancel => self.request_stop(true),
+            FooterControl::PlainSsh => self.answer_setup_row(Answer::Plain),
+            FooterControl::SetUp => self.answer_setup_row(Answer::SetUp),
         }
         true
     }

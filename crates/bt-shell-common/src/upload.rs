@@ -759,8 +759,9 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// `done / total`, both in the **total's** unit: `18.2 / 44.6 MB`.
-fn format_pair(done: u64, total: u64) -> String {
+/// `done / total`, both in the **total's** unit: `18.2 / 44.6 MB`. Also the first connection's
+/// row, while bateri goes up.
+pub fn format_pair(done: u64, total: u64) -> String {
     let (value, unit) = scaled(done, total);
     let (whole, _) = scaled(total, total);
     if unit == "B" {
@@ -2632,6 +2633,7 @@ impl Transfers {
                 lead,
                 controls: TransferControls::default(),
                 progress: None,
+                ..Transfer::default()
             },
             serial: self.serial,
             notice,

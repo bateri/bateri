@@ -123,9 +123,7 @@ impl World {
             bundle,
             home: None,
             settings: Box::new(Settings::default),
-            asker: Some(PathBuf::from(
-                "/Applications/bateri.app/Contents/MacOS/bateri",
-            )),
+            setup: Box::new(|_, _, _| ()),
             save: {
                 let saved = Arc::clone(&self.saved);
                 Box::new(move |edit| saved.lock().expect("saved").push(edit))
@@ -503,6 +501,198 @@ fn a_bridge_whose_ssh_ended_by_itself_takes_what_it_started_with_it() {
     drop(writer);
 }
 
+/// One login serves the whole first connection: the master the preparation opens first is the only
+/// `ssh` that makes a connection (it rides a key as it rides a password); the install's steps, the
+/// number and the bridge are multiplexed over it, and none of them can open one of its own or become
+/// a master. What a server sees is one login, however many steps the set-up takes.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_first_connection_is_one_login_for_every_step() {
+    let world = stand_in("onelogin", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    backend.master_made(&host, 0).expect("a master to ride");
+
+    let installed = backend.install(&host, &[]).expect("installed");
+    assert!(installed.fresh);
+    assert_eq!(backend.number(&host), Some(1));
+    let carried = backend.carry(&host, &installed).expect("a bridge");
+    let Carried { close, writer, .. } = carried;
+    close();
+    drop(writer);
+
+    // What asks nothing of the server (`-G`, `-O check`) is not a connection.
+    let calls = world.calls();
+    let connecting: Vec<&String> = calls
+        .iter()
+        .filter(|call| {
+            !call.split_whitespace().any(|word| word == "-G") && !call.contains("-O check")
+        })
+        .collect();
+    let masters = connecting
+        .iter()
+        .filter(|call| call.split_whitespace().any(|word| word == "-M"))
+        .count();
+    assert_eq!(masters, 1, "{calls:?}");
+    // The master, and what is left: at least the install's steps, the number and the bridge.
+    assert!(connecting.len() >= 5, "{calls:?}");
+    for call in connecting
+        .iter()
+        .filter(|call| !call.split_whitespace().any(|word| word == "-M"))
+    {
+        assert!(call.contains("-o ControlMaster=no"), "{call}");
+        assert!(call.contains("ControlPath=/tmp/bt-ssh-onelogin"), "{call}");
+    }
+}
+
+/// A person who stops the install as soon as it has begun to write, and notes what the server
+/// had of bateri's by then.
+struct StopAtOnce {
+    folder: PathBuf,
+    written: std::sync::atomic::AtomicBool,
+}
+
+impl install::Watch for StopAtOnce {
+    fn sent(&self, _: u64, _: u64) {}
+
+    fn stopped(&self) -> bool {
+        self.written
+            .store(self.folder.exists(), std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+fn stopper(world: &World) -> StopAtOnce {
+    StopAtOnce {
+        folder: world.home.join(".local/share/bateri"),
+        written: Default::default(),
+    }
+}
+
+/// *Cancel* while bateri goes up takes back what the install had written (the shells' files
+/// ride its look) with the script of *Remove bateri from*, and the record that bateri was there:
+/// the next connection asks again, and the server has nothing of bateri's.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn cancelling_the_set_up_takes_back_what_was_written_and_the_record() {
+    let world = stand_in("cancel", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+
+    let stop = stopper(&world);
+    assert!(backend.install_watched(&host, &[], &stop).is_err());
+    // Something of bateri's was on the server when the person stopped it ...
+    assert!(stop.written.load(std::sync::atomic::Ordering::SeqCst));
+    // ... and none of it is now, nor is the record: the next connection asks again.
+    assert!(!world.home.join(".local/share/bateri").exists());
+    assert!(!ssh_wrap::load(&world.state).knows(Fact::Touched, "u@h:22"));
+    assert_eq!(backend.consent(&host), Consent::Ask);
+    assert!(
+        world.calls().iter().any(|call| call.contains("rm -rf")),
+        "the removal's script ran: {:?}",
+        world.calls()
+    );
+    // It ended no terminal and installed nothing.
+    assert!(world.upgrades("0.2.0").is_empty());
+}
+
+/// A machine that has a kablo on it, or terminals, may be another computer's: *Cancel* leaves its
+/// folder (and ends nothing), and still takes the record back, so that the next connection asks.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn cancelling_the_set_up_leaves_the_folder_of_a_machine_that_has_terminals_of_someone_else() {
+    let world = stand_in("cancelkept", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    // Another computer's bateri is there, with a terminal that runs.
+    let theirs = world.home.join(".local/share/bateri/kablo/0.1.0/kablo");
+    std::fs::create_dir_all(theirs.parent().expect("a directory")).expect("their place");
+    crate::child::tests::write_program(&theirs, KABLO);
+    sessions(&world.home, &[("t1", "0.1.0")]);
+
+    let stop = stopper(&world);
+    assert!(backend.install_watched(&host, &[], &stop).is_err());
+    assert!(theirs.exists(), "their kablo stays");
+    assert!(!ssh_wrap::load(&world.state).knows(Fact::Touched, "u@h:22"));
+    assert!(
+        !world.calls().iter().any(|call| call.contains("rm -rf")),
+        "no removal script: {:?}",
+        world.calls()
+    );
+}
+
+/// A server this Mac had put bateri on already keeps its record when the person stops an upgrade:
+/// only the install was stopped.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn cancelling_an_upgrade_keeps_the_record_of_a_server_bateri_was_on() {
+    let world = stand_in("cancelold", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    ssh_wrap::record(
+        &world.state,
+        Fact::Touched,
+        "u@h:22",
+        ssh_wrap::unix_now(),
+        ssh_wrap::LOCK_PATIENCE,
+    )
+    .expect("recorded");
+
+    let stop = stopper(&world);
+    assert!(backend.install_watched(&host, &[], &stop).is_err());
+    assert!(ssh_wrap::load(&world.state).knows(Fact::Touched, "u@h:22"));
+}
+
+/// A server the setting says never to write to is not written to by a renewal: no step is made,
+/// and the terminals there go on with the kablo they have.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_renewal_writes_nothing_to_a_server_the_setting_refuses() {
+    let world = stand_in("refreshoff", 0);
+    let mut backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    backend.settings = Box::new(|| {
+        bt_core::Settings::parse("[remote]\nintegration = \"off\"\n")
+            .expect("parseable text")
+            .settings
+    });
+    let before = world.calls().len();
+    assert!(backend.refresh(&host, &[]).is_none());
+    assert_eq!(world.calls().len(), before, "no call was made");
+    assert!(!world.home.join(".local/share/bateri").exists());
+}
+
+/// A look that does not come back whole says nothing of the machine: *Cancel* then leaves the
+/// folder and the record, since what the install wrote may still be there.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn cancelling_the_set_up_keeps_the_record_when_the_machine_cannot_be_looked_at() {
+    let world = stand_in("cancelblind", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    let theirs = world.home.join(".local/share/bateri/kablo/0.1.0/kablo");
+    std::fs::create_dir_all(theirs.parent().expect("a directory")).expect("their place");
+    crate::child::tests::write_program(&theirs, KABLO);
+    std::fs::write(world.home.join("listing"), "not a listing").expect("a listing");
+
+    let stop = stopper(&world);
+    assert!(backend.install_watched(&host, &[], &stop).is_err());
+    assert!(ssh_wrap::load(&world.state).knows(Fact::Touched, "u@h:22"));
+    assert!(theirs.exists());
+}
+
 /// The server's counter is run over the connection the user made, as a step of its own: kablo's
 /// own (`kablo bateri --next-number`, which the agent's command there runs too), in the home the
 /// server says (a stand-in that sets it, as an ssh login does).
@@ -851,17 +1041,9 @@ fn entry(pattern: &str, integration: bool) -> bt_core::HostRule {
 fn a_server_bateri_has_not_been_to_is_asked_about_before_anything_is_done() {
     let world = stand_in("ask", 0);
     let backend = world.backend(None);
-    // The default asks, and the question is this program run on the pane's terminal with the host
-    // as the person typed it.
+    // The default asks: in the pane's dock, once the login is made.
     let asked = backend.consent(&rasp("deploy@rasp"));
-    assert_eq!(
-        asked,
-        Consent::Ask(vec![
-            b"/Applications/bateri.app/Contents/MacOS/bateri".to_vec(),
-            b"ssh-ask".to_vec(),
-            b"deploy@rasp".to_vec(),
-        ])
-    );
+    assert_eq!(asked, Consent::Ask);
     // Nothing is written to the settings, to the server's record or to the server.
     assert!(world.saved.lock().expect("saved").is_empty());
     assert!(!world.state.exists());
@@ -909,21 +1091,7 @@ fn a_server_bateri_has_been_to_the_setting_and_the_entry_settle_without_asking()
         }],
         ..Settings::default()
     });
-    assert!(matches!(backend.consent(&server), Consent::Ask(_)));
-}
-
-#[test]
-fn nothing_that_cannot_ask_sets_a_server_up() {
-    let world = stand_in("nobody", 0);
-    let mut backend = world.backend(None);
-    backend.asker = None;
-    assert_eq!(backend.consent(&rasp("rasp")), Consent::Refused);
-    // Where nothing needs asking, nothing is lost.
-    backend.settings = Box::new(|| Settings {
-        remote_integration: RemoteIntegration::Auto,
-        ..Settings::default()
-    });
-    assert_eq!(backend.consent(&rasp("rasp")), Consent::Granted);
+    assert_eq!(backend.consent(&server), Consent::Ask);
 }
 
 #[test]
@@ -939,22 +1107,20 @@ fn the_answers_are_written_where_the_menu_writes_them() {
     let world = stand_in("answers", 0);
     let backend = world.backend(None);
     let server = rasp("deploy@rasp");
-    // Yes is kept by the install that follows (it records the server first), not here.
-    backend.answered(&server, Reply::Yes);
+    // Set Up is kept by the install that follows (it records the server first), not here; a
+    // Cancel and a row nobody could be asked in keep nothing.
+    for answer in [Answer::SetUp, Answer::Cancel, Answer::Unshown] {
+        backend.answered(&server, answer);
+    }
     assert!(world.saved.lock().expect("saved").is_empty());
-    // No is this host's own entry, the line Shell ▸ Shell Integration on “{host}” writes.
-    backend.answered(&server, Reply::No);
-    // Always is the key every host follows.
-    backend.answered(&server, Reply::Always);
+    // Plain ssh is this host's own entry, the line Shell ▸ Set Up bateri on “{host}” writes (the other way).
+    backend.answered(&server, Answer::Plain);
     assert_eq!(
         *world.saved.lock().expect("saved"),
-        [
-            SettingsEdit::RemoteHostIntegration {
-                host: "deploy@rasp".into(),
-                on: false,
-            },
-            SettingsEdit::RemoteIntegration(RemoteIntegration::Auto),
-        ]
+        [SettingsEdit::RemoteHostIntegration {
+            host: "deploy@rasp".into(),
+            on: false,
+        }]
     );
 }
 

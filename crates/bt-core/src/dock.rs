@@ -29,7 +29,7 @@ use crate::settings::HostMark;
 use crate::shell::{
     ButtonState, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ProgramBar,
     ProgramTone, Reconnect, RemoteStats, STATS_HISTORY, ShellPhase, ShellState, StatsForm,
-    Transfer, TransferTone,
+    Transfer, TransferKind, TransferTone,
 };
 
 mod footer;
@@ -90,6 +90,11 @@ pub struct Dock {
     /// the edge (`bt-gpu` decides that from the row count).
     pub glow: Option<LinearRgba>,
     pub glow_strength: f32,
+    /// Whether the glow is cast even where the dock has no input row. The first connection to
+    /// a server asks and sets it up in the row (its question, its progress, its end): the
+    /// light is the row's way of saying it waits, and it must show on a row that stands alone
+    /// at the bottom of a pane that has no shell dock yet.
+    pub glow_alone: bool,
     /// The caret's place in the input block — row **and** column: a long
     /// line wraps, so the caret can stand on the second visual row too. The
     /// row is inside the vertical window, dock-local (`0` = the first drawn
@@ -1489,7 +1494,12 @@ pub(crate) fn render_with(
     // While an upload runs the line is in the color of the queue's host
     // (also after ssh closes, as long as the result row is shown).
     // While progress runs the filled part is `info` (the mark's meaning is in the empty track).
+    // The first connection's line: the question lights the host's mark, the set-up's fill is
+    // `info` as an upload's, its end is `success`.
     let meaning = match (&context.transfer, &context.remote, &context.program) {
+        (Some(transfer), _, _) if transfer.kind == TransferKind::Done => {
+            Some(theme.success_linear())
+        }
         (Some(transfer), _, _) if transfer.progress.is_some() => Some(theme.info_linear()),
         (Some(transfer), _, _) => Some(theme.mark_linear(transfer.mark)),
         (None, Some(_), _) => Some(theme.mark_linear(context.remote_mark)),
@@ -1507,6 +1517,10 @@ pub(crate) fn render_with(
         shadow_strength,
         glow: meaning,
         glow_strength,
+        glow_alone: context
+            .transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.kind != TransferKind::Upload),
         caret: None,
         caret_text: theme.background_linear(),
         // With no input row (a remote session whose shell has not taken the dock)
@@ -4702,6 +4716,213 @@ mod tests {
         let (cells, dock) = draw_with(&state, &context, 3);
         assert_eq!(row_text(&cells, 1), "");
         assert_eq!(dock.buttons, [None; 2]);
+    }
+
+    /// The first connection's row over the host `rasp` (marked `Production`, whose colour is
+    /// `error`): the moment `kind`, its words and bar as told.
+    fn first_connection(kind: TransferKind, body: &str, progress: Option<u16>) -> DockContext {
+        DockContext {
+            transfer: Some(Transfer {
+                host: "rasp".into(),
+                mark: HostMark::Production,
+                body: if kind == TransferKind::Ask {
+                    Transfer::ask_words("rasp")
+                } else {
+                    body.into()
+                },
+                tone: match kind {
+                    TransferKind::Ask => TransferTone::Plain,
+                    TransferKind::Done => TransferTone::Success,
+                    TransferKind::Upload | TransferKind::Setup => TransferTone::Quiet,
+                },
+                progress,
+                kind,
+                ..Transfer::default()
+            }),
+            ..context("/home/me", "")
+        }
+    }
+
+    const PUTTING: &str = "↑ bateri  1.4 / 2.7 MB";
+
+    fn controls_hit(context: &DockContext, cols: u16, col: u16) -> Option<FooterControl> {
+        footer_hit(context, cols, col).map(|hit| hit.control)
+    }
+
+    #[test]
+    fn the_first_connection_asks_in_the_row_with_two_buttons() {
+        let state = live("", "", "", 0);
+        let ask = first_connection(TransferKind::Ask, "", None);
+        let (cells, dock) = draw_with(&state, &ask, 100);
+        // At 100 columns the first sentence is what fits; the second is where there is room.
+        assert_eq!(
+            row_text(&cells, 1),
+            format!(
+                "{:<71}Plain ssh Esc   Set Up Enter",
+                "Set up bateri on rasp?"
+            )
+        );
+        assert_eq!(
+            row_text(&draw_with(&state, &ask, 120).0, 1),
+            format!(
+                "{:<91}Plain ssh Esc   Set Up Enter",
+                "Set up bateri on rasp? Terminals here keep running if the connection drops."
+            )
+        );
+        // The host in its mark's colour, the question in the foreground — it waits for the
+        // person — the buttons' labels in the foreground and the keys' names dim.
+        assert_eq!(color_at(&cells, 1, 18), Some(THEME.error_linear()), "host");
+        assert_eq!(
+            color_at(&cells, 1, 8),
+            Some(THEME.foreground_linear()),
+            "question"
+        );
+        assert_eq!(
+            color_at(&cells, 1, 72),
+            Some(THEME.foreground_linear()),
+            "label"
+        );
+        assert_eq!(color_at(&cells, 1, 82), Some(THEME.dim_linear()), "key");
+        // The edge is the mark's colour and casts it, even where the dock has no input row; the
+        // bar is not drawn.
+        assert_eq!(dock.edge, THEME.error_linear());
+        assert_eq!(dock.glow, Some(THEME.error_linear()));
+        assert!(dock.glow_alone);
+        assert_eq!(dock.progress, None);
+        assert_eq!(
+            dock.buttons
+                .map(|button| button.map(|button| (button.start, button.end))),
+            [Some((70, 85)), Some((86, 100))]
+        );
+        // The hit areas are the whole of the fills; the gap between is nothing.
+        let hits = |col| controls_hit(&ask, 100, col);
+        assert_eq!(hits(69), None);
+        assert_eq!(hits(70), Some(FooterControl::PlainSsh));
+        assert_eq!(hits(84), Some(FooterControl::PlainSsh));
+        assert_eq!(hits(85), None);
+        assert_eq!(hits(86), Some(FooterControl::SetUp));
+        assert_eq!(hits(99), Some(FooterControl::SetUp));
+        assert_eq!(
+            footer_span(&ask, 100, FooterControl::SetUp),
+            Some((86, 100)),
+            "the popover's anchor"
+        );
+        // A host that is not marked asks in `info`.
+        let plain = DockContext {
+            transfer: ask.transfer.as_ref().map(|_| Transfer {
+                mark: HostMark::None,
+                host: "rasp".into(),
+                kind: TransferKind::Ask,
+                tone: TransferTone::Plain,
+                ..Transfer::default()
+            }),
+            ..ask.clone()
+        };
+        assert_eq!(draw_with(&state, &plain, 100).1.edge, THEME.info_linear());
+    }
+
+    #[test]
+    fn the_question_shortens_before_its_keys_and_its_buttons_never_drop() {
+        let state = live("", "", "", 0);
+        let ask = first_connection(TransferKind::Ask, "", None);
+        let row = |cols| row_text(&draw_with(&state, &ask, cols).0, 1);
+        // The second sentence goes first, down to the first alone ...
+        assert_eq!(
+            row(110),
+            format!(
+                "{:<81}Plain ssh Esc   Set Up Enter",
+                "Set up bateri on rasp? Terminals here keep running if the connection drops."
+            )
+        );
+        assert_eq!(
+            row(70),
+            format!(
+                "{:<41}Plain ssh Esc   Set Up Enter",
+                "Set up bateri on rasp?"
+            )
+        );
+        // ... then the keys' names ...
+        assert_eq!(
+            row(50),
+            format!("{:<31}Plain ssh   Set Up", "Set up bateri on rasp?")
+        );
+        // ... and only then the first sentence clips. The buttons stay.
+        assert_eq!(
+            row(38),
+            format!("{:<19}Plain ssh   Set Up", "Set up bateri o…")
+        );
+        assert_eq!(row(20), " Plain ssh   Set Up");
+        for cols in 20..=100 {
+            let (_, dock) = draw_with(&state, &ask, cols);
+            assert!(
+                dock.buttons.iter().all(Option::is_some),
+                "both buttons at {cols} columns"
+            );
+            assert_eq!(
+                controls_hit(&ask, cols, cols - 1),
+                Some(FooterControl::SetUp),
+                "the last button ends at the edge ({cols})"
+            );
+        }
+    }
+
+    #[test]
+    fn while_bateri_goes_up_the_row_is_an_upload_with_a_single_cancel() {
+        let state = live("", "", "", 0);
+        let setup = first_connection(TransferKind::Setup, PUTTING, Some(5_000));
+        let (cells, dock) = draw_with(&state, &setup, 80);
+        assert_eq!(
+            row_text(&cells, 1),
+            format!("{:<69}Cancel Esc", "rasp  ↑ bateri  1.4 / 2.7 MB")
+        );
+        assert_eq!(color_at(&cells, 1, 8), Some(THEME.dim_linear()), "text");
+        // The top edge is the bar: filled `info`, the empty track in the host's colour, and the
+        // light is as wide as the filled part.
+        assert_eq!(dock.edge, THEME.info_linear());
+        assert_eq!(dock.track, THEME.error_linear());
+        assert_eq!(dock.progress, Some(5_000));
+        assert_eq!(dock.glow, Some(THEME.info_linear()));
+        assert!(dock.glow_alone);
+        assert_eq!(dock.buttons[0], None);
+        assert_eq!(
+            dock.buttons[1].map(|button| (button.start, button.end)),
+            Some((68, 80))
+        );
+        assert_eq!(controls_hit(&setup, 80, 79), Some(FooterControl::Cancel));
+        // The text clips, the key's name drops, the button stays.
+        let row = |cols| row_text(&draw_with(&state, &setup, cols).0, 1);
+        assert_eq!(row(34), format!("{:<23}Cancel Esc", "rasp  ↑ bateri  1.4…"));
+        assert_eq!(row(12), "     Cancel");
+    }
+
+    #[test]
+    fn a_set_up_server_says_so_in_success_and_has_no_buttons() {
+        let state = live("", "", "", 0);
+        let done = first_connection(TransferKind::Done, "", None);
+        let (cells, dock) = draw_with(&state, &done, 60);
+        assert_eq!(
+            row_text(&cells, 1),
+            "rasp  ✓ Set up · terminals here keep running"
+        );
+        assert_eq!(color_at(&cells, 1, 8), Some(THEME.success_linear()));
+        assert_eq!(dock.edge, THEME.success_linear());
+        assert_eq!(dock.glow, Some(THEME.success_linear()));
+        assert!(dock.glow_alone);
+        assert_eq!(dock.buttons, [None; 2]);
+        assert_eq!(footer_spans(&done, 60).count(), 0);
+        // The shorter words when the longer do not fit.
+        assert_eq!(
+            row_text(&draw_with(&state, &done, 40).0, 1),
+            "rasp  ✓ Set up"
+        );
+    }
+
+    #[test]
+    fn only_the_first_connections_row_lights_a_dock_without_an_input_row() {
+        let state = live("", "", "", 0);
+        let upload = uploading("↑ a.tar", 1, Some(2_500));
+        assert!(!draw_with(&state, &upload, 80).1.glow_alone);
+        assert!(!draw_with(&state, &remote("prod", "/srv"), 80).1.glow_alone);
     }
 
     #[test]

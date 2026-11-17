@@ -1,4 +1,5 @@
-//! Shell ▸ Remove bateri from “{host}”: the pane's half.
+//! Shell ▸ Remove bateri from “{host}”, and its twin Shell ▸ Set Up bateri on “{host}”: the
+//! pane's half.
 //!
 //! The steps and their order are [`bt_shell_common::kablo::removal`]'s; this file is what shows
 //! them and reaches the server for them: the question as a sheet of the pane, the login as the
@@ -12,7 +13,7 @@
 //! account, the settings' entry — is the application's ([`crate::pane::Removals`]), not the
 //! pane's, which the script may have ended.
 //!
-//! **This is the one exception to `server_target`** (`rules/kablo.md`): the command is offered in
+//! **This is the one exception to `server_target`**: the command is offered in
 //! a pane that has an `ssh` running ([`Session::remote_target`]), plain or kept, and opens a
 //! connection of bateri's own to the host when no kept one is up. The rule's reason is the
 //! connection nobody asked for; this one is a command the person chose, and they confirm it —
@@ -107,7 +108,22 @@ pub(crate) fn question(label: &str, terminals: usize) -> (String, String) {
         format!(
             "{ending} bateri's folder there (~/.local/share/bateri), with the programs it \
              installed on the server, is deleted. Nothing else on the server is touched. bateri \
-             does not set the server up again unless you turn Shell Integration on for it."
+             does not set the server up again unless you choose Shell \u{25b8} Set Up bateri on it."
+        ),
+    )
+}
+
+/// The question before bateri is set up from the menu: its title and its text. Nothing is
+/// written to the server by it, and the terminal open stays as it is: what is set up is the
+/// next connection (the one in the pane is a plain `ssh`, whose shell cannot be moved onto
+/// kablo while it runs).
+pub(crate) fn set_up_question(label: &str) -> (String, String) {
+    (
+        format!("Set up bateri on \u{201c}{label}\u{201d}?"),
+        format!(
+            "The next time you connect to {label}, with ssh {label} or a new tab, bateri puts \
+             its folder there and that terminal keeps running if the connection drops. The \
+             terminal open now stays as it is."
         ),
     )
 }
@@ -124,8 +140,8 @@ pub(crate) fn removed_text(terminals: usize, entry_error: Option<&str>) -> Strin
     };
     if let Some(why) = entry_error {
         text.push_str(&format!(
-            " The settings could not be written ({why}), so Shell Integration may set the server up \
-             again: turn it off for this server in settings.toml."
+            " The settings could not be written ({why}), so bateri may set the server up \
+             again: turn its integration off for this server in settings.toml."
         ));
     }
     text
@@ -232,16 +248,30 @@ impl TerminalPane {
     /// `ssh` and the menu is brought up to date when it is.
     pub(crate) fn removal_state(&self) -> Option<(String, bool)> {
         let target = self.removal_target()?;
+        let touched = self.touched(&target).unwrap_or(false);
+        Some((target.label, touched))
+    }
+
+    /// The menu's question for Shell ▸ Set Up bateri on “{host}”: the server of the pane's `ssh`
+    /// and whether the item is **grey** — this Mac has put bateri on it, or it is not known yet
+    /// whether it has (the key is asked of `ssh` once; one `ssh -G` cannot read never is). `None`
+    /// locally.
+    pub(crate) fn set_up_state(&self) -> Option<(String, bool)> {
+        let target = self.removal_target()?;
+        let grey = self.touched(&target) != Some(false);
+        Some((target.label, grey))
+    }
+
+    /// Whether this Mac has put bateri on the server of `target`; `None` while its key is not
+    /// known ([`Self::plain_key`]).
+    fn touched(&self, target: &Target) -> Option<bool> {
         let key = match &target.kept {
             Some(kept) => Some(kept.key.clone()),
-            None => self.plain_key(&target),
-        };
-        let touched = key.is_some_and(|key| {
-            crate::child::home().is_some_and(|home| {
-                ssh_wrap::load(&crate::remote_hosts_path(&home)).knows(Fact::Touched, &key)
-            })
-        });
-        Some((target.label, touched))
+            None => self.plain_key(target),
+        }?;
+        Some(crate::child::home().is_some_and(|home| {
+            ssh_wrap::load(&crate::remote_hosts_path(&home)).knows(Fact::Touched, &key)
+        }))
     }
 
     /// A plain `ssh` has been found in the pane: its server's key is asked of `ssh` now, so that
@@ -358,6 +388,42 @@ impl TerminalPane {
         seat.begin(&alert, &answered);
     }
 
+    /// Shell ▸ Set Up bateri on “{host}”: asks, as a sheet of the pane, and on *Set Up* writes the
+    /// host's entry `integration = true` ([`crate::app::AppDelegate::set_up_host`]): the next
+    /// connection to it sets bateri up without asking, and shows it in the dock. The terminal open
+    /// is not touched. A beep when the pane has no `ssh`, this Mac has put bateri on the server
+    /// already (or that is not known yet), or a sheet is up.
+    pub(crate) fn set_up_bateri_on_host(&self) {
+        let (Some(target), Some((_, false))) = (self.removal_target(), self.set_up_state()) else {
+            beep();
+            return;
+        };
+        let Some(seat) = sheets::seat(Asker::Pane(self)).filter(|seat| !seat.is_taken()) else {
+            beep();
+            return;
+        };
+        let (title, message) = set_up_question(bt_core::bare_host(&target.label));
+        let alert = NSAlert::new(self.mtm());
+        alert.setMessageText(&NSString::from_str(&title));
+        alert.setInformativeText(&NSString::from_str(&message));
+        alert.addButtonWithTitle(ns_string!("Set Up"));
+        let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
+        // Esc by hand (the rationale of `window::alert`).
+        cancel.setKeyEquivalent(ns_string!("\u{1b}"));
+        let (host, argv) = (target.host.clone(), target.remote.argv.clone());
+        let (pane, lookup) = (self.id(), self.lookup());
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            if response != NSAlertFirstButtonReturn {
+                return;
+            }
+            let (host, argv) = (host.clone(), argv.clone());
+            on_pane(lookup, pane, move |pane| {
+                pane.host().set_up_host(host, argv)
+            });
+        });
+        seat.begin(&alert, &answered);
+    }
+
     /// What came of the removal, as a sheet of the pane with one button; a beep when another
     /// sheet is up.
     fn removal_notice(&self, title: &str, text: &str) {
@@ -400,8 +466,20 @@ mod tests {
                 text.contains("Nothing else on the server is touched"),
                 "{text}"
             );
-            assert!(text.contains("Shell Integration"), "{text}");
+            assert!(text.contains("Set Up bateri"), "{text}");
         }
+    }
+
+    #[test]
+    fn the_set_up_question_says_when_it_happens_and_that_the_open_terminal_stays() {
+        let (title, text) = set_up_question("rasp");
+        assert_eq!(title, "Set up bateri on \u{201c}rasp\u{201d}?");
+        assert_eq!(
+            text,
+            "The next time you connect to rasp, with ssh rasp or a new tab, bateri puts its \
+             folder there and that terminal keeps running if the connection drops. The terminal \
+             open now stays as it is."
+        );
     }
 
     #[test]

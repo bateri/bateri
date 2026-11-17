@@ -80,6 +80,7 @@ use crate::keys::{
 use crate::pane::TerminalPane;
 use crate::pointer;
 use crate::quote::{paste_quote, shell_quote};
+use crate::setup_row::SetupKey;
 
 /// What happens to a point that falls outside the grid - [`point_to_pointer`]'s
 /// single decision axis.
@@ -613,6 +614,22 @@ fn is_plain_enter(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
         | NSEventModifierFlags::Control
         | NSEventModifierFlags::Option;
     !flags.intersects(held) && matches!(chars, Some("\r" | "\u{3}"))
+}
+
+/// A key as the first connection's row reads it ([`TerminalPane::setup_key`]): *Enter* and *Esc*
+/// with no modifier held, and the rest.
+fn setup_key_of(flags: NSEventModifierFlags, chars: Option<&str>) -> SetupKey {
+    let held = NSEventModifierFlags::Command
+        | NSEventModifierFlags::Shift
+        | NSEventModifierFlags::Control
+        | NSEventModifierFlags::Option;
+    if is_plain_enter(flags, chars) {
+        SetupKey::Enter
+    } else if !flags.intersects(held) && chars == Some("\u{1b}") {
+        SetupKey::Escape
+    } else {
+        SetupKey::Other
+    }
 }
 
 /// Whether `keyDown:` stops after the text stack: `consumed` is
@@ -1707,6 +1724,15 @@ define_class!(
             // beeps, and ⏎ — plain, numpad Enter too — is the wait's one key:
             // try now, or log in. Before the stack and the dock's keys: an
             // accent composed into the wait is a line nobody will read.
+            if let Some(pane) = self.pane()
+                && pane.setup_key(
+                    event.timestamp(),
+                    setup_key_of(flags, chars.as_deref()),
+                    event.isARepeat(),
+                )
+            {
+                return;
+            }
             if let Some(pane) = self.pane()
                 && pane.hold_input(is_plain_enter(flags, chars.as_deref())) {
                     return;
@@ -4283,6 +4309,39 @@ mod tests {
             paste.find("hold_input(false)") < paste.find("session.paste("),
             "{paste}"
         );
+    }
+
+    /// The first connection's row reads its keys before the wait's gate, and the gate itself
+    /// holds a paste or a drop while the row is up — the terminal under it is the holder, which
+    /// waits for the row's answer.
+    #[test]
+    fn the_first_connections_row_reads_its_keys_before_the_waits_gate() {
+        let none = NSEventModifierFlags::empty();
+        assert_eq!(setup_key_of(none, Some("\r")), SetupKey::Enter);
+        assert_eq!(setup_key_of(none, Some("\u{3}")), SetupKey::Enter);
+        assert_eq!(setup_key_of(none, Some("\u{1b}")), SetupKey::Escape);
+        assert_eq!(setup_key_of(none, Some("y")), SetupKey::Other);
+        assert_eq!(setup_key_of(none, None), SetupKey::Other);
+        // ⇧⎋ and ⌃⎋ are keys for a program.
+        for held in [
+            NSEventModifierFlags::Shift,
+            NSEventModifierFlags::Control,
+            NSEventModifierFlags::Option,
+        ] {
+            assert_eq!(setup_key_of(held, Some("\u{1b}")), SetupKey::Other);
+        }
+        let view = include_str!("view.rs");
+        let view = &view[..view.find("#[cfg(test)]").unwrap_or(view.len())];
+        let keys = view.find("pane.setup_key(").expect("the row's keys");
+        assert!(
+            keys < view
+                .find("pane.hold_input(is_plain_enter")
+                .expect("the wait's gate")
+        );
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let gate = &pane[pane.find("pub(crate) fn hold_input(").expect("the gate")..];
+        assert!(gate.find("setup_holds_input()") < gate.find("on_wait("));
     }
 
     #[test]

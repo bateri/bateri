@@ -65,8 +65,13 @@ pub enum FooterControl {
     Stats,
     /// The upload row's list button ("Show transfers (N)").
     List,
-    /// The upload row's cancel button.
+    /// The upload row's cancel button — also the single button of the row while bateri is
+    /// put on a server.
     Cancel,
+    /// The first connection's question, *Plain ssh*.
+    PlainSsh,
+    /// The first connection's question, *Set Up*.
+    SetUp,
 }
 
 /// What lies under a column of the context row ([`footer_hit`]).
@@ -116,7 +121,16 @@ impl Lead<'_> {
             Self::Remote { host, cwd } => remote_head(host) + tail(cwd),
             Self::Down { host, link, by } => remote_head(host) + tail_of(link.width(by, true)),
             Self::Program(bar) => program_head(bar) + tail(&bar.path),
-            Self::Transfer(transfer) => remote_head(&transfer.host) + tail(&transfer.body),
+            Self::Transfer(transfer) => transfer_head(transfer) + transfer_tail(transfer, true),
+        }
+    }
+
+    /// The lead's head alone: the name of the place, never shortened.
+    fn head(self) -> usize {
+        match self {
+            Self::Remote { host, .. } | Self::Down { host, .. } => remote_head(host),
+            Self::Transfer(transfer) => transfer_head(transfer),
+            Self::Local { .. } | Self::Program(_) => self.core(),
         }
     }
 
@@ -132,8 +146,36 @@ impl Lead<'_> {
             } => LocalWidths::of(cwd, branch, environment).core(),
             Self::Remote { host, .. } | Self::Down { host, .. } => remote_head(host),
             Self::Program(bar) => program_head(bar),
-            Self::Transfer(transfer) => remote_head(&transfer.host),
+            // The words of the question and of the finished line have a shortest form that
+            // the keys' names give way for; an upload's text clips freely.
+            Self::Transfer(transfer) => transfer_head(transfer) + transfer_tail(transfer, false),
         }
+    }
+}
+
+/// The width of a transfer row's text after its head: the whole of it (`whole`), or what must
+/// show for anything to stand beside the lead — the shortest of the words a question or a
+/// finished line says, nothing for an upload's text, which clips.
+fn transfer_tail(transfer: &Transfer, whole: bool) -> usize {
+    let words = transfer.ladder();
+    match (words.first(), words.last()) {
+        // The question has no head of its own: its words carry the server's name.
+        (Some(first), Some(last)) if transfer.kind == TransferKind::Ask => {
+            (if whole { first } else { last }).chars().count()
+        }
+        (Some(first), Some(last)) => tail(if whole { first } else { last }),
+        _ if whole => tail(&transfer.body),
+        _ => 0,
+    }
+}
+
+/// The width of a transfer row's head: the server's name, which the question does not have (it
+/// says the name in its words).
+fn transfer_head(transfer: &Transfer) -> usize {
+    if transfer.kind == TransferKind::Ask {
+        0
+    } else {
+        remote_head(&transfer.host)
     }
 }
 
@@ -393,9 +435,10 @@ enum PortsRung {
 enum Rung {
     Ports(PortsRung),
     Gauge(GaugeStep),
-    /// The upload buttons: with the list button, and with the `⌘.` hint.
+    /// The buttons: with the first (the upload's list, the question's *Plain ssh*), and with
+    /// the keys' names (`⌘.`, `Esc`, `Enter`).
     Buttons {
-        list: bool,
+        first: bool,
         hint: bool,
     },
     Hint,
@@ -408,7 +451,7 @@ impl Item<'_> {
             Self::Ports(_) => Rung::Ports(PortsRung::All),
             Self::Gauge(stats) => Rung::Gauge(ladder(stats.form)[0]),
             Self::Buttons(transfer) => Rung::Buttons {
-                list: transfer.controls.items > 1,
+                first: first_shown(transfer),
                 hint: true,
             },
             Self::Hint(_) => Rung::Hint,
@@ -435,13 +478,15 @@ impl Item<'_> {
         match (self, rung) {
             (Self::Ports(ports), Rung::Ports(rung)) => ports_width(ports, rung),
             (Self::Gauge(stats), Rung::Gauge(step)) => gauge(stats, step).width(),
-            (Self::Buttons(transfer), Rung::Buttons { list, hint }) => {
-                let list = if list {
-                    button_width(list_label(transfer), false) + BUTTON_GAP
+            (Self::Buttons(transfer), Rung::Buttons { first, hint }) => {
+                let first = if first {
+                    let key = key_for(transfer, first_control(transfer), hint);
+                    button_width(first_label(transfer), key) + BUTTON_GAP
                 } else {
                     0
                 };
-                list + button_width(cancel_label(transfer), hint)
+                let key = key_for(transfer, last_control(transfer), hint);
+                first + button_width(last_label(transfer), key)
             }
             (Self::Hint(hint), _) => hint.chars().count(),
             // An item is only ever asked about its own rungs.
@@ -462,6 +507,62 @@ fn cancel_label(transfer: &Transfer) -> ButtonLabel {
 /// The list button's label, with the queue's length.
 fn list_label(transfer: &Transfer) -> ButtonLabel {
     ButtonLabel::ShowFiles(transfer.controls.items)
+}
+
+/// Whether the row's first button is wanted at the widest rung: an upload's list over a queue
+/// of several; the question's *Plain ssh* always. The last button is always there.
+fn first_shown(transfer: &Transfer) -> bool {
+    match transfer.kind {
+        TransferKind::Upload => transfer.controls.items > 1,
+        TransferKind::Ask => true,
+        TransferKind::Setup | TransferKind::Done => false,
+    }
+}
+
+/// The first button's label and control, then the last's: the upload's list and cancel; the
+/// question's *Plain ssh* and *Set Up*; the setup's *Cancel* alone.
+fn first_label(transfer: &Transfer) -> ButtonLabel {
+    match transfer.kind {
+        TransferKind::Ask => ButtonLabel::PlainSsh,
+        _ => list_label(transfer),
+    }
+}
+
+fn first_control(transfer: &Transfer) -> FooterControl {
+    match transfer.kind {
+        TransferKind::Ask => FooterControl::PlainSsh,
+        _ => FooterControl::List,
+    }
+}
+
+fn last_label(transfer: &Transfer) -> ButtonLabel {
+    match transfer.kind {
+        TransferKind::Ask => ButtonLabel::SetUp,
+        _ => cancel_label(transfer),
+    }
+}
+
+fn last_control(transfer: &Transfer) -> FooterControl {
+    match transfer.kind {
+        TransferKind::Ask => FooterControl::SetUp,
+        _ => FooterControl::Cancel,
+    }
+}
+
+/// The name of the key a button teaches, shown inside it while the row has room (`hint`): the
+/// upload's cancel `⌘.`; on the question, *Plain ssh* `Esc` and *Set Up* `Enter`; while bateri
+/// goes up, the cancel's `Esc`. The list button teaches none.
+fn key_for(transfer: &Transfer, control: FooterControl, hint: bool) -> Option<&'static str> {
+    if !hint {
+        return None;
+    }
+    match (transfer.kind, control) {
+        (_, FooterControl::List) => None,
+        (TransferKind::Ask, FooterControl::PlainSsh)
+        | (TransferKind::Setup, FooterControl::Cancel) => Some(ESCAPE_KEY),
+        (TransferKind::Ask, FooterControl::SetUp) => Some(ENTER_KEY),
+        _ => Some(CANCEL_HINT),
+    }
 }
 
 /// The number of trailing items a form has: the ports and the form's own.
@@ -505,7 +606,7 @@ fn parts(context: &DockContext) -> (Lead<'_>, [Option<Item<'_>>; ITEMS]) {
     // The upload row **before** the remote form: it carries its own host and
     // must show its result after ssh has closed too.
     if let Some(transfer) = &context.transfer {
-        let buttons = (transfer.controls.items > 0).then_some(Item::Buttons(transfer));
+        let buttons = transfer.has_buttons().then_some(Item::Buttons(transfer));
         return (Lead::Transfer(transfer), [ports, buttons]);
     }
     if let Some(host) = context.remote_label() {
@@ -566,6 +667,17 @@ fn plan(context: &DockContext, available: usize) -> Plan<'_> {
             break;
         }
     }
+    // The buttons of the question and of the setup do not drop with the rest: past the shortest
+    // words the lead gives way to them, the host's name first, then nothing.
+    if items.iter().flatten().any(
+        |item| matches!(item, Item::Buttons(transfer) if transfer.kind != TransferKind::Upload),
+    ) {
+        for head in [lead.core().min(lead.head()), 0] {
+            if let Some(plan) = place(lead, head, &items, &rungs, available) {
+                return plan;
+            }
+        }
+    }
     Plan {
         lead,
         lead_budget: available,
@@ -609,7 +721,8 @@ fn shorten_ports(items: &[Option<Item<'_>>; ITEMS], rungs: &mut [Option<Rung>; I
 
 /// One step of the kept items' reduction, in their order of least need: the
 /// ports (to a count, then off), the gauge, the controls (the `⌘.` hint, the
-/// list button, the last button). `false` when nothing is left to reduce.
+/// first button, the last button — of the question and the setup only the keys' names).
+/// `false` when nothing is left to reduce.
 fn reduce_kept(items: &[Option<Item<'_>>; ITEMS], rungs: &mut [Option<Rung>; ITEMS]) -> bool {
     let at = |kind: fn(&Item<'_>) -> bool| {
         items
@@ -631,13 +744,19 @@ fn reduce_kept(items: &[Option<Item<'_>>; ITEMS], rungs: &mut [Option<Rung>; ITE
         return true;
     }
     if let Some(at) = at(|item| matches!(item, Item::Buttons(_))) {
+        let Some(Item::Buttons(transfer)) = items[at] else {
+            return false;
+        };
         rungs[at] = match rungs[at] {
-            Some(Rung::Buttons { list, hint: true }) => Some(Rung::Buttons { list, hint: false }),
+            Some(Rung::Buttons { first, hint: true }) => Some(Rung::Buttons { first, hint: false }),
+            // The question's and the setup's buttons never drop: what answers or stops is
+            // all the person has, the row's words give way instead.
+            _ if transfer.kind != TransferKind::Upload => return false,
             Some(Rung::Buttons {
-                list: true,
+                first: true,
                 hint: false,
             }) => Some(Rung::Buttons {
-                list: false,
+                first: false,
                 hint: false,
             }),
             _ => None,
@@ -858,21 +977,61 @@ fn emit_lead(
             let accent = theme.mark_linear(transfer.mark);
             let toned = match transfer.tone {
                 TransferTone::Quiet => dim,
+                TransferTone::Plain => theme.foreground_linear(),
                 TransferTone::Success => theme.success_linear(),
                 TransferTone::Error => theme.error_linear(),
             };
-            let lead = transfer.lead;
+            // A question and a finished line say all of it in one tone, in the longest of their
+            // words that fits (the shortest clips like any text).
+            let words = transfer.ladder();
+            if transfer.kind == TransferKind::Ask {
+                // The question is the row: the server's name in its words, in the mark's color,
+                // the rest in the foreground.
+                let text = words
+                    .iter()
+                    .find(|words| words.chars().count() <= budget)
+                    .or_else(|| words.last())
+                    .unwrap_or("");
+                let chars = text.chars().count();
+                let (shown, clipped) = if chars <= budget {
+                    (chars, false)
+                } else {
+                    (budget.saturating_sub(1), budget > 0)
+                };
+                let name = Transfer::ASK_BEFORE_HOST.chars().count();
+                let name = name..name + transfer.host.chars().count();
+                let line = text
+                    .chars()
+                    .take(shown)
+                    .enumerate()
+                    .map(move |(i, ch)| (ch, if name.contains(&i) { accent } else { toned }))
+                    .chain(clipped.then_some((ELLIPSIS, dim)));
+                emit_context(line, budget, row, sink);
+                return;
+            }
+            let lead = if words.is_empty() {
+                transfer.lead
+            } else {
+                usize::MAX
+            };
             emit_remote_head(&transfer.host, accent, budget, row, sink, |rest| {
-                let chars = transfer.body.chars().count();
+                let text: &str = if words.is_empty() {
+                    &transfer.body
+                } else {
+                    words
+                        .iter()
+                        .find(|words| words.chars().count() <= rest)
+                        .or_else(|| words.last())
+                        .unwrap_or("")
+                };
+                let chars = text.chars().count();
                 let (shown, clipped) = if chars <= rest {
                     (chars, false)
                 } else {
                     // The mark itself is a column too.
                     (rest.saturating_sub(1), rest > 0)
                 };
-                transfer
-                    .body
-                    .chars()
+                text.chars()
                     .take(shown)
                     .enumerate()
                     .map(move |(i, ch)| (ch, if i < lead { toned } else { dim }))
@@ -1063,10 +1222,10 @@ fn emit_item(
                     .map(|ch| (ch, theme.foreground_linear()))
                     .chain(
                         button
-                            .hint
-                            .then(|| {
+                            .key
+                            .map(|key| {
                                 std::iter::once((' ', dim))
-                                    .chain(CANCEL_HINT.chars().map(|ch| (ch, hint_color)))
+                                    .chain(key.chars().map(|ch| (ch, hint_color)))
                             })
                             .into_iter()
                             .flatten(),
@@ -1095,45 +1254,47 @@ fn emit_item(
     }
 }
 
-/// An upload button of a placed [`Item::Buttons`]: its control, label, hint
-/// and context-local range — inner padding included, i.e. the whole of the
+/// A button of a placed [`Item::Buttons`]: its control, label, the key it
+/// teaches and context-local range — inner padding included, i.e. the whole of the
 /// fill and the hit area.
 #[derive(Clone, Copy)]
 struct ButtonSpan {
     control: FooterControl,
     label: ButtonLabel,
-    hint: bool,
+    key: Option<&'static str>,
     start: usize,
     end: usize,
 }
 
-/// The placed buttons, left to right: the list (if shown) and the cancel —
-/// right-aligned, the cancel at the item's end.
+/// The placed buttons, left to right: the first (if shown) and the last —
+/// right-aligned, the last at the item's end.
 fn button_spans(transfer: &Transfer, placed: Placed<'_>) -> [Option<ButtonSpan>; 2] {
-    let Rung::Buttons { list, hint } = placed.rung else {
+    let Rung::Buttons { first, hint } = placed.rung else {
         return [None; 2];
     };
-    let cancel = cancel_label(transfer);
-    let cancel_start = placed.end - button_width(cancel, hint);
-    let cancel = ButtonSpan {
-        control: FooterControl::Cancel,
-        label: cancel,
-        hint,
-        start: cancel_start,
+    let (label, control) = (last_label(transfer), last_control(transfer));
+    let key = key_for(transfer, control, hint);
+    let last_start = placed.end - button_width(label, key);
+    let last = ButtonSpan {
+        control,
+        label,
+        key,
+        start: last_start,
         end: placed.end,
     };
-    let list = list.then(|| {
-        let label = list_label(transfer);
-        let end = cancel_start - BUTTON_GAP;
+    let first = first.then(|| {
+        let (label, control) = (first_label(transfer), first_control(transfer));
+        let key = key_for(transfer, control, hint);
+        let end = last_start - BUTTON_GAP;
         ButtonSpan {
-            control: FooterControl::List,
+            control,
             label,
-            hint: false,
-            start: end - button_width(label, false),
+            key,
+            start: end - button_width(label, key),
             end,
         }
     });
-    [list, Some(cancel)]
+    [first, Some(last)]
 }
 
 /// A port cell's tone; the color is resolved at drawing.
@@ -1638,6 +1799,10 @@ enum ButtonLabel {
     /// open (`Hide files` was dropped, the button is in the pressed tone).
     /// "Transfers", not "files": the list carries both directions.
     ShowFiles(u16),
+    /// The first connection's question: go on without bateri's terminal.
+    PlainSsh,
+    /// The first connection's question: put bateri on the server.
+    SetUp,
 }
 
 impl ButtonLabel {
@@ -1647,6 +1812,8 @@ impl ButtonLabel {
             Self::Cancel => ("Cancel", None, ""),
             Self::CancelAll => ("Cancel all", None, ""),
             Self::ShowFiles(items) => ("Show transfers (", Some(items), ")"),
+            Self::PlainSsh => ("Plain ssh", None, ""),
+            Self::SetUp => ("Set Up", None, ""),
         };
         head.chars()
             .chain(count.into_iter().flat_map(decimal))
@@ -1682,14 +1849,15 @@ const BUTTON_GAP: usize = 1;
 /// it does not compete with the label.
 pub(super) const CANCEL_HINT: &str = "⌘.";
 
-/// A button's width, in columns: `pad + label [+ space + ⌘.] + pad`.
-fn button_width(label: ButtonLabel, hint: bool) -> usize {
-    let hint = if hint {
-        1 + CANCEL_HINT.chars().count()
-    } else {
-        0
-    };
-    BUTTON_PAD + label.len() + hint + BUTTON_PAD
+/// The keys the first connection's buttons teach: the question's *Plain ssh* and the setup's
+/// cancel are `Esc`, *Set Up* is `Enter`.
+const ESCAPE_KEY: &str = "Esc";
+const ENTER_KEY: &str = "Enter";
+
+/// A button's width, in columns: `pad + label [+ space + key] + pad`.
+fn button_width(label: ButtonLabel, key: Option<&str>) -> usize {
+    let key = key.map_or(0, |key| 1 + key.chars().count());
+    BUTTON_PAD + label.len() + key + BUTTON_PAD
 }
 
 /// A path's cells on the context row, shortened **from the left** to `budget`

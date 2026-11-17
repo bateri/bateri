@@ -495,6 +495,12 @@ pub fn record(path: &Path, fact: Fact, key: &str, at: u64, patience: Duration) -
     rewrite(path, patience, |state| state.note(fact, key, at))
 }
 
+/// Takes `fact`'s row for `key` back out of the state file, under its lock: a set-up the person
+/// stopped is one that was never done, and the next connection asks again.
+pub fn unrecord(path: &Path, fact: Fact, key: &str) -> io::Result<()> {
+    rewrite(path, LOCK_PATIENCE, |state| state.forget(fact, key))
+}
+
 /// [`record`]'s body for any change of the rows: under the lock (waiting at
 /// most `patience`), read, `change`, write a temporary name, rename.
 fn rewrite(path: &Path, patience: Duration, change: impl FnOnce(&mut HostState)) -> io::Result<()> {
@@ -678,6 +684,45 @@ fn control(out: &str, sockets: &[PathBuf]) -> Option<Control> {
     }
     let socket = session_socket(sockets, &crate::ssh_route::host_key(&config))?;
     Some(Control { socket })
+}
+
+/// The options that make a plain `ssh` for `args` ride the master bateri holds for that server:
+/// `-o ControlMaster=no -o ControlPath=<its socket>` — the login that was made in the pane (the
+/// terminal's first connection, [`crate::kablo::service`]) is used, and no second password is
+/// asked. `config_out` is `ssh -G`'s answer for `args`; `bases` are the places a master's socket
+/// is looked for ([`crate::ssh_route::Masters::bases`], the one list the master was made under:
+/// the instance's directories).
+/// `None` when there is nothing to ride — no live socket of ours for the server — and when the
+/// user shares connections themselves (a `ControlMaster` or `ControlPath` of their own, in the
+/// arguments or in the configuration): then the plain `ssh` is the user's own, as it always was.
+///
+/// Ours come **before** the user's arguments: ssh keeps a key's first value. `ControlMaster=no`,
+/// so that a master that went since is not made again by a command that was never to make one.
+pub fn ride_master(args: &[String], config_out: &str, bases: &[PathBuf]) -> Option<Vec<String>> {
+    if names_sharing(args) {
+        return None;
+    }
+    let config = parse_config(config_out)?;
+    if config.shares_connections() {
+        return None;
+    }
+    let key = crate::ssh_route::host_key(&config);
+    let socket = bases
+        .iter()
+        .map(|base| base.join(&key))
+        .find(|path| crate::ssh_route::fits(path) && is_socket(path))?;
+    Some(vec![
+        "-o".to_owned(),
+        "ControlMaster=no".to_owned(),
+        "-o".to_owned(),
+        format!("ControlPath={}", socket.display()),
+    ])
+}
+
+/// Whether `path` is a socket (a master's), not a file left in its place.
+fn is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
 }
 
 // ─── the bootstrap ───────────────────────────────────────────────────────

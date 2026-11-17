@@ -1,6 +1,6 @@
 //! Main menu: the app menu (About, Check for Updates…, Settings…, Open settings.toml, Hide, Quit
 //! and — ⌥ held, under `keep_running = "quit"` only — Quit and End Programs), Shell (New
-//! Window, New Tab, New Local Tab, Mark Host as ▸, Shell Integration on Host, Remove bateri from
+//! Window, New Tab, New Local Tab, Mark Host as ▸, Set Up bateri on Host, Remove bateri from
 //! Host, Forget Password, Cancel Upload, Open Port ▸, Go to Folder…, Copy Folder Path, Show Folder in
 //! Finder, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Undo Move, Cut, Copy, Paste, Paste
@@ -38,9 +38,9 @@
 //! `openSettings:`, the theme actions, `tabsAtTop:`/`tabsAtSide:` (View ▸ Tabs ▸: the
 //! checkmark follows `[appearance] tab_position` and the items are grey where there is no
 //! file to write, both in the app delegate's `validateMenuItem:`), `markHost:`,
-//! `toggleHostIntegration:`
-//! (its title, checkmark and grey state in the app delegate's
-//! `validateMenuItem:`, from [`integration_menu`]), `openAllBackground:` (grey unless the
+//! `setUpOnHost:`
+//! (its title and grey state in the app delegate's
+//! `validateMenuItem:`, from [`set_up_menu`]), `openAllBackground:` (grey unless the
 //! focused pane's server has terminals waiting that no pane shows) and
 //! `toggleCommandPalette:`, `goToTab:`, `goToFolder:`, `jumpToCommand:`, `showCommandHistory:` and
 //! `showThemes:` (View ▸ Command Palette… ⇧⌘P, Window ▸ Go to Tab… ⌘P, Shell ▸ Go to Folder… ⌘O,
@@ -104,7 +104,7 @@
 //! "Edit" and the full-screen item to the one named "View"; to the Window menu
 //! registered with `setWindowsMenu` it adds the window list and placement items.
 
-use bt_core::{HostMark, KeepRunning, MarkSubject, RemoteIntegration, SYSTEM_THEME, bare_host};
+use bt_core::{HostMark, KeepRunning, MarkSubject, SYSTEM_THEME, bare_host};
 use bt_shell_common::shortcuts::{self, Resolved};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -189,33 +189,26 @@ pub(crate) fn forget_title(host: Option<&str>) -> String {
     }
 }
 
-/// Shell ▸ Shell Integration on “{host}”: the toggle's state, pure.
+/// Shell ▸ Set Up bateri on “{host}”: the item's title and whether it can be used, pure.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct IntegrationMenu {
+pub(crate) struct SetUpMenu {
     pub(crate) title: String,
     pub(crate) enabled: bool,
-    /// The mark: checked for `auto` (the host's entry or the setting goes ahead), a dash for
-    /// `ask` (the first connection asks), none for `off`.
-    pub(crate) answer: RemoteIntegration,
 }
 
-/// The toggle's model: on a remote tab (`Some((host, answer))`, `answer` the
-/// **resolved** one — `Settings::integration_for`, the host's own entry and
-/// otherwise the key) the title carries the host without `user@`; locally
-/// "Shell Integration on Host", grey and unmarked. The action turns it **on**
-/// for this host (its own entry, a yes that asks nothing) where the answer is
-/// `ask` or `off`, and off where it is `auto`.
-pub(crate) fn integration_menu(remote: Option<(&str, RemoteIntegration)>) -> IntegrationMenu {
+/// The item's model, the reverse of [`removal_menu`]'s: on a remote tab (`Some((host, grey))`) the
+/// title carries the host without `user@`, and the item can be used unless `grey` — this Mac has
+/// put bateri's files on the server (a server bateri is on has nothing to set up), or does not
+/// know yet whether it has; locally "Set Up bateri on Host", grey.
+pub(crate) fn set_up_menu(remote: Option<(&str, bool)>) -> SetUpMenu {
     match remote {
-        Some((host, answer)) => IntegrationMenu {
-            title: format!("Shell Integration on \u{201c}{}\u{201d}", bare_host(host)),
-            enabled: true,
-            answer,
+        Some((host, grey)) => SetUpMenu {
+            title: format!("Set Up bateri on \u{201c}{}\u{201d}", bare_host(host)),
+            enabled: !grey,
         },
-        None => IntegrationMenu {
-            title: "Shell Integration on Host".to_owned(),
+        None => SetUpMenu {
+            title: "Set Up bateri on Host".to_owned(),
             enabled: false,
-            answer: RemoteIntegration::Off,
         },
     }
 }
@@ -626,15 +619,10 @@ pub(crate) fn install(
             // Its title and grey state on opening ([`ShellMenuDelegate`]); the items go to the
             // app delegate with `markHost:` (the active tab's host).
             mark_holder(mtm),
-            // Whether a plain ssh to the tab's host sets up the shell
-            // integration; handled by the app delegate
-            // (`toggleHostIntegration:`), its title and state from its
-            // `validateMenuItem:`. Takes effect from the next ssh.
-            item(
-                mtm,
-                &integration_menu(None).title,
-                sel!(toggleHostIntegration:),
-            ),
+            // Puts bateri on the tab's server the next time it is connected to, after a question:
+            // handled by the app delegate (`setUpOnHost:`), its title and grey state from its
+            // `validateMenuItem:` (grey once this Mac has put bateri there).
+            item(mtm, &set_up_menu(None).title, sel!(setUpOnHost:)),
             // Takes everything bateri put on the tab's server off it, after a question: handled
             // by the app delegate (`removeFromHost:`), its title and grey state from its
             // `validateMenuItem:` (grey unless this Mac put it there).
@@ -1130,52 +1118,28 @@ mod tests {
     }
 
     #[test]
-    fn the_integration_toggle_follows_the_resolution() {
-        let settings = |text: &str| {
-            bt_core::Settings::parse(text)
-                .expect("parseable text")
-                .settings
-        };
-        let model = |text: &str, host: &str| {
-            integration_menu(Some((host, settings(text).integration_for(host))))
-        };
-        // Locally: grey, unchecked.
+    fn the_set_up_item_is_for_a_server_bateri_is_not_on_and_grey_locally() {
         assert_eq!(
-            integration_menu(None),
-            IntegrationMenu {
-                title: "Shell Integration on Host".to_owned(),
+            set_up_menu(None),
+            SetUpMenu {
+                title: "Set Up bateri on Host".to_owned(),
                 enabled: false,
-                answer: RemoteIntegration::Off,
             }
         );
-        // An unmarked host follows `[remote] integration`, which asks by default.
         assert_eq!(
-            model("", "deploy@web"),
-            IntegrationMenu {
-                title: "Shell Integration on \u{201c}web\u{201d}".to_owned(),
+            set_up_menu(Some(("deploy@web", false))),
+            SetUpMenu {
+                title: "Set Up bateri on \u{201c}web\u{201d}".to_owned(),
                 enabled: true,
-                answer: RemoteIntegration::Ask,
             }
         );
+        // Where this Mac has put bateri, Remove is the item that is usable and this one is not.
+        assert!(!set_up_menu(Some(("web", true))).enabled);
         assert_eq!(
-            model("[remote]\nintegration = \"auto\"\n", "web").answer,
-            RemoteIntegration::Auto
+            shortcuts::by_name("set_up_on_host").map(|c| c.id),
+            Some("setUpOnHost")
         );
-        assert_eq!(
-            model("[remote]\nintegration = \"off\"\n", "web").answer,
-            RemoteIntegration::Off
-        );
-        // A production mark is a color: the host follows the key, a glob too, and an entry of the
-        // host's own decides for it.
-        let prod = "[remote]\nhosts = [{ host = \"prod-*\", mark = \"production\" }]\n";
-        assert_eq!(model(prod, "prod-web").answer, RemoteIntegration::Ask);
-        let edit = bt_core::SettingsEdit::RemoteHostIntegration {
-            host: "prod-web".to_owned(),
-            on: true,
-        };
-        let written = bt_core::Settings::with_edit(prod, &edit).expect("writable text");
-        assert_eq!(model(&written, "prod-web").answer, RemoteIntegration::Auto);
-        assert_eq!(model(&written, "prod-db").answer, RemoteIntegration::Ask);
+        assert!(shortcuts::by_name("shell_integration").is_none());
     }
 
     #[test]

@@ -55,6 +55,8 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kablo_proto::SessionId;
@@ -230,6 +232,36 @@ pub trait Channel {
     /// Runs the script (`sh`) on the server with `input` on its standard
     /// input.
     fn run(&self, script: &str, input: &[u8]) -> io::Result<Reply>;
+
+    /// [`Channel::run`] for an input that takes a while to cross, told how much of it has: a
+    /// channel that cannot say, or stop, runs it whole ([`Watch`]).
+    fn put(&self, script: &str, input: &[u8], _watch: &dyn Watch) -> io::Result<Reply> {
+        self.run(script, input)
+    }
+}
+
+/// Whoever waits for a long input to cross: told how much has, and asked whether to go on. The
+/// first connection to a server is one, in the dock's row (a number of bytes and a *Cancel*).
+pub trait Watch: Send + Sync {
+    /// `done` of `total` bytes have been handed to the connection (not that the server has them:
+    /// what the connection holds in its buffers is counted). Called from the thread that waits for
+    /// the step, when the count has moved, a few times a second at most.
+    fn sent(&self, done: u64, total: u64);
+
+    /// Whether the person said to stop: the write ends, and what the server was given is not a
+    /// file ([`upload_script`] leaves nothing behind that is not whole).
+    fn stopped(&self) -> bool;
+}
+
+/// A [`Watch`] that watches nothing: what is not shown to anyone.
+pub struct Unwatched;
+
+impl Watch for Unwatched {
+    fn sent(&self, _done: u64, _total: u64) {}
+
+    fn stopped(&self) -> bool {
+        false
+    }
 }
 
 /// Why kablo cannot be kept on a server at all.
@@ -351,7 +383,18 @@ pub fn ensure_for(
     bundle: &Bundle,
     wants: impl Into<Wants>,
 ) -> Result<Installed, Failure> {
-    place(channel, bundle, Files::Server(wants.into()))
+    ensure_watched(channel, bundle, wants, &Unwatched)
+}
+
+/// [`ensure_for`] for a person who waits for the binary to cross ([`Watch`]): told how far it
+/// is, and able to stop it ([`Failure::Transient`] then, and no binary is left on the server).
+pub fn ensure_watched(
+    channel: &dyn Channel,
+    bundle: &Bundle,
+    wants: impl Into<Wants>,
+    watch: &dyn Watch,
+) -> Result<Installed, Failure> {
+    place(channel, bundle, Files::Server(wants.into()), watch)
 }
 
 /// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, with the one
@@ -364,7 +407,7 @@ pub fn ensure_here(
     bundle: &Bundle,
     wants: impl Into<Wants>,
 ) -> Result<Installed, Failure> {
-    place(channel, bundle, Files::Here(wants.into()))
+    place(channel, bundle, Files::Here(wants.into()), &Unwatched)
 }
 
 /// Which of the shells' files go with the look at kablo ([`place`]).
@@ -377,7 +420,12 @@ enum Files {
 }
 
 /// What [`ensure`] and [`ensure_here`] are: the look at kablo, and the files that ride it.
-fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Installed, Failure> {
+fn place(
+    channel: &dyn Channel,
+    bundle: &Bundle,
+    files: Files,
+    watch: &dyn Watch,
+) -> Result<Installed, Failure> {
     let target = server_target(channel)?;
     let artifact = bundle
         .artifact(target)
@@ -424,7 +472,11 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Install
         .read(&artifact)
         .map_err(|error| Failure::transient(format!("reading the package's bateri: {error}")))?;
     let reply = channel
-        .run(&upload_script(bundle.version(), &artifact.sha256), &bytes)
+        .put(
+            &upload_script(bundle.version(), &artifact.sha256),
+            &bytes,
+            watch,
+        )
         .map_err(|error| Failure::transient(format!("writing bateri: {error}")))?;
     match reply.status {
         Some(0) => Ok(Installed {
@@ -1003,6 +1055,12 @@ impl Channel for SshChannel {
         argv.push(format!("sh -c {}", sq(script)));
         run_command(&argv, input, self.limit)
     }
+
+    fn put(&self, script: &str, input: &[u8], watch: &dyn Watch) -> io::Result<Reply> {
+        let mut argv = self.argv.clone();
+        argv.push(format!("sh -c {}", sq(script)));
+        run_command_watched(&argv, input, self.limit, watch)
+    }
 }
 
 /// Runs `argv`, writes `input` to it, collects what it says; ends it when it
@@ -1018,6 +1076,32 @@ pub fn run_command_in(
     input: &[u8],
     limit: Duration,
     dir: Option<&Path>,
+) -> io::Result<Reply> {
+    run_command_with(argv, input, limit, dir, &Unwatched)
+}
+
+/// [`run_command`] for an input a person waits for ([`Watch`]): written in chunks, each told,
+/// and ended — the whole group, the proxy too ([`crate::program::end_group`]) — as soon as the
+/// watch says stop.
+pub fn run_command_watched(
+    argv: &[String],
+    input: &[u8],
+    limit: Duration,
+    watch: &dyn Watch,
+) -> io::Result<Reply> {
+    run_command_with(argv, input, limit, None, watch)
+}
+
+/// How much of the input is handed to the connection at a time, and so how often a [`Watch`] is
+/// told. Small enough for a bar to move, large enough not to be a call per kilobyte.
+const PUT_CHUNK: usize = 32 * 1024;
+
+fn run_command_with(
+    argv: &[String],
+    input: &[u8],
+    limit: Duration,
+    dir: Option<&Path>,
+    watch: &dyn Watch,
 ) -> io::Result<Reply> {
     let (program, args) = argv
         .split_first()
@@ -1037,13 +1121,6 @@ pub fn run_command_in(
     let mut stdin = child.stdin.take();
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
-    let data = input.to_vec();
-    let writer = std::thread::spawn(move || {
-        if let Some(stdin) = stdin.as_mut() {
-            let _ = stdin.write_all(&data);
-        }
-        drop(stdin);
-    });
     let out = std::thread::spawn(move || {
         let mut text = Vec::new();
         if let Some(stdout) = stdout.as_mut() {
@@ -1058,26 +1135,65 @@ pub fn run_command_in(
         }
         text
     });
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
+    // The writer is not waited for when a step is given up on (something the step started may hold
+    // its pipe, and the write then never ends): it counts what it has handed over, and the loop
+    // below, which waits anyway, is the one that tells the watch.
+    let data = input.to_vec();
+    let total = data.len() as u64;
+    let handed = Arc::new(AtomicU64::new(0));
+    let writer = std::thread::spawn({
+        let handed = Arc::clone(&handed);
+        move || {
+            if let Some(stdin) = stdin.as_mut() {
+                for chunk in data.chunks(PUT_CHUNK) {
+                    if stdin.write_all(chunk).is_err() {
+                        break;
+                    }
+                    handed.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+                }
+            }
+            drop(stdin);
         }
-        if Instant::now() >= deadline {
+    });
+    let mut told = 0u64;
+    let tell = |told: &mut u64| {
+        let now = handed.load(Ordering::SeqCst);
+        if now != *told {
+            *told = now;
+            watch.sent(now, total);
+        }
+    };
+    let deadline = Instant::now() + limit;
+    let mut stopped = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(error) => {
+                crate::program::end_group(&mut child);
+                return Err(error);
+            }
+        }
+        tell(&mut told);
+        stopped = stopped || watch.stopped();
+        if stopped || Instant::now() >= deadline {
             crate::program::end_group(&mut child);
             break None;
         }
         std::thread::sleep(Duration::from_millis(5));
     };
-    // A step that ran out of time is not waited for further: something it
+    // A step that ran out of time, or was stopped, is not waited for further: something it
     // started may hold its pipes, and the readers end when that does.
     let Some(status) = status else {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "the step took too long",
-        ));
+        let (kind, text) = if stopped {
+            (io::ErrorKind::Interrupted, "stopped")
+        } else {
+            (io::ErrorKind::TimedOut, "the step took too long")
+        };
+        return Err(io::Error::new(kind, text));
     };
     let _ = writer.join();
+    tell(&mut told);
     let out = out.join().unwrap_or_default();
     let err = err.join().unwrap_or_default();
     Ok(Reply {

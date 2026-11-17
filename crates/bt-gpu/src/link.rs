@@ -2484,6 +2484,7 @@ fn place_dock(
             dock.glow,
             dock.glow_strength,
         );
+        frame.set_dock_glow_alone(dock.glow_alone);
         frame.set_dock_progress(dock.progress, dock.track);
         frame.set_dock_buttons(dock.buttons);
     } else {
@@ -3466,6 +3467,13 @@ impl DisplayLink {
         if armed {
             self.request_frame();
         }
+    }
+
+    /// [`Self::arm_arrival`] with the kind the pane has now, for a dock that comes again: the
+    /// first connection's row gives its place to the server's own, and the shell's prompt is
+    /// already there, so the entrance plays at the next frame.
+    pub fn rearm_arrival(&self) {
+        self.arm_arrival(self.core.dock_arrival.get());
     }
 
     /// The user changed `[motion] dock_arrival`, or the pane is opening

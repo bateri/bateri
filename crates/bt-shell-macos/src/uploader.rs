@@ -720,7 +720,7 @@ impl TerminalPane {
     /// (`BateriView::hand_cursor_rects`); if buttons appeared or went away
     /// the rects are refreshed here, so when a button goes the hand does not
     /// hang under the mouse.
-    fn show_transfer(&self, transfer: Option<Transfer>) {
+    pub(crate) fn show_transfer(&self, transfer: Option<Transfer>) {
         if let Some(session) = self.session() {
             session.set_transfer(transfer.as_ref());
         }
@@ -738,6 +738,10 @@ impl TerminalPane {
     /// (confirmation or question) the request is dropped - two sheets cannot
     /// open on top of each other.
     pub(crate) fn request_stop(&self, all: bool) {
+        // While bateri goes up on a server the one *Cancel* is the first connection's.
+        if self.setup_cancel() {
+            return;
+        }
         self.request_stop_item(None, all);
     }
 

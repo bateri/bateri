@@ -84,6 +84,7 @@ mod search_bar;
 mod server_card;
 mod server_stats;
 mod settings_window;
+mod setup_row;
 mod sheets;
 mod snapshot;
 mod split_view;
@@ -271,25 +272,6 @@ pub fn ssh_fell_back() -> Option<i32> {
         bt_shell_common::ssh_wrap::FELL_BACK_PATIENCE,
         &mut std::io::stdout().lock(),
     ))
-}
-
-/// `bateri ssh-ask HOST`: the question a pane asks before bateri puts its files on a server it has
-/// not been to — run by the pane's holder on the pane's own terminal, before the connection is
-/// made. `Some(exit code)` when the process was started as the subcommand, `None` otherwise;
-/// `main` calls it before the window-server check, like the other subcommands a pane's shell
-/// runs. The status is the answer ([`bt_shell_common::kablo::ask`]); the body is there, here only
-/// the process's inputs.
-pub fn ssh_ask() -> Option<i32> {
-    let mut args = std::env::args_os().skip(1);
-    if args.next()? != bt_shell_common::kablo::ask::SUBCOMMAND {
-        return None;
-    }
-    let host = args
-        .next()
-        .map(|host| host.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let status = bt_shell_common::kablo::ask::run(&host, &mut std::io::stdout().lock());
-    Some(i32::from(status))
 }
 
 /// `bateri ssh-hold [--first] … [-- <ssh arguments…>]`: a pane's program that

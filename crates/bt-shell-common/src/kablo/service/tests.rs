@@ -15,7 +15,6 @@ use kablo_proto::v1::{Exit, stream};
 use super::*;
 use crate::hold::wire::Target;
 use crate::hold::{Config, Outcome, run};
-use crate::kablo::ask;
 use crate::kablo::fake::{Activity, Age, Bridge};
 use crate::kablo::install::Installed;
 use crate::program::identity::{Agent, Kind};
@@ -107,6 +106,11 @@ struct Fake {
     /// What the permission step says ([`Backend::consent`]); the log has it, and the answer, only
     /// when it is not a plain yes, so that the order of every other test's steps is as it was.
     consent: Mutex<Consent>,
+    /// The bytes the install tells its watch of, as `(sent, total)`, before it goes on
+    /// ([`Backend::install_watched`]).
+    puts: Mutex<Vec<(u64, u64)>>,
+    /// While set, the install waits until it is stopped.
+    install_holds: AtomicBool,
     fresh: AtomicBool,
     /// The terminals the server says it has, when the look at it is a whole one
     /// ([`Installed::census`]); none, when the look is not.
@@ -181,6 +185,8 @@ impl Fake {
             kablo: AtomicBool::new(true),
             master: Mutex::new(None),
             consent: Mutex::new(Consent::Granted),
+            puts: Mutex::new(Vec::new()),
+            install_holds: AtomicBool::new(false),
             fresh: AtomicBool::new(false),
             listing: Mutex::new(None),
             refresh_fails: AtomicBool::new(false),
@@ -373,15 +379,44 @@ impl Backend for Fake {
     }
 
     fn consent(&self, _: &KabloHost) -> Consent {
-        let consent = self.consent.lock().expect("lock").clone();
+        let consent = *self.consent.lock().expect("lock");
         if consent != Consent::Granted {
             self.note("consent");
         }
         consent
     }
 
-    fn answered(&self, _: &KabloHost, reply: Reply) {
-        self.note(&format!("answered:{reply:?}").to_lowercase());
+    fn answered(&self, _: &KabloHost, answer: Answer) {
+        self.note(&format!("answered:{answer:?}").to_lowercase());
+    }
+
+    fn setup_changed(&self, _: &PaneUuid, _: &str, setup: Setup) {
+        self.note(&match setup {
+            Setup::Asking => "setup:asking".to_owned(),
+            Setup::Putting { sent, total } => format!("setup:putting:{sent}/{total}"),
+            Setup::Done => "setup:done".to_owned(),
+            Setup::Gone => "setup:gone".to_owned(),
+        });
+    }
+
+    fn install_watched(
+        &self,
+        server: &KabloHost,
+        live: &[SessionId],
+        watch: &dyn Watch,
+    ) -> Result<Installed, Refusal> {
+        let puts = self.puts.lock().expect("lock").clone();
+        for (sent, total) in puts {
+            watch.sent(sent, total);
+        }
+        while self.install_holds.load(Ordering::SeqCst) && !watch.stopped() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if watch.stopped() {
+            self.note("stopped");
+            return Err(Refusal::plain());
+        }
+        self.install(server, live)
     }
 
     fn master(&self, _: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
@@ -1345,95 +1380,133 @@ fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
     assert_eq!(rig.world.count("install"), 0);
 }
 
-/// The program a pane's terminal runs for the question: a stand-in that ends with `status`.
-fn answering(status: u8) -> Consent {
-    Consent::Ask(vec![
-        b"/bin/sh".to_vec(),
-        b"-c".to_vec(),
-        format!("exit {status}").into_bytes(),
-    ])
+/// The pane the question is asked in: a holder in it, and an identity the service can answer to.
+fn asking_pane(rig: &Rig) -> PaneUuid {
+    let pane = PaneUuid::parse("2b4d6f81-3a5c-4e7d-9f10-a1b2c3d4e5f6").expect("a uuid");
+    {
+        let mut info = rig.world.info.lock().expect("lock");
+        info.tab = Some(pane.clone());
+        info.rows = true;
+    }
+    *rig.world.consent.lock().expect("lock") = Consent::Ask;
+    pane
 }
 
-/// A server bateri has not been to is asked about on the pane's terminal **before** the
-/// connection, the install or anything else: a yes and an always go on from there, in the order a
-/// terminal always starts in.
+/// A server bateri has not been to is asked about in the pane's dock **after** the login and
+/// before anything is written to it: the install waits for the answer, and a *Set Up* goes on in
+/// the order a terminal always starts in. The row says bateri is going up, and then that it is
+/// there; the line in the terminal is the row's, not a second one.
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn a_server_that_is_asked_about_is_asked_first_and_a_yes_or_an_always_goes_on() {
-    for (status, answer) in [(ask::YES, "yes"), (ask::ALWAYS, "always")] {
-        let rig = Rig::new(&format!("ask-{answer}"));
-        *rig.world.consent.lock().expect("lock") = answering(status);
-        let _holder = Holder::new(&rig.socket(), "b-1");
-        rig.terminals(1);
-        assert_eq!(
-            rig.world.log(),
-            [
-                "pane",
-                "route",
-                "consent",
-                &format!("answered:{answer}"),
-                "master",
-                "install",
-                "number",
-                "carry"
-            ],
-            "{answer}"
-        );
+fn a_server_that_is_asked_about_is_asked_after_the_login_and_a_set_up_goes_on() {
+    let rig = Rig::new("ask-set-up");
+    let pane = asking_pane(&rig);
+    rig.world.fresh.store(true, Ordering::SeqCst);
+    *rig.world.master.lock().expect("lock") =
+        Some(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    until("the question", || rig.world.count("setup:asking") == 1);
+    // The login is made and nothing else: no install, no number, no bridge, until the answer.
+    assert_eq!(
+        rig.world.log(),
+        [
+            "pane",
+            "route",
+            "consent",
+            "master",
+            "master_made:0",
+            "setup:asking"
+        ]
+    );
+    rig.service.answer_setup(&pane, Answer::SetUp);
+    let terminal = rig.terminals(1).remove(0);
+    until("the row is told it is done", || {
+        rig.world.count("setup:done") == 1
+    });
+    assert_eq!(
+        rig.world.log(),
+        [
+            "pane",
+            "route",
+            "consent",
+            "master",
+            "master_made:0",
+            "setup:asking",
+            "setup:putting:0/0",
+            "install",
+            "number",
+            "setup:done",
+            "carry"
+        ]
+    );
+    rig.world.bridge().write(&terminal, b"ready");
+    until("the output shown", || {
+        holder.shown.bytes().ends_with(b"ready")
+    });
+    let shown = String::from_utf8_lossy(&holder.shown.bytes()).into_owned();
+    assert!(
+        !shown.contains("bateri is set up"),
+        "the row said it: {shown:?}"
+    );
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+}
+
+/// *Plain ssh* is the plain `ssh` that rides the login that was made, and nothing was written
+/// on the way: not the install, not a bridge. The "no" is kept for the host; *Cancel* on the
+/// question and a pane that could not be asked in keep nothing.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn plain_ssh_is_the_plain_ssh_and_nothing_is_written_before_it() {
+    for (answer, kept) in [
+        (Answer::Plain, Some("answered:plain")),
+        (Answer::Cancel, None),
+        (Answer::Unshown, None),
+    ] {
+        let rig = Rig::new(&format!("ask-{answer:?}"));
+        let pane = asking_pane(&rig);
+        let mut holder = Holder::new(&rig.socket(), "b-1");
+        until("the question", || rig.world.count("setup:asking") == 1);
+        rig.service.answer_setup(&pane, answer);
+        assert_eq!(holder.outcome(), Outcome::FallBack, "{answer:?}");
+        until("the row goes", || rig.world.count("setup:gone") == 1);
+        let mut expected = vec!["pane", "route", "consent", "master", "setup:asking"];
+        expected.extend(kept);
+        expected.push("setup:gone");
+        assert_eq!(rig.world.log(), expected, "{answer:?}");
     }
 }
 
-/// A no is the plain `ssh` and nothing was done on the way: not the connection, not the install,
-/// not a bridge. What the person did not answer is not kept either: Control-C ends the connection
-/// the way it does at a password prompt, and a program that failed is the plain `ssh`.
+/// A pane that has no identity to be answered to is not asked at all: it is the plain `ssh` at
+/// once, with no connection made for it and nothing kept.
 #[test]
-#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn a_no_is_the_plain_ssh_and_an_interrupt_is_no_connection_and_nothing_is_done_before_either() {
-    let rig = Rig::new("ask-no");
-    *rig.world.consent.lock().expect("lock") = answering(ask::NO);
-    let mut holder = Holder::new(&rig.socket(), "b-1");
-    assert_eq!(holder.outcome(), Outcome::FallBack);
-    assert_eq!(rig.world.log(), ["pane", "route", "consent", "answered:no"]);
-    drop(rig);
-
-    let rig = Rig::new("ask-interrupt");
-    *rig.world.consent.lock().expect("lock") = answering(ask::INTERRUPTED);
-    let mut holder = Holder::new(&rig.socket(), "b-1");
-    assert_eq!(holder.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
-    assert_eq!(
-        rig.world.log(),
-        ["pane", "route", "consent"],
-        "nothing is kept"
-    );
-    drop(rig);
-
-    let rig = Rig::new("ask-broken");
-    *rig.world.consent.lock().expect("lock") = answering(64);
-    let mut holder = Holder::new(&rig.socket(), "b-1");
-    assert_eq!(holder.outcome(), Outcome::FallBack);
-    assert_eq!(
-        rig.world.log(),
-        ["pane", "route", "consent"],
-        "nothing is kept"
-    );
-}
-
-/// A server the permission refuses is the plain `ssh`, with no question and no step.
-#[test]
-fn a_server_the_setting_refuses_is_the_plain_ssh_with_no_question() {
-    let rig = Rig::new("ask-refused");
-    *rig.world.consent.lock().expect("lock") = Consent::Refused;
+fn a_pane_that_cannot_be_answered_to_is_not_asked() {
+    let rig = Rig::new("ask-nobody");
+    *rig.world.consent.lock().expect("lock") = Consent::Ask;
     let mut holder = Holder::new(&rig.socket(), "b-1");
     assert_eq!(holder.outcome(), Outcome::FallBack);
     assert_eq!(rig.world.log(), ["pane", "route", "consent"]);
+
+    // A pane that says which it is but has no dock (a pane opened for a program reserves none) has
+    // no row to be asked in either: no login, no question.
+    pane_named(&rig.world);
+    rig.world.info.lock().expect("lock").rows = false;
+    let mut holder = Holder::new(&rig.socket(), "b-2");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(
+        rig.world.log(),
+        ["pane", "route", "consent", "pane", "route", "consent"]
+    );
 }
 
-/// A holder of the first version cannot run a program on the pane's terminal, so it is not asked:
-/// the plain `ssh`, and no answer is invented for it.
+/// The person who is asked is waited for for as long as they take, and not longer than the pane:
+/// a holder that goes away ends the wait, takes the row down, and nothing is written.
 #[test]
-fn a_holder_of_the_first_version_is_not_asked_and_nothing_is_kept() {
-    use crate::hold::wire::{HoldReader, Open, ToApp, ToHold};
-    let rig = Rig::new("ask-old");
-    *rig.world.consent.lock().expect("lock") = answering(ask::YES);
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_holder_that_goes_while_it_is_asked_ends_the_question_and_writes_nothing() {
+    use crate::hold::wire::{Open, ToApp};
+    let rig = Rig::new("ask-gone");
+    let _pane = asking_pane(&rig);
     let mut stream = std::os::unix::net::UnixStream::connect(rig.socket()).expect("connected");
     let say = |stream: &mut std::os::unix::net::UnixStream, message: &ToApp| {
         let mut bytes = Vec::new();
@@ -1443,8 +1516,8 @@ fn a_holder_of_the_first_version_is_not_asked_and_nothing_is_kept() {
     say(
         &mut stream,
         &ToApp::Hello {
-            newest: 1,
-            oldest: 1,
+            newest: crate::hold::wire::VERSION,
+            oldest: crate::hold::wire::OLDEST,
         },
     );
     say(
@@ -1462,33 +1535,108 @@ fn a_holder_of_the_first_version_is_not_asked_and_nothing_is_kept() {
             },
         }),
     );
-    stream
-        .set_read_timeout(Some(Duration::from_secs(15)))
-        .expect("a timeout");
-    let mut reader = HoldReader::new();
-    let mut heard = Vec::new();
-    let mut buffer = [0u8; 4096];
-    while !heard
-        .iter()
-        .any(|message| matches!(message, ToHold::Refused { .. }))
-    {
-        let n = stream.read(&mut buffer).expect("read");
-        assert!(
-            n > 0,
-            "the connection closed before it was refused: {heard:?}"
-        );
-        reader.push(&buffer[..n]);
-        while let Some(message) = reader.read().expect("whole frames") {
-            heard.push(message);
-        }
-    }
-    assert!(
-        heard.contains(&ToHold::Refused {
-            fall_back: true,
-            text: String::new(),
-        }),
-        "{heard:?}"
+    until("the question", || rig.world.count("setup:asking") == 1);
+    drop(stream);
+    until("the row goes", || rig.world.count("setup:gone") == 1);
+    assert_eq!(
+        rig.world.log(),
+        [
+            "pane",
+            "route",
+            "consent",
+            "master",
+            "setup:asking",
+            "setup:gone"
+        ]
     );
+}
+
+/// *Cancel* while bateri goes up stops the install — what the connection was given is not kept —
+/// and the pane is the plain `ssh`; no number is drawn and no bridge made. The bytes the install
+/// tells are the row's progress, one call per step.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn cancelling_while_bateri_goes_up_stops_the_install_and_the_pane_is_the_plain_ssh() {
+    let rig = Rig::new("ask-cancel");
+    let pane = asking_pane(&rig);
+    rig.world.install_holds.store(true, Ordering::SeqCst);
+    *rig.world.puts.lock().expect("lock") = vec![(0, 200), (100, 200), (200, 200)];
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    until("the question", || rig.world.count("setup:asking") == 1);
+    rig.service.answer_setup(&pane, Answer::SetUp);
+    until("the bytes are going", || {
+        rig.world.count("setup:putting:200/200") == 1
+    });
+    rig.service.answer_setup(&pane, Answer::Cancel);
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    until("the row goes", || rig.world.count("setup:gone") == 1);
+    assert_eq!(
+        rig.world.log(),
+        [
+            "pane",
+            "route",
+            "consent",
+            "master",
+            "setup:asking",
+            "setup:putting:0/0",
+            "setup:putting:0/200",
+            "setup:putting:100/200",
+            "setup:putting:200/200",
+            "stopped",
+            "setup:gone"
+        ]
+    );
+    assert_eq!(rig.world.count("install"), 0);
+    assert_eq!(rig.world.count("carry"), 0);
+}
+
+/// A pane that comes to a server bateri is being taken off is the plain `ssh`: nothing is
+/// installed on it, so that the removal does not race a new set-up.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_comes_while_bateri_is_being_removed_is_the_plain_ssh() {
+    let rig = Rig::new("removing-new");
+    let _pane = pane_named(&rig.world);
+    rig.service.removing("u@rasp:22");
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(rig.world.count("install"), 0);
+    assert_eq!(rig.world.count("carry"), 0);
+}
+
+/// A server that is set up without asking (`auto`, a host's own `integration = true`, as Shell ▸ Set
+/// Up bateri on writes it) shows the set-up in the row all the same, and *Cancel* in it stops it:
+/// the person answers to nothing here, so the stop is registered without a question.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_set_up_that_asked_nothing_shows_in_the_row_and_can_be_cancelled() {
+    let rig = Rig::new("granted-cancel");
+    let pane = asking_pane(&rig);
+    *rig.world.consent.lock().expect("lock") = Consent::Granted;
+    rig.world.install_holds.store(true, Ordering::SeqCst);
+    *rig.world.puts.lock().expect("lock") = vec![(0, 200), (100, 200)];
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    until("the bytes are going", || {
+        rig.world.count("setup:putting:100/200") == 1
+    });
+    rig.service.answer_setup(&pane, Answer::Cancel);
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    until("the row goes", || rig.world.count("setup:gone") == 1);
+    assert_eq!(rig.world.count("setup:asking"), 0, "{:?}", rig.world.log());
+    assert_eq!(rig.world.count("stopped"), 1);
+    assert_eq!(rig.world.count("install"), 0);
+    assert_eq!(rig.world.count("carry"), 0);
+}
+
+/// A server the permission refuses is the plain `ssh`, with no question, no connection and no step.
+#[test]
+fn a_server_the_setting_refuses_is_the_plain_ssh_with_no_question_and_no_connection() {
+    let rig = Rig::new("ask-refused");
+    *rig.world.consent.lock().expect("lock") = Consent::Refused;
+    *rig.world.master.lock().expect("lock") =
+        Some(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
     assert_eq!(rig.world.log(), ["pane", "route", "consent"]);
 }
 
@@ -2400,7 +2548,11 @@ fn the_socket_is_the_users_and_goes_with_the_service() {
 /// A pane's identity for the lookup to answer with.
 fn pane_named(world: &Fake) -> PaneUuid {
     let pane = PaneUuid::parse("0f3c1a52-7d0e-4c1b-9b57-2f7a8c4d6e10").expect("a canonical uuid");
-    world.info.lock().expect("lock").tab = Some(pane.clone());
+    {
+        let mut info = world.info.lock().expect("lock");
+        info.tab = Some(pane.clone());
+        info.rows = true;
+    }
     pane
 }
 

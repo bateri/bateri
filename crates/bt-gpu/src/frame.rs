@@ -644,6 +644,8 @@ pub(crate) struct DockSurface {
     /// The glow the top edge's meaning casts into the shadow, its strength in
     /// the alpha; `None` while the edge is the plain rim.
     glow: Option<[f32; 4]>,
+    /// Whether the glow is cast where the dock has no input row too ([`Frame::set_dock_glow_alone`]).
+    glow_alone: bool,
 }
 
 impl DockSurface {
@@ -2933,10 +2935,18 @@ impl Frame {
     /// last one, right above the edge — a shadow or a glow there lies on the
     /// cursor's line and pulls the eye to the edge instead of the text. The
     /// plate and its edge in the meaning's colour still tell the dock apart.
+    /// The one exception is the glow of the first connection's row ([`Frame::set_dock_glow_alone`]):
+    /// the row asks and waits there, and its light is how it says so.
     pub(crate) fn dock_shadows(&self, band_y: f32, width_px: f32) -> [Option<WaveDraw>; 2] {
-        let Some(dock) = self.dock.filter(|_| self.dock_rows >= 2) else {
+        let Some(dock) = self
+            .dock
+            .filter(|dock| self.dock_rows >= 2 || dock.glow_alone)
+        else {
             return [None, None];
         };
+        // On a dock with no input row only the glow, and only where it is asked for: the
+        // shadow there lies on the line being typed.
+        let shadowed = self.dock_rows >= 2;
         let scale = self.scale.max(1.0);
         let reach = (SHADOW_PT * scale).round();
         // Room for the curve below the edge too, while it waves.
@@ -2963,7 +2973,7 @@ impl Frame {
             .progress
             .map_or(width_px, |p| (width_px * p.clamp(0.0, 1.0)).round());
         [
-            draw(dock.shadow, width_px),
+            draw(dock.shadow, width_px).filter(|_| shadowed),
             dock.glow.and_then(|glow| draw(glow, glow_width)),
         ]
     }
@@ -3299,6 +3309,7 @@ impl Frame {
             buttons: [None; 2],
             shadow: [0.0; 4],
             glow: None,
+            glow_alone: false,
         });
     }
 
@@ -3317,6 +3328,14 @@ impl Frame {
         if let Some(dock) = &mut self.dock {
             dock.shadow = with_alpha(shadow, shadow_strength);
             dock.glow = glow.map(|glow| with_alpha(glow, glow_strength));
+        }
+    }
+
+    /// Lets the glow show on a dock with no input row (`bt_core::Dock::glow_alone`): after
+    /// [`Frame::open_dock`]; a no-op if the dock is not open.
+    pub(crate) fn set_dock_glow_alone(&mut self, alone: bool) {
+        if let Some(dock) = &mut self.dock {
+            dock.glow_alone = alone;
         }
     }
 
@@ -3695,6 +3714,7 @@ impl Frame {
             buttons: [None; 2],
             shadow: [0.0; 4],
             glow: None,
+            glow_alone: false,
         });
         // **The arrival scene shapes the surface here and nowhere else**: the
         // ground, the line and the tone fade in together and the line and the
@@ -6785,6 +6805,15 @@ mod tests {
             frame.dock_shadows(100.0, 500.0),
             [None, None],
             "no shadow or glow on the grid's own input line"
+        );
+        // The first connection's row asks and waits on that row: its glow alone shows there,
+        // never the shadow.
+        frame.set_dock_glow_alone(true);
+        let [shadow, glow] = frame.dock_shadows(100.0, 500.0);
+        assert!(shadow.is_none(), "the shadow lies on the line being typed");
+        assert_eq!(
+            glow.expect("the row's light").instance.rgba,
+            with_alpha(edge, 0.3)
         );
         // The tests' one-row dock without context stays under its old rule.
         frame.clear(metrics, CaretStyle::default());

@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 /// Where `ssh` may be started, by file and function, and why.
-const ALLOWED: [(&str, &str, &str); 9] = [
+const ALLOWED: [(&str, &str, &str); 10] = [
     (
         "bt-shell-common/src/kablo/ssh.rs",
         "carry",
@@ -23,13 +23,18 @@ const ALLOWED: [(&str, &str, &str); 9] = [
     ),
     (
         "bt-shell-common/src/kablo/install.rs",
-        "run_command_in",
+        "run_command_with",
         "putting kablo and the files of bateri on a server, and the counter, before a connection exists",
     ),
     (
         "bt-shell-common/src/hold.rs",
         "hold_main",
         "the pane that typed `ssh` itself, when kablo cannot be kept on that server: the person's own ssh",
+    ),
+    (
+        "bt-shell-common/src/hold.rs",
+        "plain_arguments",
+        "`ssh -G` for the pane that falls back to the person's own `ssh`, to ride the login bateri made of that server: no connection is made",
     ),
     (
         "bt-shell-common/src/hold.rs",

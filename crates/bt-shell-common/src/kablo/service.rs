@@ -116,7 +116,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
@@ -126,9 +126,8 @@ use bt_core::{PaneUuid, PtyOps, PtySize, RemoteTarget, Stream, StreamExit};
 use kablo_proto::v1::stream::Command;
 use kablo_proto::v1::{NewSession, Status};
 
-use super::ask::Reply;
 use super::hub::{Declined, HoldId, Hub, HubEvent};
-use super::install::{Installed, Root};
+use super::install::{Installed, Root, Watch};
 use super::ledger::Ledger;
 use super::local;
 use super::remote::{RemoteCommand, RemoteStream};
@@ -166,6 +165,17 @@ pub struct PaneInfo {
     /// starts in. The pane says it, never the holder: it is made by the app when the pane is, and
     /// it is no part of what the holder asks for.
     pub program: Option<Vec<String>>,
+    /// The pane has a dock to put the first connection's row in. A pane opened for a program
+    /// reserves none: a person is not asked there, and nothing of it is shown.
+    pub rows: bool,
+}
+
+impl PaneInfo {
+    /// Whether the first connection's row can be shown to this pane's person: the pane says which
+    /// it is, and has the dock for it.
+    pub fn can_show_row(&self) -> bool {
+        self.tab.is_some() && self.rows
+    }
 }
 
 /// The terminal a pane shows, as far as the application's questions go.
@@ -365,18 +375,54 @@ impl Refusal {
 }
 
 /// Whether bateri may put its files on a server, and how that is found out.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Consent {
     /// It may: the setting says to go ahead (`auto`, or the host's own entry), or bateri has been
     /// there before, or the machine is this Mac.
     Granted,
-    /// The person is asked first, on the pane's terminal and before the connection is made: the
-    /// program (`bateri ssh-ask HOST`) runs there and its status is the answer
-    /// ([`Reply::of_status`]). Nothing has been written to the server, and nothing is until
-    /// the answer is in.
-    Ask(Vec<Vec<u8>>),
-    /// It may not: the setting says `off`, or nothing can ask. The plain `ssh`.
+    /// The person is asked, in the pane's dock ([`Setup::Asking`]), once the login is made — the
+    /// login is ssh's own, in the pane, and the question follows it. Nothing has been written to
+    /// the server, and nothing is until the answer is in ([`Answer`]).
+    Ask,
+    /// It may not: the setting says `off`, or nothing can ask. The plain `ssh`, and no connection
+    /// is made for it.
     Refused,
+}
+
+/// Where a server's first connection is, as the dock row of the pane says it: the question, the
+/// wait while bateri goes up, the end. Told by [`Backend::setup_changed`], once per change, on the
+/// service's thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setup {
+    /// The person is asked whether to set the server up (*Plain ssh* / *Set Up*), and the
+    /// service waits for [`Service::answer_setup`].
+    Asking,
+    /// bateri goes up: `sent` of `total` bytes of its binary are with the connection (`total` is
+    /// `0` while it is not yet known), and *Cancel* is [`Service::answer_setup`] with
+    /// [`Answer::Cancel`].
+    Putting { sent: u64, total: u64 },
+    /// bateri is on the server: the row says so for a moment, then the server's own dock takes
+    /// its place.
+    Done,
+    /// The row is not wanted any more: the answer was *Plain ssh*, the install was stopped or
+    /// failed, or the holder went. The pane is what the plain `ssh` makes it.
+    Gone,
+}
+
+/// What the person said to the first connection's row ([`Service::answer_setup`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// *Set Up*: put bateri on the server.
+    SetUp,
+    /// *Plain ssh*, asked: not on this server, which is kept for the host (the setting is `off`
+    /// for it from now on), and the connection goes on as the plain `ssh` it stands in for.
+    Plain,
+    /// *Cancel*, while bateri goes up: stop, keep nothing; the connection goes on as the plain
+    /// `ssh`. While the question is up it is the same as [`Answer::Plain`] without the record.
+    Cancel,
+    /// The pane has no row to ask in (no dock, no window): nothing was asked, nothing is kept,
+    /// and the plain `ssh` it is.
+    Unshown,
 }
 
 /// A started bridge: the two ends of the stream, and how to end it.
@@ -410,16 +456,36 @@ pub trait Backend: Send + Sync + 'static {
     fn route(&self, args: &[String]) -> Option<KabloHost>;
 
     /// Whether bateri may put its files on the server, asked before anything is: the first step
-    /// of a terminal's preparation, ahead of the connection, so that a "no" costs no password.
-    /// The default is yes, for a backend with nothing to ask.
+    /// of a terminal's preparation, so that a `Refused` opens no connection at all. The question
+    /// of a [`Consent::Ask`] is asked after the login, in the pane's dock. The default is yes, for
+    /// a backend with nothing to ask.
     fn consent(&self, _server: &KabloHost) -> Consent {
         Consent::Granted
     }
 
-    /// Told what the person answered to the question of [`Consent::Ask`], to keep it: a "no" for
-    /// this host, an "always" for every host. A "yes" is kept by the install that follows, which
+    /// Told what the person answered to the question of [`Consent::Ask`], to keep it: a *Plain
+    /// ssh* is a "no" for this host. A *Set Up* is kept by the install that follows, which
     /// records the server before it writes anything.
-    fn answered(&self, _server: &KabloHost, _reply: Reply) {}
+    fn answered(&self, _server: &KabloHost, _answer: Answer) {}
+
+    /// The first connection's row of the pane `pane`, about the server `host` (as typed), is as
+    /// `setup` says ([`Setup`]): the question is to be put up and waited for, the bytes are going,
+    /// bateri is there, or the row is to go. Called on the service's thread, in order; the
+    /// application hops to its own. A pane that cannot show the row says so at once:
+    /// [`Service::answer_setup`] with [`Answer::Unshown`].
+    fn setup_changed(&self, _pane: &PaneUuid, _host: &str, _setup: Setup) {}
+
+    /// [`Backend::install`] for a person who watches bateri go up ([`Watch`]): told how many bytes
+    /// are with the connection, and able to stop it — the install then fails as a transient one
+    /// does, and nothing that is not whole is left on the server. The default watches nothing.
+    fn install_watched(
+        &self,
+        server: &KabloHost,
+        live: &[SessionId],
+        _watch: &dyn Watch,
+    ) -> Result<Installed, Refusal> {
+        self.install(server, live)
+    }
 
     /// The program that makes sure a master connection to the server exists, to
     /// be run on the pane's terminal (where it may ask for a password and for
@@ -881,6 +947,16 @@ enum Msg {
         argv: Vec<Vec<u8>>,
         reply: Sender<u8>,
     },
+    /// A preparation asks the person whether to set the server up and waits: the answer goes back
+    /// on `reply`, and `stop` is set when the person stops the install afterwards or the holder
+    /// goes. The reply is dropped (the wait ends) with the holder.
+    Ask {
+        hold: HoldId,
+        reply: Sender<Answer>,
+        stop: Arc<AtomicBool>,
+    },
+    /// The person's answer for the pane ([`Service::answer_setup`]).
+    Answered(PaneUuid, Answer),
     /// The questions that are quick but not instant (which pane, is it a
     /// kablo call) were answered for a request.
     Admitted {
@@ -1324,6 +1400,7 @@ impl Service {
             conns: BTreeMap::new(),
             accounts: BTreeMap::new(),
             waiting: BTreeMap::new(),
+            asking: BTreeMap::new(),
             waiters: Vec::new(),
             panes: BTreeMap::new(),
             local_waiting: Vec::new(),
@@ -1566,6 +1643,12 @@ impl Service {
     /// signalled, as [`Service::end`] must be said: the holder's going is what loses the pane.
     pub fn leave(&self, pane: &PaneUuid) {
         let _ = self.tx.send(Msg::Leave(pane.clone()));
+    }
+
+    /// The person answered the first connection's row of `pane` ([`Setup`]): *Set Up* or *Plain
+    /// ssh* to the question, *Cancel* while bateri goes up. An answer to nothing is nobody's.
+    pub fn answer_setup(&self, pane: &PaneUuid, answer: Answer) {
+        let _ = self.tx.send(Msg::Answered(pane.clone(), answer));
     }
 
     /// The program of a view in the pane `pane` ended on the server the pane shows, with what
@@ -1898,6 +1981,14 @@ impl Shared {
     }
 }
 
+/// A preparation that asked the person whether to set a server up.
+struct Asked {
+    /// Where the answer goes; taken when it is given, so that a second one is nobody's.
+    reply: Option<Sender<Answer>>,
+    /// Set to stop the install that follows.
+    stop: Arc<AtomicBool>,
+}
+
 /// Everything the loop owns.
 struct Core {
     shared: Arc<Shared>,
@@ -1906,6 +1997,8 @@ struct Core {
     accounts: BTreeMap<String, Account>,
     /// A preparation waits for the holder to run a program.
     waiting: BTreeMap<HoldId, Sender<u8>>,
+    /// The preparations that asked the person ([`Msg::Ask`]), until their holder goes.
+    asking: BTreeMap<HoldId, Asked>,
     /// Quits waiting for terminals to have ended ([`Service::end_all`]).
     waiters: Vec<Waiter>,
     /// The pane each holder runs in, once it was admitted.
@@ -2114,6 +2207,21 @@ impl Core {
                 // comes and the preparation ends.
                 Err(_) => drop(reply),
             },
+            Msg::Ask { hold, reply, stop } => {
+                // A holder that is gone is asking no one: the wait ends, and so does the install.
+                if self.conns.contains_key(&hold) {
+                    self.asking.insert(
+                        hold,
+                        Asked {
+                            reply: Some(reply),
+                            stop,
+                        },
+                    );
+                } else {
+                    stop.store(true, Ordering::SeqCst);
+                }
+            }
+            Msg::Answered(pane, answer) => self.answered(&pane, answer),
             Msg::Admitted {
                 hold,
                 open,
@@ -2393,6 +2501,11 @@ impl Core {
                             self.resumed_gone(awaiting);
                         }
                         self.waiting.remove(&hold);
+                        // A person who is asked, or whose install is on its way, is asked no
+                        // more: the question ends, and the install is stopped.
+                        if let Some(asked) = self.asking.remove(&hold) {
+                            asked.stop.store(true, Ordering::SeqCst);
+                        }
                         self.collisions.remove(&hold);
                         self.conns.remove(&hold);
                         self.panes.remove(&hold);
@@ -3987,9 +4100,10 @@ impl Core {
         let tidy_due = !files;
         let key = server.key.clone();
         let name = self.shared.backend.name();
-        // An account whose kablo is in the former root is renewed too, whatever its version: the
-        // terminals it keeps are moved to the current root by the same renewal that moves them to
-        // a newer version.
+        // An account whose kablo is in the former root is refreshed too, whatever its version: the
+        // current root gets its kablo. The terminals that already run from the former root are
+        // not moved (a terminal on the package's own version is nobody's to renew), and stay
+        // there until they end; the former root is read until it is empty.
         let stale = self.shared.backend.version().is_some_and(|version| {
             version != installed.version || installed.root() == Root::Former
         });
@@ -4079,6 +4193,12 @@ impl Core {
     /// is not waited for at all: it keeps the name it made).
     fn prepare(&mut self, hold: HoldId, server: KabloHost, pane: PaneInfo) {
         let numbered = self.hub.version_of(hold) >= wire::NAMED;
+        // Bateri is being taken off this server: nothing is put on it until that is over, and the
+        // pane is the plain `ssh` it stands in for.
+        if self.removing.contains(&server.key) {
+            self.not_started(hold, &server.key);
+            return;
+        }
         if self.gives_up(&server.key) {
             self.not_started(hold, &server.key);
             // Being asked is a reason to look again: a server that is back serves the next one.
@@ -4204,8 +4324,31 @@ impl Core {
         self.hub.refuse(hold, true, &text);
     }
 
+    /// The person's answer to the first connection's row of `pane` ([`Service::answer_setup`]):
+    /// to the preparation that asked, or, once the install is on its way, to stop it.
+    fn answered(&mut self, pane: &PaneUuid, answer: Answer) {
+        let holds: Vec<HoldId> = self
+            .panes
+            .iter()
+            .filter(|(_, shown)| *shown == pane)
+            .map(|(hold, _)| *hold)
+            .collect();
+        for hold in holds {
+            let Some(asked) = self.asking.get_mut(&hold) else {
+                continue;
+            };
+            if answer == Answer::Cancel {
+                asked.stop.store(true, Ordering::SeqCst);
+            }
+            if let Some(reply) = asked.reply.take() {
+                let _ = reply.send(answer);
+            }
+        }
+    }
+
     fn prepared(&mut self, hold: HoldId, outcome: Result<Ready, Refusal>, now: Instant) {
         self.waiting.remove(&hold);
+        self.asking.remove(&hold);
         let ready = match outcome {
             Ok(ready) => ready,
             Err(refusal) => {
@@ -4330,9 +4473,14 @@ fn forget_gone(
     }
 }
 
-/// The slow steps of a first terminal, on a thread of its own: the master
-/// connection on the holder's terminal, then kablo on the server, then its number
+/// The slow steps of a first terminal, on a thread of its own: whether the server may be set up
+/// (a "no" opens no connection), the login on the holder's terminal, the person's say in the
+/// pane's dock where the server is new to bateri, then kablo on the server, then its number
 /// (when `numbered`: the holder can be told it).
+///
+/// **One connection serves the whole of it.** The login is the master, opened on the pane's terminal
+/// where ssh asks for what it asks; the steps after it ride that master ([`Backend::install`]),
+/// so a server behind a proxy costs the seconds of one connection, not of one per step.
 fn prepare(
     shared: &Shared,
     hold: HoldId,
@@ -4341,26 +4489,17 @@ fn prepare(
     numbered: bool,
 ) -> Result<Ready, Refusal> {
     let backend = &shared.backend;
-    match backend.consent(&server) {
-        Consent::Granted => {}
-        Consent::Refused => return Err(Refusal::plain()),
-        Consent::Ask(argv) => {
-            let (reply, answer) = mpsc::channel();
-            shared
-                .tx
-                .send(Msg::Run { hold, argv, reply })
-                .map_err(|_| Refusal::plain())?;
-            // The pane's terminal is the person's for as long as they take. No answer is a
-            // holder that cannot run it (version 1) or went away: the plain `ssh`, and nothing
-            // is kept.
-            let status = answer.recv().map_err(|_| Refusal::plain())?;
-            let reply = Reply::of_status(status)?;
-            backend.answered(&server, reply);
-            if reply == Reply::No {
-                return Err(Refusal::plain());
-            }
-        }
+    let consent = backend.consent(&server);
+    if consent == Consent::Refused {
+        return Err(Refusal::plain());
     }
+    // A pane that cannot say which it is, or has no dock to put the row in, cannot be asked in,
+    // nor answered to: no login is made for it either.
+    if consent == Consent::Ask && !pane.can_show_row() {
+        return Err(Refusal::plain());
+    }
+    // The login first: ssh's own questions (the server's key, a password) are asked in the pane
+    // as they always were, and what is asked of the person after it needs no second password.
     if let Some(argv) = backend.master(&server)? {
         let (reply, answer) = mpsc::channel();
         shared
@@ -4372,14 +4511,47 @@ fn prepare(
         let status = answer.recv().map_err(|_| Refusal::plain())?;
         backend.master_made(&server, status)?;
     }
+    let row = Row::new(&**backend, &server.host, pane);
+    let outcome = set_up(shared, hold, server, pane, numbered, consent, &row);
+    row.ended(&outcome);
+    outcome
+}
+
+/// The steps of [`prepare`] after the login.
+fn set_up(
+    shared: &Shared,
+    hold: HoldId,
+    server: KabloHost,
+    pane: &PaneInfo,
+    numbered: bool,
+    consent: Consent,
+    row: &Row<'_>,
+) -> Result<Ready, Refusal> {
+    let backend = &shared.backend;
+    if consent == Consent::Ask {
+        match row.ask(shared, hold)? {
+            Answer::SetUp => row.put(0, 0),
+            Answer::Plain => {
+                backend.answered(&server, Answer::Plain);
+                return Err(Refusal::plain());
+            }
+            // Nothing was asked, or the person left: nothing is kept.
+            Answer::Cancel | Answer::Unshown => return Err(Refusal::plain()),
+        }
+    } else {
+        // Nothing is asked (`auto`, the host's own yes): the row still shows the bytes going, and
+        // its *Cancel* must find the install.
+        row.watch(shared, hold);
+    }
     let live = shared.ledger.terminals_of(&server.key);
     let installed = forget_gone(
         &shared.ledger,
         &server.key,
-        backend.install(&server, &live)?,
+        backend.install_watched(&server, &live, row)?,
         &live,
     );
-    let note = installed.fresh.then(|| {
+    // The row says it when it was there; a pane that had none gets the line in its terminal.
+    let note = (installed.fresh && !row.shown()).then(|| {
         format!(
             "bateri is set up on {}; if the connection drops, this terminal keeps running",
             server.host
@@ -4399,6 +4571,114 @@ fn prepare(
         number,
         note,
     })
+}
+
+/// The first connection's row of a pane, as far as the preparation drives it: what it says is
+/// told to the application ([`Backend::setup_changed`]), in order, and the install's bytes and
+/// the person's *Cancel* pass through it ([`Watch`]).
+struct Row<'a> {
+    backend: &'a dyn Backend,
+    /// The server, as typed: what the row names.
+    host: String,
+    /// The pane the row is in; `None` for a pane that cannot say which it is or has no dock
+    /// (nothing is asked there, and nothing is shown).
+    pane: Option<PaneUuid>,
+    /// Set when the person stops the install.
+    stop: Arc<AtomicBool>,
+    /// Whether the row has been put up: only then is it taken down, and only then does it say the
+    /// server is set up.
+    up: AtomicBool,
+    /// The last whole percent of the bytes told, so that the application hears of each step and
+    /// not of each chunk.
+    percent: AtomicU64,
+}
+
+impl<'a> Row<'a> {
+    fn new(backend: &'a dyn Backend, host: &str, pane: &PaneInfo) -> Row<'a> {
+        Row {
+            backend,
+            host: host.to_owned(),
+            pane: pane.tab.clone().filter(|_| pane.rows),
+            stop: Arc::new(AtomicBool::new(false)),
+            up: AtomicBool::new(false),
+            percent: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    fn shown(&self) -> bool {
+        self.up.load(Ordering::SeqCst)
+    }
+
+    fn tell(&self, setup: Setup) {
+        if let Some(pane) = &self.pane {
+            self.up.store(true, Ordering::SeqCst);
+            self.backend.setup_changed(pane, &self.host, setup);
+        }
+    }
+
+    /// Puts the question up and waits for the answer. A pane that cannot be asked in is not waited
+    /// for: [`Refusal::plain`], and nothing is kept. No answer is a holder that went away.
+    fn ask(&self, shared: &Shared, hold: HoldId) -> Result<Answer, Refusal> {
+        if self.pane.is_none() {
+            return Err(Refusal::plain());
+        }
+        let (reply, answer) = mpsc::channel();
+        // Before the row is put up, so that an answer that comes at once finds the wait.
+        shared
+            .tx
+            .send(Msg::Ask {
+                hold,
+                reply,
+                stop: Arc::clone(&self.stop),
+            })
+            .map_err(|_| Refusal::plain())?;
+        self.tell(Setup::Asking);
+        answer.recv().map_err(|_| Refusal::plain())
+    }
+
+    /// Lets the person stop the install that nothing was asked for: the stop is registered as
+    /// [`Self::ask`] does, with no answer to wait for. A pane that shows no row has none to press.
+    fn watch(&self, shared: &Shared, hold: HoldId) {
+        if self.pane.is_none() {
+            return;
+        }
+        let (reply, _) = mpsc::channel();
+        let _ = shared.tx.send(Msg::Ask {
+            hold,
+            reply,
+            stop: Arc::clone(&self.stop),
+        });
+    }
+
+    /// bateri goes up: `sent` of `total` bytes.
+    fn put(&self, sent: u64, total: u64) {
+        self.tell(Setup::Putting { sent, total });
+    }
+
+    /// The preparation is over: the row says bateri is there, or goes.
+    fn ended(&self, outcome: &Result<Ready, Refusal>) {
+        if !self.shown() {
+            return;
+        }
+        self.tell(if outcome.is_ok() {
+            Setup::Done
+        } else {
+            Setup::Gone
+        });
+    }
+}
+
+impl Watch for Row<'_> {
+    fn sent(&self, done: u64, total: u64) {
+        let percent = (done * 100).checked_div(total).unwrap_or(0);
+        if self.percent.swap(percent, Ordering::SeqCst) != percent {
+            self.put(done, total);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
 }
 
 // ─── the threads that carry bytes ────────────────────────────────────────

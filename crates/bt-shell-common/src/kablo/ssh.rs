@@ -43,14 +43,14 @@ use kablo_proto::SessionId;
 use kablo_proto::v1::stream::Command;
 
 use super::Cause;
-use super::ask::{self, Reply};
 use super::census::Census;
 use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
 use super::local::{self, LocalChannel};
 use super::remote::{RemoteCommand, RemoteStream};
 use super::served;
 use super::service::{
-    Backend, Carried, Consent, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal, Streams,
+    Answer, Backend, Carried, Consent, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal, Setup,
+    Streams,
 };
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost, Wants};
@@ -58,6 +58,9 @@ use crate::upload::ssh_argv_for;
 
 /// How a process is found to be in a pane (see [`SshBackend::panes`]).
 pub type PaneLookup = Box<dyn Fn(&Peer) -> Option<PaneInfo> + Send + Sync>;
+
+/// Told the pane whose first-connection row is not what it was ([`Setup`]).
+pub type SetupNews = Box<dyn Fn(&PaneUuid, &str, Setup) + Send + Sync>;
 
 /// What the application does with the news that a pane's connection went or
 /// came back ([`Backend::link_changed`]).
@@ -136,12 +139,11 @@ pub struct SshBackend {
     /// The application places what was left for it on a server ([`Backend::reachable`]): `Some`
     /// reads the server's notes when a connection to it comes up. `None`: it reads none.
     pub notes: Option<NotesNews>,
-    /// This program, which asks the question before a server is set up (`bateri ssh-ask HOST`,
-    /// [`Backend::consent`]). `None`: nothing can ask, and a server that would be asked about is
-    /// not set up.
-    pub asker: Option<PathBuf>,
-    /// Keeps what the question's answer is for the settings: a "no" for the host, an "always"
-    /// for every host ([`Backend::answered`]).
+    /// The first connection's row of a pane is as [`Setup`] says
+    /// ([`Backend::setup_changed`]).
+    pub setup: SetupNews,
+    /// Keeps what the question's answer is for the settings: a "no" for the host
+    /// ([`Backend::answered`]).
     pub save: Save,
     /// The servers a program's reach has set up in this run ([`SshBackend::install_for_reach`]).
     pub filed: Mutex<std::collections::HashSet<String>>,
@@ -449,6 +451,36 @@ impl SshBackend {
         });
     }
 
+    /// A set-up the person stopped is one that was never done: the record that bateri was on the
+    /// server ([`Fact::Touched`]) goes, so that the next connection asks again, and what the
+    /// install had written goes with it — the folder bateri keeps its things in
+    /// ([`install::remove`]'s script, which ends no terminal), from a machine that has no kablo and
+    /// no terminal on it. A machine that has either may be another computer's, with terminals running
+    /// from the folder: its files stay (the install wrote the same files that are there), and the
+    /// record still goes. A look or a removal that does not come back whole leaves the record too:
+    /// our files may still be there, and what removes them finds the server by it. The person is
+    /// waiting on the row, so each step has a short limit. A server that was recorded before this
+    /// install keeps its record: it is only the install that was stopped.
+    fn take_back(&self, server: &KabloHost, argv: &[String], version: &str, was_touched: bool) {
+        let channel = SshChannel {
+            argv: argv.to_vec(),
+            limit: TAKE_BACK_LIMIT,
+        };
+        let Some(census) = install::remove::look(&channel, version) else {
+            return;
+        };
+        if census.dirs.is_empty()
+            && census.terminals.is_empty()
+            && install::remove::remove(&channel, version, &[]).is_err()
+        {
+            return;
+        }
+        // A server this Mac had put bateri on before (an upgrade the person stopped) stays one.
+        if !was_touched {
+            let _ = ssh_wrap::unrecord(&self.state_path, Fact::Touched, &server.key);
+        }
+    }
+
     fn remember(&self, fact: Fact, server: &KabloHost) {
         let _ = ssh_wrap::record(
             &self.state_path,
@@ -484,28 +516,25 @@ impl Backend for SshBackend {
                 if ssh_wrap::load(&self.state_path).knows(Fact::Touched, &server.key) {
                     return Consent::Granted;
                 }
-                match &self.asker {
-                    Some(program) => Consent::Ask(vec![
-                        program.as_os_str().as_encoded_bytes().to_vec(),
-                        ask::SUBCOMMAND.as_bytes().to_vec(),
-                        server.host.clone().into_bytes(),
-                    ]),
-                    None => Consent::Refused,
-                }
+                Consent::Ask
             }
         }
     }
 
-    fn answered(&self, server: &KabloHost, reply: Reply) {
-        match reply {
-            // Kept by the install: it records the server before it writes to it.
-            Reply::Yes => {}
-            Reply::No => (self.save)(SettingsEdit::RemoteHostIntegration {
+    fn answered(&self, server: &KabloHost, answer: Answer) {
+        match answer {
+            // *Set Up* is kept by the install: it records the server before it writes to it. A
+            // *Cancel* and a row nobody could be asked in keep nothing.
+            Answer::SetUp | Answer::Cancel | Answer::Unshown => {}
+            Answer::Plain => (self.save)(SettingsEdit::RemoteHostIntegration {
                 host: server.host.clone(),
                 on: false,
             }),
-            Reply::Always => (self.save)(SettingsEdit::RemoteIntegration(RemoteIntegration::Auto)),
         }
+    }
+
+    fn setup_changed(&self, pane: &PaneUuid, host: &str, setup: Setup) {
+        (self.setup)(pane, host, setup);
     }
 
     fn master(&self, server: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
@@ -545,6 +574,15 @@ impl Backend for SshBackend {
     }
 
     fn install(&self, server: &KabloHost, live: &[SessionId]) -> Result<Installed, Refusal> {
+        self.install_watched(server, live, &install::Unwatched)
+    }
+
+    fn install_watched(
+        &self,
+        server: &KabloHost,
+        live: &[SessionId],
+        watch: &dyn install::Watch,
+    ) -> Result<Installed, Refusal> {
         if local::is_account(&server.key) {
             return self.install_here(live);
         }
@@ -557,8 +595,9 @@ impl Backend for SshBackend {
         // Before anything is written, whatever the permission came from (the answer, `auto`, the
         // host's own entry): a server the install fell over half way through still has our files
         // on it, and what removes them finds it by this record.
+        let was_touched = ssh_wrap::load(&self.state_path).knows(Fact::Touched, &server.key);
         self.remember(Fact::Touched, server);
-        match install::ensure_for(&channel, bundle, self.wants(server)) {
+        match install::ensure_watched(&channel, bundle, self.wants(server), watch) {
             Ok(installed) => {
                 // Terminals this user has on the server may run an earlier release, whether or
                 // not the binary was there: they are renewed before a bridge exists to be left
@@ -574,7 +613,14 @@ impl Backend for SshBackend {
                 self.remember(Fact::NoKablo, server);
                 Err(Refusal::plain())
             }
-            Err(Failure::Transient(_)) => Err(Refusal::plain()),
+            Err(Failure::Transient(_)) => {
+                // The person stopped it: what was written is taken off again, so that the
+                // server is as it was and the next connection asks again.
+                if watch.stopped() {
+                    self.take_back(server, &channel.argv, bundle.version(), was_touched);
+                }
+                Err(Refusal::plain())
+            }
         }
     }
 
@@ -728,6 +774,11 @@ impl Backend for SshBackend {
             });
         }
         let bundle = self.bundle.as_ref()?;
+        // A server the setting says never to write to is not written to by a renewal either: its
+        // terminals go on with the kablo they have, and the bridge's turn comes anyway.
+        if self.consent(server) == Consent::Refused {
+            return None;
+        }
         let target = self.target(server);
         // The connection the bridge is about to take, made here when it is not
         // there: both steps ride one and a login nobody saved is the bridge's to
@@ -914,6 +965,11 @@ fn here_channel(home: &Path) -> LocalChannel {
         limit: install::UPGRADE_LIMIT,
     }
 }
+
+/// How long each step of taking back a stopped set-up may take ([`SshBackend::take_back`]): the
+/// person waits on the row, and on a stalled connection what cannot be reached in this is left
+/// (with its record).
+const TAKE_BACK_LIMIT: Duration = Duration::from_secs(10);
 
 /// How long a connection that is made again for a renewal may take to be made
 /// (`ConnectTimeout`): a network that is not there is not waited for by the

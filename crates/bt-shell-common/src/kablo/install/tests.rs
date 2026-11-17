@@ -625,6 +625,129 @@ fn the_ssh_channel_sends_the_script_as_one_word_for_sh_and_ends_a_step_that_take
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
+/// A [`Watch`] that remembers what it was told and says stop once it has been told `stop_at`
+/// bytes.
+struct Told {
+    sent: std::sync::Mutex<Vec<(u64, u64)>>,
+    stop_at: Option<u64>,
+}
+
+impl Told {
+    fn new(stop_at: Option<u64>) -> Told {
+        Told {
+            sent: std::sync::Mutex::new(Vec::new()),
+            stop_at,
+        }
+    }
+
+    fn last(&self) -> Option<(u64, u64)> {
+        self.sent.lock().expect("told").last().copied()
+    }
+}
+
+impl Watch for Told {
+    fn sent(&self, done: u64, total: u64) {
+        self.sent.lock().expect("told").push((done, total));
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop_at
+            .is_some_and(|at| self.last().is_some_and(|(done, _)| done >= at))
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_long_input_is_told_as_it_crosses_and_arrives_whole() {
+    let root = TempRoot::new("kablo-put");
+    let kept = root.0.join("in");
+    let input = vec![7u8; PUT_CHUNK * 3 + 5];
+    let told = Told::new(None);
+    let reply = run_command_watched(
+        &[
+            "sh".into(),
+            "-c".into(),
+            format!("cat > {}", kept.display()),
+        ],
+        &input,
+        Duration::from_secs(20),
+        &told,
+    )
+    .expect("ran");
+    assert_eq!(reply.status, Some(0));
+    assert_eq!(std::fs::read(&kept).expect("kept"), input);
+    let sent = told.sent.lock().expect("told").clone();
+    let total = input.len() as u64;
+    assert!(!sent.is_empty(), "told how far it was");
+    assert!(sent.iter().all(|&(_, of)| of == total));
+    assert!(
+        sent.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "{sent:?}"
+    );
+    assert_eq!(
+        told.last(),
+        Some((total, total)),
+        "the last call is the whole"
+    );
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_stopped_input_ends_the_process_at_once_and_says_it_was_stopped() {
+    // A server that never reads: the writer is stuck on a full pipe, and only the watch can end
+    // the step — long before its own limit.
+    let started = Instant::now();
+    let told = Told::new(Some(1));
+    let error = run_command_watched(
+        &["sh".into(), "-c".into(), "sleep 30".into()],
+        &vec![0u8; 8 * 1024 * 1024],
+        Duration::from_secs(60),
+        &told,
+    )
+    .expect_err("stopped");
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn an_upload_that_stops_half_way_leaves_no_binary_and_nothing_of_its_temporary_name() {
+    // What the server's shell sees of a stopped upload is a stream that ends early: the script
+    // writes the file under a name of its own, finds the sum wrong and takes it away. The
+    // binary of the version is never there, so no terminal could be started from half of one.
+    let root = TempRoot::new("kablo-half");
+    let home = Home::new(&root.0.join("home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    let whole = KABLO.as_bytes();
+    let reply = home
+        .run(
+            &upload_script("0.2.0", &sha256_hex(whole)),
+            &whole[..whole.len() / 2],
+        )
+        .expect("ran");
+    assert_eq!(reply.status, Some(EXIT_DAMAGED));
+    assert!(!home.installed("0.2.0").exists(), "no binary");
+    let left: Vec<_> = std::fs::read_dir(home.installed("0.2.0").parent().expect("dir"))
+        .expect("the directory is made first")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "nothing of the temporary name stays: {left:?}"
+    );
+    // And the whole of it, sent next, is installed as before.
+    let reply = home
+        .run(&upload_script("0.2.0", &sha256_hex(whole)), whole)
+        .expect("ran");
+    assert_eq!(reply.status, Some(0));
+    assert_eq!(std::fs::read(home.installed("0.2.0")).expect("file"), whole);
+}
+
 /// Where kablo is in the home of [`counting_home`].
 const COUNTING_KABLO: &str = ".local/share/bateri/kablo/0.2.0/kablo";
 

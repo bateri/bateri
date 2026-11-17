@@ -1070,6 +1070,109 @@ pub struct Transfer {
     /// context is `Eq` and the frame path compares it; at ten-thousandths it is under
     /// half a pixel in a 4K window.
     pub progress: Option<u16>,
+    /// What the line is: an upload queue's, or one of the three moments of the first
+    /// connection to a server ([`TransferKind`]).
+    pub kind: TransferKind,
+}
+
+/// What a [`Transfer`] line is. The first connection to a server bateri has not set up is
+/// asked and done in the same row, in the upload row's language — putting bateri on a server is
+/// an upload — so the row, its edge, its glow and its buttons are the upload line's own; only
+/// the words and the buttons differ.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransferKind {
+    /// An upload queue's line: [`Transfer::body`] and [`TransferControls`].
+    #[default]
+    Upload,
+    /// The question, after the login: [`Transfer::ask_words`] with *Plain ssh* (`Esc`) and *Set Up*
+    /// (`Enter`). The edge is the host's mark and casts its light.
+    Ask,
+    /// bateri goes up: [`Transfer::body`] and [`Transfer::progress`], one *Cancel* (`Esc`).
+    Setup,
+    /// bateri is there: [`Transfer::DONE`], the edge and its light `success`, no buttons.
+    Done,
+}
+
+impl Transfer {
+    /// What the question says before the server's name.
+    pub const ASK_BEFORE_HOST: &'static str = "Set up bateri on ";
+
+    /// The question of the first connection, which is the whole of its row (the server's name is
+    /// in it, in the mark's colour, not a head of its own): what is done, then why it is worth
+    /// it. It is [`Transfer::body`], and [`Self::ladder`] gives its two lengths.
+    pub fn ask_words(host: &str) -> String {
+        format!(
+            "{}{host}? Terminals here keep running if the connection drops.",
+            Self::ASK_BEFORE_HOST
+        )
+    }
+
+    /// The line of the moment bateri is set up on the server, longest first.
+    pub const DONE: [&'static str; 2] = [
+        "\u{2713} Set up \u{b7} terminals here keep running",
+        "\u{2713} Set up",
+    ];
+
+    /// The words the line may say, longest first; empty when it says [`Self::body`]. The
+    /// question's are its two sentences, then the first alone: the row shows the first that
+    /// fits, then drops the keys' names, and never the buttons.
+    pub fn ladder(&self) -> Ladder<'_> {
+        match self.kind {
+            TransferKind::Ask => match self.body.split_once("? ") {
+                Some((first, _)) => Ladder::of(&[&self.body, &self.body[..first.len() + 1]]),
+                None if self.body.is_empty() => Ladder::of(&[]),
+                None => Ladder::of(&[&self.body]),
+            },
+            TransferKind::Done => Ladder::of(&Self::DONE),
+            TransferKind::Upload | TransferKind::Setup => Ladder::of(&[]),
+        }
+    }
+
+    /// Whether the line has buttons at all.
+    pub fn has_buttons(&self) -> bool {
+        match self.kind {
+            TransferKind::Upload => self.controls.items > 0,
+            TransferKind::Ask | TransferKind::Setup => true,
+            TransferKind::Done => false,
+        }
+    }
+}
+
+/// The words a [`Transfer`] line may say: at most two, longest first.
+#[derive(Clone, Copy)]
+pub struct Ladder<'a> {
+    rungs: [&'a str; 2],
+    len: usize,
+}
+
+impl<'a> Ladder<'a> {
+    fn of(rungs: &[&'a str]) -> Self {
+        let mut ladder = Ladder {
+            rungs: [""; 2],
+            len: rungs.len().min(2),
+        };
+        ladder.rungs[..ladder.len].copy_from_slice(&rungs[..ladder.len]);
+        ladder
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The longest words.
+    pub fn first(&self) -> Option<&'a str> {
+        self.rungs[..self.len].first().copied()
+    }
+
+    /// The shortest words.
+    pub fn last(&self) -> Option<&'a str> {
+        self.rungs[..self.len].last().copied()
+    }
+
+    /// The words, longest first.
+    pub fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.rungs[..self.len].iter().copied()
+    }
 }
 
 impl Clone for Transfer {
@@ -1089,6 +1192,7 @@ impl Clone for Transfer {
         self.lead = source.lead;
         self.controls = source.controls;
         self.progress = source.progress;
+        self.kind = source.kind;
     }
 }
 
@@ -1098,6 +1202,8 @@ pub enum TransferTone {
     /// Dim (`dim`): progress and cancel.
     #[default]
     Quiet,
+    /// The foreground: a question that waits for the person.
+    Plain,
     /// The theme's `success`: the queue finished.
     Success,
     /// The theme's `error`: the queue finished with an error.

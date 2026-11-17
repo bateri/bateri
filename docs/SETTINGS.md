@@ -44,8 +44,8 @@ the template when the file does not exist, choosing a theme from **View ▸
 Theme ▸** writes the `[appearance] theme` line (see [View ▸ Theme
 ▸](#view--theme-)), choosing **View ▸ Tabs ▸ Top** or **Side** writes the
 `[appearance] tab_position` line (see [View ▸ Tabs ▸](#view--tabs-)),
-**Shell ▸ Mark “host” as ▸** and **Shell ▸ Shell
-Integration on “host”** write that host's entry in `[remote] hosts` (see
+**Shell ▸ Mark “host” as ▸** and **Shell ▸ Set Up
+bateri on “host”** write that host's entry in `[remote] hosts` (see
 [`[remote]`](#remote)), and the **settings window** writes the line of the
 setting you changed. No other line of an existing file — comments, order,
 keys it does not recognize — is touched.
@@ -549,9 +549,11 @@ hosts = []
 # the server, so the folder (and later command blocks) follow you there too, and
 # a terminal there keeps running when the connection drops. bateri writes a few
 # small files under ~/.local/share/bateri on the server and never touches its
-# rc files. "ask" asks in the terminal the first time you reach a server from
-# this Mac; "auto" never asks; "off" never sets anything up. An entry of
-# hosts decides for its own host: integration = true or false.
+# rc files. "ask" asks the first time you reach a server from this Mac, once you
+# have signed in: the row under the terminal offers Set Up (Enter) or Plain ssh
+# (Esc), and Plain ssh keeps that server off for good; "auto" never asks; "off"
+# never sets anything up. An entry of hosts decides for its own host:
+# integration = true or false.
 integration = "ask"
 # Folders start with / or ~/.
 # Where "Download to Downloads" puts a remote file or folder.
@@ -2567,19 +2569,28 @@ the server's rc files.
 
 - **Three values.** `"ask"` (the default) asks the first time you reach a server
   from this Mac, `"auto"` sets every server up without asking, `"off"` never
-  writes to a server. The question is in the pane, before the connection is made
-  and before anything is written to the server (so a *no* does not cost a second
-  password): *Keep this terminal running on prod if the connection drops? bateri
-  puts one folder there (~/.local/share/bateri). [Y]es / [n]o / [a]lways*. One
-  key answers it: Enter or `y` is yes, `n` is no, `a` is yes and `auto` for every
-  server from then on; Control-C opens no connection and keeps nothing. A *no*
-  writes `integration = false` in that host's entry of `hosts` (the line Shell ▸
-  Shell Integration on “{host}” writes) and the connection is the plain `ssh`;
-  *always* writes `integration = "auto"`. A server bateri has put its files on
-  from this Mac is not asked about again, and neither is one whose entry says
-  `integration = true`. A production mark colors the dock and decides nothing
-  else: a production host is asked about like the rest. Typing before the
-  question appears does not answer it.
+  writes to a server. The login comes first, in the pane, as ssh always asks it
+  (the server's key, a password). Then the row under the terminal asks, before
+  anything is written to the server: *Set up bateri on prod? Terminals here keep
+  running if the connection drops.* with **Plain ssh** (Esc) and **Set Up**
+  (Enter); on a narrow row the second sentence goes first, then the keys' names,
+  and the buttons stay. A key pressed before the row has been up for a moment does not
+  answer it. *Set Up* puts bateri on the server and the row becomes its
+  progress, with **Cancel** (Esc): Cancel stops it, takes back what was
+  written (the folder, unless another of your Macs' kablo or terminals is in it:
+  those are never cut) and forgets that bateri was there, so the next connection
+  asks again; the connection goes on as plain `ssh`. Where nothing is asked
+  (`auto`, a host whose entry says yes) the row shows the progress all the same
+  and Cancel stops it for that connection; the next one sets the server up again. When it is done the row says so for a moment and the server's dock
+  arrives. *Plain ssh* writes `integration = false` in that host's entry of
+  `hosts` and goes on with the plain `ssh` over the connection bateri made, so
+  the password is not asked twice. There is no "always": for the other servers the
+  answer is this setting. A server bateri has put its files on from this Mac is
+  not asked about again, and neither is one whose entry says `integration =
+  true`. A production mark colors the dock and decides nothing else: a
+  production host is asked about like the rest. A pane that has no row (one
+  opened for a program, with no dock) is not asked and no login is made for it:
+  it is a plain `ssh`.
 - **The earlier `true` and `false`.** `integration = true` and `false`, which
   earlier versions wrote, are read as `"ask"` and `"off"`, and bateri writes
   the new value in their place in the file the first time it reads it (the
@@ -2590,11 +2601,12 @@ the server's rc files.
   carries `integration` (`true` is a yes that asks nothing, `false` a no);
   without one, this key.
 - **From the first connection**: bateri is put on the server by the first
-  `ssh` once it has been allowed to (a line above the prompt says so, once:
-  "bateri is set up on …"), and
+  `ssh` once it has been allowed to (the row says so; where there is no row, a
+  line above the prompt says so, once: "bateri is set up on …"), and
   the directory and command blocks arrive with it. The server is written down
   as one bateri has put its files on before the first of them is written, so one
-  the setup fell over half way through is still found by what removes them. A server kablo cannot be kept
+  the setup fell over half way through is still found by what removes them
+  (a Cancel takes them back, above). A server kablo cannot be kept
   on — a platform it is not built for (kablo runs on Linux and macOS, x86-64
   and ARM), a home directory that cannot be written, a login shell that does not
   run commands (a router, Windows) — gets a plain `ssh`: the pane shows the
@@ -2608,8 +2620,8 @@ the server's rc files.
   (`~/Library/Application Support/bateri/remote-hosts`), not in
   `settings.toml`; a server is identified by the `user@host:port` that
   `~/.ssh/config` resolves. A server remembered as "shell-less" by mistake is
-  forgotten with Shell ▸ Shell Integration on “{host}” (the item deletes this
-  record on every click).
+  forgotten with Shell ▸ Set Up bateri on “{host}” (answering *Set Up* deletes this
+  record).
 - **When bateri is updated**: the kablo on a server is the one in bateri's package,
   put beside the one that is there (a version never overwrites another). Every
   connection to a server — the first `ssh` of a run, and the first connection
@@ -2637,8 +2649,8 @@ the server's rc files.
   connection of its own to that host — except for Shell ▸ Remove bateri from
   “{host}”, which you start and confirm. The remote session is still detected, so
   the dock says `host`, colored by `hosts`, and the tab and the title name
-  the server. Turning `integration` on for the host (Shell ▸ Shell Integration
-  on “{host}”) is the way to get all of it back, from the next `ssh`.
+  the server. Shell ▸ Set Up bateri on “{host}” is the way to get all of it
+  back, from the next `ssh`.
 - A value that is not accepted and a settings file that cannot be read **turn
   integration off** (like `osc52`): a wrong guess would mean writing to the
   server silently.
@@ -2646,22 +2658,25 @@ the server's rc files.
 - **From the settings window**: Servers ▸ **Set up shell integration on
   servers** (Auto, Ask first, Off) writes this key (`[remote] integration`);
   changing the file by hand changes the popup too.
-- **From the menu**: while in an ssh tab, **Shell ▸ Shell Integration on
-  “host”** turns integration on or off for that host. The mark reflects
-  the host's current answer — its entry carrying `integration`, otherwise this
-  key: a check for `auto`, a dash for `ask`, none for `off`; in a local tab the
-  item is grayed out. A click turns it on where the mark is a dash or none, and
-  off where it is a check. The choice is written to the file as that host's **own**
-  decision: if there is an entry for exactly that host, its `integration`
-  line is added or changed in place (its mark is not touched); otherwise, or
-  if a pattern carrying `integration` comes before it,
-  `{ host = "…", integration = … }` is added at the **beginning** of the
-  array and the now ineffective `integration` of that host's remaining entries
-  is removed (an entry carrying only that is deleted entirely, a marked one
-  keeps its mark). The pattern is the host without its `user@`; comments and
-  the array's formatting are not touched, and if the file cannot be parsed or
-  the list is broken, nothing is written. The change takes effect on the
-  **next** `ssh`; an open connection stays as it is.
+- **From the menu**: while in an ssh tab, **Shell ▸ Set Up bateri on “host”**
+  sets the server up the next time you connect to it, with `ssh` or in a new
+  tab. It asks first and says when: *Set up bateri on “host”? The next time you
+  connect to host, with ssh host or a new tab, bateri puts its folder there and
+  that terminal keeps running if the connection drops. The terminal open now stays
+  as it is.* (a plain `ssh`'s shell cannot be moved onto kablo while it runs).
+  **Set Up** writes `integration = true` as that host's **own** decision: if
+  there is an entry for exactly that host, its `integration` line is added or
+  changed in place (its mark is not touched); otherwise, or if a pattern
+  carrying `integration` comes before it, `{ host = "…", integration = true }`
+  is added at the **beginning** of the array and the now ineffective
+  `integration` of that host's remaining entries is removed (an entry carrying
+  only that is deleted entirely, a marked one keeps its mark). The pattern is the
+  host without its `user@`; comments and the array's formatting are not touched,
+  and if the file cannot be parsed or the list is broken, nothing is written. It
+  also forgets a "shell-less" record of the server. The item is grayed out in a
+  local tab and where this Mac has put bateri's files already (Remove is the
+  item that can be used there). The next `ssh` sets the server up without asking
+  and shows it in the row; an open connection stays as it is.
 - **Taking bateri off a server**: while the pane has an `ssh` running, **Shell ▸
   Remove bateri from “host”** removes everything bateri put on that server. It
   can be used where this Mac has put bateri's files (the record that keeps
@@ -2673,8 +2688,8 @@ the server's rc files.
   it moved in) goes, with the programs bateri installed in it. Nothing else on
   the server is touched. Then the terminals end, the folders are deleted, this
   Mac forgets the server, and the host's entry gets `integration = false`, so
-  that no later `ssh` (`"auto"` included) puts it back; turning Shell
-  Integration on for the host undoes that. For this command bateri opens a
+  that no later `ssh` (`"auto"` included) puts it back; Shell ▸ Set Up
+  bateri on “host” undoes that. For this command bateri opens a
   connection of its own to the server — the one time it does in a plain `ssh`
   pane, and also in a pane that shows one of the server's terminals, since the
   kept connection is made of the terminals the command ends — and asks for the

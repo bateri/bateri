@@ -84,7 +84,7 @@ use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
-use bt_shell_common::kablo::service::{PaneLink, Shown};
+use bt_shell_common::kablo::service::{Answer, PaneLink, Shown};
 use bt_shell_common::native_view::{
     Bars, CarryOut, Cursor as PageCursor, Fault as PageFault, Fill as PageFill,
     Host as PageDriveHost, Id as PageId, Input, Key as PageKey, Keyboard, LookSlot,
@@ -112,6 +112,7 @@ use crate::remote_ports::RemotePorts;
 use crate::restore::{SavedKept, SavedPane};
 use crate::search_bar::{SearchBar, selection_query};
 use crate::server_card::ServerCard;
+use crate::setup_row::SetupRow;
 use crate::ssh_route::Masters;
 use crate::stats::StatsSeat;
 use crate::upload::Transfers;
@@ -266,6 +267,10 @@ pub trait PaneHost {
     }
     /// What the menu says of the pane's server is not what it said: it is asked again.
     fn menu_changed(&self) {}
+    /// The person said *Set Up* to Shell ▸ Set Up bateri on “{host}” in the pane whose `ssh` is
+    /// `argv`: the host's entry says yes, and the server's record of a shell it does not have is
+    /// forgotten. The default is an owner that writes no settings.
+    fn set_up_host(&self, _host: String, _argv: Vec<String>) {}
     /// The card's *Open All in New Tab*: every terminal the server `host` keeps that no pane
     /// shows, together in a new tab of the pane's window.
     fn open_all_background(&self, _pane: u64, _host: &str) {}
@@ -321,6 +326,10 @@ pub trait PaneHost {
     /// shows dials now instead of waiting out its pause. The default is an
     /// owner that has no such terminals.
     fn retry_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// The person answered the first connection's row of the pane (*Plain ssh*, *Set Up*,
+    /// *Cancel*): the service that asked goes on with it. The default is an owner that asks
+    /// nothing.
+    fn answer_setup(&self, _pane: &PaneUuid, _answer: Answer) {}
     /// ⏎ in a pane whose terminal another computer took: the terminal is taken back, and the
     /// pane goes on from where it was. The default is an owner that has no such terminals.
     fn bring_back_kept_terminal(&self, _pane: &PaneUuid) {}
@@ -2329,6 +2338,9 @@ pub struct PaneIvars {
     /// progress and result line ([`crate::upload::Transfers`]). The queue is
     /// **this pane's ssh connection's** — switching to another tab does not stop it.
     uploads: RefCell<Transfers>,
+    /// The first connection's row: the question after the login, the wait while bateri goes up,
+    /// and the end ([`crate::setup_row`]). It shares the dock's transfer slot with the queue.
+    setup: RefCell<SetupRow>,
     /// The open upload sheet (confirmation or error): lives for the sheet's duration.
     upload_alert: RefCell<Option<Retained<NSAlert>>>,
     /// The open stop question ([`crate::uploader`]).
@@ -3049,6 +3061,7 @@ impl TerminalPane {
             jump,
             jumping: Cell::new(None),
             uploads: RefCell::new(Transfers::default()),
+            setup: RefCell::new(SetupRow::default()),
             upload_alert: RefCell::new(None),
             upload_stop: RefCell::new(None),
             password: RefCell::new(None),
@@ -4731,6 +4744,12 @@ impl TerminalPane {
     /// is the one key the wait has: try now, or log in when the server wants a
     /// password nobody saved.
     pub(crate) fn hold_input(&self, enter: bool) -> bool {
+        // The first connection's row holds the terminal too: it is the holder, waiting for the
+        // row's answer (its keys are read before this, [`TerminalPane::setup_key`]).
+        if self.setup_holds_input() {
+            crate::sheets::beep();
+            return true;
+        }
         match on_wait(self.connection(), enter) {
             Wait::Pass => return false,
             Wait::LogIn => self.log_in_to_reconnect(),
@@ -8200,6 +8219,16 @@ impl TerminalPane {
         &self.ivars().uploads
     }
 
+    /// The first connection's row (`setup_row`).
+    pub(crate) fn setup_row(&self) -> &RefCell<SetupRow> {
+        &self.ivars().setup
+    }
+
+    /// Whether the pane has a dock — somewhere a row can be put.
+    pub(crate) fn has_dock(&self) -> bool {
+        self.ivars().dock_rows.get() != 0
+    }
+
     /// The helper ssh session's handle.
     pub(crate) fn remote_helper(&self) -> &RefCell<RemoteHelper> {
         &self.ivars().remote_helper
@@ -8861,7 +8890,7 @@ mod tests {
             let end = rest.find("\n    }\n").expect("its end");
             rest[..end].to_owned()
         };
-        // The one named exception (`rules/kablo.md`): Shell ▸ Remove bateri from “{host}” is
+        // The one named exception to `server_target`: Shell ▸ Remove bateri from “{host}” is
         // offered in any pane that has an `ssh` running, plain or kept, and opens a connection of
         // bateri's own when none is kept — a command the person chose and confirms. It asks
         // `remote_target` in one place, and goes through the steps that ask before they write.

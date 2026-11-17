@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    HostMark, InitialInput, MarkSubject, PaneUuid, ReduceMotion, RemoteIntegration, RemoteKind,
-    RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
-    ShellIntegration, TabDetails, TabPosition, Teardown, Theme,
+    HostMark, InitialInput, MarkSubject, PaneUuid, ReduceMotion, RemoteKind, RestoreWindows,
+    SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, TabDetails,
+    TabPosition, Teardown, Theme,
 };
 use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
 use bt_shell_common::kablo::quit;
@@ -31,12 +31,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueMixed,
-    NSControlStateValueOff, NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags,
-    NSMenu, NSMenuDelegate, NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen,
-    NSText, NSWindow, NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference,
-    NSWorkspace, NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
-    NSWorkspaceDidWakeNotification, NSWorkspaceWillPowerOffNotification,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
+    NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSText, NSWindow,
+    NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference, NSWorkspace,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidWakeNotification,
+    NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
     NSArray, NSBundle, NSCurrentLocaleDidChangeNotification, NSDictionary,
@@ -1568,25 +1568,18 @@ define_class!(
                 item.setTitle(&NSString::from_str(window::close_title(1)));
             }
 
-            // Shell ▸ Shell Integration on “{host}”: the key tab's host
-            // and its resolved answer; locally grey.
-            if item.action() == Some(sel!(toggleHostIntegration:)) {
-                let remote = self.key_remote_mark().map(|(host, _)| {
-                    let answer = self.settings().integration_for(&host);
-                    (host, answer)
-                });
-                let model = crate::menu::integration_menu(
-                    remote
+            // Shell ▸ Set Up bateri on “{host}”: the key pane's server, usable while this Mac
+            // has not put bateri on it (and that is known); locally grey.
+            if item.action() == Some(sel!(setUpOnHost:)) {
+                let state = self
+                    .key_tab()
+                    .and_then(|tab| tab.focused_pane().set_up_state());
+                let model = crate::menu::set_up_menu(
+                    state
                         .as_ref()
-                        .map(|(host, answer)| (host.as_str(), *answer)),
+                        .map(|(host, grey)| (host.as_str(), *grey)),
                 );
                 item.setTitle(&NSString::from_str(&model.title));
-                item.setState(match model.answer {
-                    RemoteIntegration::Auto => NSControlStateValueOn,
-                    // The question is still to come: neither on nor off.
-                    RemoteIntegration::Ask => NSControlStateValueMixed,
-                    RemoteIntegration::Off => NSControlStateValueOff,
-                });
                 model.enabled
             } else if item.action() == Some(sel!(removeFromHost:)) {
                 // Shell ▸ Remove bateri from “{host}”: the key pane's server, usable when this
@@ -1863,31 +1856,13 @@ define_class!(
             }
         }
 
-        /// Shell ▸ Shell Integration on “{host}”: writes the host's own
-        /// `[remote] hosts` entry (`SettingsEdit::RemoteHostIntegration`) — the
-        /// Mark … as ▸ path: the menu only writes, nothing is written to an
-        /// unparseable file, and the next `ssh` reads the file. A no-op if the
-        /// tab became local. The mark is checked for `auto`, a dash for `ask`
-        /// and none for `off`: a click turns it **on** (`true`, a yes that asks
-        /// nothing) from `ask` and `off`, and off from `auto`.
-        ///
-        /// It also forgets the server's `plain` row
-        /// (`ssh_wrap::forget_plain`), the one way back for a server branded
-        /// shell-less by mistake — which the check mark cannot show (it is the
-        /// setting's; the row's key is `ssh -G`'s, too slow for validation).
-        /// So a click on a **checked** item asks first: when a `plain` row was
-        /// there, forgetting it is the click's whole effect and the setting
-        /// stays on (the next `ssh` is wrapped); only without one is the
-        /// integration turned off. Turning it on writes at once and forgets.
-        #[unsafe(method(toggleHostIntegration:))]
-        fn toggle_host_integration(&self, _sender: Option<&AnyObject>) {
-            if let Some((host, _)) = self.key_remote_mark() {
-                if self.settings().integration_for(&host) == RemoteIntegration::Auto {
-                    self.forget_plain(Some(host));
-                } else {
-                    self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: true });
-                    self.forget_plain(None);
-                }
+        /// Shell ▸ Set Up bateri on “{host}”: the key pane's server is asked about
+        /// (`TerminalPane::set_up_bateri_on_host`), and the answer goes to
+        /// [`Self::set_up_host`].
+        #[unsafe(method(setUpOnHost:))]
+        fn set_up_on_host(&self, _sender: Option<&AnyObject>) {
+            if let Some(tab) = self.key_tab() {
+                tab.focused_pane().set_up_bateri_on_host();
             }
         }
 
@@ -3065,6 +3040,7 @@ impl AppDelegate {
         let program = pane.program_start();
         Some(bt_shell_common::kablo::service::PaneInfo {
             tab: Some(pane.uuid().clone()),
+            rows: pane.has_dock(),
             // A pane's own first program is the `ssh` that stood in for the command the shell
             // never ran: the block it printed is the parent of the remote blocks, there
             // being no shell block to read ([`bt_core::FIRST_BLOCK`]).
@@ -3181,54 +3157,30 @@ impl AppDelegate {
             .unwrap_or_default()
     }
 
-    /// [`Self::toggle_host_integration`]'s `plain` forgetting: the key tab's
-    /// remote ssh argv, `ssh -G` and the state file on a thread of its own.
-    /// `turn_off` is the host to turn the integration off for when **no**
-    /// row was forgotten — back on the main queue; it is turned off at once
-    /// when there is nothing to ask (a timed run, no remote target, no
-    /// thread).
-    fn forget_plain(&self, turn_off: Option<String>) {
-        let off = |delegate: &Self, host: String| {
-            delegate.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: false });
-        };
-        let target = self.key_tab().and_then(|tab| {
-            tab.focused_pane()
-                .session()
-                .and_then(|session| session.remote_target())
-        });
-        let (Some((_, target, _)), None) = (target, self.ivars().run.as_ref()) else {
-            if let Some(host) = turn_off {
-                off(self, host);
-            }
+    /// The yes of the question Shell ▸ Set Up bateri on “{host}” asks: writes the host's own
+    /// `[remote] hosts` entry (`SettingsEdit::RemoteHostIntegration`, a yes that asks nothing) —
+    /// the Mark … as ▸ path: the menu only writes, nothing is written to an unparseable file, and
+    /// the next `ssh` reads the file — and forgets the server's `plain` row, the one way back
+    /// for a server branded shell-less by mistake (`ssh_wrap::forget_plain`: `ssh -G` and the
+    /// state file, on a thread of its own; not in a timed run). `argv` is the `ssh` of the pane that
+    /// was asked, as it was then: the key tab may be another by now. The terminal open now is not
+    /// touched.
+    pub(crate) fn set_up_host(&self, host: String, argv: Vec<String>) {
+        self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: true });
+        if self.ivars().run.is_some() {
             return;
-        };
-        let argv = target.argv;
-        let host = turn_off.clone();
-        let spawned = std::thread::Builder::new()
+        }
+        let _ = std::thread::Builder::new()
             .name("remote plain".into())
             .spawn(move || {
-                let forgot = crate::child::home().is_some_and(|home| {
-                    bt_shell_common::ssh_wrap::forget_plain(
+                if let Some(home) = crate::child::home() {
+                    let _ = bt_shell_common::ssh_wrap::forget_plain(
                         &crate::ssh_route::SystemSsh,
                         &argv,
                         &crate::remote_hosts_path(&home),
-                    )
-                    .unwrap_or(false)
-                });
-                if let (false, Some(host)) = (forgot, host) {
-                    DispatchQueue::main().exec_async(move || {
-                        // audit: a block running on the main queue is on the main thread by definition.
-                        let mtm =
-                            MainThreadMarker::new().expect("the main queue is the main thread");
-                        if let Some(delegate) = delegate(mtm) {
-                            off(&delegate, host);
-                        }
-                    });
+                    );
                 }
             });
-        if let (Err(_), Some(host)) = (spawned, turn_off) {
-            off(self, host);
-        }
     }
 
     /// The terminal window whose `NSWindow` is `window`; `None` if not in the list

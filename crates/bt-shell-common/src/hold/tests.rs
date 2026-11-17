@@ -914,6 +914,113 @@ fn the_process_without_an_application_runs_plain_ssh_with_the_arguments_as_typed
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An `ssh` that answers `-G` with `config` and is nothing else: what the fall-back asks of it.
+fn config_ssh(dir: &Path, config: &str) -> OsString {
+    let path = dir.join("ssh");
+    std::fs::write(&path, format!("#!/bin/sh\ncat <<'EOF'\n{config}EOF\n")).expect("a script");
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("executable");
+    path.into_os_string()
+}
+
+const RASP: &str = "host rasp\nuser me\nhostname 10.0.0.5\nport 22\nproxyjump none\ncontrolmaster false\ncontrolpath none\n";
+
+/// A directory with a path short enough for a master's socket to be in (`sun_path`).
+fn short_scratch(name: &str) -> PathBuf {
+    let dir = PathBuf::from("/tmp").join(format!("bt-h{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a directory");
+    // Private, as the application's socket root is.
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .expect("private");
+    dir
+}
+
+/// The socket the application's master for `config` is at — the path `Masters` makes it at:
+/// `socket_path` over the instance's directory under `root` (`prepare_instance`).
+fn masters_socket(root: &Path, config: &str) -> PathBuf {
+    let config = crate::ssh_route::parse_config(config).expect("a configuration");
+    let instance = crate::ssh_route::prepare_instance(root, "0a1b2c3d").expect("the instance");
+    crate::ssh_route::socket_path(&[instance], &crate::ssh_route::host_key(&config))
+        .expect("a socket that fits")
+}
+
+#[test]
+fn the_plain_ssh_rides_the_master_bateri_made_the_login_in() {
+    let dir = short_scratch("rides");
+    let env = Env {
+        instance: Some("0a1b2c3d".into()),
+        roots: vec![dir.join("none"), dir.clone()],
+        ssh: config_ssh(&dir, RASP),
+        shell: no_shell,
+    };
+    let typed = [os("--"), os("-p"), os("22"), os("rasp"), os("uptime")];
+    let plain = |env: &Env| match hold_main(&typed, env) {
+        Action::Exec { program, args } => (program, args),
+        other => panic!("{other:?}"),
+    };
+    // No master of ours: the arguments as typed (the usual refusal costs one `ssh -G`).
+    let socket = masters_socket(&dir, RASP);
+    assert_eq!(
+        plain(&env),
+        (
+            env.ssh.clone(),
+            vec![os("-p"), os("22"), os("rasp"), os("uptime")]
+        )
+    );
+    // A file where the socket would be is not a master.
+    std::fs::write(&socket, b"").expect("a file");
+    assert_eq!(plain(&env).1.len(), 4);
+    std::fs::remove_file(&socket).expect("removed");
+    // The master is up: the login is used, ahead of the user's arguments.
+    let _master = UnixListener::bind(&socket).expect("a socket");
+    assert_eq!(
+        plain(&env).1,
+        [
+            os("-o"),
+            os("ControlMaster=no"),
+            os("-o"),
+            OsString::from(format!("ControlPath={}", socket.display())),
+            os("-p"),
+            os("22"),
+            os("rasp"),
+            os("uptime"),
+        ]
+    );
+    // Another instance's master is not this pane's.
+    let other = Env {
+        instance: Some("1b2c3d4e".into()),
+        ..env
+    };
+    assert_eq!(plain(&other).1.len(), 4);
+    // Arguments that are not text are the user's and nothing is added to them.
+    let raw = OsString::from_vec(vec![b'h', 0xff, b'x']);
+    assert_eq!(plain_arguments(&other, std::slice::from_ref(&raw)), [raw]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_user_who_shares_connections_themselves_keeps_their_own_plain_ssh() {
+    let dir = short_scratch("own");
+    let shared = format!("{RASP}controlmaster auto\ncontrolpath /tmp/mine-%h\n");
+    let env = |config: &str| Env {
+        instance: Some("0a1b2c3d".into()),
+        roots: vec![dir.clone()],
+        ssh: config_ssh(&dir, config),
+        shell: no_shell,
+    };
+    // A master of ours is up for the server, and the configuration says the user has their own.
+    let _master = UnixListener::bind(masters_socket(&dir, RASP)).expect("a socket");
+    let args = [os("rasp")];
+    assert_eq!(plain_arguments(&env(&shared), &args), args);
+    // So does an option of theirs on the command line.
+    let named = [os("-o"), os("ControlPath=none"), os("rasp")];
+    assert_eq!(plain_arguments(&env(RASP), &named), named);
+    // What `ssh -G` cannot say is not guessed at.
+    assert_eq!(plain_arguments(&env("nonsense\n"), &args), args);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_sockets_are_the_instances_and_nothing_a_name_can_escape_to() {
     let env = |instance: Option<&str>| Env {

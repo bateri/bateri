@@ -28,7 +28,7 @@ use bt_shell_common::kablo::ledger::Ledger;
 use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{
-    Backend, PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Screen, Service, Shown, Survey,
+    Answer, Backend, PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Screen, Service, Setup, Shown, Survey,
 };
 use bt_shell_common::kablo::ssh::SshBackend;
 
@@ -512,6 +512,33 @@ fn link_changed(pane: &PaneUuid, link: PaneLink) {
     });
 }
 
+/// The first connection's row of the pane `pane` is as `setup` says: on the main queue, where
+/// the panes are. A question the pane cannot put up (it is gone, or has no dock to show a row
+/// in) is answered at once as not shown — nothing is asked and nothing is kept, and the
+/// connection is the plain `ssh`.
+fn setup_changed(pane: &PaneUuid, host: &str, setup: Setup) {
+    let (uuid, host) = (pane.clone(), host.to_owned());
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        let found = delegate(mtm).and_then(|delegate| delegate.pane_with_uuid(&uuid));
+        let shown = found
+            .as_ref()
+            .is_some_and(|pane| pane.set_setup(&host, setup));
+        if !shown && setup == Setup::Asking {
+            answer_setup(&uuid, Answer::Unshown);
+        }
+    });
+}
+
+/// The person answered the first connection's row of the pane `pane`, or the row could not be
+/// asked in: the service goes on with it.
+pub(crate) fn answer_setup(pane: &PaneUuid, answer: Answer) {
+    if let Some(service) = SERVICE.get() {
+        service.answer_setup(pane, answer);
+    }
+}
+
 /// The person's answer to the question before a server is set up is for the settings (a "no" for
 /// the host, an "always"): written through the one path every edit takes, on the main queue,
 /// where the settings are.
@@ -768,9 +795,7 @@ pub(crate) fn serve(
         // The same package serves this Mac's own account: its place is below the real home.
         home: Some(home.clone()),
         settings: Box::new(settings_of),
-        // The question before a server is set up is this very program, run on the pane's
-        // terminal (`bateri ssh-ask`).
-        asker: std::env::current_exe().ok(),
+        setup: Box::new(setup_changed),
         save: Box::new(answer_saved),
         panes: Box::new(pane_of),
         runner: Box::new(ssh_route::SystemSsh),

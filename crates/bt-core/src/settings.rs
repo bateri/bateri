@@ -1950,7 +1950,8 @@ pub enum SettingsEdit {
     /// edit that [`Parsed::legacy_remote_integration`] asks for ends once it
     /// is written.
     RemoteIntegrationUpdated,
-    /// Shell ▸ Shell Integration on “{host}”: the `[remote] hosts`
+    /// Shell ▸ Set Up bateri on “{host}” (on) and the question of the first connection (*Plain
+    /// ssh*, off): the `[remote] hosts`
     /// edit after which `host`'s first matching entry that writes
     /// `integration` writes `on` — an explicit choice for this host, even
     /// when it equals what the mark and `[remote] integration` would give.
@@ -2512,9 +2513,11 @@ hosts = []
 # the server, so the folder (and later command blocks) follow you there too, and
 # a terminal there keeps running when the connection drops. bateri writes a few
 # small files under ~/.local/share/bateri on the server and never touches its
-# rc files. "ask" asks in the terminal the first time you reach a server from
-# this Mac; "auto" never asks; "off" never sets anything up. An entry of
-# hosts decides for its own host: integration = true or false.
+# rc files. "ask" asks the first time you reach a server from this Mac, once you
+# have signed in: the row under the terminal offers Set Up (Enter) or Plain ssh
+# (Esc), and Plain ssh keeps that server off for good; "auto" never asks; "off"
+# never sets anything up. An entry of hosts decides for its own host:
+# integration = true or false.
 integration = "ask"
 # Folders start with / or ~/.
 # Where "Download to Downloads" puts a remote file or folder.
@@ -4582,9 +4585,11 @@ const REMOTE_INTEGRATION_COMMENT: &str = "\
 # the server, so the folder (and later command blocks) follow you there too, and
 # a terminal there keeps running when the connection drops. bateri writes a few
 # small files under ~/.local/share/bateri on the server and never touches its
-# rc files. \"ask\" asks in the terminal the first time you reach a server from
-# this Mac; \"auto\" never asks; \"off\" never sets anything up. An entry of
-# hosts decides for its own host: integration = true or false.
+# rc files. \"ask\" asks the first time you reach a server from this Mac, once you
+# have signed in: the row under the terminal offers Set Up (Enter) or Plain ssh
+# (Esc), and Plain ssh keeps that server off for good; \"auto\" never asks; \"off\"
+# never sets anything up. An entry of hosts decides for its own host:
+# integration = true or false.
 ";
 
 /// [`SettingsEdit::RemoteIntegrationUpdated`]'s text: the earlier versions'

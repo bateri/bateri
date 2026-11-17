@@ -33,7 +33,9 @@
 //! connection lost **before** the terminal was bound to a server, or a
 //! request that cannot be served, is not retried: the program replaces itself
 //! with the plain `ssh` it stands in for (see [`Outcome::FallBack`]), because
-//! nothing has been shown yet.
+//! nothing has been shown yet. When bateri made the login of that server in the pane (the first
+//! connection's, whose answer was *Plain ssh* or *Cancel*), the plain `ssh` rides it
+//! ([`crate::ssh_wrap::ride_master`]) and the person is not asked for the password again.
 //!
 //! **A pane that is one terminal's and no more** (`--close-at-end`: a pane a program on a
 //! server asked for, the pane of a program a clicked path opens) never becomes anything
@@ -349,14 +351,58 @@ pub fn hold_main(args: &[OsString], env: &Env) -> Action {
         // is left to return to.
         Outcome::FallBack if parsed.first => {
             let code = std::process::Command::new(&env.ssh)
-                .args(&parsed.ssh_args)
+                .args(plain_arguments(env, &parsed.ssh_args))
                 .status()
                 .map_or(255, status_code);
             shell(code)
         }
-        Outcome::FallBack => plain_ssh(),
+        Outcome::FallBack => Action::Exec {
+            program: env.ssh.clone(),
+            args: plain_arguments(env, &parsed.ssh_args),
+        },
         Outcome::Shell(code) => shell(code),
     }
+}
+
+/// The arguments of the plain `ssh` a terminal that was not served falls back to: the user's own,
+/// and — when bateri made the login of this server in the pane — the options that ride that login
+/// ([`crate::ssh_wrap::ride_master`]), so that the person is not asked for the password twice.
+/// The master's socket is in the instance's directory under the roots, as the application opened
+/// it ([`crate::ssh_route::Masters::bases`]). With no master of ours for the server (the usual
+/// refusal: no kablo, nobody listening) they are the arguments as typed, and `ssh -G` was all it
+/// cost.
+fn plain_arguments(env: &Env, args: &[OsString]) -> Vec<OsString> {
+    let bases = env
+        .instance
+        .as_deref()
+        .map(|instance| crate::ssh_route::instance_dirs(&env.roots, instance))
+        .unwrap_or_default();
+    let Some(words) = args
+        .iter()
+        .map(|arg| arg.to_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .filter(|_| !bases.is_empty())
+    else {
+        return args.to_vec();
+    };
+    let config = std::process::Command::new(&env.ssh)
+        .arg("-G")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    let Some(options) = config.and_then(|out| crate::ssh_wrap::ride_master(&words, &out, &bases))
+    else {
+        return args.to_vec();
+    };
+    options
+        .into_iter()
+        .map(OsString::from)
+        .chain(args.iter().cloned())
+        .collect()
 }
 
 /// Carries out an [`Action`]: the exit status, or the program that takes the

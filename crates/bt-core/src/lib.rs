@@ -132,9 +132,9 @@ pub use shell::{
     EnvironmentRequest, FIRST_BLOCK, FooterPort, Highlight, HighlightColor, HighlightStyle,
     PaneTitle, ProgramBar, ProgramTone, Reconnect, RemoteKind, RemoteLink, RemoteSetupFault,
     RemoteStats, RemoteTarget, STATS_HISTORY, ShellEnvironment, ShellPhase, ShellState, StatsForm,
-    Transfer, TransferAction, TransferControls, TransferTone, TtyModes, counter_period,
-    decode_percent, finished_counter, first_command_begun, first_command_ended, next_tick,
-    running_counter, tilde,
+    Transfer, TransferAction, TransferControls, TransferKind, TransferTone, TtyModes,
+    counter_period, decode_percent, finished_counter, first_command_begun, first_command_ended,
+    next_tick, running_counter, tilde,
 };
 pub use wake::Wake;
 

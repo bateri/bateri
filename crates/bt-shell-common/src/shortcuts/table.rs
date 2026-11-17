@@ -236,7 +236,9 @@ pub const COMMANDS: &[Command] = &[
     command("mark_staging", "markHost:1", &[]),
     command("mark_development", "markHost:2", &[]),
     command("mark_none", "markHost:3", &[]),
-    command("shell_integration", "toggleHostIntegration", &[]),
+    // bateri goes on the focused pane's server the next time it is connected to, after a question:
+    // grey once this Mac has put it there.
+    command("set_up_on_host", "setUpOnHost", &[]),
     // Everything bateri put on the focused pane's server comes off it, after a question: grey
     // unless this Mac put it there.
     command("remove_from_host", "removeFromHost", &[]),

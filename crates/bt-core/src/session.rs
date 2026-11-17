@@ -10739,6 +10739,13 @@ impl Session {
         changed
     }
 
+    /// The mark `host` has under the rules the pane was given ([`Self::set_host_marks`]): the
+    /// color of a server the pane is about to connect to, before it is a remote session. A leaf
+    /// lock, `Term` is not touched.
+    pub fn host_mark_of(&self, host: &str) -> HostMark {
+        crate::settings::host_mark(&lock(&self.shell).host_rules, host)
+    }
+
     /// The remote session's host (as displayed, `user@` included) and its
     /// resolved mark; `None` locally. Its readers are the tab's
     /// dot and Shell ▸ Mark … as ▸ — both on the main thread, on the edge; the
