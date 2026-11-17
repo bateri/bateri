@@ -14,7 +14,8 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
-- **Teach Claude Code the `bateri` command.** A new switch in Settings ▸ Agents, off by default, gives each Claude Code you start in a bateri terminal a skill for the `bateri` command, so asking it to run something beside it opens a pane there. On its own it runs a dev server or a watcher in a minimized floating pane you can open with a click, and opens a login it cannot answer in a floating pane for you to type in. The skill lasts for that session, and nothing is written to Claude Code's own files.
+- **Teach Claude Code the `bateri` command.** A new switch in Settings ▸ Agents, off by default, gives each Claude Code you start in a bateri terminal a skill for the `bateri` command, so asking it to run something beside it opens a pane there. On its own it runs a dev server or a watcher in a minimized floating pane you can open with a click (a capsule from the start), and opens a login it cannot answer in a floating pane for you to type in. The skill lasts for that session, and nothing is written to Claude Code's own files.
+- **`bateri split --float --minimized` opens a floating pane as a capsule.** Its card is never seen, so a program that only has to run does not cover your panes, and the pane stays open when the program ends.
 - **Shell ▸ Remove bateri from “host”.** Takes everything bateri put on a server off it, after asking: the terminals running there end, bateri's folder is deleted, and the host stops being set up (`integration = false` in its entry). It works from any `ssh` pane of a server this Mac set up, kept terminal or plain.
 
 ### Changed

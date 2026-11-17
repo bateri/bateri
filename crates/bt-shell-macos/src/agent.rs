@@ -560,8 +560,8 @@ impl<'a> World<'a> {
             // A floating pane: a card over the tab, in front, as `--at` and `--size` say. The
             // keyboard goes to it only if the person is where it opens ([`World::place_on`]).
             (_, Dest::Anchor | Dest::Tab(_)) if place.float.is_some() => {
-                let frame = place.float.unwrap_or_default();
-                let (wish_at, wish_size) = arrange::wished(&frame);
+                let floating = place.float.unwrap_or_default();
+                let (wish_at, wish_size) = arrange::wished(&floating.frame);
                 let (config, _) = app.pane_launch_as(
                     into.id(),
                     Some(anchor),
@@ -569,7 +569,13 @@ impl<'a> World<'a> {
                     Some(&start),
                     incoming,
                 );
-                let pane = into.add_floating_with(mtm, config, wish_at, wish_size, false)?;
+                // A capsule is born where the card would be and takes no keyboard: the message
+                // refuses `focus` with `minimized` (a capsule the keyboard is given to opens), so
+                // `focus` is false here when `minimized` is.
+                let minimized = floating.minimized;
+                debug_assert!(!(focus && minimized), "a capsule takes no keyboard");
+                let pane =
+                    into.add_floating_with(mtm, config, wish_at, wish_size, false, minimized)?;
                 if focus {
                     window.show_pane(into.id(), pane.id());
                 }
@@ -1304,8 +1310,13 @@ mod tests {
         // The keyboard stays unless `--focus` was given and the rule let it go.
         let float = &put[put.find("place.float.is_some() =>").expect(put)..planned];
         assert!(
-            float.contains("add_floating_with(mtm, config, wish_at, wish_size, false)")
-                && float.contains("if focus {"),
+            float.contains("wish_at, wish_size, false, minimized)") && float.contains("if focus {"),
+            "{float}"
+        );
+        // A capsule is born by the message's say (`minimized`), which refuses `focus` with it: a
+        // capsule the keyboard is given to opens.
+        assert!(
+            float.contains("let minimized = floating.minimized;"),
             "{float}"
         );
     }

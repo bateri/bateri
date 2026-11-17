@@ -2371,6 +2371,24 @@ mod tests {
     }
 
     #[test]
+    fn a_card_opened_and_minimized_at_once_is_a_capsule_that_keeps_the_place_it_was_given() {
+        // A pane born a capsule (`bateri split --float --minimized`): opened, then minimized
+        // before anything is laid out. It is the newest capsule and opens where it was asked.
+        let g = headed(&small);
+        let mut layers = with_cards(vec![card(3)]);
+        assert!(layers.minimize(3));
+        assert!(layers.open(10, Some((0.3, 0.4)), Some((0.5, 0.4)), &g));
+        let before = layers.cards[1].area;
+        assert!(layers.minimize(10));
+        assert_eq!(layers.capsules(), vec![3, 10]);
+        assert_eq!(layers.cards[1].area, before);
+        assert!(layers.is_minimized(10));
+        // The card the user opens later is where it was asked to stand.
+        assert!(layers.reveal(10));
+        assert_eq!(layers.cards.last().map(|card| card.area), Some(before));
+    }
+
+    #[test]
     fn revealing_a_capsule_opens_it_in_front_where_it_was() {
         let mut layers = with_cards(vec![card(3), card(4)]);
         assert!(layers.minimize(3));

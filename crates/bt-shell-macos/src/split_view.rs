@@ -1278,6 +1278,7 @@ impl SplitView {
         pane: &TerminalPane,
         at: Option<(f64, f64)>,
         size: Option<(f64, f64)>,
+        minimized: bool,
     ) -> bool {
         let mut layers = self.layers();
         let opened = {
@@ -1288,10 +1289,24 @@ impl SplitView {
         if !opened {
             return false;
         }
+        // Born a capsule: the card is a capsule in the model before the first layout, so it is laid
+        // out at its place and size (the shell starts with the size the card has) and hidden, and
+        // is never drawn. No flight into the capsule either: nothing was shown to fly. The strip
+        // the capsules stand in may come with it, and the splits give up its height by sliding, as
+        // they do when a card goes into its capsule ([`Self::set_cards`]); the snapshot is taken
+        // before the pane is here, so it has no slide of its own.
+        let mut before = None;
+        if minimized {
+            layers.minimize(pane.id());
+            before = (self.strip_of(&layers.cards) != self.strip_height()).then(|| self.snapshot());
+        }
         self.ivars().cards.replace(layers.cards);
         self.ivars().panes.borrow_mut().push(pane.retain());
         self.add_pane(pane);
         self.layout_panes();
+        if let Some(before) = before {
+            self.slide(&before, None, card::MOVE_SECS);
+        }
         true
     }
 
@@ -4314,6 +4329,54 @@ mod tests {
         assert!(body.contains("self.apply_visibility("));
         // Opening a card from its capsule takes the same road.
         assert!(body_of("pub(crate) fn reveal(").contains("self.set_cards(layers.cards)"));
+    }
+
+    #[test]
+    fn a_card_born_a_capsule_is_one_in_the_model_before_its_first_layout() {
+        // Laid out at its card's size (the shell starts with it) and hidden at once: never drawn.
+        let body = body_of("pub(crate) fn open_card(");
+        let minimized = body
+            .find("layers.minimize(pane.id())")
+            .expect("minimized in the model");
+        let stored = body.find("cards.replace(layers.cards)").expect("stored");
+        let laid = body.find("self.layout_panes()").expect("laid out");
+        assert!(
+            minimized < stored && stored < laid,
+            "a capsule born before the first layout: {body}"
+        );
+        // No flight into the capsule: nothing was shown to fly.
+        assert!(!body.contains("set_cards("), "{body}");
+        assert!(!body.contains("card::fly("), "{body}");
+        // The strip the capsule brings takes the splits' height by sliding, as `set_cards` does:
+        // the snapshot is taken only when the strip changes, before the pane and the cards are
+        // here, and the slide plays after the layout.
+        let strip = body
+            .find("self.strip_of(&layers.cards) != self.strip_height()")
+            .expect(body);
+        let snapshot = body.find("self.snapshot()").expect(body);
+        let slide = body
+            .find("self.slide(&before, None, card::MOVE_SECS)")
+            .expect(body);
+        assert!(
+            strip < snapshot && snapshot < stored && laid < slide,
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_capsules_pane_is_placed_at_its_cards_frame_all_the_same_as_it_is_hidden() {
+        // The size a shell born in a capsule starts with is its card's: the pane is hidden by `shown`
+        // and placed whether it is shown or not.
+        let body = body_of("fn layout_cards(");
+        let hidden = body
+            .find("pane.setHidden(!shown)")
+            .expect("hidden by shown");
+        let placed = body.find("pane.place(").expect("placed");
+        assert!(hidden < placed, "{body}");
+        assert!(
+            !body[hidden..placed].contains("if shown"),
+            "the pane is placed shown or not: {body}"
+        );
     }
 
     #[test]

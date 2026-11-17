@@ -1417,12 +1417,14 @@ impl TerminalTab {
         at: Option<(f64, f64)>,
         size: Option<(f64, f64)>,
     ) -> Result<(), String> {
-        self.add_floating_with(mtm, launch, at, size, true)
+        self.add_floating_with(mtm, launch, at, size, true, false)
             .map(drop)
     }
 
     /// [`Self::add_floating`] for a pane that is asked for (`bateri split --float`): the keyboard
-    /// goes to it only if `focus`, and stays where it was otherwise. The new pane is returned.
+    /// goes to it only if `focus`, and stays where it was otherwise. With `minimized` it is born a
+    /// capsule (`--minimized`): its card is never seen, its shell still starts at the size the card
+    /// has, and it takes no keyboard (`focus` is false then). The new pane is returned.
     pub(crate) fn add_floating_with(
         &self,
         mtm: MainThreadMarker,
@@ -1430,11 +1432,13 @@ impl TerminalTab {
         at: Option<(f64, f64)>,
         size: Option<(f64, f64)>,
         focus: bool,
+        minimized: bool,
     ) -> Result<Retained<TerminalPane>, String> {
+        debug_assert!(!(focus && minimized), "a capsule takes no keyboard");
         let container = &self.ivars().container;
         let held = self.responder_pane().map(|pane| pane.id());
         let pane = embed::open(mtm, initial_rect(), launch).map_err(|e| e.to_string())?;
-        if !container.open_card(&pane, at, size) {
+        if !container.open_card(&pane, at, size, minimized) {
             drop(pane.begin_close());
             return Err("no room for the pane".to_owned());
         }
@@ -1444,6 +1448,11 @@ impl TerminalTab {
             let _ = container.remove_pane(pane.id());
             drop(container.detach(pane.id()));
             return Err(format!("could not start the shell: {e}"));
+        }
+        if minimized {
+            // Hidden since its card opened as a capsule: its frames stop now that its link is there
+            // ([`SplitView::set_cards`] does the same for a card that goes into its capsule).
+            pane.refresh_visibility();
         }
         if focus {
             self.focus_pane(&pane);
@@ -2913,6 +2922,25 @@ mod tests {
         // A capsule's press and the keyboard arriving in one are the same road: the card opens
         // and the pane takes the keyboard.
         assert!(body("pub(crate) fn show_capsule(").contains("self.focus_pane(&pane)"));
+    }
+
+    #[test]
+    fn a_floating_pane_born_a_capsule_starts_at_its_cards_size_and_stops_its_frames() {
+        let source = include_str!("tab.rs");
+        let at = source
+            .find("pub(crate) fn add_floating_with(")
+            .expect("add_floating_with");
+        let body = &source[at..at + source[at..].find("\n    }\n").expect("its end")];
+        // The card opens as a capsule (laid out, so the shell's first size is the card's), the
+        // session starts, and only then do the hidden pane's frames stop: its link is there.
+        let card = body
+            .find("open_card(&pane, at, size, minimized)")
+            .expect(body);
+        let start = body.find("pane.start(mtm)").expect(body);
+        let stop = body.find("pane.refresh_visibility()").expect(body);
+        assert!(card < start && start < stop, "{body}");
+        // The keyboard goes only to a pane that was asked to have it.
+        assert!(body.contains("if focus {"), "{body}");
     }
 
     #[test]

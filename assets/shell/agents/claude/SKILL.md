@@ -26,13 +26,13 @@ You run in a pane of bateri, a terminal app. The `bateri` command opens and arra
 
 A dev server, a watcher (`npm run watch`, `cargo watch`), a `tail -f`, a tunnel: anything that runs past this turn. Run it in a minimized floating pane, not in the background of your own shell, so the user can open it with a click and you can still read it:
 
-1. Run `bateri ls --json` first. If a pane with the label you would give is there, use that one: a second dev server would fight the first for its port.
-2. `bateri split --float --keep-open --label 'dev server' --json -- npm run dev`, then `bateri minimize PANE` once. `minimize` also opens a minimized pane again: never run it twice on one pane, and read `minimized` from `bateri ls --json` when unsure.
+1. Run `bateri ls --json` first. If a pane has the label you would give (the kind of program and the name of the project folder, short, since a label is at most 64 bytes: `dev server · api`) and its `directory` is the folder you would start it in, it is yours. If its `program` is the server, use it: a second dev server would fight the first for its port. If only a shell is left (the server stopped), close that pane and open a new one. A pane with the same kind of label from another project is not yours to use.
+2. One command: `bateri split --float --minimized --label 'dev server · <folder name>' --json -- npm run dev`. The pane is born as a capsule, so no card shows over the user's work, and it stays open when the program ends. Do not run `minimize` after it: `minimize` opens a capsule again.
 3. Tell the user in one line what runs in the capsule, by its label.
-4. Read it with `bateri capture PANE` (`--history ROWS` for more). With `--keep-open` the pane keeps a shell after the program, so `bateri wait` does not return when the program ends and its exit status is not kept: read the end of the output instead.
+4. Read it with `bateri capture PANE` (`--history ROWS` for more). The pane keeps a shell after the program, so `bateri wait` does not return when the program ends and its exit status is not kept: read the end of the output instead.
 5. When the work is done, close what you opened (`bateri close pane PANE`), or tell the user it is left running. The pane outlives your session. Never close a pane you did not open.
 
-Always give `--keep-open` here: without it, a program that fails closes its pane, and nobody sees why.
+`--minimized` never goes with `--focus`: a capsule the keyboard is given to opens. A program that fails leaves its output in the pane for you to read.
 
 ### A program the user has to type into
 

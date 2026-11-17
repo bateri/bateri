@@ -213,6 +213,7 @@ bateri move pane p9 --beside p3 --right          # or --tab t3, beside its focus
 bateri move pane p9 --new-tab web                # a tab of its own, its name optional; --group g1, --new-group api or --window w1 say where; prints the tab
 bateri zoom [p9]    bateri swap p9 p3    bateri resize [p9] --left [--by N]
 bateri split --float [--at X,Y] [--size W,H]     # a floating pane over this tab; a pane or --tab t3 says whose; percents of the tab
+bateri split --float --minimized -- PROGRAM      # the same, born as a capsule: the card is never seen, and the pane stays open when the program ends
 bateri move pane p9 --float [--at X,Y] [--size W,H]   # a flat pane floats; --dock puts it back; --at, --size alone move or resize it
 bateri minimize [p9]                             # a floating pane shrinks to a capsule, or opens again
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
@@ -256,7 +257,10 @@ the card was, and is a mistake (64) on a flat pane; `focus pane p9` of a pane in
 capsule opens it and takes the keyboard. The programs in a minimized card keep
 running. `bateri ls` marks such a pane `(floating)`, and `(minimized)` in a
 capsule, and in `--json` a pane's object carries `floating` and `minimized` (the
-tab's zoomed pane and the entries for another machine do not).
+tab's zoomed pane and the entries for another machine do not). `split --float
+--minimized` opens the pane as a capsule from the start: its card is never seen,
+the pane stays open when its program ends, and it goes with no `--focus`, since
+the keyboard opens a capsule.
 
 **What a machine may do** is a setting per machine, `off`, `own`, `screen` or
 `full`, and nobody is asked ([`[commands]`](docs/SETTINGS.md#commands)). `own`,

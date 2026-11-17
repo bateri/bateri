@@ -147,6 +147,8 @@ mod tests {
                 "bateri capture",
                 "--keep-open",
                 "--wait",
+                "--float",
+                "--minimized",
                 "bateri --help",
             ] {
                 assert!(body.contains(needle), "{needle}");
