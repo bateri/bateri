@@ -34,6 +34,8 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **The pointer keeps its shape over a program's page.** Over a divider or the edge of a column, the
+  resize pointer turned back into an arrow at the next move of the mouse; it now stays.
 - **`bateri split` with a program that is not there opens no pane.** It says the program cannot be started and exits 1, also with `--keep-open`, which used to open a pane with the error in it.
 - **A pane Claude Code opens starts clean.** A pane opened with the `bateri` command used to inherit the marks of the Claude Code that opened it, so a Claude started there did not save its conversation or show its last reply, and `git commit` in it failed. Panes opened by the command now start without them.
 - **A very long line no longer freezes a program's editor.** Opening a file with one long line, like minified JavaScript or JSON, in an editor such as textpen froze bateri: half a minute for a line of a hundred thousand characters. Such a line now opens at once.
