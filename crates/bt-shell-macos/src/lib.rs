@@ -150,9 +150,10 @@ pub fn apps_card_layout_problems(
 /// light themes and lists each time the sidebar's "Open settings.toml" is not titled in the
 /// theme's text colour. Only for `tests/settings_window.rs`, before anything else there: a button
 /// keeps the colour its title had when it was first drawn, and a light grey left from before the
-/// theme reads as a button that is off.
+/// theme reads as a button that is off. `None` when the screen shows no window to read, as while
+/// it is locked.
 #[doc(hidden)]
-pub fn settings_title_problems(mtm: MainThreadMarker) -> Vec<String> {
+pub fn settings_title_problems(mtm: MainThreadMarker) -> Option<Vec<String>> {
     settings_window::SettingsWindow::new(mtm).title_problems()
 }
 

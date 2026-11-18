@@ -4,8 +4,10 @@
 //! draws everything over one another; this is the check that sees it without eyes.
 //!
 //! Its own `main` (`harness = false`): AppKit wants the main thread. Without a window server
-//! session (an ssh login) it says so and passes. `BT_SETTINGS_SHOTS=<dir>` also writes each page
-//! there as a PNG, for a person to look at.
+//! session (an ssh login) it says so and passes. While the screen is locked the window server
+//! draws no window, so the check that reads the buttons' titles from the screen says so and is
+//! passed over; the rest draws into bitmaps and runs. `BT_SETTINGS_SHOTS=<dir>` also writes each
+//! page there as a PNG, for a person to look at.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -30,15 +32,21 @@ fn main() {
         std::fs::create_dir_all(dir).expect("the pictures' folder can be made");
     }
     // First: the window's palette is not set yet, as when the application opens the window.
-    let titles = bt_shell_macos::settings_title_problems(mtm);
-    for problem in &titles {
-        eprintln!("settings_window: {problem}");
+    match bt_shell_macos::settings_title_problems(mtm) {
+        None => println!(
+            "settings_window: button titles SKIPPED (the screen shows no window, as while it is locked)"
+        ),
+        Some(titles) => {
+            for problem in &titles {
+                eprintln!("settings_window: {problem}");
+            }
+            assert!(
+                titles.is_empty(),
+                "{} buttons titled in a colour that is not the theme's",
+                titles.len()
+            );
+        }
     }
-    assert!(
-        titles.is_empty(),
-        "{} buttons titled in a colour that is not the theme's",
-        titles.len()
-    );
     let problems = bt_shell_macos::settings_layout_problems(mtm, shots.as_deref());
     for problem in &problems {
         eprintln!("settings_window: {problem}");

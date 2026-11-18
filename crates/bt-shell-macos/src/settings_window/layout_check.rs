@@ -1157,11 +1157,13 @@ impl SettingsWindow {
     /// is off. The window is shown off the screen and the window server's copy of it is read:
     /// drawing the sidebar into a bitmap draws its button afresh, in the right colour whatever the
     /// screen shows. The light themes keep the window's light appearance, so only the theme
-    /// changes. Runs before anything else in the process sets the window's palette.
-    pub(crate) fn title_problems(&self) -> Vec<String> {
+    /// changes. Runs before anything else in the process sets the window's palette. `None` when
+    /// the window server's copy of the window has nothing drawn in it, as while the screen is
+    /// locked: there is no title to read then.
+    pub(crate) fn title_problems(&self) -> Option<Vec<String>> {
         let ivars = self.ivars();
         let (Some(window), Some(open)) = (ivars.window.get(), ivars.side_open.get()) else {
-            return vec!["the window was not built".to_owned()];
+            return Some(vec!["the window was not built".to_owned()]);
         };
         let settings = Settings::default();
         let embedded = Theme::embedded_groups();
@@ -1176,7 +1178,7 @@ impl SettingsWindow {
                 away(a).total_cmp(&away(b))
             })
         else {
-            return vec!["there is no second light theme".to_owned()];
+            return Some(vec!["there is no second light theme".to_owned()]);
         };
 
         window.setAppearance(super::look::appearance(&first).as_deref());
@@ -1187,6 +1189,7 @@ impl SettingsWindow {
         };
         settle();
         let mut problems = Vec::new();
+        let mut blank = false;
         // The text colours the window had before: first its own, before it has a theme.
         let mut before = vec![luma(super::look::palette().foreground)];
         for (which, theme) in [
@@ -1210,11 +1213,15 @@ impl SettingsWindow {
             settle();
             let want = text(theme);
             match darkest_on_screen(window, open) {
-                None => {
+                OnScreen::Unread => {
                     problems.push("the window could not be read from the screen".to_owned());
                     break;
                 }
-                Some(got) => {
+                OnScreen::Blank => {
+                    blank = true;
+                    break;
+                }
+                OnScreen::Darkest(got) => {
                     let off = |earlier: &f64| (got - earlier).abs();
                     if let Some(stale) = before
                         .iter()
@@ -1230,7 +1237,7 @@ impl SettingsWindow {
             before.push(want);
         }
         window.orderOut(None);
-        problems
+        (!blank).then_some(problems)
     }
 }
 
@@ -1240,9 +1247,19 @@ fn luma(rgb: u32) -> f64 {
     0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
 }
 
+/// What the screen shows of a button, read from the window server's copy of its window.
+enum OnScreen {
+    /// The copy could not be made.
+    Unread,
+    /// The copy has nothing drawn in it, every pixel clear, as while the screen is locked.
+    Blank,
+    /// The darkest luma in the middle of the button, where its title's strokes are.
+    Darkest(f64),
+}
+
 /// The darkest luma in the middle of `button` as the screen shows it, where its title's strokes
-/// are: read from the window server's copy of `window`. `None` when it cannot be read.
-fn darkest_on_screen(window: &NSWindow, button: &NSView) -> Option<f64> {
+/// are: read from the window server's copy of `window`.
+fn darkest_on_screen(window: &NSWindow, button: &NSView) -> OnScreen {
     type Capture = unsafe extern "C" fn(CGRect, u32, u32, u32) -> *mut CGImage;
     const INCLUDING_WINDOW: u32 = 1 << 3;
     const IGNORE_FRAMING: u32 = 1 << 0;
@@ -1252,7 +1269,7 @@ fn darkest_on_screen(window: &NSWindow, button: &NSView) -> Option<f64> {
     // SAFETY: a NUL-terminated name; `RTLD_DEFAULT` searches every image the process loaded.
     let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGWindowListCreateImage".as_ptr()) };
     if symbol.is_null() {
-        return None;
+        return OnScreen::Unread;
     }
     // SAFETY: the symbol is CoreGraphics' `CGWindowListCreateImage`, which has this signature.
     let capture: Capture = unsafe { std::mem::transmute::<*mut libc::c_void, Capture>(symbol) };
@@ -1260,7 +1277,9 @@ fn darkest_on_screen(window: &NSWindow, button: &NSView) -> Option<f64> {
         CGPoint::new(f64::INFINITY, f64::INFINITY),
         CGSize::new(0.0, 0.0),
     );
-    let number = u32::try_from(window.windowNumber()).ok()?;
+    let Ok(number) = u32::try_from(window.windowNumber()) else {
+        return OnScreen::Unread;
+    };
     // SAFETY: the window is this process's and on the screen; the image follows the Create rule.
     let image = unsafe {
         capture(
@@ -1270,9 +1289,24 @@ fn darkest_on_screen(window: &NSWindow, button: &NSView) -> Option<f64> {
             IGNORE_FRAMING | BEST_RESOLUTION,
         )
     };
-    // SAFETY: a +1 reference the call returned, or null.
-    let image = unsafe { CFRetained::from_raw(NonNull::new(image)?) };
+    let Some(image) = NonNull::new(image) else {
+        return OnScreen::Unread;
+    };
+    // SAFETY: a +1 reference the call returned.
+    let image = unsafe { CFRetained::from_raw(image) };
     let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
+    // While the screen is locked the window server draws no window: the copy comes back the
+    // window's size, every pixel clear, and its black reads as the darkest title there is. A
+    // window it draws is opaque all over, so every eighth pixel is enough to tell.
+    let drawn = (0..rep.pixelsHigh()).step_by(8).any(|y| {
+        (0..rep.pixelsWide()).step_by(8).any(|x| {
+            rep.colorAtX_y(x, y)
+                .is_some_and(|c| c.alphaComponent() > 0.0)
+        })
+    });
+    if !drawn {
+        return OnScreen::Blank;
+    }
     let frame = window.frame();
     let scale = rep.pixelsWide() as f64 / frame.size.width;
     let place = button.convertRect_toView(button.bounds(), None);
@@ -1292,7 +1326,7 @@ fn darkest_on_screen(window: &NSWindow, button: &NSView) -> Option<f64> {
             darkest = Some(darkest.map_or(value, |d| d.min(value)));
         }
     }
-    darkest
+    darkest.map_or(OnScreen::Unread, OnScreen::Darkest)
 }
 
 /// The sidebar's column: the table's scroll view's parent, which holds its ground, the search
