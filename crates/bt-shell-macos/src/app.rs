@@ -7002,6 +7002,31 @@ impl AppDelegate {
         Ok(())
     }
 
+    /// `bateri config` from a terminal of this computer (`agent`): the words run on this copy's
+    /// settings ([`bt_shell_common::config_command`]), so a development copy's command changes the
+    /// development copy's. A write is applied at once and ends a preview, as a change in Settings
+    /// is ([`AppDelegate::save_edits`]); a timed run has no file and says so.
+    pub(crate) fn run_config(&self, words: &[String]) -> bt_shell_common::config_command::Ran {
+        let Inputs::User {
+            config_root: Some(root),
+        } = self.inputs()
+        else {
+            return bt_shell_common::config_command::Ran {
+                status: 1,
+                stderr: format!("bateri: {} is not available\n", settings::FILE_NAME),
+                ..Default::default()
+            };
+        };
+        let before = self.file_settings();
+        let ran = bt_shell_common::config_command::run(&root, words);
+        if ran.wrote {
+            self.ivars().preview.replace(None);
+            self.post_notices(Source::Write, Vec::new());
+            self.reload_from(Some(before));
+        }
+        ran
+    }
+
     /// bateri ▸ Settings…: spawns the settings window (the first time), fills it with the
     /// active settings and brings it to the front. In a timed run and when the home directory
     /// cannot be resolved it does **nothing** ([`Inputs::Hermetic`]): there is no file to

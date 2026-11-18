@@ -50,6 +50,7 @@ pub mod agent;
 pub mod apps;
 pub mod card_gesture;
 pub mod child;
+pub mod config_command;
 pub mod download;
 pub mod environment;
 pub mod floating;

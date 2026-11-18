@@ -34,10 +34,12 @@ use crate::session::{Osc52, TerminalOptions};
 
 mod font_features;
 mod keys;
+mod plain;
 
 pub use keys::{
     Chord, Key, KeyEntry, MAX_SHORTCUTS, Modifier, Mods, NamedKey, Shortcut, ShortcutError,
 };
+pub use plain::{PlainKey, PlainValue, plain_key, plain_keys};
 
 /// The scrollback's ceiling: the limit of **the alacritty application**.
 ///
@@ -3489,57 +3491,69 @@ open_with = "textpen"
             _ => {}
         }
         let (section_name, key, path) = edit.place();
-        let value = edit.value();
-        let parsed = document(text)?;
-        // On the document with positions for the rejection: `into_mut` drops the
-        // positions, the diagnostic's line comes from them.
-        let mut refused = Vec::new();
-        // An inline table (`theme = { … }`) is a section too: `is_value` would let
-        // it through and writing in its place would in this spelling silently
-        // delete the content that `[appearance.theme]` is rejected for
-        // (a code-review finding).
-        if let Some(table) = section(text, parsed.as_table(), section_name, &mut refused)
-            && let Some(item) = table
-                .get(key)
-                .filter(|item| !item.is_value() || item.is_inline_table())
-        {
-            let expected = match value {
-                toml_edit::Value::String(_) => "a string",
-                toml_edit::Value::Integer(_) => "an integer",
-                toml_edit::Value::Boolean(_) => "a boolean",
-                toml_edit::Value::Array(_) => "a list",
-                _ => "a number",
-            };
-            refused.push(Diagnostic {
-                key: Some(path),
-                line: item.span().and_then(|span| line_of(text, span.start)),
-                message: format!("`{path}` must be {expected}, found {}", kind(item)),
-            });
-        }
-        if let Some(diagnostic) = refused.pop() {
-            return Err(diagnostic);
-        }
-        let mut doc = parsed.into_mut();
-        ensure_section(&mut doc, section_name);
-        // There is no `else` arm: a section that isn't a section was rejected
-        // above, and a missing one was just added as a table.
-        if let Some(table) = doc.get_mut(section_name).and_then(Item::as_table_like_mut) {
-            match table.get_mut(key).and_then(Item::as_value_mut) {
-                // The decor (the space after `=`, the comment at line end) sits on
-                // the value; if the new value doesn't inherit it the comment would
-                // be dropped.
-                Some(old) => {
-                    let decor = old.decor().clone();
-                    *old = value;
-                    *old.decor_mut() = decor;
-                }
-                None => {
-                    table.insert(key, Item::Value(value));
-                }
+        write_value(text, section_name, key, path, edit.value())
+    }
+}
+
+/// [`Settings::with_edit`]'s writer of one value: `section_name`'s `key` (`path` in a refusal)
+/// takes `value`, every other byte of `text` stays. `bateri config` writes through it too
+/// ([`Settings::with_plain`]).
+fn write_value(
+    text: &str,
+    section_name: &'static str,
+    key: &str,
+    path: &'static str,
+    value: toml_edit::Value,
+) -> Result<String, Diagnostic> {
+    let parsed = document(text)?;
+    // On the document with positions for the rejection: `into_mut` drops the
+    // positions, the diagnostic's line comes from them.
+    let mut refused = Vec::new();
+    // An inline table (`theme = { … }`) is a section too: `is_value` would let
+    // it through and writing in its place would in this spelling silently
+    // delete the content that `[appearance.theme]` is rejected for
+    // (a code-review finding).
+    if let Some(table) = section(text, parsed.as_table(), section_name, &mut refused)
+        && let Some(item) = table
+            .get(key)
+            .filter(|item| !item.is_value() || item.is_inline_table())
+    {
+        let expected = match value {
+            toml_edit::Value::String(_) => "a string",
+            toml_edit::Value::Integer(_) => "an integer",
+            toml_edit::Value::Boolean(_) => "a boolean",
+            toml_edit::Value::Array(_) => "a list",
+            _ => "a number",
+        };
+        refused.push(Diagnostic {
+            key: Some(path),
+            line: item.span().and_then(|span| line_of(text, span.start)),
+            message: format!("`{path}` must be {expected}, found {}", kind(item)),
+        });
+    }
+    if let Some(diagnostic) = refused.pop() {
+        return Err(diagnostic);
+    }
+    let mut doc = parsed.into_mut();
+    ensure_section(&mut doc, section_name);
+    // There is no `else` arm: a section that isn't a section was rejected
+    // above, and a missing one was just added as a table.
+    if let Some(table) = doc.get_mut(section_name).and_then(Item::as_table_like_mut) {
+        match table.get_mut(key).and_then(Item::as_value_mut) {
+            // The decor (the space after `=`, the comment at line end) sits on
+            // the value; if the new value doesn't inherit it the comment would
+            // be dropped.
+            Some(old) => {
+                let decor = old.decor().clone();
+                *old = value;
+                *old.decor_mut() = decor;
+            }
+            None => {
+                table.insert(key, Item::Value(value));
             }
         }
-        Ok(rendered(text, &doc))
     }
+    Ok(rendered(text, &doc))
 }
 
 /// Adds an empty `[name]` to the document if the section is missing; if present

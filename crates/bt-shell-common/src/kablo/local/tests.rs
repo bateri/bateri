@@ -4642,3 +4642,78 @@ mod packages {
         waits_for("the newer release", || runs(&home) == "demo-ran 1.1.0");
     }
 }
+
+/// `bateri config` over the real kablo: the words reach the app as they were typed, the app runs
+/// them on its settings, and the terminal prints what it answers with its status.
+mod config {
+    use super::*;
+    use crate::agent::LOCAL_SERVER;
+    use crate::agent::message::{Failure as Said, Kind, Relayed, Reply, Request};
+    use crate::agent::relay;
+    use crate::config_command;
+    use crate::kablo::service::{Gone, Letter};
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_real_kablo_hands_bateri_config_to_the_app_and_prints_its_answer() {
+        let settings = TempRoot::new("config-settings");
+        let root = settings.0.clone();
+        // The app's side of the mail: a `config` of this computer's account runs on the
+        // settings, as the app runs it.
+        let mailer: Arc<dyn Fn(Letter) + Send + Sync> = Arc::new(move |letter: Letter| {
+            let text = String::from_utf8_lossy(&letter.bytes).into_owned();
+            let reply = match Request::parse(&text) {
+                Ok(Request::Config(words)) if super::is_account(&letter.account) => {
+                    let ran = config_command::run(&root, &words);
+                    Reply::Relayed(Relayed::of(ran.status, &ran.stderr, &ran.stdout))
+                }
+                Ok(other) => Reply::Failed(Said::new(Kind::Failed, format!("not here: {other:?}"))),
+                Err(failure) => Reply::Failed(failure),
+            };
+            letter.answer(reply.encode().into_bytes());
+        });
+        let Some(here) = Here::mailing("config", mailer) else {
+            return;
+        };
+        ensure_here(
+            &LocalChannel::new(here.ground.home.clone()),
+            &release().expect("a release"),
+            true,
+        )
+        .expect("kablo and its command");
+        let served = here.served();
+        let bateri = |words: &[&str]| {
+            let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+            relay::run_for(
+                &served,
+                LOCAL_SERVER,
+                &words,
+                &Gone::new(),
+                Duration::from_secs(60),
+            )
+            .expect("the command ran")
+        };
+
+        let said = bateri(&["config", "set", "font.family", "Kode Mono"]);
+        assert_eq!(said.status, 0, "{said:?}");
+        assert_eq!(said.stdout, "font.family = \"Kode Mono\"  (was not set)\n");
+        assert_eq!(bateri(&["config", "get", "family"]).stdout, "Kode Mono\n");
+        let refused = bateri(&["config", "set", "split_style", "dots"]);
+        assert_eq!(refused.status, 64, "{refused:?}");
+        assert!(
+            refused
+                .stderr
+                .iter()
+                .any(|line| line.contains("split_style")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            bateri(&["config", "set", "commands.level", "full"]).status,
+            77
+        );
+        let file =
+            std::fs::read_to_string(settings.0.join(crate::settings::FILE_NAME)).expect("the file");
+        assert!(file.contains("family = \"Kode Mono\""), "{file}");
+        assert!(file.contains("split_style = \"cards\""), "{file}");
+    }
+}

@@ -25,7 +25,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use bt_core::{Diagnostic, Parsed, Settings, SettingsEdit, Theme};
+use bt_core::{Diagnostic, Parsed, PlainKey, PlainValue, Settings, SettingsEdit, Theme};
 
 /// The settings file's name; diagnostic texts also refer to it by this name for the user.
 pub const FILE_NAME: &str = "settings.toml";
@@ -143,18 +143,68 @@ pub fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
         _ => "setting",
     };
     let not_saved = |reason: String| format!("{reason}; the {subject} was not saved");
+    write_with(root, |text| Settings::with_edit(text, edit)).map_err(|why| match why {
+        Unwritten::Refused(diagnostic) => not_saved(notice(&diagnostic)),
+        Unwritten::Unread(reason) => not_saved(reason),
+        Unwritten::Failed(reason) => reason,
+    })
+}
+
+/// `bateri config`'s write ([`crate::config_command`]): `key` takes `value`, or with `None` its
+/// line goes ([`Settings::with_plain`]). The same write as [`write_edit`]'s, by the same rules.
+pub fn write_plain(
+    root: &Path,
+    key: &PlainKey,
+    value: Option<&PlainValue>,
+) -> Result<(), Unwritten> {
+    write_with(root, |text| Settings::with_plain(text, key, value))
+}
+
+/// Why a write of `settings.toml` did not happen.
+#[derive(Debug)]
+pub enum Unwritten {
+    /// The new text is one the app's reading refuses (or the file's text is no TOML): the
+    /// reading's sentence.
+    Refused(Diagnostic),
+    /// The file was there to write and could not be read.
+    Unread(String),
+    /// The file could not be created or written.
+    Failed(String),
+}
+
+/// The one write of `settings.toml`: the file read at this moment (made from the template when
+/// there is none, [`create_if_missing`]), `write`'s text written in its place. The rules are
+/// [`write_edit`]'s.
+fn write_with(
+    root: &Path,
+    write: impl FnOnce(&str) -> Result<String, Diagnostic>,
+) -> Result<(), Unwritten> {
     let path = create_if_missing(root)
-        .map_err(|err| format!("{FILE_NAME} could not be created: {err}"))?;
+        .map_err(|err| Unwritten::Failed(format!("{FILE_NAME} could not be created: {err}")))?;
     let text = match read_text(&path) {
         Text::Read(text) => text,
         Text::Unreadable(err) => {
-            return Err(not_saved(format!("{FILE_NAME} could not be read: {err}")));
+            return Err(Unwritten::Unread(format!(
+                "{FILE_NAME} could not be read: {err}"
+            )));
         }
         // Deleted between creation and reading.
-        Text::Missing => return Err(not_saved(format!("{FILE_NAME} was removed"))),
+        Text::Missing => return Err(Unwritten::Unread(format!("{FILE_NAME} was removed"))),
     };
-    let written = Settings::with_edit(&text, edit).map_err(|d| not_saved(notice(&d)))?;
-    std::fs::write(&path, written).map_err(|err| format!("{FILE_NAME} could not be written: {err}"))
+    let written = write(&text).map_err(Unwritten::Refused)?;
+    std::fs::write(&path, written)
+        .map_err(|err| Unwritten::Failed(format!("{FILE_NAME} could not be written: {err}")))
+}
+
+/// The text of `{root}/settings.toml` for a reader that is no launch and no watcher
+/// (`bateri config`): `Ok(None)` when there is no file, `Err` the sentence when it cannot be
+/// read.
+pub fn file_text(root: &Path) -> Result<Option<String>, String> {
+    match read_text(&root.join(FILE_NAME)) {
+        Text::Read(text) => Ok(Some(text)),
+        Text::Missing => Ok(None),
+        Text::Unreadable(err) => Err(format!("{FILE_NAME} could not be read: {err}")),
+    }
 }
 
 /// The settings a **preview** of `edit` shows: what the file would hold if `edit` were written

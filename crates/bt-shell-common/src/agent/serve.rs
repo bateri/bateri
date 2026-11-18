@@ -140,6 +140,10 @@ pub enum Answer {
     Close(Anchor),
     /// `notify`: the shell shows it and answers.
     Notify(String),
+    /// `config`: the words of a `bateri config` from a terminal of this computer. The shell runs
+    /// them on its settings ([`crate::config_command`]) and answers what to print and the status.
+    /// A server never gets this far: the settings are not its own.
+    Config(Vec<String>),
     /// `message`: the last thing an agent said. The shell keeps it for the pane the letter came
     /// from, to be shown beside the pane's tab, and answers; it asks nothing and starts nothing,
     /// so the level has only judged that it is not `off`.
@@ -230,6 +234,16 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
             Err(failure) => Answer::Reply(Reply::Failed(failure)),
         },
         Ok(Request::Package(package)) => Answer::Package(package),
+        Ok(Request::Config(words)) if crate::kablo::local::is_account(&server.account) => {
+            Answer::Config(words)
+        }
+        Ok(Request::Config(_)) => Answer::Reply(Reply::Failed(Failure::new(
+            Kind::Refused,
+            format!(
+                "the settings are this computer's: a terminal on {} cannot change them",
+                server.host_name().unwrap_or("a server")
+            ),
+        ))),
     }
 }
 
@@ -560,6 +574,33 @@ mod tests {
     /// A machine's questions about its programs go to the shell to be answered on a thread of its
     /// own (they go to the internet and to the machine), at any level but `off`, and the app
     /// refuses them all when the server's commands are `off` like everything else.
+    /// `bateri config` is this computer's: its terminals hand the words on at every level that
+    /// has the command, a server is refused whatever its level.
+    #[test]
+    fn config_is_for_the_terminals_of_this_computer_alone() {
+        let ask = "bateri 2\nconfig\nwords x676574 x7468656d65\n";
+        let words = vec!["get".to_owned(), "theme".to_owned()];
+        for level in [CommandLevel::Own, CommandLevel::Screen, CommandLevel::Full] {
+            let here = Server {
+                level,
+                ..this_computer()
+            };
+            assert_eq!(
+                serve(&here, Some("p3"), ask, &mut Pretend::default()),
+                Answer::Config(words.clone()),
+                "{level:?}"
+            );
+            let there = Server { level, ..server() };
+            match serve(&there, Some("p3"), ask, &mut Pretend::default()) {
+                Answer::Reply(Reply::Failed(failed)) => {
+                    assert_eq!(failed.kind, Kind::Refused, "{level:?}");
+                    assert!(failed.text.contains("rasp"), "{}", failed.text);
+                }
+                other => panic!("{level:?}: a server's config was {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_question_about_programs_is_the_shells_to_answer_unless_the_level_is_off() {
         let ask = "bateri 2\npackage offer\nsource bateri/textpen\ntarget aarch64-apple-darwin\n";

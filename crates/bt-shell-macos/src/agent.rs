@@ -68,7 +68,7 @@ use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
 use bt_shell_common::agent::listing::{self, Card, Node, Pane, Scene, Tab, Window};
 use bt_shell_common::agent::message::{
-    self, Failure, Format, Kind, Place, Placed, Reply, WindowHome,
+    self, Failure, Format, Kind, Place, Placed, Relayed, Reply, WindowHome,
 };
 use bt_shell_common::agent::notes::Note;
 use bt_shell_common::agent::place::{Ask, Landed, Landing, Spot};
@@ -277,6 +277,11 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         Answer::PlaceOn(place) => reach::place_on(letter, server, from, place),
         Answer::Relay(relay) => reach::relay(app, letter, &server, from.as_deref(), relay),
         Answer::Package(package) => reach::package(letter, &server, package),
+        Answer::Config(words) => {
+            let ran = app.run_config(&words);
+            let done = Relayed::of(ran.status, &ran.stderr, &ran.stdout);
+            letter.answer(Reply::Relayed(done).encode().into_bytes());
+        }
     }
     world.finish();
 }

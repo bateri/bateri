@@ -39,16 +39,17 @@ does not exist (see [Settings…](#settings-1)). Creating the directory and the
 file by hand works too. The file may be a symbolic link to somewhere else (a
 dotfiles repository); the link's target is read.
 
-The app writes to this file from five places: **Open settings.toml** creates
+The app writes to this file from six places: **Open settings.toml** creates
 the template when the file does not exist, choosing a theme from **View ▸
 Theme ▸** writes the `[appearance] theme` line (see [View ▸ Theme
 ▸](#view--theme-)), choosing **View ▸ Tabs ▸ Top** or **Side** writes the
 `[appearance] tab_position` line (see [View ▸ Tabs ▸](#view--tabs-)),
 **Shell ▸ Mark “host” as ▸** and **Shell ▸ Set Up
 bateri on “host”** write that host's entry in `[remote] hosts` (see
-[`[remote]`](#remote)), and the **settings window** writes the line of the
-setting you changed. No other line of an existing file — comments, order,
-keys it does not recognize — is touched.
+[`[remote]`](#remote)), the **settings window** writes the line of the
+setting you changed, and [`bateri config`](#from-a-terminal-bateri-config)
+writes or removes the line of the setting it names. No other line of an
+existing file — comments, order, keys it does not recognize — is touched.
 
 A change takes effect **the moment you save** — in the settings file and in
 the file of the theme in use alike; the shell and the program inside it keep
@@ -247,6 +248,50 @@ reads and writes the [`[keys]`](#keys-1) table.
   file when the file changes. When the file cannot be read the page lists the
   shortcuts but cannot change them. In the command palette, → on a command opens
   **Change Shortcut…**, which opens this page on that command, listening.
+
+### From a terminal: `bateri config`
+
+In a terminal of bateri on this computer, `bateri config` reads and changes
+the same file, through the same writer as the settings window:
+
+```
+$ bateri config get split_style
+cards
+$ bateri config set split_style lines
+appearance.split_style = "lines"  (was "cards")
+$ bateri config set font.family Kode Mono
+font.family = "Kode Mono"  (was not set)
+$ bateri config list --changed
+appearance.split_style = "lines"  (default "cards")
+font.family            = "Kode Mono"  (default: not set)
+$ bateri config reset split_style
+appearance.split_style = "cards"  (the default)
+$ bateri config path
+/Users/you/.config/bateri/settings.toml
+```
+
+- **The settings are the template's**: every `key = value` line of the
+  [template](#template), named `section.key` or by the key alone where one
+  section has it (`split_style`, but `shell.integration` and
+  `remote.integration`). `list` shows them all with their values,
+  `list --changed` those not at their default, `list WORD` those whose name
+  has the word. A string may be written bare (`Kode Mono`) or between double
+  quotes.
+- **A value bateri would not accept is not written**: `set` says why and
+  exits 64. A change takes effect at once in every window, as a change in the
+  settings window does.
+- **`reset` removes the line**, so the setting is back to its default (a
+  comment above it stays). `get` prints a value as a script reads it, a string
+  without its quotes; a setting that is not set (`font.family`) exits 1.
+- **What it does not change**: the lists and tables — `[remote] hosts`,
+  `[apps] sources`, the shortcuts of [`[keys]`](#keys-1) and a font's
+  `[font.features]` — are changed in Settings or in the file. `commands.level`
+  is read but not changed: it is the reach of the `bateri` command itself, so a
+  program in a terminal could otherwise raise its own; Settings changes it.
+- **Only this computer's terminals** use it. In a terminal on a server it says
+  the settings are this computer's and exits 77. It needs bateri running, and
+  the `bateri` command: with [`[commands] level = "off"`](#commands) there is
+  none. A development copy's command changes the development copy's settings.
 
 ### Template
 
