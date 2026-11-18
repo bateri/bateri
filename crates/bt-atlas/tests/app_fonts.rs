@@ -14,9 +14,9 @@ use bt_atlas::{
     register_app_fonts,
 };
 
-/// The eight families of the Font list, as the list spells them, and whether
-/// the family has an italic of its own (Fira Code has none).
-const FAMILIES: [(&str, bool); 8] = [
+/// The nine families of the Font list, as the list spells them, and whether
+/// the family has an italic of its own (Fira Code and Kode Mono have none).
+const FAMILIES: [(&str, bool); 9] = [
     ("JetBrains Mono", true),
     ("Fira Code", false),
     ("Cascadia Code", true),
@@ -25,6 +25,7 @@ const FAMILIES: [(&str, bool); 8] = [
     ("Maple Mono", true),
     ("IBM Plex Mono", true),
     ("Obel Mono", true),
+    ("Kode Mono", false),
 ];
 
 const SYMBOLS: &str = "Symbols Nerd Font Mono";
@@ -34,7 +35,7 @@ fn fonts_dir() -> PathBuf {
 }
 
 #[test]
-fn the_eight_families_are_in_the_font_list_and_the_symbol_font_is_not() {
+fn the_nine_families_are_in_the_font_list_and_the_symbol_font_is_not() {
     let outcome = register_app_fonts(&fonts_dir());
     assert!(
         outcome.refused.is_empty(),
@@ -42,7 +43,7 @@ fn the_eight_families_are_in_the_font_list_and_the_symbol_font_is_not() {
         outcome.refused
     );
     // Every family was either registered or already on this Mac under its
-    // name: nine in all, the eight and the symbol font.
+    // name: ten in all, the nine and the symbol font.
     let mut seen: Vec<&str> = outcome
         .registered
         .iter()

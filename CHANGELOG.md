@@ -14,6 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Kode Mono comes with bateri.** The square-cut code font by Isa Ozler is in the Font list in Settings and the command palette, and `family = "Kode Mono"` works without installing it.
 - **Claude Code can use the `bateri` command.** A new switch in Settings ▸ Agents, off by default, teaches each Claude Code you start in bateri to open and read panes: ask it to run something beside it and a pane opens there. It also starts a dev server or a watcher in a capsule you can open with a click, and opens a login it cannot answer in a floating pane for you to type in. Nothing is written to Claude Code's own files.
 - **`bateri split --float --minimized` opens a floating pane as a capsule.** Its card never shows, so a program that only has to run does not cover your panes, and the pane stays open when the program ends so its last output is there.
 - **Shell ▸ Remove bateri from “host”.** Takes everything bateri put on a server off it, after asking: the terminals running there end, bateri's folder is deleted, and the host stops being set up (`integration = false` in its entry). It works from any `ssh` pane of a server this Mac set up, kept terminal or plain.

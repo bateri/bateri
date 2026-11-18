@@ -18,8 +18,9 @@ under the same name is left alone: their copy opens, not this one.
 | MapleMono | Maple Mono | variable, roman and italic |
 | IBMPlexMono | IBM Plex Mono | static, four faces |
 | ObelMono | Obel Mono | variable, roman and italic |
+| KodeMono | Kode Mono | variable, roman (no italic design) |
 | SymbolsNerdFontMono | (not listed) | one file: the symbols drawn where the selected font has none |
 
-The font files add up to 9,287,652 bytes (9.3 MB) in the package.
+The font files add up to 9,548,956 bytes (9.5 MB) in the package.
 
 Obel Mono and JetBrains Mono also serve the tests (`coretext::fixture`).

@@ -1,0 +1,12 @@
+Kode Mono 2.003. Family name in the Font list: "Kode Mono".
+
+Unmodified copy of the upstream variable font (the weight axis covers regular
+and bold; the width and roundness axes stay at their defaults). Kode Mono has
+no italic design: italic text uses the regular face.
+
+- `KodeMono[ROND,wdth,wght].ttf`: `fonts/variable/` of the GitHub release
+  v2.003, https://github.com/isaozler/kode-mono/releases/tag/v2.003
+  (kode-mono-v2.003.zip, sha256
+  dd8e64e226aed1ea8b78651e378a0fd9549cd34ce61c0574e4f150a218e903d9)
+  sha256 b6404c5ace111fb7665eaae6b3994596b6eccf8f85f9312780cca2721b90ce22.
+- `OFL.txt`: SIL Open Font License 1.1, `OFL.txt` of the same archive.

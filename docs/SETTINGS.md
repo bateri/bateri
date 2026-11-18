@@ -1458,15 +1458,16 @@ smoothing = false
 - If the family is not on the machine, the default font is used and the title
   bar says so: `font "Hack" not found; using JetBrains Mono`. Fixing the name and
   saving changes the font and clears the warning.
-- **Eight fonts come with bateri:** JetBrains Mono, Fira Code, Cascadia Code,
-  Monaspace Neon, Geist Mono, Maple Mono, IBM Plex Mono and Obel Mono. They
+- **Nine fonts come with bateri:** JetBrains Mono, Fira Code, Cascadia Code,
+  Monaspace Neon, Geist Mono, Maple Mono, IBM Plex Mono, Obel Mono and Kode
+  Mono. They
   are loaded for bateri alone when it starts: they are in the Font list and
   `family = "Fira Code"` works on a Mac that has never had it installed, but
   they do not show up in Font Book or in any other app. **A copy you installed
   yourself comes first** — if a family of the same name is already on the Mac,
   bateri does not load its own and yours is what opens, with its version and
-  its rules. Fira Code has no italic design, so italic text in it is drawn in
-  its regular face. Each family's license text lies beside its font files in
+  its rules. Fira Code and Kode Mono have no italic design, so italic text in
+  them is drawn in their regular face. Each family's license text lies beside its font files in
   the app, `bateri.app/Contents/Resources/fonts/`. A symbol font ships with
   them too; it is not in the list and is not meant to be chosen.
 - **The default font is JetBrains Mono**, which comes with the app: with no
