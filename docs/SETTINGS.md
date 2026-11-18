@@ -285,9 +285,13 @@ $ bateri config path
   without its quotes; a setting that is not set (`font.family`) exits 1.
 - **What it does not change**: the lists and tables — `[remote] hosts`,
   `[apps] sources`, the shortcuts of [`[keys]`](#keys-1) and a font's
-  `[font.features]` — are changed in Settings or in the file. `commands.level`
-  is read but not changed: it is the reach of the `bateri` command itself, so a
-  program in a terminal could otherwise raise its own; Settings changes it.
+  `[font.features]` — are changed in Settings or in the file. Three settings
+  that widen what bateri reaches are read but not changed by the command:
+  `commands.level` (the reach of the `bateri` command itself),
+  `remote.integration` (setting bateri up on a server without asking) and
+  `agents.claude_skill` (teaching Claude Code the command). Settings changes
+  them. This is not a lock — a program in a terminal can still edit the file —
+  only the command leaving them to you.
 - **Only this computer's terminals** use it. In a terminal on a server it says
   the settings are this computer's and exits 77. It needs bateri running, and
   the `bateri` command: with [`[commands] level = "off"`](#commands) there is

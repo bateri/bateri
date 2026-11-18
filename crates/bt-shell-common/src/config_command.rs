@@ -18,9 +18,11 @@
 //! is printed and the status is 64. A list (`remote.hosts`, `apps.sources`), the shortcuts of
 //! `[keys]` and a font's features are no keys here: Settings and the file change them.
 //!
-//! **`commands.level` is read, never written here.** It is the reach of the `bateri` command
-//! itself; a program in a terminal could otherwise raise its own. Settings changes it, where a
-//! person does. A terminal on a server never gets here: the app refuses it before.
+//! **What widens bateri's reach is read, never written here** ([`SETTINGS_ONLY`]): the reach of
+//! the `bateri` command itself, setting bateri up on a server without asking, and teaching Claude
+//! Code the command. Settings changes them, where a person does. This is not a boundary — a
+//! program in a terminal can write the file — only the command not doing it. A terminal on a
+//! server never gets here: the app refuses it before.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -29,8 +31,13 @@ use bt_core::{PlainKey, PlainValue, Settings, plain_key, plain_keys};
 
 use crate::settings::{self, FILE_NAME, Unwritten};
 
-/// The key `bateri config` reads and does not write.
-const OWN_LEVEL: &str = "commands.level";
+/// The keys `bateri config` reads and does not write: each widens what bateri, or a program in
+/// it, reaches.
+const SETTINGS_ONLY: [&str; 3] = [
+    "commands.level",
+    "remote.integration",
+    "agents.claude_skill",
+];
 
 /// What a `bateri config` did: what to print, how it ends, and whether the file was written (the
 /// app then reads it at once, as after a change in Settings).
@@ -240,7 +247,7 @@ fn set(root: &Path, words: &[String], ran: &mut Ran) {
     let Some(key) = key_of(name, ran) else {
         return;
     };
-    if refused_own_level(key, ran) {
+    if settings_only(key, ran) {
         return;
     }
     let value = match key.value_of(&value.join(" ")) {
@@ -273,7 +280,7 @@ fn reset(root: &Path, words: &[String], ran: &mut Ran) {
     let Some(key) = key_of(name, ran) else {
         return;
     };
-    if refused_own_level(key, ran) {
+    if settings_only(key, ran) {
         return;
     }
     let Some(text) = text(root, ran) else {
@@ -296,14 +303,17 @@ fn reset(root: &Path, words: &[String], ran: &mut Ran) {
     }
 }
 
-/// `commands.level` is not the command's to change: said, and `true`.
-fn refused_own_level(key: &PlainKey, ran: &mut Ran) -> bool {
-    if key.path != OWN_LEVEL {
+/// A key of [`SETTINGS_ONLY`] is not the command's to change: said, and `true`.
+fn settings_only(key: &PlainKey, ran: &mut Ran) -> bool {
+    if !SETTINGS_ONLY.contains(&key.path) {
         return false;
     }
     ran.fail(
         77,
-        "commands.level is the reach of this command, so it is changed in Settings, not by the command",
+        &format!(
+            "{} widens what bateri reaches, so it is changed in Settings, not by this command",
+            key.path
+        ),
     );
     true
 }
@@ -463,15 +473,29 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_level_is_read_and_never_written() {
+    fn what_widens_bateris_reach_is_read_and_never_written() {
         let root = Root::new("level");
         assert_eq!(root.run(&["get", "commands.level"]).stdout, "own\n");
-        for words in [&["set", "level", "full"][..], &["reset", "commands.level"]] {
+        assert_eq!(root.run(&["get", "remote.integration"]).stdout, "ask\n");
+        assert_eq!(root.run(&["get", "claude_skill"]).stdout, "false\n");
+        for words in [
+            &["set", "level", "full"][..],
+            &["reset", "commands.level"],
+            &["set", "remote.integration", "auto"],
+            &["reset", "remote.integration"],
+            &["set", "claude_skill", "true"],
+            &["reset", "agents.claude_skill"],
+        ] {
             let ran = root.run(words);
             assert_eq!(ran.status, 77, "{words:?}");
+            assert!(ran.stderr.contains("changed in Settings"), "{}", ran.stderr);
             assert!(!ran.wrote);
         }
         assert_eq!(root.file(), None);
+        // Each is a key of the template: a renamed one would leave the command free to write it.
+        for path in SETTINGS_ONLY {
+            assert!(plain_key(path).is_ok(), "{path} is no plain key");
+        }
     }
 
     #[test]
