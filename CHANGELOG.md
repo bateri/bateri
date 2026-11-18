@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-18
+
 ### Added
 
 - **Change a setting from the terminal with `bateri config`.** `bateri config set split_style lines` changes it as Settings would, and the window shows it at once; `get`, `list` and `reset` read a setting and put it back. A value bateri does not understand is refused, with the reason.
