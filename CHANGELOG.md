@@ -16,10 +16,12 @@ of every installed copy. A version without a section is not released.
 
 - **Give Claude Code on a server your screenshots and files.** Paste a screenshot with ⌘V, or drop files on it, and bateri sends them to the server and pastes their paths, so the agent reads them as if they were on your Mac. Files over 50 MB ask first.
 - **See an upload's progress in every pane.** A pane without the input bar at the bottom now shows its upload on a small card in the corner, with Cancel.
+- **Pick several labels at once in linearpen.** Labels and filters open a card that stays open while you check as many values as you like, with a search field to find one. Before, the menu closed after every pick.
 
 ### Fixed
 
 - **One click runs a command in a program's command palette.** In palettes such as linearpen's and toppen's, and in an editor's completions, the row under the mouse needed a double click; a single click now picks it.
+- **Clicking into a text field closes an open card.** In a program's page, a card next to a button now closes when you click into a field, as it does for any other click.
 
 ## [0.30.0] - 2026-11-18
 
