@@ -17,6 +17,10 @@ of every installed copy. A version without a section is not released.
 - **Give Claude Code on a server your screenshots and files.** Paste a screenshot with ⌘V, or drop files on it, and bateri sends them to the server and pastes their paths, so the agent reads them as if they were on your Mac. Files over 50 MB ask first.
 - **See an upload's progress in every pane.** A pane without the input bar at the bottom now shows its upload on a small card in the corner, with Cancel.
 
+### Fixed
+
+- **One click runs a command in a program's command palette.** In palettes such as linearpen's and toppen's, and in an editor's completions, the row under the mouse needed a double click; a single click now picks it.
+
 ## [0.30.0] - 2026-11-18
 
 ### Added
