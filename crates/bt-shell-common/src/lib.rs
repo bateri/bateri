@@ -10,7 +10,8 @@
 //! font size (`zoom`), the mouse gesture ledger (`gesture`), shell quoting
 //! (`quote`), key encoding (`keys`), what a ⌘-clicked link resolves to and
 //! what opening it does (`links`), the remote upload rules, processes and the
-//! two-way transfer queue (`upload`), the download's stream (`download`), the
+//! two-way transfer queue (`upload`), the image ⌘V puts on a server for its path to be
+//! pasted (`paste_image`), the download's stream (`download`), the
 //! rules of downloading a remote file (`remote_files`), its
 //! helper ssh session (`remote_helper`), the remote host's load sampling (`remote_stats`), which
 //! ssh connection a remote job rides on and the askpass wire (`ssh_route`), the host names of
@@ -74,6 +75,7 @@ pub mod open_with;
 mod outward_contract;
 pub mod overview;
 pub mod palette;
+pub mod paste_image;
 pub mod port_forward;
 pub mod ports;
 pub mod program;

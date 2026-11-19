@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Paste screenshots and Finder files into a terminal on a server.** In a pane on a server bateri set up, ⌘V with a screenshot puts the image on the server and pastes its path, so Claude Code and other agents take it as an image. Files copied in Finder are uploaded to the terminal's folder, as dropping them does.
+
 ## [0.30.0] - 2026-11-18
 
 ### Added

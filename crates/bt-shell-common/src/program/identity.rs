@@ -86,8 +86,11 @@ impl Agent {
     /// `input.paste` and Codex's fixed `paste_image`. An agent not read hears nothing: to a
     /// program that does not bind it this way ⌃V is a key of its own.
     ///
-    /// In a remote session the agent reads the server's clipboard, finds no image and says so —
-    /// still more than a paste that does nothing.
+    /// A program on a server reads the server's clipboard, which holds no image of this Mac's: in
+    /// a pane a server keeps ⌘V puts the image on the server and pastes its path instead, for
+    /// every program ([`crate::paste_image`]); an agent that takes an image path takes it as a
+    /// dropped file. A plain `ssh` has neither, and an agent behind it that hears ⌃V finds no
+    /// image and says so — still more than a paste that does nothing.
     ///
     /// No wildcard: a new agent is a decision.
     pub fn pastes_clipboard_images(self) -> bool {

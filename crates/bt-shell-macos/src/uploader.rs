@@ -10,6 +10,10 @@
 //! and the Dock tile itself is the total over all panes
 //! ([`refresh_dock_tile`], the owner walks them).
 //!
+//! The image ⌘V puts on a server ([`TerminalPane::paste_image_up`]) rides here too: it is a
+//! transfer with no sheet and no queue, whose line borrows the queue's row only while that row is
+//! free and the upload is slow ([`paste_image`]).
+//!
 //! The rule and the text are in `upload` (pure, tested); only the binding is
 //! here. Every report from the background threads goes to the main queue
 //! **with the pane id** and finds the pane through the owner's path
@@ -25,13 +29,14 @@ use std::cell::{OnceCell, RefCell};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use block2::{DynBlock, RcBlock};
 use bt_core::{HostMark, Transfer};
 use bt_shell_common::kablo::served::Served;
+use bt_shell_common::paste_image;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
@@ -58,6 +63,7 @@ use crate::child;
 use crate::download::{self, Conflict};
 use crate::pane::{PaneLookup, TerminalPane};
 use crate::password_sheet::Job as SheetJob;
+use crate::quote::shell_quote;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{Answer, Dial, Query, Request};
 use crate::sheets::{self, Asker, beep};
@@ -75,6 +81,16 @@ struct Asked {
     mark: HostMark,
     reported: bool,
     result: Result<(Vec<Local>, ProbeReply), String>,
+}
+
+/// An image ⌘V sends to a server ([`TerminalPane::paste_image_up`]): how far it has gone, what
+/// its line names, and the line it put up, if any — taken down only while it is still that one.
+struct ImagePaste {
+    sending: paste_image::Sending,
+    host: String,
+    mark: HostMark,
+    total: u64,
+    row: Mutex<Option<Transfer>>,
 }
 
 /// The confirmed drop (or download): the items that will enter the
@@ -215,6 +231,106 @@ impl TerminalPane {
         !self.is_plain_ssh()
             && self.uploads().borrow().can_accept()
             && self.upload_stop().borrow().is_none()
+    }
+
+    /// ⌘V with an image and no text on the clipboard, in a pane a server keeps
+    /// ([`paste_image`]): the PNG goes to the server's paste folder on a thread of its own, and
+    /// its path is pasted once it is there. No sheet asks first; the dock's line shows only an
+    /// upload that is slow ([`paste_image::SLOW`]). `false` → nothing was started (not a server
+    /// pane, or no thread).
+    pub(crate) fn paste_image_up(&self, png: Vec<u8>) -> bool {
+        let (Some(session), Some((command, target, _))) = (self.session(), self.server_target())
+        else {
+            return false;
+        };
+        let paste = Arc::new(ImagePaste {
+            sending: paste_image::Sending::default(),
+            host: target.label().into_owned(),
+            mark: session
+                .remote_mark()
+                .map_or(HostMark::None, |(_, mark)| mark),
+            total: png.len() as u64,
+            row: Mutex::new(None),
+        });
+        let served = self.served(&target);
+        let (id, lookup) = (self.id(), self.lookup());
+        let sent = Arc::clone(&paste);
+        let spawned = thread::Builder::new()
+            .name("image paste".into())
+            .spawn(move || {
+                let result = paste_image::put(&served, &png, &sent.sending);
+                on_pane(lookup, id, move |pane| {
+                    pane.image_landed(&sent, command, result);
+                });
+            });
+        if spawned.is_err() {
+            return false;
+        }
+        self.image_paste_tick(paste, paste_image::SLOW);
+        true
+    }
+
+    /// Looks at an image's upload `after` from now: while it runs, its line is put up or
+    /// refreshed where the dock's transfer row is free or already its own, and looked at again
+    /// after [`upload::TICK`]. The stop condition is the upload's end: no frame is asked for
+    /// after it.
+    fn image_paste_tick(&self, paste: Arc<ImagePaste>, after: Duration) {
+        let Ok(when) = DispatchTime::try_from(after) else {
+            return;
+        };
+        let (id, lookup) = (self.id(), self.lookup());
+        let _ = DispatchQueue::main().after(when, move || {
+            // audit: a block running on the main queue is by definition on the main thread.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let Some(pane) = lookup(mtm, id) else {
+                return;
+            };
+            if paste.sending.is_done() {
+                return;
+            }
+            let mut ours = paste.row.lock().unwrap_or_else(PoisonError::into_inner);
+            let free = {
+                let uploads = pane.uploads().borrow();
+                uploads.shown().is_none() || uploads.shown() == ours.as_ref()
+            };
+            if free {
+                let row =
+                    paste_image::row(&paste.host, paste.mark, paste.sending.sent(), paste.total);
+                pane.show_transfer(Some(row.clone()));
+                *ours = Some(row);
+            }
+            drop(ours);
+            pane.image_paste_tick(paste, upload::TICK);
+        });
+    }
+
+    /// The image's upload is over: its line comes down if it is still up, and the path is pasted
+    /// as a drop's path is — through the pane's input gate — if the pane still shows the session
+    /// it was pasted in. A failure is said in a sheet.
+    fn image_landed(&self, paste: &ImagePaste, command: u64, result: Result<String, String>) {
+        let ours = paste
+            .row
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if ours.is_some() && self.uploads().borrow().shown() == ours.as_ref() {
+            self.show_transfer(None);
+        }
+        if !self.server_target().is_some_and(|(now, ..)| now == command) {
+            return;
+        }
+        match result {
+            Ok(path) => {
+                if let Some(session) = self.session()
+                    && !self.hold_input(false)
+                {
+                    session.paste(shell_quote(&[path]).into_bytes());
+                }
+            }
+            Err(text) => {
+                self.failure_sheet(&format!("Can't paste the image on {}", paste.host), &text)
+            }
+        }
     }
 
     /// The probe returned: the confirmation or error sheet.

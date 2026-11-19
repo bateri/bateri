@@ -973,7 +973,7 @@ LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
 # checkout it is `.git` itself and nothing more is mounted.
 LINUX_GIT_COMMON = $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
 LINUX_GIT_MOUNT = $(if $(filter-out $(CURDIR)/.git,$(LINUX_GIT_COMMON)),-v "$(LINUX_GIT_COMMON)":"$(LINUX_GIT_COMMON)":ro)
-SERVER_TESTS = agent::relay:: ssh_wrap::remote_shells:: kablo::install:: apps::upload::
+SERVER_TESTS = agent::relay:: ssh_wrap::remote_shells:: kablo::install:: apps::upload:: paste_image::
 
 linux-server:
 	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \

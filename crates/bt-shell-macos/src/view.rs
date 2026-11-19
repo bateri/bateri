@@ -1012,6 +1012,12 @@ define_class!(
         /// spreadsheet) pastes as before. An empty string beside an image is
         /// no text - it would paste nothing and hide the image.
         ///
+        /// **In a pane a server keeps** a program reads the server's clipboard, and a path of
+        /// this Mac means nothing there: what a paste cannot carry goes to the server first
+        /// ([`BateriView::paste_to_server`]). The files of a Finder copy are uploaded as a drop
+        /// is, and an image with no text is put in bateri's paste folder there and its path is
+        /// pasted, whatever runs in the pane. A plain `ssh` and a local pane are as above.
+        ///
         /// **A page whose view has files** is given what is on the pasteboard that is a file
         /// ([`BateriView::paste_files`]) in place of any of this: the files of a Finder copy, or
         /// an image with no text, saved as a file of its own.
@@ -1030,6 +1036,9 @@ define_class!(
                 return;
             }
             let board = NSPasteboard::generalPasteboard();
+            if self.paste_to_server(&board) {
+                return;
+            }
             if let Some(text) = clipboard::read(&board).filter(|text| !text.is_empty()) {
                 session.paste(text.into_bytes());
             } else if clipboard::has_image(&board)
@@ -2549,6 +2558,34 @@ impl BateriView {
         } else {
             NSDragOperation::None
         }
+    }
+
+    /// A paste into a pane a server keeps, of what a terminal's paste cannot carry there: the
+    /// files of a Finder copy, which are uploaded to the remote directory as a drop of them is
+    /// ([`TerminalPane::upload_drop`]: the same sheet and line; their names, which the copy
+    /// holds as text too, are not pasted), and an image with no text, which goes to the server's
+    /// paste folder and has its path pasted ([`TerminalPane::paste_image_up`]). `true` when it
+    /// was one of these, refused with a beep included (a sheet already up); `false` leaves the
+    /// paste to the terminal — text wins over an image here as anywhere.
+    fn paste_to_server(&self, board: &NSPasteboard) -> bool {
+        let Some(pane) = self.pane().filter(|pane| pane.server_target().is_some()) else {
+            return false;
+        };
+        let paths = dropped_paths(board);
+        if !paths.is_empty() {
+            if !pane.upload_drop(paths) {
+                crate::sheets::beep();
+            }
+            return true;
+        }
+        let has_text = clipboard::read(board).is_some_and(|text| !text.is_empty());
+        if has_text || !clipboard::has_image(board) {
+            return false;
+        }
+        if !clipboard::read_image_png(board).is_some_and(|png| pane.paste_image_up(png)) {
+            crate::sheets::beep();
+        }
+        true
     }
 
     /// A paste into a page whose view has files: the files on the pasteboard (what Finder copies,

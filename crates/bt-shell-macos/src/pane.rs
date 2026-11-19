@@ -9030,6 +9030,46 @@ mod tests {
         assert!(body.contains("server_program_changed()"));
     }
 
+    /// ⌘V in a pane a server keeps sends what a paste cannot carry there to the server first —
+    /// the files of a Finder copy as a drop, an image with no text as a file whose path is pasted
+    /// — and only there: the gate is `server_target`, after the pane's input gate and before the
+    /// text, so a local pane and a plain `ssh` paste as before. A source scan, because the panes
+    /// need a window server.
+    #[test]
+    fn a_paste_in_a_server_pane_sends_files_and_images_up_and_nowhere_else() {
+        let view = include_str!("view.rs");
+        let view = &view[..view.find("#[cfg(test)]").unwrap_or(view.len())];
+        // A method of the class ends at its own indent, one of the `impl` at four spaces.
+        let body = |signature: &str, end: &str| {
+            let at = view
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            let rest = &view[at..];
+            rest[..rest.find(end).expect("its end")].to_owned()
+        };
+        let paste = body("        fn paste_clipboard(", "\n        }\n");
+        let at = |what: &str| {
+            paste
+                .find(what)
+                .unwrap_or_else(|| panic!("{what}: {paste}"))
+        };
+        assert!(at("hold_input(false)") < at("self.paste_to_server(&board)"));
+        assert!(at("self.paste_to_server(&board)") < at("clipboard::read(&board)"));
+        let server = body("    fn paste_to_server(", "\n    }\n");
+        assert!(server.contains("server_target().is_some()"), "{server}");
+        assert!(!server.contains("remote_target()"), "{server}");
+        // Files before text: a Finder copy holds the names as text too.
+        assert!(server.find("dropped_paths(board)") < server.find("clipboard::read(board)"));
+        assert!(server.contains("pane.upload_drop(paths)"));
+        assert!(server.contains("pane.paste_image_up(png)"));
+        // The pane it lands in pastes the path only while it still shows that session.
+        let uploader = include_str!("uploader.rs");
+        let at = uploader.find("fn image_landed(").expect("image_landed");
+        let landed = &uploader[at..at + uploader[at..].find("\n    }\n").expect("its end")];
+        assert!(landed.contains("now == command"), "{landed}");
+        assert!(landed.contains("hold_input(false)"), "{landed}");
+    }
+
     /// A program's view coming and going is news for the tab: its tile wears the program's own
     /// icon while the view is up (`view_face`) and the mark of what runs in the pane again after.
     /// Nothing else tells the tab, and a tile that missed it would keep the other picture until

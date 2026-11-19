@@ -118,6 +118,7 @@ while IFS= read -r f; do
     case $f in
     assets/shell/* | crates/bt-shell-common/src/agent/* | crates/bt-shell-common/src/ssh_wrap* | \
         crates/bt-shell-common/src/kablo/install* | crates/bt-shell-common/src/apps/upload* | \
+        crates/bt-shell-common/src/paste_image* | \
         tools/linux/* | Cargo.lock | Makefile | tools/gate.sh) server=1 ;;
     esac
     case $f in assets/bundle/* | assets/shell/* | crates/bateri/*) bundle=1 ;; esac
