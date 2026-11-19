@@ -45,7 +45,7 @@ use bt_core::pencere::{Action, ShellGroup, State, ViewOptions, font_stack};
 use bt_core::{
     BlockHandle, BlockInfo, Chord, CommandId, CommandPhase, ContentEdge, FontOptions, Osc52,
     PaneUuid, ProgramBar, RemoteFiles, RemoteTarget, ScrollBounce, SearchCover, SearchDirection,
-    SearchReport, SearchStatus, Session, SessionOptions, Settings, Theme, TtyModes, Wake,
+    SearchReport, SearchStatus, Session, SessionOptions, Settings, Theme, Transfer, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{
@@ -116,6 +116,7 @@ use crate::setup_row::SetupRow;
 use crate::ssh_route::Masters;
 use crate::stats::StatsSeat;
 use crate::upload::Transfers;
+use crate::upload_card::UploadCard;
 use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
 use crate::zoom::Zoom;
@@ -2247,6 +2248,9 @@ pub struct PaneIvars {
     /// that never searches carries no views. The query and keys are in the
     /// panel, i.e. **per pane**, and are not forgotten on close.
     search: OnceCell<SearchBar>,
+    /// The card a pane with no dock shows its transfer line on ([`UploadCard`]) — born on the
+    /// first line such a pane shows.
+    upload_card: OnceCell<UploadCard>,
     /// The state of the last query given to the session — the label's input.
     search_status: Cell<SearchStatus>,
     /// Whether the driver of the two indexes — the search's count and the
@@ -3036,6 +3040,7 @@ impl TerminalPane {
             closed: Cell::new(false),
             leaving: Cell::new(false),
             search: OnceCell::new(),
+            upload_card: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
             driving: Cell::new(false),
             bar_pointer: Cell::new((false, false)),
@@ -4570,6 +4575,9 @@ impl TerminalPane {
         }
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, theme.is_dark());
+        }
+        if let Some(card) = self.ivars().upload_card.get() {
+            card.paint(&theme);
         }
         paint_layer(&self.ivars().layer, &theme);
         self.ivars().dim.paint(&theme);
@@ -7884,6 +7892,38 @@ impl TerminalPane {
         }
     }
 
+    /// Shows the transfer line on the card a pane with no dock has ([`UploadCard`]), or takes
+    /// the card down (`None`, or the pane has a dock: its row says it). The card is born on the
+    /// first line it shows, painted with the session's theme.
+    pub(crate) fn show_upload_card(&self, line: Option<&Transfer>) {
+        let reduce = self.ivars().reduce_motion.get();
+        let line = line.filter(|_| !self.has_dock());
+        if line.is_none() {
+            if let Some(card) = self.ivars().upload_card.get() {
+                card.show(None, reduce);
+            }
+            return;
+        }
+        let card = self.ivars().upload_card.get_or_init(|| {
+            // Inside the pane, right above the view that carries the Metal layer, as the find
+            // panel is: under the veils, which dim it with the pane. Its button's target is the
+            // pane (`cancelUpload:`), held weakly; the pane holds the card.
+            let card = UploadCard::new(self.mtm(), self, self.view(), self);
+            if let Some(session) = self.session() {
+                card.paint(&session.theme());
+            }
+            card
+        });
+        card.show(line, reduce);
+    }
+
+    /// The transfer ended `finish`'s way: the card's fill plays its end, as the tab's does.
+    pub(crate) fn end_upload_card(&self, finish: crate::tabs::Finish) {
+        if let Some(card) = self.ivars().upload_card.get() {
+            card.end(finish, self.ivars().reduce_motion.get());
+        }
+    }
+
     /// The search panel — built on the first call, painted with the theme.
     fn search_bar(&self) -> &SearchBar {
         self.ivars().search.get_or_init(|| {
@@ -9062,12 +9102,29 @@ mod tests {
         assert!(server.find("dropped_paths(board)") < server.find("clipboard::read(board)"));
         assert!(server.contains("pane.upload_drop(paths)"));
         assert!(server.contains("pane.paste_image_up(png)"));
-        // The pane it lands in pastes the path only while it still shows that session.
+        // The pane pastes the paths only while it still shows that session, through its gate.
         let uploader = include_str!("uploader.rs");
-        let at = uploader.find("fn image_landed(").expect("image_landed");
-        let landed = &uploader[at..at + uploader[at..].find("\n    }\n").expect("its end")];
-        assert!(landed.contains("now == command"), "{landed}");
-        assert!(landed.contains("hold_input(false)"), "{landed}");
+        let fn_body = |signature: &str| {
+            let at = uploader.find(signature).expect(signature);
+            uploader[at..at + uploader[at..].find("\n    }\n").expect("its end")].to_owned()
+        };
+        let settle = fn_body("    pub(crate) fn settle_drops(");
+        assert!(settle.contains("now == drop.command"), "{settle}");
+        assert!(settle.contains("hold_input(false)"), "{settle}");
+        // Every way the queue moves on or ends pastes what is over: an item's end, the queue's
+        // end, a waiting item removed.
+        for signature in ["    fn upload_finished(", "    fn show_end("] {
+            assert!(
+                fn_body(signature).contains("self.settle_drops()"),
+                "{signature}"
+            );
+        }
+        // The program in front decides where a drop goes, by the server's word.
+        let drop = fn_body("    pub(crate) fn upload_drop(");
+        assert!(
+            drop.contains("paste_folder::for_program(self.program_kind())"),
+            "{drop}"
+        );
     }
 
     /// A program's view coming and going is news for the tab: its tile wears the program's own

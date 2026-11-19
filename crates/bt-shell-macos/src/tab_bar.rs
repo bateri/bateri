@@ -53,7 +53,7 @@
 //! question waiting, a running command's ring, a tick or a dot for a
 //! command that ended while the tab was away, a transfer's arrow; a marked
 //! host's colour as a line along its top; a transfer's progress as its
-//! ground filling from the left ([`ChipFill`]) — and, when it is over, the
+//! ground filling from the left ([`TransferFill`]) — and, when it is over, the
 //! ground running to the end, resting and fading away, a tick or a dot left
 //! on the tab if the user was elsewhere. Between two quiet tabs a separator
 //! (a tab filling with a transfer is lit, like a hovered one). While ⌘ is held
@@ -184,8 +184,10 @@ use crate::split::Rect;
 use crate::tab_drag::{self, Carried, Landed};
 use crate::tabs::{
     self, BUTTON, BUTTON_RADIUS, Bar, CHIP_PAD, Card, CardCommand, CardPane, Clock, Column, Drag,
-    Ending, FADE, Finish, Grip, Indicator, ROW_RADIUS, Stir, Strip, Tide, Tone, Turn,
+    FADE, Finish, Grip, Indicator, ROW_RADIUS, Stir, Strip, Tide, Tone, Turn,
 };
+use crate::tint::paint_in;
+use crate::transfer_fill::{FillInks, TransferFill};
 use crate::window::{Seat, TerminalWindow, is_dark_background};
 
 // The bar's other mode, the tabs in a column down the window's left edge. A child module, not a
@@ -400,23 +402,7 @@ pub(crate) fn single_label(title: &str, notice: &str) -> String {
     }
 }
 
-/// An sRGB colour with its strength.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Tint {
-    pub(crate) rgb: u32,
-    pub(crate) alpha: f64,
-}
-
-impl Tint {
-    pub(crate) const fn of(rgb: u32, alpha: f64) -> Self {
-        Self { rgb, alpha }
-    }
-
-    pub(crate) fn color(self) -> Retained<NSColor> {
-        let byte = |shift: u32| f64::from((self.rgb >> shift) & 0xff) / 255.0;
-        NSColor::colorWithSRGBRed_green_blue_alpha(byte(16), byte(8), byte(0), self.alpha)
-    }
-}
+pub(crate) use crate::tint::Tint;
 
 /// The bar's colours, from the theme's roles: the foreground at the
 /// design's strengths for fills and lines, the dim role for a tab that is
@@ -424,7 +410,7 @@ impl Tint {
 /// and `error` for the indicators, the background for the card. The light
 /// theme's selected chip is a white face with a thin shadow instead.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Palette {
+pub(crate) struct Palette {
     title: u32,
     dim: u32,
     /// A step under `dim`: the place at a row's title, where the row is in `dim` itself.
@@ -476,7 +462,7 @@ struct SelectedFace {
 }
 
 impl Palette {
-    fn of(theme: &Theme) -> Self {
+    pub(crate) fn of(theme: &Theme) -> Self {
         let fg = theme.foreground;
         let ink = |alpha| Tint::of(fg, alpha);
         let dark = is_dark_background(theme);
@@ -535,11 +521,14 @@ impl Palette {
         }
     }
 
-    /// The two ends of a transfer's fill ([`ChipFill`]): the accent's tail and leading edge, or
-    /// the error's once the transfer has failed.
-    fn fill_tints(self, failed: bool) -> (Tint, Tint) {
-        let rgb = if failed { self.error } else { self.accent };
-        (Tint::of(rgb, FILL_TAIL), Tint::of(rgb, FILL_HEAD))
+    /// A transfer's fill in the bar's colours ([`TransferFill`]): the accent, the error's for a
+    /// failure, and the way still to go in the hover's tone.
+    fn fill_inks(self) -> FillInks {
+        FillInks {
+            accent: self.accent,
+            error: self.error,
+            way: self.hover,
+        }
     }
 
     /// A card line's colour: its tone's role, a marked host's own colour
@@ -3107,22 +3096,6 @@ fn paint(layer: &CALayer, side: f64, scale: f64, draw: impl Fn() + 'static) {
     paint_in(layer, NSSize::new(side, side), scale, move |_| draw());
 }
 
-/// [`paint`] for a picture of any size: `draw` is given the rect to fill (a flipped one).
-fn paint_in(layer: &CALayer, size: NSSize, scale: f64, draw: impl Fn(NSRect) + 'static) {
-    let block = RcBlock::new(move |rect: NSRect| -> Bool {
-        draw(rect);
-        Bool::YES
-    });
-    let image = NSImage::imageWithSize_flipped_drawingHandler(size, true, &block);
-    let picture = image.layerContentsForContentsScale(scale);
-    CATransaction::begin();
-    CATransaction::setDisableActions(true);
-    layer.setContentsScale(scale);
-    // SAFETY: what `NSImage::layerContentsForContentsScale` returns is what `contents` takes.
-    unsafe { layer.setContents(Some(&picture)) };
-    CATransaction::commit();
-}
-
 // ─── A chip's top and bottom lines ───────────────────────────────────────
 
 /// What a chip's lines show ([`ChipLines`]).
@@ -3212,340 +3185,6 @@ impl ChipLines {
     }
 }
 
-// ─── A chip's fill while a transfer flows ────────────────────────────────
-
-/// The accent at the fill's tail and at its leading edge: 7 % and 14 %. On the bar's ladder of
-/// grounds these are the hover's tone (the foreground at 5 %) and the selected face's (10 %) in
-/// both themes, so a tab in the background is never brighter than the selected one and the
-/// leading edge is the darkest place, which tells the way it goes. The way still to go is the
-/// hover's tone itself ([`Palette::hover`]).
-const FILL_TAIL: f64 = 0.07;
-const FILL_HEAD: f64 = 0.14;
-
-/// The width of the pictures the fill's layers hold: a gradient stretched over the layer is
-/// smooth at any width, and one is painted only when its colours change.
-const FILL_PICTURE: f64 = 64.0;
-
-/// What a chip's fill is doing ([`ChipFill`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Filling {
-    /// Nothing shows.
-    Idle,
-    /// A transfer flows; the fill stands at this share of the chip's width.
-    Flowing(f64),
-    /// The transfer ended and the fill plays its end ([`Ending`]): it is the tab's ground until
-    /// `lit` and gone at `gone`. `failed`: it has turned to the error colour.
-    Ending {
-        failed: bool,
-        lit: Instant,
-        gone: Instant,
-    },
-}
-
-pub(crate) struct FillIvars {
-    state: Cell<Filling>,
-    /// Holds the two layers; its opacity carries the end's rest and fade.
-    holder: Retained<CALayer>,
-    /// The way still to go, right of the fill, up to the chip's right edge.
-    track: Retained<CALayer>,
-    /// The filled part, from the chip's left edge: the accent from [`FILL_TAIL`] to [`FILL_HEAD`].
-    fill: Retained<CALayer>,
-    /// The size the layers were last placed for.
-    size: Cell<NSSize>,
-    /// What the two pictures were last painted in: the fill's two ends, the track's tone and
-    /// the screen's scale.
-    inked: Cell<Option<(Tint, Tint, Tint, f64)>>,
-}
-
-define_class!(
-    // SAFETY: NSView is designed for subclassing; ChipFill implements no
-    // `Drop` and is born with `initWithFrame:`.
-    #[unsafe(super(NSView))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "BateriTabFill"]
-    #[ivars = FillIvars]
-    pub(crate) struct ChipFill;
-
-    unsafe impl NSObjectProtocol for ChipFill {}
-
-    impl ChipFill {
-        /// Takes no click: the chip does.
-        #[unsafe(method_id(hitTest:))]
-        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
-            None
-        }
-    }
-);
-
-/// A chip's fill: a tab's own ground filling from the left as its transfer goes, and playing
-/// out the end ([`Ending`]) when it is over. It lies above the chip's faces and below its
-/// glyph and title.
-///
-/// **It moves in Core Animation only, and only when something changed.** A report moves the two
-/// layers' widths at an even pace in the time to the next ([`tabs::FILL_FLOW`]); the end is one
-/// animation of the holder's opacity, rest and fade in one, set up when the end is told. The
-/// app draws no frame, and a layout that asks for what the fill already shows leaves it to
-/// arrive ([`Self::follow`]). The pictures the layers hold are painted when their colours
-/// change — layers carry no colour of their own (the module's note on drawing).
-impl ChipFill {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let holder = CALayer::new();
-        let track = CALayer::new();
-        let fill = CALayer::new();
-        // The layers hold their widths from an edge each: the fill from the left, the way still
-        // to go from the right, both about the middle of the chip's height.
-        holder.setAnchorPoint(NSPoint::ZERO);
-        holder.setPosition(NSPoint::ZERO);
-        fill.setAnchorPoint(NSPoint::new(0.0, 0.5));
-        track.setAnchorPoint(NSPoint::new(1.0, 0.5));
-        holder.addSublayer(&track);
-        holder.addSublayer(&fill);
-        let this = Self::alloc(mtm).set_ivars(FillIvars {
-            state: Cell::new(Filling::Idle),
-            holder,
-            track,
-            fill,
-            size: Cell::new(NSSize::ZERO),
-            inked: Cell::new(None),
-        });
-        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
-        // ivars are set.
-        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
-        this.setAccessibilityElement(false);
-        this.setWantsLayer(true);
-        this.setHidden(true);
-        this.hang();
-        this
-    }
-
-    /// Hangs the holder in the view's backing layer, rounded to the chip's corner so the fill
-    /// takes the chip's shape, if it is not there: AppKit makes that layer itself and may make
-    /// it anew (as for the [`Glyph`]'s).
-    fn hang(&self) {
-        let Some(layer) = self.layer() else {
-            return;
-        };
-        layer.setCornerRadius(ROW_RADIUS);
-        layer.setMasksToBounds(true);
-        let holder = &self.ivars().holder;
-        if holder.superlayer().is_none() {
-            layer.addSublayer(holder);
-        }
-    }
-
-    /// What the fill is doing at `now`: an end that is over is nothing.
-    fn state_at(&self, now: Instant) -> Filling {
-        match self.ivars().state.get() {
-            Filling::Ending { gone, .. } if now >= gone => Filling::Idle,
-            state => state,
-        }
-    }
-
-    /// Whether the fill is the tab's ground now: a transfer flows, or its end rests. A fading
-    /// fill is not — the tab's title and its separators are the ordinary ones again.
-    fn lit(&self, now: Instant) -> bool {
-        match self.state_at(now) {
-            Filling::Idle => false,
-            Filling::Flowing(_) => true,
-            Filling::Ending { lit, .. } => now < lit,
-        }
-    }
-
-    fn flowing(&self) -> bool {
-        matches!(self.ivars().state.get(), Filling::Flowing(_))
-    }
-
-    /// The fill is gone at once (the chip took its one-tab form).
-    fn reset(&self) {
-        let iv = self.ivars();
-        iv.holder.removeAllAnimations();
-        iv.state.set(Filling::Idle);
-        self.setHidden(true);
-    }
-
-    /// Lays the layers out for a chip of `size` with the fill at `share`, at once.
-    fn place(&self, size: NSSize, share: f64) {
-        let iv = self.ivars();
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        let middle = size.height / 2.0;
-        iv.holder.setBounds(NSRect::new(NSPoint::ZERO, size));
-        iv.fill.setPosition(NSPoint::new(0.0, middle));
-        iv.track.setPosition(NSPoint::new(size.width, middle));
-        CATransaction::commit();
-        iv.size.set(size);
-        self.run(share, 0.0);
-    }
-
-    /// Moves the boundary between the fill and the way still to go to `share`, over `secs` at an
-    /// even pace (at once for zero).
-    fn run(&self, share: f64, secs: f64) {
-        let iv = self.ivars();
-        let size = iv.size.get();
-        CATransaction::begin();
-        if secs > 0.0 {
-            CATransaction::setAnimationDuration(secs);
-            let even = CAMediaTimingFunction::functionWithControlPoints(0.0, 0.0, 1.0, 1.0);
-            CATransaction::setAnimationTimingFunction(Some(&even));
-        } else {
-            CATransaction::setDisableActions(true);
-        }
-        let part =
-            |share: f64| NSRect::new(NSPoint::ZERO, NSSize::new(size.width * share, size.height));
-        iv.fill.setBounds(part(share));
-        iv.track.setBounds(part(1.0 - share));
-        CATransaction::commit();
-    }
-
-    /// The pictures of the fill and of the way still to go, in the palette's colours
-    /// (`failed`: the error's) and at the scale of the screen the chip is on; painted again only
-    /// when one of them changed.
-    fn ink(&self, palette: Palette, failed: bool) {
-        let iv = self.ivars();
-        let scale = self
-            .window()
-            .map_or(2.0, |window| window.backingScaleFactor());
-        let (tail, head) = palette.fill_tints(failed);
-        let key = (tail, head, palette.hover, scale);
-        if iv.inked.replace(Some(key)) == Some(key) {
-            return;
-        }
-        let gradient = |from: Tint, to: Tint| {
-            move |rect: NSRect| {
-                let gradient = NSGradient::initWithStartingColor_endingColor(
-                    NSGradient::alloc(),
-                    &from.color(),
-                    &to.color(),
-                );
-                if let Some(gradient) = gradient {
-                    gradient.drawInRect_angle(rect, 0.0);
-                }
-            }
-        };
-        let picture = NSSize::new(FILL_PICTURE, 1.0);
-        paint_in(&iv.fill, picture, scale, gradient(tail, head));
-        paint_in(
-            &iv.track,
-            picture,
-            scale,
-            gradient(palette.hover, palette.hover),
-        );
-    }
-
-    /// Shows the transfer at `share` (`None`: none flows) in a chip of `size`, lit by `palette`.
-    /// A fill already at `share` is left alone, one that moved follows at an even pace; one that
-    /// begins starts there at once, from a clean slate. A transfer that stops flowing without
-    /// its end having been told ([`Self::end`]) is a stop. `selected`: the chip's own face is the
-    /// ground, so there is no way still to go to show.
-    fn follow(
-        &self,
-        size: NSSize,
-        share: Option<f64>,
-        palette: Palette,
-        selected: bool,
-        reduce: bool,
-    ) {
-        let iv = self.ivars();
-        let now = Instant::now();
-        let share = share.map(|share| share.clamp(0.0, 1.0));
-        let flow = if reduce { 0.0 } else { tabs::FILL_FLOW };
-        if share.is_none() && self.state_at(now) == Filling::Idle {
-            // Nothing to show, and the common case: every chip, at every layout.
-            iv.state.set(Filling::Idle);
-            self.setHidden(true);
-            return;
-        }
-        self.hang();
-        match (share, self.state_at(now)) {
-            (Some(share), Filling::Flowing(shown)) => {
-                if iv.size.get() != size {
-                    self.place(size, shown);
-                }
-                if share != shown {
-                    self.run(share, flow);
-                    iv.state.set(Filling::Flowing(share));
-                }
-            }
-            (Some(share), _) => {
-                iv.holder.removeAllAnimations();
-                CATransaction::begin();
-                CATransaction::setDisableActions(true);
-                iv.holder.setOpacity(1.0);
-                CATransaction::commit();
-                self.place(size, share);
-                iv.state.set(Filling::Flowing(share));
-            }
-            (None, Filling::Flowing(_)) => {
-                self.end(Finish::Stopped, reduce, palette);
-            }
-            (None, _) => {}
-        }
-        let state = self.state_at(now);
-        match state {
-            Filling::Flowing(_) => self.ink(palette, false),
-            Filling::Ending { failed, .. } => self.ink(palette, failed),
-            Filling::Idle => {}
-        }
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        iv.track.setHidden(selected);
-        CATransaction::commit();
-        self.setHidden(state == Filling::Idle);
-    }
-
-    /// Plays the end of the transfer `finish` says ([`Ending`]); the seconds the fill stays the
-    /// tab's ground (the caller lays the bar out again then). Nothing flows in the fill: none.
-    fn end(&self, finish: Finish, reduce: bool, palette: Palette) -> f64 {
-        let iv = self.ivars();
-        if !self.flowing() {
-            return 0.0;
-        }
-        let ending = Ending::of(finish, reduce);
-        let now = Instant::now();
-        let after = |secs: f64| now + Duration::from_secs_f64(secs);
-        iv.state.set(Filling::Ending {
-            failed: ending.failed,
-            lit: after(ending.lit()),
-            gone: after(ending.total()),
-        });
-        self.ink(palette, ending.failed);
-        if ending.fills_up {
-            self.run(1.0, ending.run);
-        }
-        // The model goes to nothing at once and the animation shows rest and fade on the way:
-        // when it is over there is nothing left to snap back to.
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        iv.holder.setOpacity(0.0);
-        CATransaction::commit();
-        let number = |value: f64| NSNumber::numberWithDouble(value);
-        let total = ending.total();
-        let values: Vec<Retained<AnyObject>> = [1.0, 1.0, 0.0]
-            .map(|value| {
-                Retained::into_super(Retained::into_super(Retained::into_super(number(value))))
-            })
-            .into();
-        let times = [
-            0.0,
-            if total > 0.0 {
-                ending.lit() / total
-            } else {
-                0.0
-            },
-            1.0,
-        ]
-        .map(number);
-        let fade = CAKeyframeAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
-        // SAFETY: plain `NSNumber`s, what opacity takes.
-        unsafe { fade.setValues(Some(&NSArray::from_retained_slice(&values))) };
-        fade.setKeyTimes(Some(&NSArray::from_retained_slice(&times)));
-        fade.setDuration(total);
-        iv.holder
-            .addAnimation_forKey(&fade, Some(ns_string!("end")));
-        ending.lit()
-    }
-}
-
 // ─── A chip: one tab ──────────────────────────────────────────────────────
 
 pub(crate) struct ChipIvars {
@@ -3573,7 +3212,7 @@ pub(crate) struct ChipIvars {
     /// Its tab is carried away: only a faint place is left ([`GHOST_ALPHA`]).
     ghost: Cell<bool>,
     /// The fill of the chip's own ground while a transfer flows, above the faces.
-    fill: Retained<ChipFill>,
+    fill: Retained<TransferFill>,
     /// The tab's ground is its transfer's fill now (`Look::glowing`): the title is in full ink.
     glowing: Cell<bool>,
     /// How much of the title's end is its place (`Look::place_len`) and the colour it says it in
@@ -3742,7 +3381,7 @@ impl Chip {
         let pick = ChipFace::new(mtm, Face::Picked);
         let face = ChipFace::new(mtm, Face::Selected);
         let lines = ChipLines::new(mtm);
-        let fill_view = ChipFill::new(mtm);
+        let fill_view = TransferFill::new(mtm, ROW_RADIUS, false);
         let glyph = Glyph::new(mtm);
         let title = tab_title::Title::new(mtm, NSTextAlignment::Center);
         let hint = label(mtm);
@@ -3837,7 +3476,7 @@ impl Chip {
     /// the tab's ground, the bar's cue to lay out again (`0` when it plays none, or has none).
     fn fill_end(&self, finish: Finish, reduce: bool) -> f64 {
         self.ivars().palette.get().map_or(0.0, |palette| {
-            self.ivars().fill.end(finish, reduce, palette)
+            self.ivars().fill.end(finish, reduce, palette.fill_inks())
         })
     }
 
@@ -4065,7 +3704,8 @@ impl Chip {
         if single {
             iv.fill.reset();
         } else {
-            iv.fill.follow(size, *fill, palette, selected, *reduce);
+            iv.fill
+                .follow(size, *fill, palette.fill_inks(), selected, *reduce);
         }
         let text = iv.title.field();
         let (size_pt, weight, color, pad) = if single {
@@ -4312,7 +3952,7 @@ struct Look<'a> {
     lines: Lines,
     /// How far its transfer is, `0..=1`: its ground fills to there; `None` when none flows.
     fill: Option<f64>,
-    /// Its ground is the transfer's fill now — it flows or its end rests ([`ChipFill::lit`]): the
+    /// Its ground is the transfer's fill now — it flows or its end rests ([`TransferFill::lit`]): the
     /// title is in full ink, as a hovered tab's.
     glowing: bool,
     /// Reduce Motion: the fill does not run, and ends in one short fade.
@@ -6639,7 +6279,7 @@ impl TabBar {
     /// The transfer of tab `tab` ended as `finish` says. Told once, **before** the pane tells the
     /// title that nothing flows (the tab's label still says it does until then): the layout that
     /// finds nothing flowing in the tab any more plays the end on the tab's chip
-    /// ([`ChipFill`]), and the layouts after it do not. The window lays out
+    /// ([`TransferFill`]), and the layouts after it do not. The window lays out
     /// (`TerminalWindow::transfer_ended`).
     pub(crate) fn transfer_ended(&self, tab: u64, finish: Finish) {
         self.ivars()
@@ -9538,11 +9178,11 @@ mod tests {
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
             let palette = Palette::of(&theme);
             assert_eq!(
-                palette.fill_tints(false),
+                palette.fill_inks().ends(false),
                 (Tint::of(theme.accent, 0.07), Tint::of(theme.accent, 0.14))
             );
             assert_eq!(
-                palette.fill_tints(true),
+                palette.fill_inks().ends(true),
                 (Tint::of(theme.error, 0.07), Tint::of(theme.error, 0.14))
             );
             assert_eq!(palette.hover, Tint::of(theme.foreground, 0.05));

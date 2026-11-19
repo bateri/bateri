@@ -2561,10 +2561,11 @@ impl BateriView {
     }
 
     /// A paste into a pane a server keeps, of what a terminal's paste cannot carry there: the
-    /// files of a Finder copy, which are uploaded to the remote directory as a drop of them is
-    /// ([`TerminalPane::upload_drop`]: the same sheet and line; their names, which the copy
-    /// holds as text too, are not pasted), and an image with no text, which goes to the server's
-    /// paste folder and has its path pasted ([`TerminalPane::paste_image_up`]). `true` when it
+    /// files of a Finder copy, which go up as a drop of them does ([`TerminalPane::upload_drop`]:
+    /// to the shell's directory after the sheet, or with a coding agent in front to the paste
+    /// folder with their paths pasted; their names, which the copy holds as text too, are not
+    /// pasted), and an image with no text, which goes to the server's paste folder and has its
+    /// path pasted ([`TerminalPane::paste_image_up`]). `true` when it
     /// was one of these, refused with a beep included (a sheet already up); `false` leaves the
     /// paste to the terminal — text wins over an image here as anywhere.
     fn paste_to_server(&self, board: &NSPasteboard) -> bool {

@@ -32,7 +32,8 @@
 //! (`menu`), the settings window (`settings_window`, writing through the
 //! settings edit path), the floating search bar (`search_bar`), the split
 //! container (`split_view`), the remote upload's sheet, queue driver and
-//! notifications (`uploader`), the updater (`updater`, Sparkle loaded at run
+//! notifications (`uploader`), the card a pane with no dock shows its transfer on
+//! (`upload_card`), the updater (`updater`, Sparkle loaded at run
 //! time) and the shell's locale from `NSLocale` (`locale`) are here too. The
 //! system's light/dark appearance is read here (`app`, KVO on
 //! `NSApp.effectiveAppearance`) and the window chrome is painted to the theme
@@ -94,7 +95,10 @@ mod tab;
 mod tab_bar;
 mod tab_drag;
 mod tab_merge;
+mod tint;
+mod transfer_fill;
 mod updater;
+mod upload_card;
 mod uploader;
 mod view;
 mod window;

@@ -907,6 +907,9 @@ struct Tally {
     ways: Ways,
     /// The item that may have left a partial file on the server ([`Queue::left`]).
     left: Option<String>,
+    /// Every item went for the program in front ([`Job::paste`]): where they went is the paste
+    /// folder, and their paths are on the program's line already.
+    pasted: bool,
 }
 
 impl Tally {
@@ -926,6 +929,7 @@ impl Tally {
             },
             ways: Ways::of(entries.iter().map(|entry| entry.job.way.direction())),
             left: None,
+            pasted: !entries.is_empty() && entries.iter().all(|entry| entry.job.paste),
         }
     }
 
@@ -976,6 +980,7 @@ fn end_line(end: &End, host: &str, tally: &Tally) -> (String, TransferTone, usiz
     }
     let partial = left.unwrap_or_else(|| "partial file removed".to_owned());
     let body = match (end, &tally.dest) {
+        (End::Done, _) if tally.pasted => format!("✓ {}", tally.what()),
         (End::Done, Some(dest)) => format!("✓ {} → {dest}", tally.what()),
         (End::Done, None) => format!(
             "✓ {} {} {verb}",
@@ -1047,6 +1052,13 @@ pub struct Local {
     pub(crate) dir: bool,
     pub(crate) files: u64,
     pub(crate) bytes: u64,
+}
+
+impl Local {
+    /// Where the item is on this Mac.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Measures a path. Symbolic links are **not followed** (tar does not follow them
@@ -1172,35 +1184,9 @@ pub fn sheet(host: &str, reported: bool, items: &[Local], reply: &ProbeReply, bu
             clashes.len()
         )),
     }
-    let mut enabled = true;
-    if let Some(free) = reply.free
-        && free < bytes
-    {
-        enabled = false;
-        let needs = if one {
-            format!("{} needs", quoted(&items[0].name))
-        } else {
-            "these items need".to_owned()
-        };
-        lines.push(format!(
-            "{host} has {} free, {needs} {}.",
-            format_bytes(free),
-            format_bytes(bytes)
-        ));
-    }
-    if !reply.tar {
-        enabled = false;
-        lines.push(format!(
-            "tar is not installed on {host}, so nothing can be sent."
-        ));
-    }
-    if let Some(item) = items.iter().find(|item| !is_safe(&item.name)) {
-        enabled = false;
-        lines.push(format!(
-            "{} has a backslash or a control character in its name and can't be sent safely.",
-            quoted(&item.name)
-        ));
-    }
+    let refused = refusals(host, items, reply);
+    let enabled = refused.is_empty();
+    lines.extend(refused);
     if busy {
         lines.push("Added to the queue; the current upload keeps going.".to_owned());
     }
@@ -1217,6 +1203,102 @@ pub fn sheet(host: &str, reported: bool, items: &[Local], reply: &ProbeReply, bu
         button,
         enabled,
     }
+}
+
+/// Why the items cannot be sent at all, a line each, in the sheet's order: the server has not
+/// room for them, it has no `tar`, a name cannot be carried safely. Empty when they can go.
+fn refusals(host: &str, items: &[Local], reply: &ProbeReply) -> Vec<String> {
+    let quoted = |name: &str| format!("“{name}”");
+    let bytes: u64 = items.iter().map(|item| item.bytes).sum();
+    let mut lines = Vec::new();
+    if let Some(free) = reply.free
+        && free < bytes
+    {
+        let needs = match items {
+            [item] => format!("{} needs", quoted(&item.name)),
+            _ => "these items need".to_owned(),
+        };
+        lines.push(format!(
+            "{host} has {} free, {needs} {}.",
+            format_bytes(free),
+            format_bytes(bytes)
+        ));
+    }
+    if !reply.tar {
+        lines.push(format!(
+            "tar is not installed on {host}, so nothing can be sent."
+        ));
+    }
+    if let Some(item) = items.iter().find(|item| !is_safe(&item.name)) {
+        lines.push(format!(
+            "{} has a backslash or a control character in its name and can't be sent safely.",
+            quoted(&item.name)
+        ));
+    }
+    lines
+}
+
+/// How long a drop for the program in front runs before its line shows — a **design
+/// constant**: a screenshot usually crosses before the eye could read a line, and its path on
+/// the program's line says it arrived; a line that flashes, and an arrival said twice, are
+/// noise. Past this the person is left wondering where the drop went.
+pub const PASTE_QUIET: Duration = Duration::from_secs(1);
+
+/// Above this many bytes, a drop for the program in front asks before it goes ([`paste_check`])
+/// — a **design constant**: a screenshot or a few files cross before a question could be read,
+/// and a person who let go of a video or an archive over a program may not have meant to send it.
+pub const PASTE_ASK_ABOVE: u64 = 50_000_000;
+
+/// What a drop for the program in front ([`crate::paste_folder`]) does once its first question
+/// is answered ([`probe_paste`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasteCheck {
+    /// It goes, with no sheet: the person asked for it by letting go.
+    Go,
+    /// It is large ([`PASTE_ASK_ABOVE`]): the sheet asks first, with the size and where it goes.
+    Ask(Sheet),
+    /// It cannot go: the error sheet's text, a line for each reason.
+    Refused(String),
+}
+
+/// The rule of [`PasteCheck`]: what cannot be sent is refused with the drop sheet's reasons,
+/// what is larger than [`PASTE_ASK_ABOVE`] is asked about, the rest goes.
+pub fn paste_check(host: &str, items: &[Local], reply: &ProbeReply) -> PasteCheck {
+    let mut refused = refusals(host, items, reply);
+    if !is_safe(&reply.dir) {
+        refused.push(format!(
+            "The paste folder's path on {host} has a backslash or a control character and \
+             can't be used safely."
+        ));
+    }
+    if !refused.is_empty() {
+        return PasteCheck::Refused(refused.join("\n"));
+    }
+    let bytes: u64 = items.iter().map(|item| item.bytes).sum();
+    if bytes <= PASTE_ASK_ABOVE {
+        return PasteCheck::Go;
+    }
+    let (message, after) = match items {
+        [item] => (
+            format!("Upload “{}” to {host}?", item.name),
+            "Its path is pasted here when it arrives.",
+        ),
+        _ => (
+            format!("Upload {} items to {host}?", items.len()),
+            "Their paths are pasted here when they arrive.",
+        ),
+    };
+    let mut lines = vec![format!("{} → {}", format_bytes(bytes), reply.dir)];
+    if items.len() > 1 {
+        lines.extend(items.iter().map(|item| item.name.clone()));
+    }
+    lines.push(after.to_owned());
+    PasteCheck::Ask(Sheet {
+        message,
+        informative: lines.join("\n"),
+        button: "Upload",
+        enabled: true,
+    })
 }
 
 // ─── process ─────────────────────────────────────────────────────────────
@@ -1309,13 +1391,7 @@ pub fn probe(
     dir: Option<&str>,
     paths: &[String],
 ) -> Result<(Vec<Local>, ProbeReply), String> {
-    let items: Vec<Local> = paths
-        .iter()
-        .filter_map(|path| measure(Path::new(path)).ok())
-        .collect();
-    if items.is_empty() {
-        return Err("The dropped items could not be read.".to_owned());
-    }
+    let items = measured(paths)?;
     if let Some(dir) = dir.filter(|dir| !is_safe(dir)) {
         return Err(format!(
             "The remote folder {dir} has a backslash or a control character in its path and \
@@ -1329,6 +1405,46 @@ pub fn probe(
         Some(reply) if code == Some(0) => Ok((items, reply)),
         _ => Err(probe_failure(host, code, &err)),
     }
+}
+
+/// [`probe`] for a drop for the program in front ([`crate::paste_folder`]): the first question
+/// makes the drop's own folder in the paste folder and is answered from inside it, so the
+/// reply's directory is where the items go, and nothing there shares a name with them.
+pub fn probe_paste(
+    served: &Served,
+    ask: Ask,
+    host: &str,
+    paths: &[String],
+) -> Result<(Vec<Local>, ProbeReply), String> {
+    let items = measured(paths)?;
+    let script = format!(
+        "{}{}",
+        crate::paste_folder::fresh_folder_script(),
+        probe_script(None, &[])
+    );
+    let (code, out, err) = run_sh(served, ask, &script)
+        .map_err(|text| format!("Uploading to {host} could not start: {text}"))?;
+    match parse_probe(&out) {
+        Some(reply) if code == Some(0) => Ok((items, reply)),
+        _ if code == Some(crate::paste_folder::EXIT_UNWRITABLE) => Err(format!(
+            "~/{} can't be written on {host}.",
+            crate::paste_folder::ROOT
+        )),
+        _ => Err(probe_failure(host, code, &err)),
+    }
+}
+
+/// The dropped paths measured ([`measure`]); one that cannot be read is left out, and none
+/// left is the error sheet's text.
+fn measured(paths: &[String]) -> Result<Vec<Local>, String> {
+    let items: Vec<Local> = paths
+        .iter()
+        .filter_map(|path| measure(Path::new(path)).ok())
+        .collect();
+    if items.is_empty() {
+        return Err("The dropped items could not be read.".to_owned());
+    }
+    Ok(items)
 }
 
 /// The shared state of one item's stream: the main thread cancels and reads the
@@ -1813,6 +1929,12 @@ pub struct Job {
     pub local: Local,
     pub dir: String,
     pub way: Way,
+    /// An upload for the program in front ([`crate::paste_folder`]): once its drop is over, the
+    /// remote paths of its items that arrived are pasted ([`Transfers::take_settled`]).
+    pub paste: bool,
+    /// The local file is bateri's own — an image the clipboard held, written out to be sent —
+    /// and is deleted once its drop is over, however it ended.
+    pub ours: bool,
 }
 
 impl Job {
@@ -1839,10 +1961,12 @@ impl Job {
             },
             dir: folder.to_owned(),
             way: Way::Down { lane, conflict },
+            paste: false,
+            ours: false,
         })
     }
 
-    /// The remote item's absolute path (a download's source).
+    /// The remote item's absolute path: a download's source, an upload's landing.
     pub fn remote_path(&self) -> String {
         if self.dir.ends_with('/') {
             format!("{}{}", self.dir, self.local.name)
@@ -1887,6 +2011,8 @@ struct Item {
     /// Unique across queues: the popover's button finds the item by this — the
     /// position would shift as items finish and are removed.
     id: u64,
+    /// The drop it came with ([`Transfers::enqueue`]): one paste of paths for all of them.
+    drop: u64,
     job: Job,
     state: EntryState,
     /// Where a finished download landed (the conflict rule may have renamed it):
@@ -1952,6 +2078,15 @@ struct Queue {
     /// ([`Shared::partial_left`]), by its [`label`]: the result line names it
     /// instead of saying the partial file was removed.
     left: Option<String>,
+    /// The drops whose paths are pasted when they are over ([`Job::paste`]), in their order.
+    pasting: Vec<u64>,
+    /// bateri's own local files ([`Job::ours`]) and the drop each came with.
+    ours: Vec<(u64, PathBuf)>,
+    /// When the queue's first item started: a queue of drops for the program in front says
+    /// nothing before [`PASTE_QUIET`] has passed.
+    since: Option<Instant>,
+    /// The queue's line has been shown ([`Transfers::status`]): its end is said too.
+    said: bool,
 }
 
 impl Queue {
@@ -2015,6 +2150,73 @@ impl Queue {
             .map(|current| current.shared.progress().0)
             .sum()
     }
+
+    /// Every item is a drop for the program in front ([`Job::paste`]).
+    fn pasted(&self) -> bool {
+        !self.entries.is_empty() && self.entries.iter().all(|entry| entry.job.paste)
+    }
+
+    /// Whether the queue keeps quiet at `now`: drops for the program in front, in their first
+    /// [`PASTE_QUIET`], before anything was said.
+    fn quiet(&self, now: Instant) -> bool {
+        !self.said
+            && self.pasted()
+            && self
+                .since
+                .is_none_or(|since| now.saturating_duration_since(since) < PASTE_QUIET)
+    }
+
+    /// Reports every drop that is over into `into`: a drop to paste is over when each of its
+    /// items has arrived or left the list, or when the queue `closes` (a stop, a failure, the
+    /// session gone) — what arrived is pasted then and what did not is not. bateri's own files
+    /// go with their drop's report; when the queue closes, every one left goes.
+    fn settle(&mut self, closes: bool, into: &mut Vec<Settled>) {
+        let (entries, ours, command) = (&self.entries, &mut self.ours, self.command);
+        let mut take_ours = |drop: Option<u64>| -> Vec<PathBuf> {
+            let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(ours)
+                .into_iter()
+                .partition(|(of, _)| drop.is_none_or(|drop| *of == drop));
+            *ours = kept;
+            taken.into_iter().map(|(_, path)| path).collect()
+        };
+        self.pasting.retain(|&drop| {
+            let mut items = entries.iter().filter(|entry| entry.drop == drop);
+            if !closes && !items.all(|entry| entry.state == EntryState::Done) {
+                return true;
+            }
+            let paths = entries
+                .iter()
+                .filter(|entry| entry.drop == drop && entry.state == EntryState::Done)
+                .map(|entry| entry.job.remote_path())
+                .collect();
+            into.push(Settled {
+                command,
+                paths,
+                ours: take_ours(Some(drop)),
+            });
+            false
+        });
+        if closes {
+            let ours = take_ours(None);
+            if !ours.is_empty() {
+                into.push(Settled {
+                    command,
+                    paths: Vec::new(),
+                    ours,
+                });
+            }
+        }
+    }
+}
+
+/// A drop is over ([`Transfers::take_settled`]): the remote paths of its items that arrived, in
+/// the order they were dropped, to paste into the session `command` (none for a drop that only
+/// leaves files to delete), and bateri's own local files it held ([`Job::ours`]), to delete.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Settled {
+    pub command: u64,
+    pub paths: Vec<String>,
+    pub ours: Vec<PathBuf>,
 }
 
 /// A tab's transfer state (main thread): whether a sheet is in progress, the queue
@@ -2042,6 +2244,10 @@ pub struct Transfers {
     /// An update waits for the application's transfers to end: how many are left across every
     /// pane — the line leads with it ([`Self::status`]). `None`: no update waits.
     update_waits: Option<usize>,
+    /// The drops' counter ([`Item::drop`]).
+    next_drop: u64,
+    /// The drops that are over and not yet taken ([`Self::take_settled`]).
+    settled: Vec<Settled>,
 }
 
 /// The queue ended: the result line, its generation and the notification (title,
@@ -2053,6 +2259,8 @@ pub struct Ended {
     pub serial: u64,
     pub notice: Option<(String, String)>,
     pub end: End,
+    /// The line was never shown and all is well ([`PASTE_QUIET`]): the end is not said either.
+    pub quiet: bool,
 }
 
 /// The answer to a stop request ([`Transfers::stop_request`]).
@@ -2218,21 +2426,40 @@ impl Transfers {
             ending: None,
             side_failure: None,
             left: None,
+            pasting: Vec::new(),
+            ours: Vec::new(),
+            since: None,
+            said: false,
         });
         if queue.command != command || queue.ending.is_some() {
             return false;
         }
+        self.next_drop += 1;
+        let drop = self.next_drop;
+        if jobs.iter().any(|job| job.paste) {
+            queue.pasting.push(drop);
+        }
         for job in jobs {
             self.next_id += 1;
             queue.bytes_total += job.local.bytes;
+            if job.ours {
+                queue.ours.push((drop, job.local.path.clone()));
+            }
             queue.entries.push(Item {
                 id: self.next_id,
+                drop,
                 job,
                 state: EntryState::Waiting,
                 landed: None,
             });
         }
         true
+    }
+
+    /// The drops that are over since the last call ([`Settled`]): the pane pastes their paths
+    /// and deletes bateri's own files.
+    pub fn take_settled(&mut self) -> Vec<Settled> {
+        std::mem::take(&mut self.settled)
     }
 
     /// Starts at `now` every item that may start: each waiting Finder
@@ -2245,6 +2472,7 @@ impl Transfers {
         if queue.ending.is_some() {
             return Vec::new();
         }
+        queue.since.get_or_insert(now);
         let mut queue_busy = queue
             .running
             .iter()
@@ -2290,6 +2518,7 @@ impl Transfers {
         let entry = queue.entries.iter_mut().find(|entry| {
             entry.state == EntryState::Waiting && entry.job.way.lane() == Lane::Queue
         })?;
+        queue.since.get_or_insert(now);
         entry.state = EntryState::Running;
         let shared = Arc::new(Shared::default());
         queue.running.push(Current {
@@ -2485,10 +2714,11 @@ impl Transfers {
     /// killed and their half-written files deleted on the stream threads; the result
     /// is shown to no one.
     pub fn abandon(&mut self) {
-        if let Some(queue) = self.queue.take() {
+        if let Some(mut queue) = self.queue.take() {
             for current in &queue.running {
                 current.shared.cancel();
             }
+            queue.settle(true, &mut self.settled);
         }
     }
 
@@ -2590,6 +2820,7 @@ impl Transfers {
                 queue.ending = Some(End::Failed(reason));
             }
         }
+        queue.settle(false, &mut self.settled);
         if !queue.running.is_empty() {
             return None;
         }
@@ -2608,7 +2839,8 @@ impl Transfers {
 
     /// Closes the queue and returns the result line.
     fn end(&mut self) -> Option<Ended> {
-        let queue = self.queue.take()?;
+        let mut queue = self.queue.take()?;
+        queue.settle(true, &mut self.settled);
         self.serial += 1;
         // The session closed but the streaming item finished over the server's connection and
         // nothing was waiting: everything arrived, the result is a success.
@@ -2623,7 +2855,10 @@ impl Transfers {
         let mut tally = Tally::of(&queue.entries);
         tally.left = queue.left;
         let (body, tone, lead) = end_line(&end, &queue.host, &tally);
-        let notice = end_notice(&end, &queue.host, &tally);
+        // A drop for the program that arrived before its line ever showed is said by its path on
+        // the program's line alone.
+        let quiet = end == End::Done && tally.pasted && !queue.said;
+        let notice = end_notice(&end, &queue.host, &tally).filter(|_| !quiet);
         Some(Ended {
             line: Transfer {
                 host: queue.host,
@@ -2638,6 +2873,7 @@ impl Transfers {
             serial: self.serial,
             notice,
             end,
+            quiet,
         })
     }
 
@@ -2846,6 +3082,7 @@ impl Transfers {
         {
             let entry = queue.entries.remove(index);
             queue.bytes_total -= entry.job.local.bytes;
+            queue.settle(false, &mut self.settled);
         }
     }
 
@@ -2874,6 +3111,11 @@ impl Transfers {
             _ => None,
         };
         queue.rate = rate;
+        // The speed is measured from the start; the line waits.
+        if queue.quiet(now) {
+            return None;
+        }
+        queue.said = true;
         let (index, entry) = queue.entry(id)?;
         let local = &entry.job.local;
         let items = queue.entries.len();
@@ -2920,6 +3162,7 @@ impl Transfers {
         let shown = sent.min(total);
         body.push_str("  ");
         body.push_str(&format_pair(shown, total));
+        let short = body.chars().count();
         if let Some(rate) = rate {
             body.push_str(" · ");
             body.push_str(&format_rate(rate));
@@ -2946,6 +3189,7 @@ impl Transfers {
                 list_open: self.list_open,
             },
             progress: Some(progress),
+            short,
             ..Transfer::default()
         })
     }
@@ -3236,10 +3480,13 @@ mod tests {
             .enumerate()
             .map(|(id, &(name, dir, at, state))| Item {
                 id: id as u64,
+                drop: 0,
                 job: Job {
                     local: local(name, dir, 1, 1),
                     dir: at.into(),
                     way: Way::Up,
+                    paste: false,
+                    ours: false,
                 },
                 state,
                 landed: None,
@@ -3476,6 +3723,8 @@ mod tests {
             local: local(name, dir, files, bytes),
             dir: "/srv".into(),
             way: Way::Up,
+            paste: false,
+            ours: false,
         }
     }
 
@@ -4672,5 +4921,318 @@ mod tests {
         assert!(plain.contains("static/a"), "{plain}");
         assert_eq!(listed, plain);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A drop for the program in front ([`Job::paste`]), into `/srv`.
+    fn pasted(name: &str, bytes: u64) -> Job {
+        Job {
+            paste: true,
+            ..job(name, false, 1, bytes)
+        }
+    }
+
+    #[test]
+    fn paste_drops_paste_their_arrived_paths_once_each_is_over_in_their_order() {
+        let mut uploads = queue_of(vec![pasted("one.png", 10), pasted("two.pdf", 10)]);
+        // A drop for the shell behind it pastes nothing.
+        assert!(uploads.enqueue(
+            7,
+            Served::none(),
+            "prod".into(),
+            HostMark::Production,
+            vec![job("site", true, 3, 10)],
+        ));
+        let now = Instant::now();
+        uploads.start_next(now).expect("one");
+        assert_eq!(uploads.finish(Outcome::Done), None);
+        assert_eq!(uploads.take_settled(), [], "the drop is not over yet");
+        uploads.start_next(now).expect("two");
+        assert_eq!(
+            uploads.finish(Outcome::Done),
+            None,
+            "the shell's drop still waits"
+        );
+        assert_eq!(
+            uploads.take_settled(),
+            [Settled {
+                command: 7,
+                paths: vec!["/srv/one.png".into(), "/srv/two.pdf".into()],
+                ours: Vec::new(),
+            }],
+            "pasted when its own items are in, not when the queue ends"
+        );
+        uploads.start_next(now).expect("site");
+        let ended = uploads.finish(Outcome::Done).expect("ended");
+        assert_eq!(uploads.take_settled(), [], "pasted once");
+        assert_eq!(
+            ended.line.body, "✓ 3 files → /srv",
+            "a mixed queue says where"
+        );
+    }
+
+    #[test]
+    fn paste_a_stop_pastes_what_arrived_and_lets_bateris_own_files_go() {
+        let mut image = pasted("image.png", 10);
+        image.ours = true;
+        image.local.path = PathBuf::from("/tmp/bateri-paste/1/image.png");
+        let mut uploads = queue_of(vec![image, pasted("big.mov", 10), pasted("late.txt", 10)]);
+        let now = Instant::now();
+        uploads.start_next(now).expect("image");
+        assert_eq!(uploads.finish(Outcome::Done), None);
+        uploads.start_next(now).expect("big");
+        assert_eq!(uploads.stop(None, true), None);
+        let ended = uploads.finish(Outcome::Cancelled).expect("ended");
+        assert_eq!(
+            uploads.take_settled(),
+            [Settled {
+                command: 7,
+                paths: vec!["/srv/image.png".into()],
+                ours: vec![PathBuf::from("/tmp/bateri-paste/1/image.png")],
+            }]
+        );
+        assert!(
+            ended.line.body.starts_with("Cancelled — 1 of 3"),
+            "{}",
+            ended.line.body
+        );
+    }
+
+    #[test]
+    fn paste_a_failure_pastes_what_arrived_and_a_closing_tab_pastes_nothing_but_deletes() {
+        let mut uploads = queue_of(vec![pasted("a.png", 10), pasted("b.log", 10)]);
+        let now = Instant::now();
+        uploads.start_next(now).expect("a");
+        assert_eq!(uploads.finish(Outcome::Done), None);
+        uploads.start_next(now).expect("b");
+        let ended = uploads.finish(Outcome::DiskFull).expect("ended");
+        assert_eq!(
+            ended.line.body,
+            "Failed — disk full on prod · 1 of 2 uploaded"
+        );
+        let settled = uploads.take_settled();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].paths, ["/srv/a.png"]);
+
+        let mut image = pasted("image.png", 10);
+        image.ours = true;
+        image.local.path = PathBuf::from("/tmp/bateri-paste/2/image.png");
+        let mut uploads = queue_of(vec![image]);
+        uploads.start_next(now).expect("image");
+        uploads.abandon();
+        let settled = uploads.take_settled();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].paths, Vec::<String>::new(), "nothing arrived");
+        assert_eq!(
+            settled[0].ours,
+            [PathBuf::from("/tmp/bateri-paste/2/image.png")]
+        );
+    }
+
+    #[test]
+    fn paste_a_removed_item_leaves_its_drop_to_paste_the_rest() {
+        let mut uploads = queue_of(vec![pasted("a.png", 10), pasted("b.png", 10)]);
+        let now = Instant::now();
+        uploads.start_next(now).expect("a");
+        // The popover's Remove on the waiting one while the first streams.
+        let waiting = uploads.queue.as_ref().unwrap().entries[1].id;
+        uploads.remove(waiting);
+        assert_eq!(uploads.take_settled(), [], "the first is still on its way");
+        let ended = uploads.finish(Outcome::Done).expect("ended");
+        assert_eq!(uploads.take_settled()[0].paths, ["/srv/a.png"]);
+        assert_eq!(
+            ended.line.body, "✓ a.png",
+            "the path is on the line: no folder"
+        );
+    }
+
+    #[test]
+    fn paste_the_end_line_names_what_went_and_not_the_folder() {
+        let mut uploads = queue_of(vec![pasted("a.png", 10), pasted("b.png", 10)]);
+        let now = Instant::now();
+        uploads.start_next(now).expect("a");
+        assert_eq!(uploads.finish(Outcome::Done), None);
+        uploads.start_next(now).expect("b");
+        let ended = uploads.finish(Outcome::Done).expect("ended");
+        assert_eq!(ended.line.body, "✓ 2 files");
+        assert_eq!(ended.line.tone, TransferTone::Success);
+    }
+
+    #[test]
+    fn paste_the_short_line_leaves_the_rate_and_the_time_out() {
+        let mut uploads = queue_of(vec![pasted("shot.png", 3_400_000)]);
+        let start = Instant::now();
+        let (_, _, shared) = uploads.start_next(start).expect("shot");
+        shared.bytes.store(1_000_000, Ordering::Release);
+        uploads.status(start);
+        shared.bytes.store(2_000_000, Ordering::Release);
+        let line = uploads
+            .status(start + Duration::from_secs(1))
+            .expect("line");
+        assert!(line.body.contains(" · 1.0 MB/s"), "{}", line.body);
+        let short: String = line.body.chars().take(line.short).collect();
+        assert_eq!(short, "↑ shot.png  2.0 / 3.4 MB");
+    }
+
+    fn paste_reply(free: Option<u64>, tar: bool, dir: &str) -> ProbeReply {
+        ProbeReply {
+            dir: dir.into(),
+            free,
+            tar,
+            existing: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn paste_check_lets_small_drops_go_asks_for_large_ones_and_refuses_what_cannot_go() {
+        let dir = "/home/me/.cache/bateri/paste/2026-11-19-143012";
+        let small = [local("shot.png", false, 1, 3_400_000)];
+        assert_eq!(
+            paste_check(
+                "rasp",
+                &small,
+                &paste_reply(Some(10_000_000_000), true, dir)
+            ),
+            PasteCheck::Go
+        );
+        let at_the_line = [local("clip.mov", false, 1, PASTE_ASK_ABOVE)];
+        assert_eq!(
+            paste_check("rasp", &at_the_line, &paste_reply(None, true, dir)),
+            PasteCheck::Go,
+            "a server whose df is not read is not asked about"
+        );
+        let large = [
+            local("clip.mov", false, 1, 120_000_000),
+            local("notes.txt", false, 1, 1_000),
+        ];
+        match paste_check("rasp", &large, &paste_reply(None, true, dir)) {
+            PasteCheck::Ask(sheet) => {
+                assert_eq!(sheet.message, "Upload 2 items to rasp?");
+                assert_eq!(
+                    sheet.informative,
+                    format!(
+                        "120.0 MB → {dir}\nclip.mov\nnotes.txt\n\
+                         Their paths are pasted here when they arrive."
+                    )
+                );
+                assert_eq!((sheet.button, sheet.enabled), ("Upload", true));
+            }
+            other => panic!("{other:?}"),
+        }
+        let PasteCheck::Ask(one) = paste_check("rasp", &large[..1], &paste_reply(None, true, dir))
+        else {
+            panic!("asked");
+        };
+        assert_eq!(one.message, "Upload “clip.mov” to rasp?");
+        assert!(
+            one.informative
+                .ends_with("Its path is pasted here when it arrives.")
+        );
+        assert_eq!(
+            paste_check("rasp", &small, &paste_reply(Some(2_000_000), true, dir)),
+            PasteCheck::Refused("rasp has 2.0 MB free, “shot.png” needs 3.4 MB.".into())
+        );
+        assert_eq!(
+            paste_check("rasp", &small, &paste_reply(None, false, dir)),
+            PasteCheck::Refused("tar is not installed on rasp, so nothing can be sent.".into())
+        );
+        assert!(matches!(
+            paste_check("rasp", &small, &paste_reply(None, true, "/home/a\u{1b}b")),
+            PasteCheck::Refused(text) if text.contains("paste folder's path")
+        ));
+    }
+
+    #[test]
+    fn paste_probe_answers_from_a_folder_of_its_own_and_the_item_lands_there() {
+        let root = crate::settings::TempRoot::new("upload-paste-probe");
+        let (home, here) = (root.0.join("home"), root.0.join("here"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&here).unwrap();
+        let file = here.join("image.png");
+        std::fs::write(&file, b"\x89PNG not really").unwrap();
+        let served = Served::at_home(&home, Path::new("/bin/sh"));
+        let paths = [file.to_str().unwrap().to_owned()];
+        let (items, reply) = probe_paste(&served, Ask::Never, "rasp", &paths).expect("probe");
+        let folder = home.join(crate::paste_folder::ROOT);
+        assert_eq!(
+            Path::new(&reply.dir)
+                .parent()
+                .map(Path::canonicalize)
+                .transpose()
+                .unwrap(),
+            Some(folder.canonicalize().unwrap()),
+            "{}",
+            reply.dir
+        );
+        assert!(reply.tar, "this machine has tar");
+        assert_eq!(items[0].name, "image.png");
+        let shared = Arc::new(Shared::default());
+        let outcome = transfer(&served, &items[0], &reply.dir, &shared, || {});
+        assert_eq!(outcome, Outcome::Done);
+        let job = Job {
+            paste: true,
+            ..Job {
+                local: items[0].clone(),
+                dir: reply.dir.clone(),
+                way: Way::Up,
+                paste: false,
+                ours: false,
+            }
+        };
+        assert_eq!(
+            std::fs::read(job.remote_path()).expect("landed"),
+            b"\x89PNG not really"
+        );
+        // A second paste gets another folder.
+        let (_, again) = probe_paste(&served, Ask::Never, "rasp", &paths).expect("again");
+        assert_ne!(again.dir, reply.dir);
+    }
+
+    #[test]
+    fn paste_a_paste_folder_that_cannot_be_made_says_so() {
+        let root = crate::settings::TempRoot::new("upload-paste-unwritable");
+        let file = root.0.join("image.png");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::write(root.0.join(".cache"), b"").unwrap();
+        let served = Served::at_home(&root.0, Path::new("/bin/sh"));
+        let error = probe_paste(
+            &served,
+            Ask::Never,
+            "rasp",
+            &[file.to_str().unwrap().to_owned()],
+        )
+        .expect_err("refused");
+        assert_eq!(error, "~/.cache/bateri/paste can't be written on rasp.");
+    }
+
+    #[test]
+    fn paste_a_drop_for_the_program_keeps_quiet_its_first_second_and_a_quick_one_ends_quiet() {
+        let mut uploads = queue_of(vec![pasted("shot.png", 3_400_000)]);
+        let start = Instant::now();
+        let (_, _, shared) = uploads.start_next(start).expect("shot");
+        shared.bytes.store(1_000_000, Ordering::Release);
+        assert_eq!(uploads.status(start), None, "the first second is quiet");
+        assert_eq!(uploads.status(start + Duration::from_millis(900)), None);
+        let ended = uploads.finish(Outcome::Done).expect("ended");
+        assert!(ended.quiet, "its path says it arrived");
+        assert_eq!(ended.notice, None);
+
+        // A slow one says it, and its end too.
+        let mut uploads = queue_of(vec![pasted("clip.mov", 30_000_000)]);
+        uploads.start_next(start).expect("clip");
+        assert!(uploads.status(start + PASTE_QUIET).is_some());
+        let ended = uploads.finish(Outcome::Done).expect("ended");
+        assert!(!ended.quiet);
+        assert_eq!(ended.line.body, "✓ clip.mov");
+
+        // A quick failure is said whatever its time.
+        let mut uploads = queue_of(vec![pasted("shot.png", 10)]);
+        uploads.start_next(start).expect("shot");
+        assert!(!uploads.finish(Outcome::DiskFull).expect("ended").quiet);
+
+        // A drop for the shell is said at once, as it always was.
+        let mut uploads = queue_of(vec![job("site", true, 3, 10)]);
+        uploads.start_next(start).expect("site");
+        assert!(uploads.status(start).is_some());
+        assert!(!uploads.finish(Outcome::Done).expect("ended").quiet);
     }
 }

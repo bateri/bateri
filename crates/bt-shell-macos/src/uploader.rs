@@ -10,9 +10,13 @@
 //! and the Dock tile itself is the total over all panes
 //! ([`refresh_dock_tile`], the owner walks them).
 //!
-//! The image ⌘V puts on a server ([`TerminalPane::paste_image_up`]) rides here too: it is a
-//! transfer with no sheet and no queue, whose line borrows the queue's row only while that row is
-//! free and the upload is slow ([`paste_image`]).
+//! What is pasted or dropped **for the program in front** rides the same queue
+//! ([`paste_folder`]): an image ⌘V pastes ([`TerminalPane::paste_image_up`], written out to a
+//! file of bateri's own first) and the files a person drops on, or pastes into, a coding agent
+//! ([`TerminalPane::upload_drop`]). They go to a folder of their own in the server's paste
+//! folder with no sheet — one asks only past [`upload::PASTE_ASK_ABOVE`] — and once their drop
+//! is over the paths of what arrived are pasted ([`TerminalPane::settle_drops`]). A pane with no
+//! dock shows the line on its card ([`crate::upload_card`]).
 //!
 //! The rule and the text are in `upload` (pure, tested); only the binding is
 //! here. Every report from the background threads goes to the main queue
@@ -29,14 +33,14 @@ use std::cell::{OnceCell, RefCell};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use block2::{DynBlock, RcBlock};
 use bt_core::{HostMark, Transfer};
 use bt_shell_common::kablo::served::Served;
-use bt_shell_common::paste_image;
+use bt_shell_common::paste_folder;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
@@ -69,8 +73,8 @@ use crate::remote_helper::{Answer, Dial, Query, Request};
 use crate::sheets::{self, Asker, beep};
 use crate::ssh_route;
 use crate::upload::{
-    self, Direction, Ended, Job, Lane, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared,
-    Started, Stop, StopQuestion, TransferList, Way,
+    self, Direction, Ended, Job, Lane, Local, Outcome, PasteCheck, ProbeReply, RowAction,
+    RowStatus, Shared, Started, Stop, StopQuestion, TransferList, Way,
 };
 
 /// Everything that returns to the main thread from the background probe.
@@ -83,14 +87,17 @@ struct Asked {
     result: Result<(Vec<Local>, ProbeReply), String>,
 }
 
-/// An image ⌘V sends to a server ([`TerminalPane::paste_image_up`]): how far it has gone, what
-/// its line names, and the line it put up, if any — taken down only while it is still that one.
-struct ImagePaste {
-    sending: paste_image::Sending,
+/// Everything that returns to the main thread from the first question of a drop for the program
+/// in front ([`TerminalPane::upload_for_program`]).
+struct PasteAsked {
+    command: u64,
+    served: Served,
     host: String,
     mark: HostMark,
-    total: u64,
-    row: Mutex<Option<Transfer>>,
+    /// bateri's own files among the dropped ones (a pasted image written out): deleted if the
+    /// drop does not go into the queue, and by the queue once it is over if it does.
+    ours: Vec<std::path::PathBuf>,
+    result: Result<(Vec<Local>, ProbeReply), String>,
 }
 
 /// The confirmed drop (or download): the items that will enter the
@@ -172,10 +179,16 @@ impl TerminalPane {
     }
 
     /// A Finder drop in a remote session: local measurement and
-    /// remote probe in the background, then the confirmation sheet. `false` →
+    /// remote probe in the background, then the confirmation sheet — or, with a coding agent in
+    /// front, its drop for the program ([`Self::upload_for_program`]). `false` →
     /// the drop was refused (local session, or another sheet is in progress -
     /// two sheets cannot open on top of each other).
     pub(crate) fn upload_drop(&self, paths: Vec<String>) -> bool {
+        // A coding agent in front reads the paths it is given: the files go to the paste
+        // folder and their paths are pasted, with no sheet ([`paste_folder::for_program`]).
+        if paste_folder::for_program(self.program_kind()) {
+            return self.upload_for_program(paths, Vec::new());
+        }
         let Some(session) = self.session() else {
             return false;
         };
@@ -233,102 +246,199 @@ impl TerminalPane {
             && self.upload_stop().borrow().is_none()
     }
 
-    /// ⌘V with an image and no text on the clipboard, in a pane a server keeps
-    /// ([`paste_image`]): the PNG goes to the server's paste folder on a thread of its own, and
-    /// its path is pasted once it is there. No sheet asks first; the dock's line shows only an
-    /// upload that is slow ([`paste_image::SLOW`]). `false` → nothing was started (not a server
-    /// pane, or no thread).
+    /// ⌘V with an image and no text on the clipboard, in a pane a server keeps, whatever program
+    /// is in front: the PNG is written out to a file of bateri's own and sent as a drop for the
+    /// program ([`Self::upload_for_program`]) — to the paste folder, its path pasted once it is
+    /// there. `false` → nothing was started (not a server pane, a sheet is up, or the file could
+    /// not be written).
     pub(crate) fn paste_image_up(&self, png: Vec<u8>) -> bool {
-        let (Some(session), Some((command, target, _))) = (self.session(), self.server_target())
-        else {
-            return false;
-        };
-        let paste = Arc::new(ImagePaste {
-            sending: paste_image::Sending::default(),
-            host: target.label().into_owned(),
-            mark: session
-                .remote_mark()
-                .map_or(HostMark::None, |(_, mark)| mark),
-            total: png.len() as u64,
-            row: Mutex::new(None),
-        });
-        let served = self.served(&target);
-        let (id, lookup) = (self.id(), self.lookup());
-        let sent = Arc::clone(&paste);
-        let spawned = thread::Builder::new()
-            .name("image paste".into())
-            .spawn(move || {
-                let result = paste_image::put(&served, &png, &sent.sending);
-                on_pane(lookup, id, move |pane| {
-                    pane.image_landed(&sent, command, result);
-                });
-            });
-        if spawned.is_err() {
+        if self.server_target().is_none() || !self.accepts_drop() {
             return false;
         }
-        self.image_paste_tick(paste, paste_image::SLOW);
+        let Ok(file) = write_pasted_image(&png) else {
+            return false;
+        };
+        let path = file.display().to_string();
+        let started = self.upload_for_program(vec![path], vec![file.clone()]);
+        if !started {
+            forget(&[file]);
+        }
+        started
+    }
+
+    /// A drop for the program in front: the dropped `paths` are measured and the server makes
+    /// the drop's own folder in its paste folder on a background thread ([`upload::probe_paste`]),
+    /// then [`Self::paste_asked`] lets them go, asks, or says why not. `ours`: bateri's own files
+    /// among them. `false` → refused (not a server pane, or another sheet is in progress).
+    fn upload_for_program(&self, paths: Vec<String>, ours: Vec<std::path::PathBuf>) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        let Some((command, target, _)) = self.server_target() else {
+            return false;
+        };
+        if !self.accepts_drop() {
+            return false;
+        }
+        let mark = session
+            .remote_mark()
+            .map_or(HostMark::None, |(_, mark)| mark);
+        let host = target.label().into_owned();
+        let served = self.served(&target);
+        let ask = self.login_ask(&host, Some((SheetJob::Upload, true)));
+        let (id, lookup) = (self.id(), self.lookup());
+        self.uploads().borrow_mut().set_asking(true);
+        let spawned = thread::Builder::new()
+            .name("paste probe".into())
+            .spawn(move || {
+                let result = upload::probe_paste(&served, ask, &host, &paths);
+                let asked = PasteAsked {
+                    command,
+                    served,
+                    host,
+                    mark,
+                    ours,
+                    result,
+                };
+                on_pane(lookup, id, move |pane| pane.paste_asked(asked));
+            });
+        if spawned.is_err() {
+            self.uploads().borrow_mut().set_asking(false);
+            return false;
+        }
         true
     }
 
-    /// Looks at an image's upload `after` from now: while it runs, its line is put up or
-    /// refreshed where the dock's transfer row is free or already its own, and looked at again
-    /// after [`upload::TICK`]. The stop condition is the upload's end: no frame is asked for
-    /// after it.
-    fn image_paste_tick(&self, paste: Arc<ImagePaste>, after: Duration) {
-        let Ok(when) = DispatchTime::try_from(after) else {
+    /// A drop for the program had its first question answered: it goes into the queue with no
+    /// sheet, or the sheet asks first for a large one, or the error sheet says why it cannot go
+    /// ([`upload::paste_check`]).
+    fn paste_asked(&self, asked: PasteAsked) {
+        self.uploads().borrow_mut().set_asking(false);
+        let alive = self
+            .server_target()
+            .is_some_and(|(command, ..)| command == asked.command);
+        let PasteAsked {
+            command,
+            served,
+            host,
+            mark,
+            ours,
+            result,
+        } = asked;
+        // The session ended meanwhile, or the login was cancelled: nothing more to say.
+        if !alive
+            || result
+                .as_ref()
+                .is_err_and(|text| text == ssh_route::CANCELLED)
+        {
+            forget(&ours);
             return;
+        }
+        let (items, reply) = match result {
+            Ok(answer) => answer,
+            Err(text) => {
+                forget(&ours);
+                self.failure_sheet(&format!("Can't upload to {host}"), &text);
+                return;
+            }
         };
-        let (id, lookup) = (self.id(), self.lookup());
-        let _ = DispatchQueue::main().after(when, move || {
-            // audit: a block running on the main queue is by definition on the main thread.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            let Some(pane) = lookup(mtm, id) else {
-                return;
-            };
-            if paste.sending.is_done() {
-                return;
-            }
-            let mut ours = paste.row.lock().unwrap_or_else(PoisonError::into_inner);
-            let free = {
-                let uploads = pane.uploads().borrow();
-                uploads.shown().is_none() || uploads.shown() == ours.as_ref()
-            };
-            if free {
-                let row =
-                    paste_image::row(&paste.host, paste.mark, paste.sending.sent(), paste.total);
-                pane.show_transfer(Some(row.clone()));
-                *ours = Some(row);
-            }
-            drop(ours);
-            pane.image_paste_tick(paste, upload::TICK);
-        });
-    }
-
-    /// The image's upload is over: its line comes down if it is still up, and the path is pasted
-    /// as a drop's path is — through the pane's input gate — if the pane still shows the session
-    /// it was pasted in. A failure is said in a sheet.
-    fn image_landed(&self, paste: &ImagePaste, command: u64, result: Result<String, String>) {
-        let ours = paste
-            .row
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if ours.is_some() && self.uploads().borrow().shown() == ours.as_ref() {
-            self.show_transfer(None);
-        }
-        if !self.server_target().is_some_and(|(now, ..)| now == command) {
-            return;
-        }
-        match result {
-            Ok(path) => {
-                if let Some(session) = self.session()
-                    && !self.hold_input(false)
-                {
-                    session.paste(shell_quote(&[path]).into_bytes());
+        let check = upload::paste_check(&host, &items, &reply);
+        let confirmed = Confirmed {
+            command,
+            served,
+            host: host.clone(),
+            mark,
+            jobs: items
+                .into_iter()
+                .map(|local| Job {
+                    ours: ours.iter().any(|file| file == local.path()),
+                    local,
+                    dir: reply.dir.clone(),
+                    way: Way::Up,
+                    paste: true,
+                })
+                .collect(),
+        };
+        match check {
+            PasteCheck::Go => {
+                if !self.upload_confirmed(confirmed) {
+                    forget(&ours);
+                    beep();
                 }
             }
-            Err(text) => {
-                self.failure_sheet(&format!("Can't paste the image on {}", paste.host), &text)
+            PasteCheck::Refused(text) => {
+                forget(&ours);
+                self.failure_sheet(&format!("Can't upload to {host}"), &text);
+            }
+            PasteCheck::Ask(sheet) => self.paste_ask(&sheet, confirmed, ours),
+        }
+    }
+
+    /// The question a large drop for the program asks before it goes: Upload, or Cancel (Esc),
+    /// which lets bateri's own files go.
+    fn paste_ask(
+        &self,
+        sheet: &upload::Sheet,
+        confirmed: Confirmed,
+        ours: Vec<std::path::PathBuf>,
+    ) {
+        let Some(seat) = sheets::seat(Asker::Pane(self)).filter(|seat| !seat.is_taken()) else {
+            forget(&ours);
+            beep();
+            return;
+        };
+        let alert = NSAlert::new(self.mtm());
+        alert.setMessageText(&NSString::from_str(&sheet.message));
+        alert.setInformativeText(&NSString::from_str(&sheet.informative));
+        alert.addButtonWithTitle(&NSString::from_str(sheet.button));
+        let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
+        // Esc by hand (the rationale of `window::alert`).
+        cancel.setKeyEquivalent(ns_string!("\u{1b}"));
+        self.uploads().borrow_mut().set_asking(true);
+        let (id, lookup) = (self.id(), self.lookup());
+        // The block is `Fn`: the payload is taken once.
+        let payload = RefCell::new(Some((confirmed, ours)));
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            // audit: the sheet's completion block runs on AppKit's main thread.
+            let mtm = MainThreadMarker::new().expect("the sheet block is on the main thread");
+            let Some((confirmed, ours)) = payload.borrow_mut().take() else {
+                return;
+            };
+            let Some(pane) = lookup(mtm, id) else {
+                forget(&ours);
+                return;
+            };
+            drop(pane.upload_alert().take());
+            pane.uploads().borrow_mut().set_asking(false);
+            if response != NSAlertFirstButtonReturn {
+                forget(&ours);
+            } else if !pane.upload_confirmed(confirmed) {
+                forget(&ours);
+                beep();
+            }
+        });
+        self.upload_alert().replace(Some(alert.clone()));
+        seat.begin(&alert, &answered);
+    }
+
+    /// The drops that are over ([`upload::Settled`]): bateri's own files are deleted, and the
+    /// paths of what arrived are pasted, as a drop's paths are — in their order, quoted, through
+    /// the pane's input gate — if the pane still shows the session they were dropped in.
+    pub(crate) fn settle_drops(&self) {
+        let settled = self.uploads().borrow_mut().take_settled();
+        for drop in settled {
+            forget(&drop.ours);
+            if drop.paths.is_empty()
+                || !self
+                    .server_target()
+                    .is_some_and(|(now, ..)| now == drop.command)
+            {
+                continue;
+            }
+            if let Some(session) = self.session()
+                && !self.hold_input(false)
+            {
+                session.paste(shell_quote(&drop.paths).into_bytes());
             }
         }
     }
@@ -387,6 +497,8 @@ impl TerminalPane {
                             local,
                             dir: reply.dir.clone(),
                             way: Way::Up,
+                            paste: false,
+                            ours: false,
                         })
                         .collect(),
                 })
@@ -776,6 +888,8 @@ impl TerminalPane {
             None if !self.start_transfers() => self.upload_refresh(),
             None => {}
         }
+        // A drop for the program whose items are all in is pasted now, not when the queue ends.
+        self.settle_drops();
         self.uploads_changed();
     }
 
@@ -786,12 +900,29 @@ impl TerminalPane {
         // The tab hears how it ended first: the queue is gone already, so the refresh this starts
         // sees both the end and the fill with nothing flowing — and the title's refresh, below,
         // is not the one to tell the bar the transfer is over without saying why.
-        self.host()
-            .upload_ended(self.id(), crate::tabs::Finish::of(&ended.end));
+        let finish = crate::tabs::Finish::of(&ended.end);
+        self.host().upload_ended(self.id(), finish);
+        self.end_upload_card(finish);
         self.close_upload_list();
         self.dismiss_stale_stop();
+        if ended.quiet {
+            // A drop for the program that arrived before its line showed: its path says so. An
+            // earlier queue's result still up goes with it (its wait is for the older serial).
+            let lingering = self
+                .uploads()
+                .borrow()
+                .shown()
+                .is_some_and(|line| line.kind == bt_core::TransferKind::Upload);
+            if lingering {
+                self.show_transfer(None);
+            }
+            self.refresh_upload_title();
+            self.settle_drops();
+            return;
+        }
         self.show_transfer(Some(ended.line));
         self.refresh_upload_title();
+        self.settle_drops();
         // `[remote] download_notify`: a transfer ending in the
         // background notifies only if the user wants it — either direction.
         if let Some((title, body)) = ended.notice
@@ -840,6 +971,8 @@ impl TerminalPane {
         if let Some(session) = self.session() {
             session.set_transfer(transfer.as_ref());
         }
+        // A pane with no dock says it on its card.
+        self.show_upload_card(transfer.as_ref());
         self.uploads().borrow_mut().set_shown(transfer);
         // `borrow_mut` is done: computing the rects borrows `uploads` again.
         // An upload row takes the load indicator's place: its popover closes
@@ -981,6 +1114,10 @@ impl TerminalPane {
     pub(crate) fn abandon_uploads(&self) {
         self.close_upload_list();
         self.uploads().borrow_mut().abandon();
+        // Nothing is pasted into a closing tab; bateri's own files go.
+        for drop in self.uploads().borrow_mut().take_settled() {
+            forget(&drop.ours);
+        }
         self.dismiss_stale_stop();
         self.uploads_changed();
     }
@@ -1000,6 +1137,7 @@ impl TerminalPane {
             Some(RowAction::Cancel) => self.request_stop_item(Some(id), false),
             Some(RowAction::Remove) => {
                 self.uploads().borrow_mut().remove(id);
+                self.settle_drops();
                 self.upload_refresh();
             }
             Some(RowAction::ShowInFinder) => {
@@ -1762,6 +1900,31 @@ pub(crate) fn quarantine(path: &Path, agent: &str) {
 /// `download_dir`, its free space and whether the remote name is already taken
 /// there. Nothing is created here — a missing folder is made when the stream
 /// starts (`download::transfer`), after the user confirmed.
+/// Writes an image the clipboard held to a file of bateri's own, to be sent as a drop is
+/// ([`TerminalPane::paste_image_up`]): `image.png` in a folder of its own in this user's
+/// temporary folder, so the name it lands under on the server is plain.
+fn write_pasted_image(png: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let folder = std::env::temp_dir()
+        .join("bateri-paste")
+        .join(format!("{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&folder)?;
+    let file = folder.join("image.png");
+    std::fs::write(&file, png)?;
+    Ok(file)
+}
+
+/// Deletes bateri's own files ([`write_pasted_image`]) and the folder each was alone in.
+fn forget(ours: &[std::path::PathBuf]) {
+    for file in ours {
+        let _ = std::fs::remove_file(file);
+        if let Some(folder) = file.parent() {
+            let _ = std::fs::remove_dir(folder);
+        }
+    }
+}
+
 fn landing(
     entry: RemoteEntry,
     remote: &str,

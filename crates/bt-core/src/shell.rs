@@ -1062,6 +1062,10 @@ pub struct Transfer {
     /// The number of leading characters drawn in [`Self::tone`]: in a failure line
     /// `Failed — {reason}` is red, the ` · k of n uploaded` after it is dim.
     pub lead: usize,
+    /// The number of leading characters a short line says — the card a pane with no dock
+    /// shows the line on: what goes and how much of it has, without the rate and the time
+    /// left after it. `0` → the whole body.
+    pub short: usize,
     /// The state of the buttons at the right of the line; no buttons if the item
     /// count is zero (result line).
     pub controls: TransferControls,

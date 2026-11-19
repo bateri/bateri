@@ -428,7 +428,7 @@ const SURFACE_APART: (f64, f64) = (1.4, 1.12);
 /// it). A theme whose foreground stands close to its background (a soft light
 /// palette) gets less from the same ratio, so the blend goes on, a percent at
 /// a time, until the fill stands [`SURFACE_APART`] from the background.
-fn surface_colors(background: u32, foreground: u32, dark: bool) -> (u32, (u32, f64)) {
+pub(crate) fn surface_colors(background: u32, foreground: u32, dark: bool) -> (u32, (u32, f64)) {
     let (lift, edge) = if dark { (0.20, 0.30) } else { (0.08, 0.24) };
     let apart = if dark {
         SURFACE_APART.0
@@ -456,7 +456,7 @@ pub(crate) fn mix(a: u32, b: u32, t: f64) -> u32 {
     channel(16) | channel(8) | channel(0)
 }
 
-fn srgb(color: u32, alpha: f64) -> Retained<NSColor> {
+pub(crate) fn srgb(color: u32, alpha: f64) -> Retained<NSColor> {
     let byte = |shift: u32| f64::from((color >> shift) & 0xff) / 255.0;
     NSColor::colorWithSRGBRed_green_blue_alpha(byte(16), byte(8), byte(0), alpha)
 }
