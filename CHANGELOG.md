@@ -20,6 +20,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A tab running `npm run dev` shows the task icon.** npm renames its process to its whole command line, and bateri took the tab for a plain shell.
 - **One click runs a command in a program's command palette.** In palettes such as linearpen's and toppen's, and in an editor's completions, the row under the mouse needed a double click; a single click now picks it.
 - **Clicking into a text field closes an open card.** In a program's page, a card next to a button now closes when you click into a field, as it does for any other click.
 

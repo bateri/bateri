@@ -452,6 +452,21 @@ fn started_as(record: &ProcArgs) -> Option<String> {
     .map(str::to_owned)
 }
 
+/// The name a program that renamed itself goes by (Node's `process.title`): it writes the title
+/// over the interpreter's argv, so argv[0] is the title and the script is gone. A title is a
+/// name (Pi's `pi`) or a command line (npm's `npm run dev`), so its first word is looked up when
+/// the whole of it names nothing; the whole is asked first, for an argv[0] that is a path with a
+/// blank in it.
+fn retitled(record: &ProcArgs) -> Option<&str> {
+    let first = record.args.first()?;
+    let whole = base(first);
+    if by_name(whole).is_some() {
+        return Some(whole);
+    }
+    let word = base(first.split_whitespace().next()?);
+    by_name(word).is_some().then_some(word)
+}
+
 /// What a process is by its name, else by the script an interpreter runs.
 /// The guide bar's families (a REPL, a client, a container) are not decided
 /// here ([`of_family`]).
@@ -460,9 +475,7 @@ fn of_process(process: &Process) -> Option<Kind> {
         return Some(kind);
     }
     let record = process.member.candidate.as_ref()?.record.as_ref()?;
-    // A program that renames itself (Node's `process.title`: Pi does) writes its name over the
-    // interpreter's argv, so the script is gone and argv's first word is all that names it.
-    if let Some(kind) = record.args.first().and_then(|first| by_name(base(first))) {
+    if let Some(kind) = retitled(record).and_then(by_name) {
         return Some(kind);
     }
     let args = record.args.get(1..).unwrap_or_default();
@@ -674,8 +687,11 @@ fn kept_name_of(process: &Process) -> Option<String> {
     let record = || process.member.candidate.as_ref()?.record.as_ref();
     let name = match Family::of_name(&process.name) {
         Some(Family::Node) => {
-            let args = record()?.args.get(1..).unwrap_or_default();
-            node_script(args).and_then(|(path, _)| named(base(path)))
+            let record = record()?;
+            let args = record.args.get(1..).unwrap_or_default();
+            node_script(args)
+                .and_then(|(path, _)| named(base(path)))
+                .or_else(|| retitled(record))
         }
         Some(Family::Python) => {
             let args = record()?.args.get(1..).unwrap_or_default();
@@ -1284,6 +1300,28 @@ mod tests {
             &[],
         );
         assert_eq!(seen(&retitled), kind(agent(Agent::Pi)));
+        // npm's title is its command line, written over the argv as one string: its first word
+        // names it, and `npm run dev` is the task it is, not a shell.
+        let npm = login_shell(200).exec(
+            200,
+            101,
+            200,
+            ("node", "/usr/local/bin/node"),
+            &["npm run dev", "", ""],
+            &[],
+        );
+        assert_eq!(seen(&npm), kind(Kind::Task));
+        assert_eq!(kept(&npm).as_deref(), Some("npm"));
+        // An argv[0] that is a path with a blank in it is still read whole.
+        let spaced = login_shell(200).exec(
+            200,
+            101,
+            200,
+            ("node", "/opt/homebrew/bin/node"),
+            &["/Users/u/My Tools/claude", ""],
+            &[],
+        );
+        assert_eq!(seen(&spaced), kind(agent(Agent::ClaudeCode)));
         // A bundled entry point names nothing; the folder it is installed in does.
         let bundled = login_shell(200).exec(
             200,
