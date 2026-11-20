@@ -767,7 +767,7 @@ impl TerminalPane {
     }
 
     /// Starts every item that may start on its own background thread: the
-    /// queue's next item (no-op while one flows) and every Finder
+    /// queue's next items, until [`upload::QUEUE_AT_ONCE`] of them flow, and every Finder
     /// item, which never wait.
     /// Whether anything started (the line was refreshed then).
     fn start_transfers(&self) -> bool {

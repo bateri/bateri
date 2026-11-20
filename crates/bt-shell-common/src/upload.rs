@@ -1869,6 +1869,15 @@ pub fn titled_as(prefix: Option<(&str, u8)>, title: &str) -> String {
 /// not happen with a single wrong click.
 pub const STOP_ASK_AFTER: Duration = Duration::from_secs(30);
 
+/// How many of the queue lane's items stream at once, taken in their order. Every item is a
+/// stream of its own, and opening one and hearing its program end costs two round trips
+/// whatever its size: one at a time, a drop of many small files waited on the link and not on
+/// the bytes, the longer the farther the server. Several at once hide those trips; a large item
+/// shares the link with the others and the queue's bytes still arrive at the link's speed. Four,
+/// not more: a stream's window is its share of the connection's budget, and every item also
+/// starts a `tar` here and one on the server.
+pub const QUEUE_AT_ONCE: usize = 4;
+
 /// Which way an item goes: `Up` to the server, `Down` to this Mac.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Direction {
@@ -1877,7 +1886,7 @@ pub enum Direction {
     Down,
 }
 
-/// Where an item waits: the **queue** runs one item at a time
+/// Where an item waits: the **queue** runs its items in order, [`QUEUE_AT_ONCE`] at a time
 /// (uploads and right-click downloads); a **Finder** drop starts
 /// at once — Finder holds a placeholder.
 /// Every lane is counted alike by the line, the totals, the list, the stop question
@@ -2055,8 +2064,8 @@ struct Queue {
     host: String,
     mark: HostMark,
     entries: Vec<Item>,
-    /// The streaming items: at most one from the queue lane, any number from the
-    /// Finder lane.
+    /// The streaming items, in the order they started: at most [`QUEUE_AT_ONCE`] from the
+    /// queue lane, any number from the Finder lane.
     running: Vec<Current>,
     /// The bar's denominator and the bytes of finished items: the unsent part of an
     /// individually stopped item is subtracted from the denominator and the sent part
@@ -2094,14 +2103,14 @@ impl Queue {
         self.running.iter().find(|current| current.id == id)
     }
 
-    /// The queue lane's streaming item.
+    /// The queue lane's item that started first of those streaming.
     fn queued(&self) -> Option<&Current> {
         self.running
             .iter()
             .find(|current| current.lane == Lane::Queue)
     }
 
-    /// The item the line and a stop without an id speak of: the queue lane's,
+    /// The item the line and a stop without an id speak of: the queue lane's first,
     /// otherwise the longest-streaming one.
     fn subject(&self) -> Option<&Current> {
         self.queued().or_else(|| self.longest())
@@ -2117,6 +2126,22 @@ impl Queue {
             .iter()
             .enumerate()
             .find(|(_, entry)| entry.id == id)
+    }
+
+    /// How many of the queue lane's items stream.
+    fn queue_running(&self) -> usize {
+        self.running
+            .iter()
+            .filter(|current| current.lane == Lane::Queue)
+            .count()
+    }
+
+    /// The queue ends with `end` — unless items streamed together and one of them failed
+    /// before: the first failure is the one the line tells.
+    fn fail(&mut self, end: End) {
+        if !matches!(self.ending, Some(End::Failed(_) | End::DiskFull)) {
+            self.ending = Some(end);
+        }
     }
 
     fn waiting(&self) -> usize {
@@ -2463,7 +2488,7 @@ impl Transfers {
     }
 
     /// Starts at `now` every item that may start: each waiting Finder
-    /// item, and the queue lane's next item if none of its own streams.
+    /// item, and the queue lane's next items until [`QUEUE_AT_ONCE`] of its own stream.
     /// Empty if the queue is ending.
     pub fn start(&mut self, now: Instant) -> Vec<Started> {
         let Some(queue) = self.queue.as_mut() else {
@@ -2473,10 +2498,7 @@ impl Transfers {
             return Vec::new();
         }
         queue.since.get_or_insert(now);
-        let mut queue_busy = queue
-            .running
-            .iter()
-            .any(|current| current.lane == Lane::Queue);
+        let mut queue_free = QUEUE_AT_ONCE.saturating_sub(queue.queue_running());
         let mut started = Vec::new();
         for entry in &mut queue.entries {
             if entry.state != EntryState::Waiting {
@@ -2484,10 +2506,10 @@ impl Transfers {
             }
             let lane = entry.job.way.lane();
             if lane == Lane::Queue {
-                if queue_busy {
+                if queue_free == 0 {
                     continue;
                 }
-                queue_busy = true;
+                queue_free -= 1;
             }
             entry.state = EntryState::Running;
             let shared = Arc::new(Shared::default());
@@ -2509,10 +2531,10 @@ impl Transfers {
     }
 
     /// Starts the queue lane's next item at `now`: the stream thread's inputs. `None`
-    /// if a queue lane item is already streaming or the queue is ending.
+    /// if [`QUEUE_AT_ONCE`] queue lane items are already streaming or the queue is ending.
     pub fn start_next(&mut self, now: Instant) -> Option<(Served, Job, Arc<Shared>)> {
         let queue = self.queue.as_mut()?;
-        if queue.queued().is_some() || queue.ending.is_some() {
+        if queue.queue_running() >= QUEUE_AT_ONCE || queue.ending.is_some() {
             return None;
         }
         let entry = queue.entries.iter_mut().find(|entry| {
@@ -2531,7 +2553,7 @@ impl Transfers {
         Some((queue.served.clone(), entry.job.clone(), shared))
     }
 
-    /// The queue lane's streaming item's id.
+    /// The id of the queue lane's item that started first of those streaming.
     pub fn running_id(&self) -> Option<u64> {
         self.queue.as_ref()?.queued().map(|current| current.id)
     }
@@ -2663,7 +2685,7 @@ impl Transfers {
 
     /// Applies the stop. `id` is the question's (or the request's) item: if that item
     /// finished meanwhile, nothing is done — the question spoke of losing that item.
-    /// Without `all` only that item stops (without an id, the queue lane's) and the
+    /// Without `all` only that item stops (without an id, the queue lane's first) and the
     /// queue goes on; its result comes when the item finishes ([`Self::finish_item`]).
     /// With nothing else waiting or streaming, stopping the item cancels the queue.
     pub fn stop(&mut self, id: Option<u64>, all: bool) -> Option<Ended> {
@@ -2736,7 +2758,8 @@ impl Transfers {
         None
     }
 
-    /// The queue lane's streaming item finished ([`Self::finish_item`]).
+    /// The queue lane's item that started first of those streaming finished
+    /// ([`Self::finish_item`]).
     pub fn finish(&mut self, outcome: Outcome) -> Option<Ended> {
         let id = self.queue.as_ref()?.queued()?.id;
         self.finish_item(id, outcome, None)
@@ -2809,7 +2832,7 @@ impl Transfers {
             Outcome::DiskFull => {
                 queue.entries[index].state = EntryState::Waiting;
                 queue.bytes_done += bytes;
-                queue.ending = Some(match direction {
+                queue.fail(match direction {
                     Direction::Up => End::DiskFull,
                     Direction::Down => End::Failed(LOCAL_DISK_FULL.to_owned()),
                 });
@@ -2817,7 +2840,7 @@ impl Transfers {
             Outcome::Failed(reason) => {
                 queue.entries[index].state = EntryState::Waiting;
                 queue.bytes_done += bytes;
-                queue.ending = Some(End::Failed(reason));
+                queue.fail(End::Failed(reason));
             }
         }
         queue.settle(false, &mut self.settled);
@@ -3743,7 +3766,10 @@ mod tests {
         let start = Instant::now();
         let (_, first, shared) = uploads.start_next(start).expect("first item");
         assert_eq!(first.local.name, "backup.tar.gz");
-        assert!(uploads.start_next(start).is_none(), "sequential only");
+        // The next item does not wait for the first one to end: they stream together.
+        let (_, second, second_shared) = uploads.start_next(start).expect("second item");
+        assert_eq!(second.local.name, "static");
+        assert!(uploads.start_next(start).is_none(), "nothing else waits");
 
         shared.bytes.store(18_200_000, Ordering::Release);
         let status = uploads.status(start).expect("line");
@@ -3768,9 +3794,7 @@ mod tests {
         // A finished item does not end the queue and no path is pasted —
         // `finish`'s answer has nothing to paste, only the result.
         assert_eq!(uploads.finish(Outcome::Done), None);
-        let (_, second, shared) = uploads.start_next(start).expect("second item");
-        assert_eq!(second.local.name, "static");
-        shared.files.store(57, Ordering::Release);
+        second_shared.files.store(57, Ordering::Release);
         let status = uploads.status(start + Duration::from_secs(2)).unwrap();
         assert!(
             status
@@ -3797,6 +3821,126 @@ mod tests {
         );
         assert!(!uploads.active());
         assert!(uploads.linger_over(ended.serial));
+    }
+
+    #[test]
+    fn the_queue_streams_its_limit_at_once_and_starts_the_next_in_order_as_any_ends() {
+        let names: Vec<String> = (0..QUEUE_AT_ONCE + 2).map(|n| format!("{n}.png")).collect();
+        let mut uploads = queue_of(names.iter().map(|name| job(name, false, 1, 10)).collect());
+        let now = Instant::now();
+        let first = uploads.start(now);
+        assert_eq!(
+            started_names(&first),
+            names[..QUEUE_AT_ONCE]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "the first items, in their order"
+        );
+        assert!(uploads.start(now).is_empty(), "the rest wait");
+        assert!(uploads.start_next(now).is_none());
+
+        // An item that ends before the ones started ahead of it frees its place for the next
+        // waiting one; the line keeps naming the first that still streams.
+        assert_eq!(uploads.finish_item(first[1].id, Outcome::Done, None), None);
+        let next = uploads.start(now);
+        assert_eq!(started_names(&next), [names[QUEUE_AT_ONCE].as_str()]);
+        assert!(uploads.start(now).is_empty());
+        let total = names.len();
+        let line = uploads.status(now).expect("line");
+        assert!(
+            line.body.starts_with(&format!("↑ 1 of {total} · 0.png  ")),
+            "{}",
+            line.body
+        );
+
+        let mut streaming: Vec<u64> = first
+            .iter()
+            .chain(&next)
+            .map(|started| started.id)
+            .filter(|&id| id != first[1].id)
+            .collect();
+        let mut ended = None;
+        while let Some(id) = streaming.pop() {
+            ended = uploads.finish_item(id, Outcome::Done, None);
+            streaming.extend(uploads.start(now).iter().map(|started| started.id));
+        }
+        let ended = ended.expect("the queue ended with its last item");
+        assert_eq!(ended.line.body, format!("✓ {total} files → /srv"));
+    }
+
+    #[test]
+    fn of_items_that_fail_together_the_first_failure_is_the_one_told() {
+        let mut uploads = queue_of(vec![
+            job("a.bin", false, 1, 10),
+            job("b.bin", false, 1, 10),
+            job("c.bin", false, 1, 10),
+        ]);
+        let now = Instant::now();
+        let started = uploads.start(now);
+        assert_eq!(started.len(), 3);
+        assert_eq!(
+            uploads.finish_item(started[0].id, Outcome::DiskFull, None),
+            None,
+            "the others still stream"
+        );
+        assert!(uploads.start(now).is_empty(), "nothing new starts");
+        assert_eq!(
+            uploads.finish_item(
+                started[1].id,
+                Outcome::Failed("connection to prod lost".into()),
+                None
+            ),
+            None
+        );
+        let ended = uploads
+            .finish_item(started[2].id, Outcome::Done, None)
+            .expect("ended");
+        assert_eq!(ended.end, End::DiskFull);
+        assert!(
+            ended.line.body.contains("disk full on prod"),
+            "{}",
+            ended.line.body
+        );
+        assert!(!ended.line.body.contains("lost"), "{}", ended.line.body);
+    }
+
+    #[test]
+    fn paste_a_drop_whose_items_end_out_of_order_pastes_its_paths_in_their_order() {
+        let mut uploads = queue_of(vec![
+            pasted("one.png", 10),
+            pasted("two.png", 10),
+            pasted("three.png", 10),
+        ]);
+        let now = Instant::now();
+        let started = uploads.start(now);
+        assert_eq!(started.len(), 3, "they stream together");
+        assert_eq!(
+            uploads.finish_item(started[2].id, Outcome::Done, None),
+            None
+        );
+        assert_eq!(
+            uploads.finish_item(started[0].id, Outcome::Done, None),
+            None
+        );
+        assert_eq!(uploads.take_settled(), [], "`two.png` is not in yet");
+        assert!(
+            uploads
+                .finish_item(started[1].id, Outcome::Done, None)
+                .is_some()
+        );
+        assert_eq!(
+            uploads.take_settled(),
+            [Settled {
+                command: 7,
+                paths: vec![
+                    "/srv/one.png".into(),
+                    "/srv/two.png".into(),
+                    "/srv/three.png".into()
+                ],
+                ours: Vec::new(),
+            }]
+        );
     }
 
     #[test]
@@ -4152,7 +4296,7 @@ mod tests {
     }
 
     #[test]
-    fn finder_drops_start_at_once_while_the_queue_runs_one_by_one() {
+    fn finder_drops_start_at_once_beside_the_queue() {
         let mut transfers = queue_of(vec![
             job("a", false, 1, 100),
             download("b", Lane::Queue, 100),
@@ -4160,9 +4304,9 @@ mod tests {
         ]);
         let now = Instant::now();
         let started = transfers.start(now);
-        assert_eq!(started_names(&started), ["a", "d"]);
-        assert_eq!(started[1].job.remote_path(), "/var/log/d");
-        assert!(transfers.start(now).is_empty(), "the queue waits for `a`");
+        assert_eq!(started_names(&started), ["a", "b", "d"]);
+        assert_eq!(started[2].job.remote_path(), "/var/log/d");
+        assert!(transfers.start(now).is_empty(), "nothing else waits");
         let id = |name: &str| {
             started
                 .iter()
@@ -4184,8 +4328,8 @@ mod tests {
         );
         assert_eq!(transfers.landed(id("d")), Some(landed));
         assert_eq!(transfers.finish_item(id("a"), Outcome::Done, None), None);
-        let next = transfers.start(now);
-        assert_eq!(started_names(&next), ["b"], "the queue's next item");
+        assert!(transfers.start(now).is_empty(), "`b` streams already");
+        // The line moves on to the queue's next item.
         assert!(
             transfers
                 .status(now)
@@ -4215,9 +4359,7 @@ mod tests {
             RowStatus::Done("✓ Downloaded · 100 B".into())
         );
 
-        let ended = transfers
-            .finish_item(next[0].id, Outcome::Done, None)
-            .unwrap();
+        let ended = transfers.finish_item(id("b"), Outcome::Done, None).unwrap();
         assert_eq!(ended.line.body, "✓ 3 files transferred");
         assert_eq!(
             ended.notice,
@@ -4242,9 +4384,9 @@ mod tests {
         assert_eq!(transfers.list().unwrap().title, "Downloading from prod");
 
         assert_eq!(transfers.finish(Outcome::Done), None);
-        let second = transfers.start(now);
+        assert!(transfers.start(now).is_empty(), "both streamed together");
         let ended = transfers
-            .finish_item(second[0].id, Outcome::Done, None)
+            .finish_item(started[1].id, Outcome::Done, None)
             .unwrap();
         assert_eq!(ended.line.body, "✓ 2 files → /Users/me/Downloads");
         assert_eq!(
@@ -4267,34 +4409,45 @@ mod tests {
 
     #[test]
     fn a_failed_finder_drop_does_not_stop_the_waiting_queue() {
-        // The lanes are independent.
+        // The lanes are independent. The queue holds one item more than streams at once, so one
+        // of its items waits while the Finder drop fails.
         let now = Instant::now();
-        let mut transfers = queue_of(vec![
-            download("a.log", Lane::Queue, 10),
-            download("b.log", Lane::Queue, 10),
-            download("app.log", Lane::Finder, 10),
-        ]);
+        let mut jobs: Vec<Job> = (0..=QUEUE_AT_ONCE)
+            .map(|n| download(&format!("{n}.log"), Lane::Queue, 10))
+            .collect();
+        jobs.push(download("app.log", Lane::Finder, 10));
+        let mut transfers = queue_of(jobs);
         let started = transfers.start(now);
+        assert_eq!(started.len(), QUEUE_AT_ONCE + 1);
         let finder = started
             .iter()
             .find(|started| started.job.local.name == "app.log")
             .expect("the Finder drop starts at once")
             .id;
-        let first = started
+        let mut queued: Vec<u64> = started
             .iter()
-            .find(|started| started.job.local.name == "a.log")
-            .expect("the queue starts")
-            .id;
+            .filter(|started| started.job.local.name != "app.log")
+            .map(|started| started.id)
+            .collect();
         assert!(
             transfers
                 .finish_item(finder, Outcome::Failed("denied".into()), None)
                 .is_none()
         );
-        assert!(transfers.finish_item(first, Outcome::Done, None).is_none());
+        assert!(
+            transfers
+                .finish_item(queued.remove(0), Outcome::Done, None)
+                .is_none()
+        );
         let next = transfers.start(now);
         assert_eq!(next.len(), 1, "the waiting item still starts");
+        queued.push(next[0].id);
+        let last = queued.pop().expect("the last item");
+        for id in queued {
+            assert!(transfers.finish_item(id, Outcome::Done, None).is_none());
+        }
         let ended = transfers
-            .finish_item(next[0].id, Outcome::Done, None)
+            .finish_item(last, Outcome::Done, None)
             .expect("ended");
         assert_eq!(
             ended.line.tone,
@@ -4355,27 +4508,35 @@ mod tests {
         assert_eq!(question.text, "syslog: 48.0 of 96.0 MB will be lost.");
         assert_eq!(transfers.keep_label(&question), "Keep downloading");
 
-        // Both ways: the whole queue; the other streaming item is counted.
-        let mut transfers = queue_of(vec![
+        // Both ways: the whole queue; the other streaming items are counted. The Finder drop
+        // streams first; the uploads fill the queue lane, so the download waits.
+        let mut transfers = queue_of(vec![download("p", Lane::Finder, 100)]);
+        let finder = transfers.start(start);
+        let mut jobs = vec![
             job("done.txt", false, 1, 10),
             job("backup.tar.gz", false, 1, 96_000_000),
-            download("p", Lane::Finder, 100),
-            download("w", Lane::Queue, 100),
-        ]);
-        let first = transfers.start(start);
-        assert_eq!(started_names(&first), ["done.txt", "p"]);
-        assert_eq!(transfers.finish(Outcome::Done), None);
-        let second = transfers.start(start);
+        ];
+        jobs.extend((2..QUEUE_AT_ONCE).map(|n| job(&format!("part{n}"), false, 1, 10)));
+        jobs.push(download("w", Lane::Queue, 100));
+        assert!(transfers.enqueue(7, Served::none(), "prod".into(), HostMark::Production, jobs));
+        let uploads = transfers.start(start + Duration::from_millis(1));
+        assert_eq!(uploads.len(), QUEUE_AT_ONCE, "`w` waits");
+        let second = &uploads[1..];
+        assert_eq!(transfers.finish(Outcome::Done), None, "`done.txt` arrived");
+        assert!(!transfers.is_running(uploads[0].id));
         second[0].shared.bytes.store(48_000_000, Ordering::Release);
         let Some(Stop::Ask(question)) = transfers.stop_request(true, long) else {
             panic!("question");
         };
         assert_eq!(question.title, "Stop all transfers?");
-        assert_eq!(question.id, first[1].id, "the longest-streaming item");
+        assert_eq!(question.id, finder[0].id, "the longest-streaming item");
         assert_eq!(
             question.text,
-            "p: 0 of 100 B will be lost. 1 waiting file won't be downloaded. 1 other \
-             transfer stops. 1 finished file stays on prod."
+            format!(
+                "p: 0 of 100 B will be lost. 1 waiting file won't be downloaded. {} other \
+                 transfers stop. 1 finished file stays on prod.",
+                QUEUE_AT_ONCE - 1
+            )
         );
         assert_eq!(transfers.keep_label(&question), "Keep transferring");
         // A row's `Cancel` names its own item.
@@ -4386,18 +4547,18 @@ mod tests {
         assert_eq!(one.title, "Stop uploading?");
         assert_eq!(one.id, second[0].id);
         // Stopping the Finder drop alone leaves the upload streaming.
-        assert_eq!(transfers.stop(Some(first[1].id), false), None);
-        assert!(first[1].shared.cancel.load(Ordering::Acquire));
+        assert_eq!(transfers.stop(Some(finder[0].id), false), None);
+        assert!(finder[0].shared.cancel.load(Ordering::Acquire));
         assert!(!second[0].shared.cancel.load(Ordering::Acquire));
         assert_eq!(
-            transfers.finish_item(first[1].id, Outcome::Cancelled, None),
+            transfers.finish_item(finder[0].id, Outcome::Cancelled, None),
             None
         );
         assert!(transfers.is_running(second[0].id));
-        assert!(!transfers.is_running(first[1].id));
+        assert!(!transfers.is_running(finder[0].id));
         // A late `Cancel` on the finished row stops nothing else.
         assert_eq!(
-            transfers.stop_request_item(Some(first[1].id), false, long),
+            transfers.stop_request_item(Some(finder[0].id), false, long),
             None
         );
         assert!(!second[0].shared.cancel.load(Ordering::Acquire));

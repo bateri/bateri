@@ -18,6 +18,10 @@ of every installed copy. A version without a section is not released.
 - **See an upload's progress in every pane.** A pane without the input bar at the bottom now shows its upload on a small card in the corner, with Cancel.
 - **Pick several labels at once in linearpen.** Labels and filters open a card that stays open while you check as many values as you like, with a search field to find one. Before, the menu closed after every pick.
 
+### Changed
+
+- **Many files reach a server sooner.** Files dropped on a server pane now go up to four at a time instead of one after another, so a drop of many small files finishes several times sooner.
+
 ### Fixed
 
 - **A tab running `npm run dev` shows the task icon.** npm renames its process to its whole command line, and bateri took the tab for a plain shell.
