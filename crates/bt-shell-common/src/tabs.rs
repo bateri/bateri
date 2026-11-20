@@ -1781,12 +1781,13 @@ impl Row {
         }
     }
 
-    /// What a name field covers while a row `width` wide is renamed: from where the leading
-    /// element starts to the row's end, over the icon and the title alike. The same bounds
-    /// [`Row::of`] cuts a title at, so the field's text starts where the title's did and ends
-    /// where it would have ended.
-    pub fn field(width: f64) -> Span {
-        Span::new(ROW_LEAD, (width - ROW_LEAD - ROW_END).max(0.0))
+    /// What a name field covers while a row `width` wide with a leading element `lead` wide (as
+    /// [`Row::of`] takes it) is renamed: the title's place, from where the title starts to the
+    /// row's end; the leading element stays beside it. The same bounds [`Row::of`] cuts a title
+    /// at, so the field's text starts where the title's did and ends where it would have ended.
+    pub fn field(width: f64, lead: Option<f64>) -> Span {
+        let start = lead.map_or(ROW_LEAD, |lead| ROW_LEAD + lead + ICON_GAP);
+        Span::new(start, (width - start - ROW_END).max(0.0))
     }
 }
 
@@ -5959,13 +5960,19 @@ mod tests {
             row.host_mark.x + row.host_mark.width < ROW_LEAD,
             "the stripe stops short of the icon"
         );
-        // The name field covers the lead and the longest title: the same ends.
+        // The name field takes the longest title's place, beside the lead: the same ends.
         assert_eq!(
-            Row::field(width).x,
+            Row::field(width, None).x,
             bare.title.x,
             "a row with no lead starts at the field"
         );
-        assert_eq!(Row::field(width).end(), long.title.end());
+        assert_eq!(Row::field(width, Some(TILE_WIDTH)), long.title);
+        let lead = Some(lead_width(TILE_WIDTH, 2));
+        assert_eq!(
+            Row::field(width, lead),
+            deck.title,
+            "a deck's title moves the field too"
+        );
     }
 
     /// The column's width is the window's to give, within the bounds: a wide window takes what was
@@ -6044,7 +6051,7 @@ mod tests {
             assert_eq!(row.key.end(), column.row_width() - CLOSE_INSET);
             assert_eq!(row.title.end(), row.key.x, "{width}");
             assert_eq!(
-                Row::field(column.row_width()).end(),
+                Row::field(column.row_width(), Some(TILE_WIDTH)).end(),
                 column.row_width() - ROW_END
             );
         }

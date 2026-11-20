@@ -704,13 +704,21 @@ impl TabBar {
                     heights: shape.heights.clone(),
                     whole: agents,
                     details: shown.details,
+                    naming,
                     selected: index == shown.selected,
                     palette,
                     style: seen.style,
                 },
             );
             if naming {
-                self.place_row_field(row, palette);
+                // The field takes the title's place, beside the icon: an agent line's tile is
+                // one pane's, a row's the chip's with its deck.
+                let lead = if agents {
+                    Some(tabs::TILE_WIDTH)
+                } else {
+                    super::row_lead(seen.style, Some(label.emblem))
+                };
+                self.place_row_field(row, lead, agents, palette);
             }
         }
         let headers = self.headers_for(&shown.headings);
@@ -877,20 +885,18 @@ impl TabBar {
         (count > 0).then(|| read_column(&shown, self.side_for(top, count + room), room))
     }
 
-    /// Puts the name field over `row` (the bar's space), in the type the selected row's title
-    /// wears, left-aligned where the row's leading element starts: the field covers icon and
-    /// title alike.
-    fn place_row_field(&self, row: Rect, palette: Palette) {
+    /// Puts the name field over the title of `row` (the bar's space), in the type the selected
+    /// row's title wears: left-aligned where the title starts, after a leading element `lead`
+    /// wide that stays in sight ([`tabs::Row::field`]), up and down where the title stands
+    /// ([`field_top`]; `whole` in Activity).
+    fn place_row_field(&self, row: Rect, lead: Option<f64>, whole: bool, palette: Palette) {
         let field = &self.ivars().field;
         field.setAlignment(NSTextAlignment::Left);
         self.dress_field(palette, false);
         let height = field.intrinsicContentSize().height;
-        let covers = tabs::Row::field(row.width);
+        let covers = tabs::Row::field(row.width, lead);
         field.setFrame(NSRect::new(
-            NSPoint::new(
-                row.x + covers.x,
-                row.y + ((row.height - height) / 2.0).max(0.0),
-            ),
+            NSPoint::new(row.x + covers.x, row.y + field_top(whole, height)),
             NSSize::new(covers.width, height),
         ));
     }
@@ -1259,6 +1265,9 @@ pub(crate) struct AgentIvars {
     style: Cell<Option<IconStyle>>,
     /// The line under the pointer: its title in full ink and, among several, its own face.
     hot: Cell<Option<usize>>,
+    /// The tab is being named: in Activity the first line's title gives way to the name field
+    /// over it, beside its tile.
+    naming: Cell<bool>,
 }
 
 define_class!(
@@ -1325,6 +1334,7 @@ impl AgentRows {
             palette: Cell::new(None),
             style: Cell::new(None),
             hot: Cell::new(None),
+            naming: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -1398,6 +1408,7 @@ impl AgentRows {
             heights,
             whole,
             details,
+            naming,
             selected,
             palette,
             style,
@@ -1409,6 +1420,7 @@ impl AgentRows {
             | (*iv.heights.borrow() != heights)
             | (iv.whole.replace(whole) != whole)
             | (iv.details.replace(details) != details)
+            | (iv.naming.replace(naming) != naming)
             | (iv.selected.replace(selected) != selected)
             | (iv.palette.replace(Some(palette)) != Some(palette))
             | (iv.style.replace(Some(style)) != Some(style));
@@ -1487,6 +1499,9 @@ impl AgentRows {
             } else if bundled && lit {
                 row_face(row, Tint::of(palette.title, 0.03125), None);
             }
+            // The name field stands over the first line's title ([`field_top`]): the title gives
+            // way to it, and the tile beside it and what the line says under it stay.
+            let named = iv.naming.get() && index == 0;
             // The program's tile, where a row's stands, level with the name: in the line's top
             // band, the height of a plain row, however far the status and the details run below.
             // What the pane reports is a badge on its corner, as on a chip's tile.
@@ -1523,17 +1538,22 @@ impl AgentRows {
                 tabs::ROW_END
             };
             let room = (width - x - end).max(0.0);
-            draw_line(
-                &line.title,
-                NSRect::new(NSPoint::new(x, top + 4.5), NSSize::new(room, 18.0)),
-                super::CHIP_TEXT,
-                strong,
-                if strong || hot == Some(index) {
-                    palette.title
-                } else {
-                    palette.dim
-                },
-            );
+            if !named {
+                draw_line(
+                    &line.title,
+                    NSRect::new(
+                        NSPoint::new(x, top + LINE_TITLE_TOP),
+                        NSSize::new(room, LINE_TITLE_HEIGHT),
+                    ),
+                    super::CHIP_TEXT,
+                    strong,
+                    if strong || hot == Some(index) {
+                        palette.title
+                    } else {
+                        palette.dim
+                    },
+                );
+            }
             let tone = match line.tone {
                 AgentTone::Quiet => palette.dim,
                 AgentTone::Asking => palette.warning,
@@ -1646,6 +1666,25 @@ struct LineTops {
 const UNDER_TITLE: f64 = 23.0;
 const STATUS_ROW: f64 = 16.0;
 
+/// The box an Activity line's title is drawn in: how far under the line's top it starts, and
+/// how tall it is.
+const LINE_TITLE_TOP: f64 = 4.5;
+const LINE_TITLE_HEIGHT: f64 = 18.0;
+
+/// How far under a row's top the name field stands, for a field `field` tall: on the title, which
+/// is the row's top whatever stands under it. A plain row's title is centred in its band, the
+/// chip's height, and a row with details keeps that band at its top with the details under it;
+/// in Activity (`whole`) the field is on the first line's title. Centred on the row's whole
+/// height, the field stood in the details, away from the name it edits.
+fn field_top(whole: bool, field: f64) -> f64 {
+    let (top, height) = if whole {
+        (LINE_TITLE_TOP, LINE_TITLE_HEIGHT)
+    } else {
+        (0.0, tabs::TAB_HEIGHT)
+    };
+    top + ((height - field) / 2.0).max(0.0)
+}
+
 /// An Activity line that starts at `top`, under its title: what it says (`said` points tall, none
 /// when it says nothing), then its status, then where it stands.
 fn line_tops(top: f64, said: f64) -> LineTops {
@@ -1720,6 +1759,8 @@ pub(super) struct AgentLook {
     pub(super) heights: Vec<f64>,
     pub(super) whole: bool,
     pub(super) details: bool,
+    /// The tab is being named: the field stands over the first line's title, beside its tile.
+    pub(super) naming: bool,
     pub(super) selected: bool,
     pub(super) palette: Palette,
     pub(super) style: IconStyle,
@@ -1954,6 +1995,35 @@ mod tests {
         quiet[0].focused = false;
         let shape = RowShape::of(&label(quiet), false, true, 120.0);
         assert_eq!(shape.lead, Some(1), "the focused pane's reply");
+    }
+
+    #[test]
+    fn the_name_field_stands_on_the_title_and_not_in_the_details_under_it() {
+        // About the field's height in the chip's type.
+        let field = 17.0;
+        let centre = |whole: bool| field_top(whole, field) + field / 2.0;
+        // A plain row: centred in it, as its title is.
+        assert_eq!(centre(false), tabs::TAB_HEIGHT / 2.0);
+        // A row with details is taller and keeps its title in the chip's band at its top: the
+        // field stays there, above the details, not halfway down the row.
+        let lines = vec![agent(Some(SHORT), Some(LONG), Some("api · main"))];
+        let detailed = RowShape::of(&label(lines.clone()), false, true, 120.0);
+        assert!(detailed.lead.is_some());
+        assert!(detailed.height > tabs::TAB_HEIGHT);
+        assert!(field_top(false, field) + field <= tabs::TAB_HEIGHT);
+        // In Activity the row is its agents' lines: the field is on the first line's title.
+        let activity = RowShape::of(&label(lines), true, true, 120.0);
+        assert!(activity.whole);
+        assert_eq!(centre(true), LINE_TITLE_TOP + LINE_TITLE_HEIGHT / 2.0);
+        assert!(field_top(true, field) + field <= UNDER_TITLE);
+        // Across, the field takes the title's place and the tile beside it stays: its text, 2 pt
+        // in as a label's is, starts where the line's title and the details do.
+        let across = tabs::Row::field(200.0, Some(tabs::TILE_WIDTH));
+        assert_eq!(across.x + 2.0, DETAIL_X);
+        assert!(
+            across.x > tabs::ROW_LEAD + tabs::TILE_WIDTH,
+            "clear of the tile"
+        );
     }
 
     /// A column 200 wide and `height` tall, its list from 40 down, scrolled by `scroll`.

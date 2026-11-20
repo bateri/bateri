@@ -1253,6 +1253,17 @@ impl Default for IconStyle {
     }
 }
 
+/// How wide a side row's leading element is ([`tabs::Row::of`]'s `lead`), and a chip's while icons
+/// show: without icons the indicator's room, which a row keeps whether the indicator shows or not
+/// so its title stays put as it comes and goes; with them the icon `emblem` and its deck.
+fn row_lead(style: IconStyle, emblem: Option<Emblem>) -> Option<f64> {
+    if style.icons {
+        emblem.map(|emblem| tabs::lead_width(tabs::TILE_WIDTH, emblem.edges))
+    } else {
+        Some(tabs::INDICATOR_SIDE)
+    }
+}
+
 impl IconStyle {
     /// The settings now; the defaults without an application (the tests).
     fn current(mtm: MainThreadMarker) -> Self {
@@ -3763,14 +3774,10 @@ impl Chip {
         // Without icons the small indicator takes the place, and only while the tab reports
         // something; with them the icon is always there (a deck widens it).
         let bare = !style.icons;
-        let lead = if bare && side {
-            // A row keeps the indicator's room whether it shows or not, so the title stays put
-            // as the indicator comes and goes.
-            Some(tabs::INDICATOR_SIDE)
-        } else if bare {
-            indicator.map(|_| tabs::INDICATOR_SIDE)
+        let lead = if side || !bare {
+            row_lead(style, *emblem)
         } else {
-            emblem.map(|emblem| tabs::lead_width(tabs::TILE_WIDTH, emblem.edges))
+            indicator.map(|_| tabs::INDICATOR_SIDE)
         };
         // Where the parts stand: a side row's and a chip's in `tabs::Row`'s (`×` and the ⌘ key
         // at the right end, the title after the icon); the one-tab title's in the strip's
@@ -3995,7 +4002,8 @@ struct Seen {
 /// How one chip stands in the layout ([`Seen::look`]).
 struct Standing {
     index: usize,
-    /// Its tab is being named: the field takes the place of icon and title.
+    /// Its tab is being named: the field takes the place of a chip's icon and title, and of a
+    /// row's title, beside its icon ([`tabs::Row::field`]).
     naming: bool,
     selected: bool,
     hovered: bool,
@@ -4036,8 +4044,8 @@ impl Seen {
                 .as_ref()
                 .map(|_| self.theme.mark_rgb(label.mark)),
             server: label.server.as_deref(),
-            emblem: (!naming).then_some(label.emblem),
-            indicator: label.indicator.filter(|_| !naming),
+            emblem: (!naming || side).then_some(label.emblem),
+            indicator: label.indicator.filter(|_| !naming || side),
             turn: label
                 .running
                 .filter(|_| self.visible)
