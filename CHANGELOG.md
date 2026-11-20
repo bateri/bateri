@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-11-20
+
 ### Added
 
 - **Give Claude Code on a server your screenshots and files.** Paste a screenshot with ⌘V, or drop files on it, and bateri sends them to the server and pastes their paths, so the agent reads them as if they were on your Mac. Files over 50 MB ask first.
