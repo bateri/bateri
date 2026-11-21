@@ -34,14 +34,17 @@
 //! kept on disk by their digest (`view_store`), the strip the application keeps over
 //! such a view (`view_strip`), a page of the UI kit shown in a pane — the engine's draw list on the
 //! renderer, in the pane's theme and font (`native_view`) — and what the view asks of the person — the access it
-//! declared and the links it opens — with what is remembered of the answer (`view_ask`).
+//! declared and the links it opens — with what is remembered of the answer (`view_ask`), and the
+//! browser element's helper — what is installed and when, the profiles' keys, the proxy its
+//! requests go through and the helper's life (`browser`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
 //! whatever needs the toolkit stays in the platform shell (`bt-shell-macos` on
 //! macOS). Where a module needs an operating system service, its body is
 //! behind `cfg(target_os = …)` and named as such (`jobs::SystemTable`, `watch`);
-//! the only macOS-specific dependency is `dispatch2`, for `watch`'s vnode
-//! sources. Values the toolkit reads (the system's language and region) come
+//! the only macOS-specific dependencies are `dispatch2`, for `watch`'s vnode
+//! sources, and `browser-ipc`, the browser helper's conversation, for `browser::helper`.
+//! Values the toolkit reads (the system's language and region) come
 //! in as arguments (`child::locale_env`).
 //!
 //! **Layer:** `bateri → bt-shell-{macos,linux} → bt-shell-common → bt-gpu →
@@ -49,9 +52,11 @@
 
 pub mod agent;
 pub mod apps;
+pub mod browser;
 pub mod card_gesture;
 pub mod child;
 pub mod config_command;
+pub mod digest;
 pub mod download;
 pub mod environment;
 pub mod floating;

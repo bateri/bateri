@@ -1188,7 +1188,11 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 Paint::Text(run) => Some(run.text.clone()),
-                Paint::Quad(_) | Paint::Image(_) | Paint::Figure(_) | Paint::Editor(_) => None,
+                Paint::Quad(_)
+                | Paint::Image(_)
+                | Paint::Figure(_)
+                | Paint::Editor(_)
+                | Paint::Browser(_) => None,
             })
             .collect()
     }
@@ -1278,6 +1282,7 @@ mod tests {
                         Paint::Image(p) => (p.rect, p.clip),
                         Paint::Figure(f) => (f.rect, f.clip),
                         Paint::Editor(e) => (e.rect, e.clip),
+                        Paint::Browser(b) => (b.rect, b.clip),
                         Paint::Text(r) => (
                             pencere_view::Rect::new(r.origin.x, r.origin.y, 1.0, 1.0),
                             r.clip,
@@ -1324,7 +1329,11 @@ mod tests {
         let (_, list) = page(1000.0, 600.0, 2.0);
         assert!(list.items.iter().all(|item| match item {
             Paint::Text(run) => run.font.family == Family::Terminal,
-            Paint::Quad(_) | Paint::Image(_) | Paint::Figure(_) | Paint::Editor(_) => true,
+            Paint::Quad(_)
+            | Paint::Image(_)
+            | Paint::Figure(_)
+            | Paint::Editor(_)
+            | Paint::Browser(_) => true,
         }));
     }
 }

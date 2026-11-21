@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 /// Where `ssh` may be started, by file and function, and why.
-const ALLOWED: [(&str, &str, &str); 10] = [
+const ALLOWED: [(&str, &str, &str); 11] = [
     (
         "bt-shell-common/src/kablo/ssh.rs",
         "carry",
@@ -65,6 +65,11 @@ const ALLOWED: [(&str, &str, &str); 10] = [
         "bt-shell-common/src/kablo/local.rs",
         "bridge_command",
         "kablo's `attach` on this computer: the bridge to the local account, no ssh in it",
+    ),
+    (
+        "bt-shell-macos/src/browser_install.rs",
+        "spawn",
+        "the browser engine's own executable, an app bateri has checked, started with its key and its proxy",
     ),
 ];
 

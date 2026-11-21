@@ -85,6 +85,10 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 # the module rather than turning on the `SecBase` header.
 objc2-security = { version = "0.3.2", default-features = false, features = [
     "std", "SecItem",
+    # The browser helper's signature (`browser_install::signature`): a static code of the unpacked
+    # app, the requirement it must meet and bateri's own team identifier. Header flags of the same
+    # crate; the CF flags they turn on are in `bt-shell-macos`'s manifest.
+    "CSCommon", "SecCode", "SecStaticCode", "SecRequirement",
 ] }
 # The web view a program's view runs in (`bt-shell-macos::pencere_view`): `WKWebView`
 # with a custom URL scheme served by the application, a script-message bridge to the
@@ -271,16 +275,23 @@ kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "e1e614ac9d87653
 # All of pencere is Apache-2.0 (GPL-3 compatible), and `rev` must be a commit at or after the
 # relicensing (`75a78e3`). `make audit` fails if `rev` is not a full hash or does not resolve,
 # and if any of them comes from anywhere else.
-pencere-host = { git = "https://github.com/bateri/pencere", rev = "1c9474635bd2c989851927704dfe9ab14b4371cd" }
-pencere-view = { git = "https://github.com/bateri/pencere", rev = "1c9474635bd2c989851927704dfe9ab14b4371cd" }
-pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "1c9474635bd2c989851927704dfe9ab14b4371cd" }
-pencere-drive = { git = "https://github.com/bateri/pencere", rev = "1c9474635bd2c989851927704dfe9ab14b4371cd" }
+pencere-host = { git = "https://github.com/bateri/pencere", rev = "5fc4b464a2c2f31e508775b9fb8fbf2a4a17198a" }
+pencere-view = { git = "https://github.com/bateri/pencere", rev = "5fc4b464a2c2f31e508775b9fb8fbf2a4a17198a" }
+pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "5fc4b464a2c2f31e508775b9fb8fbf2a4a17198a" }
+pencere-drive = { git = "https://github.com/bateri/pencere", rev = "5fc4b464a2c2f31e508775b9fb8fbf2a4a17198a" }
 # And the program's side of the same protocol (`pencere`, the library of pencere's `program/`),
 # at the same `rev`, as a **dev**-dependency of `bt-core` alone: the program the end-to-end tests
 # of a pane run in it (`crates/bt-core/examples/demopen.rs`). It ships nowhere. It brings no crate
 # the build does not have already (`serde`, `serde_json`, `libc` and `pencere-wire`).
-pencere = { git = "https://github.com/bateri/pencere", rev = "1c9474635bd2c989851927704dfe9ab14b4371cd" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "5fc4b464a2c2f31e508775b9fb8fbf2a4a17198a" }
 serde_json = "1"
+# The browser helper's conversation (plan 034 Karar 5): the control messages, the socket and its
+# handshake, the frames over mach and the release notice, written once in the helper's repository
+# and taken by `rev` like kablo's and pencere's. macOS only (mach, IOSurface): bateri's modules that
+# name it are `cfg(target_os = "macos")`. Its `wgpu` feature (a frame as a texture) is not on yet.
+# It brings no crate the build does not have (`mach2`, `base64`, `objc2-io-surface` are in the
+# graph); the dependency is the plan's (034 Phase 4), user-approved with the set.
+browser-ipc = { git = "https://github.com/bateri/browser", rev = "efa669d042d2913d85d425728470958984506a65" }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }

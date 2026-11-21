@@ -877,6 +877,11 @@ install: kablo-rev bundle
 # first time). It never updates itself (no Sparkle) and does not answer `bateri://` links (the
 # installed bateri does). A copy that is open is not quit for you: ⌘Q ends its terminals unless
 # `keep_running = "quit"`, so quit it yourself and run this again.
+# The browser element's engine (plan 034) is a release, which a copy with no team signature does
+# not trust: `make dev BROWSER_APP=<the helper's app>` makes the copy run that app where it is
+# (`BateriBrowserApp` in its `Info.plist`, read only by a copy that names a profile), with no
+# signature check and no keychain; without it the copy has no engine.
+BROWSER_APP ?=
 DEV_APP = $(TARGET_DIR)/dev/bateri-dev.app
 DEV_ID = dev.bateri.dev
 DEV_SETTINGS = $(HOME)/.config/bateri-dev
@@ -938,6 +943,7 @@ dev: kablo-rev
 	plutil -replace CFBundleName -string bateri-dev $$p && \
 	plutil -replace CFBundleDisplayName -string bateri-dev $$p && \
 	plutil -insert BateriProfile -string dev $$p && \
+	{ test -z '$(BROWSER_APP)' || plutil -insert BateriBrowserApp -string '$(abspath $(BROWSER_APP))' $$p; } && \
 	for k in CFBundleURLTypes SUFeedURL SUPublicEDKey SUEnableAutomaticChecks; do plutil -remove $$k $$p || exit 1; done
 	rm -rf $(DEV_APP)/Contents/Frameworks/Sparkle.framework
 	codesign --force --deep --sign - --entitlements assets/bundle/bateri.entitlements $(DEV_APP)

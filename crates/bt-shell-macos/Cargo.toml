@@ -226,7 +226,12 @@ objc2-user-notifications = { workspace = true }
 # `objc2-core-foundation`'s flags are the query's own types: the dictionary,
 # its string keys, the password's bytes and the port's number.
 objc2-security = { workspace = true }
-objc2-core-foundation = { workspace = true, features = ["CFData", "CFNumber"] }
+# `CFDictionary`, `CFError` and `CFURL` of the browser helper's signature check.
+objc2-core-foundation = { workspace = true, features = [
+    "CFData", "CFNumber", "CFDictionary", "CFError", "CFURL",
+] }
+# The frames and the messages of the browser helper (`browser_install`, the pane's browsers).
+browser-ipc = { workspace = true }
 # The web view of a program's view (`pencere_view`): a new crate, user-approved
 # (2026-10-21); the rationale for the flags is in the workspace manifest.
 objc2-web-kit = { workspace = true }

@@ -494,6 +494,9 @@ fn to_list(
             // An editor's place that no editor filled (the drive's editors fill every one they
             // have): its room's fill, under it, is what shows.
             Paint::Editor(_) => {}
+            // A browser's place: the helper's frame is painted into it by the shell (the room of
+            // `Laid::browsers`); the list holds nothing of it.
+            Paint::Browser(_) => {}
         }
     }
     list
