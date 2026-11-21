@@ -378,6 +378,15 @@ impl Sink for RoomSink {
     }
 }
 
+/// What the helper is told of [`BrowserWindows`]: it words the rows of its menu that open a link or an
+/// image by it ("Open Link in New Tab", or "Open Link" where the browser goes there itself).
+fn new_windows_of(windows: BrowserWindows) -> browser_ipc::message::NewWindows {
+    match windows {
+        BrowserWindows::Here => browser_ipc::message::NewWindows::Here,
+        BrowserWindows::Page => browser_ipc::message::NewWindows::Page,
+    }
+}
+
 enum Life {
     /// The way to the program's machine is being found; the engine starts when it is.
     Routing,
@@ -486,7 +495,15 @@ impl Rooms {
             match self.rooms.get_mut(&browser.id) {
                 Some(room) if room.options.profile == browser.options.profile => {
                     room.options.keys.clone_from(&browser.options.keys);
+                    let windows = new_windows_of(browser.options.windows);
+                    let changed = windows != new_windows_of(room.options.windows);
                     room.options.windows = browser.options.windows;
+                    if changed && let Life::Open(engine) = &room.life {
+                        let _ = engine.send(Command::Windows {
+                            browser: engine.id(),
+                            mode: windows,
+                        });
+                    }
                     if (room.size, room.scale) != (size, scale) {
                         room.size = size;
                         room.scale = scale;
@@ -845,6 +862,11 @@ impl Rooms {
         };
         match result {
             Ok(engine) => {
+                // Where a link the menu opens goes decides the words of its row.
+                let _ = engine.send(Command::Windows {
+                    browser: engine.id(),
+                    mode: new_windows_of(room.options.windows),
+                });
                 // The room may have been sized and given the keyboard while the engine started.
                 let _ = engine.send(Command::Resize {
                     browser: engine.id(),

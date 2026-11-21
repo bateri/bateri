@@ -1276,6 +1276,58 @@ fn the_real_engine_takes_a_pinch_as_ctrl_wheel_events_and_zooms_a_page_that_leav
     let _ = std::fs::remove_dir_all(&probe.root);
 }
 
+/// The menu of a link with the real engine: it starts with the rows that open the link and copy
+/// its address, and the words of the first are by where bateri opens a link (`Command::Windows`):
+/// "Open Link in New Tab" for a tab of the page, "Open Link" where the browser goes there itself.
+/// Picking it is a window asked for in the background, which bateri answers as the room says.
+/// Measured on the helper of `browser` rev b6ed148
+/// (`BATERI_BROWSER_APP=… cargo test -p bt-shell-macos --lib the_real_engines_link_menu`).
+#[test]
+fn the_real_engines_link_menu_starts_with_rows_worded_by_where_windows_go() {
+    use browser_ipc::message::{Button, Command, Event, MouseKind, NewWindows};
+    let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+        return;
+    };
+    let mut probe = Probe::start("linkmenu", app);
+    probe.load(
+        "<title>init</title><body style='margin:0'><a href='http://other.test/x' \
+         style='position:absolute;left:10px;top:10px;font-size:30px'>a link</a>",
+    );
+    let id = probe.browser.id();
+    let ask = |probe: &mut Probe, mode: NewWindows| -> (u32, Vec<String>) {
+        probe.send(Command::Windows { browser: id, mode });
+        for kind in [MouseKind::Move, MouseKind::Down, MouseKind::Up] {
+            probe.send(Command::Mouse {
+                browser: id,
+                kind,
+                x: 30,
+                y: 30,
+                button: Button::Right,
+                clicks: 1,
+                mods: 0,
+            });
+        }
+        let mut found = None;
+        probe.until("the menu", |e| {
+            if let Event::Menu { req, items, .. } = e {
+                found = Some((
+                    *req,
+                    items.iter().map(|m| m.label.clone()).collect::<Vec<_>>(),
+                ));
+            }
+            found.is_some()
+        });
+        found.unwrap()
+    };
+    let (req, labels) = ask(&mut probe, NewWindows::Page);
+    assert_eq!(labels[..2], ["Open Link in New Tab", "Copy Link Address"]);
+    probe.send(Command::MenuResult { req, command: None });
+    let (req, labels) = ask(&mut probe, NewWindows::Here);
+    assert_eq!(labels[..2], ["Open Link", "Copy Link Address"]);
+    probe.send(Command::MenuResult { req, command: None });
+    let _ = std::fs::remove_dir_all(&probe.root);
+}
+
 /// The whole way of a failure: a page of a machine the proxy has no way to is a 502 of the
 /// proxy's with the header, and the real helper makes of it the page's load error with the code
 /// the proxy named (the helper's side is tested in its own repository against a stand-in proxy;

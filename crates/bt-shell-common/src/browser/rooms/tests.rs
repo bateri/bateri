@@ -552,6 +552,52 @@ fn a_link_that_opens_a_window_goes_here_or_is_the_pages_to_decide() {
     });
 }
 
+#[test]
+fn the_helper_is_told_where_windows_go_as_it_opens_and_when_that_changes() {
+    use browser_ipc::message::NewWindows;
+    let mut rig = rig("winmode", true);
+    // As the engine opens: the room's own (it goes here, in these rooms), before the first size.
+    rig.open(1);
+    let first = rig.command("the mode", |c| matches!(c, Command::Windows { .. }));
+    assert_eq!(
+        first,
+        Command::Windows {
+            browser: 1,
+            mode: NewWindows::Here
+        }
+    );
+    // A change is said once, and what is said again is not.
+    let mut page = room(1, None, (400.0, 300.0));
+    page.options.windows = BrowserWindows::Page;
+    rig.apply(&[page.clone()], 2.0);
+    rig.apply(&[page.clone()], 2.0);
+    let second = rig.command("the mode", |c| matches!(c, Command::Windows { .. }));
+    assert_eq!(
+        second,
+        Command::Windows {
+            browser: 1,
+            mode: NewWindows::Page
+        }
+    );
+    page.options.windows = BrowserWindows::Here;
+    rig.apply(&[page], 2.0);
+    rig.command("the mode back", |c| {
+        matches!(
+            c,
+            Command::Windows {
+                mode: NewWindows::Here,
+                ..
+            }
+        )
+    });
+    let said = rig
+        .seen
+        .iter()
+        .filter(|c| matches!(c, Command::Windows { .. }))
+        .count();
+    assert_eq!(said, 3, "{:?}", rig.seen);
+}
+
 fn unhandled(kind: KeyKind, vk: i32, character: char, mods: u32) -> Event {
     Event::UnhandledKey {
         browser: 1,

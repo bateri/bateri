@@ -223,7 +223,7 @@ dependencies = [
 [[package]]
 name = "browser-ipc"
 version = "0.1.0"
-source = "git+https://github.com/bateri/browser?rev=0990358bf970d7c0e9d3dea7b9e7ce7791ec47f0#0990358bf970d7c0e9d3dea7b9e7ce7791ec47f0"
+source = "git+https://github.com/bateri/browser?rev=b6ed148b503acd7204c852211619d0af96f41912#b6ed148b503acd7204c852211619d0af96f41912"
 dependencies = [
  "base64",
  "libc",
