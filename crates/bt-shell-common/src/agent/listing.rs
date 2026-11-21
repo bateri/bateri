@@ -289,8 +289,10 @@ impl ViewKind {
 pub struct Marks {
     /// The view the pane shows, where it shows one.
     pub view: Option<ViewKind>,
-    /// 1 for the pane that has the keyboard now, 2 for the one before it, and so on, among the
-    /// panes of this machine that have had it since the app began; none for a pane that has not.
+    /// 1 for the pane that has the keyboard now, 2 for the listed pane that had it before, and so
+    /// on, among the panes of this machine that have had it since the app began; none for a pane
+    /// that has not. A pane the listing does not show takes no number: when it is the one that has
+    /// the keyboard now, no listed pane is 1 and they count from 2.
     pub focus_rank: Option<u32>,
 }
 

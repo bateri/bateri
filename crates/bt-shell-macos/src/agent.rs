@@ -950,20 +950,28 @@ fn listed(
         return;
     };
     let (windows, typing) = windows_of(app, &server.account, server.level);
-    // The numbers the keyboard came to the panes of this machine by (the ones the listing is
-    // of): a pane's place in the order is how many came after it, and the one with the largest has
-    // it now. A pane of another machine is not counted, as it is not shown.
+    // The numbers the keyboard came to the panes by: the one with the largest has it now, and a
+    // pane's place in the order is how many of the listed panes came after it. A pane of another
+    // machine that has it now is not shown and takes no number, but then no listed pane has the
+    // keyboard and they count from 2.
+    let holder = app
+        .tabs()
+        .iter()
+        .flat_map(|tab| tab.panes())
+        .filter_map(|pane| pane.keyboard_order())
+        .max();
     let orders: Vec<u64> = statuses
         .iter()
         .filter_map(|status| find_pane(app, &server.account, status.id.as_str()))
         .filter_map(|(_, pane, _)| pane.keyboard_order())
         .collect();
+    let holder_hidden = holder.is_some_and(|holder| !orders.contains(&holder));
     let rows = state(|state| {
         listing::rows(
             statuses,
             &survey.records,
             &|terminal| state.waiting.waits(&server.account, terminal),
-            &|terminal| marks_of(app, &server.account, terminal, &orders),
+            &|terminal| marks_of(app, &server.account, terminal, &orders, holder_hidden),
         )
     });
     let scene = Scene {
@@ -986,10 +994,17 @@ fn listed(
 }
 
 /// What `ls` tells of the pane that shows `terminal` of the server `account` beside the server's
-/// own word: the view it shows, and where the keyboard has been in it among the panes whose
+/// own word: the view it shows, and where the keyboard has been in it among the listed panes whose
 /// numbers are `orders` (1 for the pane that has it now, 2 for the one before, and so on; none for a
-/// pane it has not been in since the app began).
-fn marks_of(app: &AppDelegate, account: &str, terminal: Terminal, orders: &[u64]) -> Marks {
+/// pane it has not been in since the app began). `holder_hidden` says the pane that has it now is
+/// not one of them: the listed panes then count from 2, and none is the one that has it.
+fn marks_of(
+    app: &AppDelegate,
+    account: &str,
+    terminal: Terminal,
+    orders: &[u64],
+    holder_hidden: bool,
+) -> Marks {
     let Some((_, pane, _)) = find_pane(app, account, &terminal.to_string()) else {
         return Marks::default();
     };
@@ -997,7 +1012,7 @@ fn marks_of(app: &AppDelegate, account: &str, terminal: Terminal, orders: &[u64]
         view: pane.view_kind(),
         focus_rank: pane.keyboard_order().map(|order| {
             let later = orders.iter().filter(|other| **other > order).count();
-            u32::try_from(later + 1).unwrap_or(u32::MAX)
+            u32::try_from(later + 1 + usize::from(holder_hidden)).unwrap_or(u32::MAX)
         }),
     }
 }

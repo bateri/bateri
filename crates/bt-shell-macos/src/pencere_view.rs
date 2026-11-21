@@ -70,6 +70,7 @@ mod engine;
 pub(crate) mod face;
 mod files;
 mod fonts;
+mod kept;
 mod serve;
 mod still;
 mod wait;

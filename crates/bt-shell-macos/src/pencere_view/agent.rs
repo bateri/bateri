@@ -21,9 +21,9 @@
 //! **What the page does to the person's things is turned back.** The web view runs the agent's
 //! call as a person's gesture, so a page's Copy button writes the pasteboard and its Upload button
 //! asks for the Open panel. A request that drives the page keeps what the pasteboard held and puts
-//! it back if the page wrote it ([`Kept`]), and while a request is carried out the panel is
-//! turned away as a Cancel ([`WebRun`] marks the pane's session active, as a native page's
-//! request does).
+//! it back if the page wrote it ([`kept`]), and from the action to the end of the request the
+//! panel is turned away as a Cancel ([`WebRun`] marks the pane's session active, as a native
+//! page's request does) and the answer says so.
 //!
 //! **A request is a short chain of calls, asked again until the page is at rest** ([`WebRun`]):
 //! look (to name the element), act, look until the document has stood still ([`QUIET_MS`], in the
@@ -45,23 +45,23 @@ use block2::RcBlock;
 use bt_shell_common::agent::message::{Failure, Format, Kind, Reply};
 use bt_shell_common::agent::view::web::{self, Act};
 use bt_shell_common::agent::view::{
-    Action, Pane, REST_LIMIT, Shared, Step, View, WAIT_DEFAULT, Way, drives, picture_size, written,
+    Action, Effects, Pane, REST_LIMIT, Shared, Step, View, WAIT_DEFAULT, Way, drives, picture_size,
+    written,
 };
 use bt_shell_common::native_view::Reading;
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
+use objc2_app_kit::NSPasteboard;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
     CGInterpolationQuality, kCGColorSpaceSRGB,
 };
-use objc2_foundation::{NSArray, NSData, NSError, NSString};
+use objc2_foundation::{NSError, NSString};
 use objc2_web_kit::{WKContentWorld, WKFrameInfo};
 
-use super::{ViewHost, serve::js_string, still};
+use super::{ViewHost, kept, serve::js_string, still};
 
 /// The name of the agent's content world: the page's scripts are in another, and so is every
 /// other named one.
@@ -77,6 +77,19 @@ const SCRIPT: &str = include_str!("agent.js");
 /// The script as it is put in the frames of the web view.
 pub(super) fn script() -> &'static str {
     SCRIPT
+}
+
+/// Whether the action can make a page copy (a click, a key, a command, a menu line): the data of
+/// the person's pasteboard is read only then, to be written back.
+const fn may_copy(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Click(_)
+            | Action::DoubleClick(_)
+            | Action::Press(_)
+            | Action::Command(_)
+            | Action::Menu(_)
+    )
 }
 
 /// How long the program's frame may take to say it is there, seconds: a view whose page has not
@@ -238,73 +251,18 @@ enum Stage {
     Shooting(PictureSlot),
 }
 
-/// What the person's pasteboard held when a request that drives the page began: every type of every
-/// item, to be put back if the page wrote the pasteboard meanwhile (a Copy button does, as the
-/// web view runs the agent's call as a person's gesture).
-struct Kept {
-    board: Retained<NSPasteboard>,
-    count: isize,
-    items: Vec<Vec<(Retained<NSString>, Retained<NSData>)>>,
-}
-
-impl Kept {
-    fn take() -> Self {
-        let board = NSPasteboard::generalPasteboard();
-        let count = board.changeCount();
-        let mut items = Vec::new();
-        if let Some(found) = board.pasteboardItems() {
-            for item in &found {
-                let mut kept = Vec::new();
-                for kind in &item.types() {
-                    if let Some(data) = item.dataForType(&kind) {
-                        kept.push((kind.clone(), data));
-                    }
-                }
-                items.push(kept);
-            }
-        }
-        Self {
-            board,
-            count,
-            items,
-        }
-    }
-
-    /// Whether the pasteboard was written since, and so put back as it was.
-    fn put_back(&self) -> bool {
-        if self.board.changeCount() == self.count {
-            return false;
-        }
-        self.board.clearContents();
-        let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = self
-            .items
-            .iter()
-            .map(|kept| {
-                let item = NSPasteboardItem::new();
-                for (kind, data) in kept {
-                    item.setData_forType(data, kind);
-                }
-                ProtocolObject::from_retained(item)
-            })
-            .collect();
-        if !items.is_empty() {
-            self.board
-                .writeObjects(&NSArray::from_retained_slice(&items));
-        }
-        true
-    }
-}
-
 /// One `bateri view` on a web view, carried out.
 pub struct WebRun {
     host: ViewHost,
-    /// The pane's session, marked active while the request is: the pane turns a file panel the
-    /// page asks for away meanwhile, as it does for a native page.
+    /// The pane's session, marked active from the action to the end of the request: the pane
+    /// turns a file panel the page asks for away meanwhile, as it does for a native page, and
+    /// says so in the answer.
     session: Shared,
-    /// What the pasteboard held before the page was acted on, where the action drives it.
-    kept: Option<Kept>,
-    /// Whether the page wrote the pasteboard and it was put back.
-    copied: bool,
+    /// Whether the pasteboard is kept for this request ([`kept`]): it is from the action to the
+    /// end, where the action drives the page.
+    keeping: bool,
+    /// What came of the pasteboard, to be told in the answer.
+    pasteboard: Option<String>,
     view: View,
     name: String,
     program: Option<String>,
@@ -339,12 +297,11 @@ impl WebRun {
             return Err(failure);
         }
         let now = Instant::now();
-        session.borrow_mut().active = drives(&view.action);
         Ok(Self {
             host,
             session,
-            kept: None,
-            copied: false,
+            keeping: false,
+            pasteboard: None,
             view: view.clone(),
             name: name.to_owned(),
             program: program.map(str::to_owned),
@@ -357,13 +314,33 @@ impl WebRun {
         })
     }
 
-    /// What the page did to the pasteboard is undone: the pasteboard is the person's.
-    fn put_back(&mut self) {
-        if let Some(kept) = self.kept.take()
-            && kept.put_back()
-        {
-            self.copied = true;
+    /// The action is about to be done: from here to the end of the request what the page does to
+    /// the person's pasteboard is kept for, and a file panel it asks for is turned away.
+    fn guard(&mut self) {
+        if self.keeping || !drives(&self.view.action) {
+            return;
         }
+        self.keeping = true;
+        {
+            let mut session = self.session.borrow_mut();
+            session.active = true;
+            session.effects = Effects::default();
+        }
+        kept::enter(
+            &NSPasteboard::generalPasteboard(),
+            may_copy(&self.view.action),
+        );
+    }
+
+    /// The request is over, answered or not: the pane lets a panel through again, and what the page
+    /// wrote to the pasteboard is put back (the last request to end does) and told.
+    fn release(&mut self) {
+        if !self.keeping {
+            return;
+        }
+        self.keeping = false;
+        self.session.borrow_mut().active = false;
+        self.pasteboard = kept::leave(&NSPasteboard::generalPasteboard());
     }
 
     fn failed(&self, text: impl Into<String>) -> Step {
@@ -498,7 +475,7 @@ impl WebRun {
                 self.said = planned.said;
                 match Self::call_of(&planned.act) {
                     Some(body) => {
-                        self.kept = Some(Kept::take());
+                        self.guard();
                         self.asked = Instant::now();
                         match self.host.agent_call(&body) {
                             Some(slot) => {
@@ -644,15 +621,9 @@ impl WebRun {
     }
 
     fn answer(&mut self, reading: &Reading) -> Step {
-        self.put_back();
-        let notes = if self.copied {
-            vec![
-                "the page copied text: the pasteboard is the person's and was put back as it was"
-                    .to_owned(),
-            ]
-        } else {
-            Vec::new()
-        };
+        self.release();
+        let mut notes = std::mem::take(&mut self.session.borrow_mut().effects).sentences();
+        notes.extend(self.pasteboard.take());
         let format: Format = self.view.format;
         Step::Answer(Reply::Text(written(
             Pane {
@@ -671,7 +642,6 @@ impl Drop for WebRun {
     /// A request that ends, answered or not (the pane closed, the view gone), lets the pane's
     /// panel through again and puts back what the page wrote.
     fn drop(&mut self) {
-        self.put_back();
-        self.session.borrow_mut().active = false;
+        self.release();
     }
 }

@@ -481,6 +481,60 @@ fn press(ctx: &Ctx<'_>, env: &Env<'_>, keys: &[String]) -> Result<Done, Failure>
     ))
 }
 
+/// Takes the last character a person sees out of `text`: a letter with its accents, an emoji with
+/// its skin tone or the ones it is joined of, a flag of its two letters. An approximation of a
+/// grapheme cluster that needs no table (the text of a field is short and a wrong cut is one
+/// more ⌫ away).
+fn pop_character(text: &mut String) {
+    let Some(mut last) = text.pop() else { return };
+    loop {
+        if ('\u{1F1E6}'..='\u{1F1FF}').contains(&last) {
+            // A flag is two regional indicators: a pair is gone together.
+            let before = text
+                .chars()
+                .rev()
+                .take_while(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(c))
+                .count();
+            if before % 2 == 1 {
+                text.pop();
+            }
+            return;
+        }
+        // What was taken is a mark on the one before it, or a joiner's.
+        let joins = matches!(
+            last,
+            '\u{0300}'..='\u{036F}'
+                | '\u{1AB0}'..='\u{1AFF}'
+                | '\u{1DC0}'..='\u{1DFF}'
+                | '\u{20D0}'..='\u{20FF}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FE20}'..='\u{FE2F}'
+                | '\u{200C}'
+                | '\u{200D}'
+                | '\u{1F3FB}'..='\u{1F3FF}'
+                | '\u{E0020}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
+        );
+        if joins {
+            match text.pop() {
+                Some(base) => last = base,
+                None => return,
+            }
+            continue;
+        }
+        // A joiner before it glues what is before the joiner.
+        if text.ends_with('\u{200D}') {
+            text.pop();
+            match text.pop() {
+                Some(base) => last = base,
+                None => return,
+            }
+            continue;
+        }
+        return;
+    }
+}
+
 /// A key, as the page is told it: to the editor that has the keyboard first (the page's command for
 /// the key before the editor's own), or to the page. A letter for a field of the host is its text:
 /// the host's own control would have taken it.
@@ -491,17 +545,18 @@ fn press_one(ctx: &Ctx<'_>, env: &Env<'_>, key: Key, mods: Mods) {
         let done = match key {
             Key::Character(letter) => Some(type_into_field(ctx, env, id, &letter.to_string())),
             // The caret of a host's field is at the end of what it holds, as far as an agent goes:
-            // the key before it is taken away, and there is none after it.
-            Key::Backspace => Some(match env.fields.text(id) {
+            // the character before it is taken away, and there is none after it. A ⌫ with a
+            // modifier (a word, a line) is the page's key, not this.
+            Key::Backspace if mods == Mods::default() => Some(match env.fields.text(id) {
                 Some(mut held) => {
-                    held.pop();
+                    pop_character(&mut held);
                     env.fields.put(id, &held);
                     ctx.handle.page().text(id, &held);
                     true
                 }
                 None => false,
             }),
-            Key::Delete => Some(env.fields.text(id).is_some()),
+            Key::Delete if mods == Mods::default() => Some(env.fields.text(id).is_some()),
             _ => None,
         };
         match done {
@@ -534,5 +589,36 @@ fn press_one(ctx: &Ctx<'_>, env: &Env<'_>, key: Key, mods: Mods) {
                 .push("paste is not done for an agent: the pasteboard is the person's".to_owned());
         }
         Route::NotEditor | Route::Command(_) | Route::Page | Route::Done => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pop_character;
+
+    fn popped(text: &str) -> String {
+        let mut text = text.to_owned();
+        pop_character(&mut text);
+        text
+    }
+
+    /// ⌫ takes out what a person sees as one character, not a scalar of it.
+    #[test]
+    fn a_backspace_takes_out_a_whole_character() {
+        assert_eq!(popped("abc"), "ab");
+        assert_eq!(popped(""), "");
+        // A letter and its accent.
+        assert_eq!(popped("ae\u{301}"), "a");
+        // An emoji and its skin tone, and one joined of three.
+        assert_eq!(popped("a\u{1F44D}\u{1F3FD}"), "a");
+        assert_eq!(popped("x\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), "x");
+        // A flag is two letters; the one before it stays.
+        assert_eq!(
+            popped("a\u{1F1F9}\u{1F1F7}\u{1F1E9}\u{1F1EA}"),
+            "a\u{1F1F9}\u{1F1F7}"
+        );
+        assert_eq!(popped("\u{1F1F9}\u{1F1F7}"), "");
+        // A joiner left at the end takes the one it was to join.
+        assert_eq!(popped("a\u{1F468}\u{200D}"), "a");
     }
 }

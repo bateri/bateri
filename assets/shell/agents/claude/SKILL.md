@@ -33,7 +33,7 @@ The user's words:
 - a context menu: `menu REF`, then `pick TITLE` (or its number).
 - "wait until it says Done": `wait 'Done' [--for SECONDS]` (`--gone` waits for the words to go).
 - "show me what it looks like": `shot FILE.png` (`--full` for its own size); read the picture yourself.
-- "that pen", "the pane I was looking at": the pane that had the keyboard before yours. The user types to you, so `bateri ls --json` has `focus_rank` 1 for yours and 2 for the one before. Take rank 2; if it is not a view, or you are unsure, ask.
+- "that pen", "the pane I was looking at": the pane that had the keyboard before yours. The user types to you, so `bateri ls --json` has `focus_rank` 1 for yours and 2 for the one before. Take rank 2; if no listed pane has rank 1 the keyboard is in a pane you cannot see, so the ranks start at 2: ask. If it is not a view, or you are unsure, ask.
 
 How to work with it:
 

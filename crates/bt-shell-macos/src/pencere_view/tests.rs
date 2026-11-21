@@ -1713,9 +1713,12 @@ fn the_agents_script_and_its_handler_are_in_a_world_the_page_cannot_see() {
     let panel = &files[files.find("fn web_open_panel(").expect("web_open_panel")..];
     let panel = &panel[..panel.find("let open = ").expect("the panel's making")];
     assert!(panel.contains("self.agent_active()"), "{panel}");
-    assert!(
-        agent.contains("self.kept = Some(Kept::take());") && agent.contains("impl Drop for WebRun")
-    );
+    assert!(agent.contains("kept::enter(") && agent.contains("kept::leave("));
+    assert!(agent.contains("impl Drop for WebRun"));
+    // The pasteboard's data is read only for an action that can make a page copy.
+    assert!(agent.contains("may_copy(&self.view.action)"));
+    // The panel that was turned away is counted for the answer.
+    assert!(panel.contains("effects.panels += 1"), "{panel}");
     // The handler's message is one thing: the frame is there.
     assert_eq!(super::agent::HANDLER, "bateriAgent");
     assert_ne!(super::agent::HANDLER, HANDLER);
@@ -1765,13 +1768,19 @@ fn the_agents_script_encodes_what_the_page_says_and_runs_nothing_of_it() {
     // left the document is let go of.
     let walk = &source[source.find("const walk = ").expect("walk")..];
     let cap = &walk[..walk
-        .find("if (el.nodeType !== 1) return;")
+        .find("if (spent() || el.nodeType !== 1) return;")
         .expect("the cap's end")];
     assert!(
         cap.contains("ITEMS_MOST") && cap.contains("walkInside(el)"),
         "{cap}"
     );
     assert!(source.contains("prune();") && source.contains("!el.isConnected"));
+    // The fields and the whole look are bounded, so that a page of thousands of inputs cannot make
+    // a look longer than the call may take.
+    assert!(
+        source.contains("fields.length >= FIELDS_MOST")
+            && source.contains("++visited <= WALK_MOST")
+    );
     // The record's version is what the reader of it expects.
     assert!(source.contains(&format!(
         "\"{}\",",

@@ -12,8 +12,9 @@
 // or `ok` / `err` and a code for an action. An element is told by a number this script gives it
 // the first time it sees it and keeps for as long as the document lives; the page cannot see it.
 //
-// Nothing here moves the window, the app's keyboard or the pasteboard: the events are the page's
-// own, dispatched to its elements, and the reading is of the document as it is.
+// Nothing here moves the window or the app's keyboard: the events are the page's own, dispatched
+// to its elements, and the reading is of the document as it is. (The app, not this script, keeps
+// the pasteboard: a page's Copy button runs as a person's gesture.)
 (() => {
   "use strict";
   if (window === window.top || window.parent !== window.top || window.__bateriAgent) return;
@@ -21,6 +22,11 @@
   const ITEMS_MOST = 300;
   const WORDS_MOST = 200;
   const SCROLLS_MOST = 100;
+  // The fields are told of to a most too: each is measured and asked what covers it, and a table of
+  // thousands of inputs would make a look longer than the call may take.
+  const FIELDS_MOST = 200;
+  // The elements one look visits at the most, however many are told of: the look is bounded.
+  const WALK_MOST = 5000;
 
   // ─── Numbers ──────────────────────────────────────────────────────────────────────────────────
   const numbers = new WeakMap();
@@ -202,8 +208,18 @@
     const fields = [];
     const scrolls = [];
     let more = false;
+    let visited = 0;
+    const spent = () => {
+      if (++visited <= WALK_MOST) return false;
+      more = true;
+      return true;
+    };
 
     const pushField = (el, kind) => {
+      if (fields.length >= FIELDS_MOST) {
+        more = true;
+        return;
+      }
       const t = el.tagName;
       const value =
         kind === "secret"
@@ -220,7 +236,7 @@
         walkInside(el);
         return;
       }
-      if (el.nodeType !== 1) return;
+      if (spent() || el.nodeType !== 1) return;
       const t = el.tagName;
       if (t === "SCRIPT" || t === "STYLE" || t === "NOSCRIPT" || t === "TEMPLATE") return;
       if (!shown(el)) return;
@@ -250,7 +266,7 @@
 
     // The fields and the boxes that scroll inside what is already named: no more words of it.
     const walkInside = (el) => {
-      if (el.nodeType !== 1 || !shown(el)) return;
+      if (spent() || el.nodeType !== 1 || !shown(el)) return;
       const kind = fieldKind(el);
       if (kind) {
         pushField(el, kind);
@@ -289,7 +305,7 @@
       ...fields,
       ...scrolls,
     ];
-    if (more) out.push("note\t" + enc(`the page has more than ${ITEMS_MOST} elements: the rest are not listed`));
+    if (more) out.push("note\t" + enc(`the page is larger than a reading lists (${ITEMS_MOST} elements, ${FIELDS_MOST} fields, ${WALK_MOST} visited): the rest are not listed`));
     return out.join("\n");
   };
 

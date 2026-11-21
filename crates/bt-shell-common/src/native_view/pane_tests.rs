@@ -1966,6 +1966,30 @@ fn a_backspace_in_a_field_of_the_host_takes_a_letter_out_and_a_read_holds_nothin
         &fields,
     ));
     assert_eq!(fields.text_of("q"), "dock");
+    // A character a person sees as one goes whole; a ⌫ with a modifier is the page's key.
+    answered(ask(
+        &mut rig,
+        true,
+        Action::Fill {
+            target: q.clone(),
+            text: "a\u{1F44D}\u{1F3FD}".into(),
+        },
+        &fields,
+    ));
+    answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["alt+backspace".into()]),
+        &fields,
+    ));
+    assert_eq!(fields.text_of("q"), "a\u{1F44D}\u{1F3FD}");
+    answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["backspace".into()]),
+        &fields,
+    ));
+    assert_eq!(fields.text_of("q"), "a");
     // Only a request that drives the page holds the page's replies.
     let begun = |rig: &PaneRig, action: Action| {
         let session = Rc::clone(&fields.session);

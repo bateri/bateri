@@ -1675,11 +1675,15 @@ const AGENT_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>
 <label>Name <input id=name></label><label>Secret <input id=pw type=password></label>\
 <p id=echo>echo -</p><p id=keyed>keyed -</p><p id=copied>copied -</p>\
 <button id=cp>Copy it</button><button id=up>Upload it</button><input id=file type=file hidden>\
-<div id=list><div id=tall>tall box</div></div><script src=app.js></script></body></html>";
+<div id=list><div id=tall>tall box</div></div><div id=many></div><script src=app.js></script></body></html>";
 
 const AGENT_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
 var n=0,started=false,$=function(id){return document.getElementById(id)};\
 $('list').style.height='60px';$('list').style.overflow='auto';$('tall').style.height='600px';\
+var many=$('many');many.style.display='flex';many.style.flexWrap='wrap';many.style.width='400px';\
+many.style.height='20px';many.style.overflow='hidden';\
+for(var i=0;i<1200;i++){var f=document.createElement('input');f.style.width='2px';f.style.height='2px';\
+f.style.padding='0';f.style.border='0';f.style.flex='none';many.appendChild(f)}\
 $('inc').addEventListener('click',function(){n++;$('count').textContent='count '+n});\
 $('name').addEventListener('input',function(e){$('echo').textContent='echo '+e.target.value});\
 document.addEventListener('keydown',function(e){$('keyed').textContent='keyed '+e.key});\
@@ -1722,6 +1726,44 @@ fn view_of(pane: &TerminalPane, action: Action, format: Format) -> Reply {
     }
 }
 
+/// Requests on several panes at once, as the app carries them out when they overlap: all begun, and
+/// each asked again between turns of the main loop until it is answered.
+fn together(requests: Vec<(&TerminalPane, Action)>) -> Vec<Reply> {
+    let mut runs: Vec<_> = requests
+        .into_iter()
+        .map(|(pane, action)| {
+            let view = View {
+                terminal: None,
+                format: Format::Text,
+                action,
+            };
+            match pane.web_run(&view, "p9", Some("agent-test")) {
+                Some(Ok(run)) => run,
+                _ => panic!("no web view to begin on"),
+            }
+        })
+        .collect();
+    let mut replies: Vec<Option<Reply>> = runs.iter().map(|_| None).collect();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while replies.iter().any(Option::is_none) {
+        for (run, reply) in runs.iter_mut().zip(replies.iter_mut()) {
+            if reply.is_none() {
+                match run.step() {
+                    Step::Answer(answer) => *reply = Some(answer),
+                    Step::Pending => {}
+                    Step::Shot { .. } => panic!("a web view's picture is made by its own run"),
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the requests were never answered"
+        );
+        spin(0.03);
+    }
+    replies.into_iter().flatten().collect()
+}
+
 fn said(pane: &TerminalPane, action: Action) -> String {
     match view_of(pane, action, Format::Text) {
         Reply::Text(text) => text,
@@ -1761,12 +1803,14 @@ fn png_size(bytes: &[u8]) -> (u32, u32) {
     (at(16), at(20))
 }
 
-/// The person's general pasteboard as this process found it, written back when it is dropped (a
-/// failed assertion included): a web view writes only the general one, so the check that an agent's
+/// The person's general pasteboard as this process found it, written back when it is dropped if it
+/// changed meanwhile (a failed assertion included): a web view writes only the general one, so the check that an agent's
 /// click leaves it alone has to look at that one, and must leave the developer's clipboard as it was
 /// whatever came of the check.
 struct PasteboardAsFound {
     board: Retained<NSPasteboard>,
+    /// Its change count then: it is written back only if it changed since.
+    count: isize,
     items: Vec<Vec<(Retained<NSString>, Retained<NSData>)>>,
 }
 
@@ -1785,7 +1829,12 @@ impl PasteboardAsFound {
                 items.push(kept);
             }
         }
-        Self { board, items }
+        let count = board.changeCount();
+        Self {
+            board,
+            count,
+            items,
+        }
     }
 
     /// The text a paste would give.
@@ -1798,6 +1847,11 @@ impl PasteboardAsFound {
 
 impl Drop for PasteboardAsFound {
     fn drop(&mut self) {
+        // A pasteboard that was not written since is left as it is: writing it back would drop what
+        // could not be read and bump its count for nothing.
+        if self.board.changeCount() == self.count {
+            return;
+        }
         self.board.clearContents();
         let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = self
             .items
@@ -1987,19 +2041,27 @@ fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSR
     let text_before = found.text();
     let copy = ref_of(&said(&pane, Action::Read), "button \"Copy it\"");
     let upload = ref_of(&said(&pane, Action::Read), "button \"Upload it\"");
-    let copied = said(&pane, Action::Click(copy));
+    let copied = said(&pane, Action::Click(copy.clone()));
     assert!(
         copied.contains("text \"copied exec true"),
         "the page's Copy did not run, so nothing was tried: {copied}"
     );
     assert!(
-        copied.contains("the pasteboard is the person's and was put back as it was"),
+        copied.contains("the page wrote text to the pasteboard: it was put back as it was"),
         "{copied}"
     );
     spin(0.3);
     let upped = said(&pane, Action::Click(upload));
     spin(0.5);
     assert!(upped.contains("clicked button \"Upload it\""), "{upped}");
+    eprintln!(
+        "pencere: agent in a web view: the file panel was {}",
+        if upped.contains("a file panel was asked for and turned away") {
+            "asked for and turned away"
+        } else {
+            "never asked for"
+        }
+    );
     assert_eq!(
         found.text(),
         text_before,
@@ -2008,6 +2070,70 @@ fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSR
     assert!(
         window.attachedSheet().is_none(),
         "an agent's click opened a file panel on the person's window"
+    );
+
+    // **Two requests at once**, on two panes whose pages both copy: the pasteboard is kept once, and
+    // what the first page wrote is not kept as the person's by the second.
+    let files_two = [
+        ("index.html", "text/html", AGENT_PAGE.as_bytes()),
+        ("app.js", "text/javascript", AGENT_SCRIPT.as_bytes()),
+    ];
+    let (pane_two, mut program_two) =
+        open_pane(mtm, window, frame_rect, &dir.join("agent-two"), PANE + 7);
+    program_two.say(&format!("{ESC}[?1049h"));
+    let token_two = program_two.hello();
+    program_two.open(&token_two, &files_two, None);
+    program_two.supply(&files_two);
+    watch_it_start(&pane_two, &mut program_two);
+    let copy_two = ref_of(&said(&pane_two, Action::Read), "button \"Copy it\"");
+    let both = together(vec![
+        (&pane, Action::Click(copy)),
+        (&pane_two, Action::Click(copy_two)),
+    ]);
+    let both: Vec<String> = both
+        .into_iter()
+        .map(|reply| match reply {
+            Reply::Text(text) => text,
+            other => panic!("not an answer: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        both.iter()
+            .filter(|text| text.contains("it was put back as it was"))
+            .count(),
+        1,
+        "the last to end puts it back, once: {both:?}"
+    );
+    assert!(
+        both.iter().all(|text| !text.contains("was not put back")),
+        "{both:?}"
+    );
+    assert_eq!(
+        found.text(),
+        text_before,
+        "two requests that overlapped left the person's pasteboard changed"
+    );
+    program_two.bye(&token_two);
+    until("the second view to go", || !covered(&pane_two));
+    pane_two.close();
+    drop(found);
+
+    // **A page larger than a reading lists** (a table of a thousand inputs): the fields are told of
+    // to a most, and the reading says it is cut.
+    let big = said(&pane, Action::Read);
+    let fields = big
+        .lines()
+        .filter(|line| line.split_whitespace().nth(1) == Some("field"))
+        .count();
+    assert!(fields <= 200, "{fields} fields in\n{big}");
+    assert!(fields >= 150, "the fields of the page came to {fields}");
+    assert!(
+        big.contains("note: the page is larger than a reading lists"),
+        "{big}"
+    );
+    assert!(
+        big.contains("field \"Name\""),
+        "the first fields stay: {big}"
     );
 
     // **Wait** for words that show, words that go, and the time that runs out.

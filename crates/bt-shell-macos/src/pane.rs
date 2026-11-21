@@ -8824,21 +8824,23 @@ impl PageDriveHost for PageHost<'_> {
     /// where the keyboard already is can send it where it likes: the request is let go, not kept
     /// for the click.
     fn keyboard(&mut self, to: Keyboard) {
-        // Where the page's own keyboard is, as an agent's reading goes by it, is where the page
-        // last said, an agent's request or not: a person's click on something that is no field
-        // takes the agent's field from the reading as well.
+        let Some(fields) = self.fields() else {
+            return;
+        };
+        if !self.0.holds_keyboard() {
+            return;
+        }
+        // Where the page's keyboard is, as an agent's reading goes by it, moves with the person's:
+        // a click of theirs on something that is no field takes the agent's field from the reading
+        // too. A program's own word, said where the person is not, is not theirs to follow: a
+        // program that draws again after an agent filled a field has not taken it away.
         self.0.agent_session().borrow_mut().field = match to {
             Keyboard::Field(id) => Some(id),
             Keyboard::Page => None,
         };
-        if let Some(fields) = self.fields() {
-            if !self.0.holds_keyboard() {
-                return;
-            }
-            match to {
-                Keyboard::Field(id) => fields.send_keyboard(Some(id)),
-                Keyboard::Page => fields.send_keyboard(None),
-            }
+        match to {
+            Keyboard::Field(id) => fields.send_keyboard(Some(id)),
+            Keyboard::Page => fields.send_keyboard(None),
         }
     }
 
@@ -10037,12 +10039,13 @@ mod tests {
             .expect("keyboard");
         let keyboard = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(keyboard.contains("self.0.holds_keyboard()"), "{keyboard}");
-        // An agent's reading goes by where the page's keyboard last was, the person's move of it
-        // included: the host tells the session before it decides whether the keyboard goes there.
+        // An agent's reading goes by where the page's keyboard last was where the person is: the
+        // host tells the session only once it has found the pane holds the keyboard, and not for a
+        // program's word said where the person is not.
         assert!(
             keyboard
                 .find("agent_session()")
-                .is_some_and(|told| told < keyboard.find("holds_keyboard()").unwrap_or(0)),
+                .is_some_and(|told| told > keyboard.find("holds_keyboard()").unwrap_or(usize::MAX)),
             "{keyboard}"
         );
         // The gate stands in `place`, before `put` makes the pane: the rule every keyboard-moving
