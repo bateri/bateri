@@ -494,6 +494,9 @@ fn to_list(
             // An editor's place that no editor filled (the drive's editors fill every one they
             // have): its room's fill, under it, is what shows.
             Paint::Editor(_) => {}
+            // A browser's place: this host keeps no browser yet, so its room's fill, under it, is
+            // what shows.
+            Paint::Browser(_) => {}
         }
     }
     list

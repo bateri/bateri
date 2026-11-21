@@ -35,9 +35,10 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityCheckBoxRole,
-    NSAccessibilityElement, NSAccessibilityImageRole, NSAccessibilityLayoutChangedNotification,
-    NSAccessibilityLinkRole, NSAccessibilityMenuItemRole, NSAccessibilityPostNotification,
-    NSAccessibilityProgressIndicatorRole, NSAccessibilityRadioButtonRole, NSAccessibilityRole,
+    NSAccessibilityElement, NSAccessibilityGroupRole, NSAccessibilityImageRole,
+    NSAccessibilityLayoutChangedNotification, NSAccessibilityLinkRole, NSAccessibilityMenuItemRole,
+    NSAccessibilityPostNotification, NSAccessibilityProgressIndicatorRole,
+    NSAccessibilityRadioButtonRole, NSAccessibilityRole,
     NSAccessibilitySelectedTextChangedNotification, NSAccessibilitySliderRole,
     NSAccessibilityStaticTextRole, NSAccessibilitySubrole, NSAccessibilitySwitchSubrole,
     NSAccessibilityTabButtonSubrole, NSAccessibilityTextAreaRole,
@@ -860,6 +861,8 @@ fn accessibility_role(
             AccessibleRole::Progress => (NSAccessibilityProgressIndicatorRole, None),
             AccessibleRole::Slider => (NSAccessibilitySliderRole, None),
             AccessibleRole::Editor => (NSAccessibilityTextAreaRole, None),
+            // This host keeps no browser yet: the room is an empty group, and nothing in it reads.
+            AccessibleRole::Browser => (NSAccessibilityGroupRole, None),
             AccessibleRole::Text | AccessibleRole::Heading(_) | AccessibleRole::Field(_) => {
                 (NSAccessibilityStaticTextRole, None)
             }
