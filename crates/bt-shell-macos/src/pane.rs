@@ -8817,6 +8817,11 @@ impl PageDriveHost for PageHost<'_> {
         {
             match to {
                 Keyboard::Field(id) if browsers.is_room(id) => {
+                    // Out of the host's field the keyboard was in (the address line a page sends it
+                    // from after its Enter), or that field keeps the keys and its caret.
+                    if let Some(fields) = self.fields() {
+                        fields.send_keyboard(None);
+                    }
                     browsers.give_keyboard(Some(id));
                     return;
                 }
