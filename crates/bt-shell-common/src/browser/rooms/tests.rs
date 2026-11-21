@@ -438,6 +438,58 @@ fn the_engines_state_is_the_pages_and_a_search_with_no_match_has_no_current() {
 }
 
 #[test]
+fn the_helpers_answer_to_a_scroll_question_comes_back_numbered_and_history_is_what_state_said() {
+    let mut rig = rig("scroll", true);
+    rig.open(1);
+    assert_eq!(rig.rooms.history(Id::new(1)), (false, false));
+    rig.say(&Event::State {
+        browser: 1,
+        url: "https://example.com/".into(),
+        title: "Example".into(),
+        loading: false,
+        can_back: true,
+        can_forward: false,
+        status: String::new(),
+        zoom: 1.0,
+        error: None,
+        found: None,
+    });
+    rig.until("the state", |e| {
+        states(e, 1).iter().any(|s| s.title == "Example")
+    });
+    assert_eq!(rig.rooms.history(Id::new(1)), (true, false));
+    assert_eq!(rig.rooms.history(Id::new(99)), (false, false));
+    // The question is sent to the room's engine with its own number.
+    assert!(rig.rooms.send(Id::new(1), |browser| Command::CanScroll {
+        browser,
+        req: 4,
+        x: 10,
+        y: 20,
+        dx: 1,
+    }));
+    let asked = rig.command("the question", |c| matches!(c, Command::CanScroll { .. }));
+    assert_eq!(
+        asked,
+        Command::CanScroll {
+            browser: 1,
+            req: 4,
+            x: 10,
+            y: 20,
+            dx: 1
+        }
+    );
+    rig.say(&Event::CanScroll {
+        browser: 1,
+        req: 4,
+        can: false,
+    });
+    rig.until("the answer", |e| {
+        e.iter()
+            .any(|e| matches!(e, Effect::CanScroll(room, 4, false) if *room == Id::new(1)))
+    });
+}
+
+#[test]
 fn the_browsers_of_a_page_are_listed_by_id_with_what_they_are_and_where() {
     let mut rig = rig("seen", true);
     assert!(rig.rooms.seen().is_empty());

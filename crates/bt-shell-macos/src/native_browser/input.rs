@@ -220,6 +220,16 @@ pub(super) fn pinch_of(phase: GesturePhase, by: f32) -> Vec<(PinchKind, f64)> {
     }
 }
 
+/// The side button of the mouse that AppKit's `buttonNumber` names: 3 goes back, 4 forward, as
+/// the page hears them (`button` of a `mouseup`). The others (5 and on) are not a browser's.
+pub(super) fn side_button_of(number: isize) -> Option<Button> {
+    match number {
+        3 => Some(Button::Back),
+        4 => Some(Button::Forward),
+        _ => None,
+    }
+}
+
 pub(super) fn button_of(button: Pressed) -> Button {
     match button {
         Pressed::Left => Button::Left,
@@ -261,6 +271,15 @@ pub(super) fn cursor_of(cursor: Cursor) -> Retained<NSCursor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_third_and_fourth_buttons_are_back_and_forward_and_no_others_are() {
+        assert_eq!(side_button_of(3), Some(Button::Back));
+        assert_eq!(side_button_of(4), Some(Button::Forward));
+        for other in [0, 1, 2, 5, 6, 7, -1] {
+            assert_eq!(side_button_of(other), None, "{other}");
+        }
+    }
 
     #[test]
     fn a_pinch_is_a_begin_the_changes_and_an_end() {

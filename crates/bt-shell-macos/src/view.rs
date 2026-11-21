@@ -1391,9 +1391,11 @@ define_class!(
         fn other_mouse_down(&self, event: &NSEvent) {
             self.note_interaction();
             if event.buttonNumber() != 2 {
-                // A page of the kit is told the others (the ones at a mouse's side); the grid
-                // drops them.
-                self.page_extra(event, true);
+                // A browser's room has the two at a mouse's side (back, forward) first; a page of
+                // the kit is told the others and the grid drops them.
+                if !self.page_side_button(event, true) {
+                    self.page_extra(event, true);
+                }
                 return;
             }
             self.button_event(event, MouseButton::Middle, true);
@@ -1402,7 +1404,9 @@ define_class!(
         #[unsafe(method(otherMouseUp:))]
         fn other_mouse_up(&self, event: &NSEvent) {
             if event.buttonNumber() != 2 {
-                self.page_extra(event, false);
+                if !self.page_side_button(event, false) {
+                    self.page_extra(event, false);
+                }
                 return;
             }
             self.button_event(event, MouseButton::Middle, false);
@@ -3670,6 +3674,19 @@ impl BateriView {
     /// A button of the pointer beyond the third went down or came up, for the page of the pane if
     /// one is up: told as its own event, never as a press ([`Input::Extra`]), and held like the
     /// others, so that the page follows the pointer until it is let go ([`ViewIvars::page_held`]).
+    /// A side button of the mouse over a room of a browser (`true`: the room took it).
+    fn page_side_button(&self, event: &NSEvent, pressed: bool) -> bool {
+        let Some(pane) = self.pane().filter(|pane| pane.page_is_up()) else {
+            return false;
+        };
+        pane.page_side_button(
+            self.page_point(event),
+            event.buttonNumber(),
+            pressed,
+            crate::native_page::mods_of(event.modifierFlags()),
+        )
+    }
+
     fn page_extra(&self, event: &NSEvent, pressed: bool) {
         let Some(pane) = self.pane().filter(|pane| pane.page_is_up()) else {
             return;
@@ -4342,6 +4359,67 @@ mod tests {
             ask.contains("self.page_is_up()")
                 && ask.contains("browsers.magnify(self, at, by, phase)"),
             "{ask}"
+        );
+    }
+
+    /// The mouse's side buttons go to a browser's room before the page of the kit hears them: the
+    /// room has back and forward (3 and 4), and the page has the rest, or those where no room is
+    /// under the pointer. A source scan, because a view needs a window server.
+    #[test]
+    fn a_side_button_over_a_browser_goes_to_the_browser_before_the_page() {
+        let source = include_str!("view.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        for (selector, down) in [("otherMouseDown:", "true"), ("otherMouseUp:", "false")] {
+            let head = format!("#[unsafe(method({selector}))]");
+            let at = source.find(&head).unwrap_or_else(|| panic!("{selector}"));
+            let body = &source[at..at + source[at..].find("\n        }\n").expect("its end")];
+            let room = body
+                .find(&format!("self.page_side_button(event, {down})"))
+                .unwrap_or_else(|| panic!("{selector}: the room is asked"));
+            let page = body
+                .find(&format!("self.page_extra(event, {down})"))
+                .unwrap_or_else(|| panic!("{selector}: the page is told"));
+            assert!(room < page, "{body}");
+        }
+        let ask = &source[source
+            .find("    fn page_side_button(")
+            .expect("the view's question")..];
+        let ask = &ask[..ask.find("\n    }\n").expect("its end")];
+        assert!(
+            ask.contains("pane.page_is_up()")
+                && ask.contains("pane.page_side_button(")
+                && ask.contains("event.buttonNumber()"),
+            "{ask}"
+        );
+        let pane = include_str!("pane.rs");
+        let ask = &pane[pane
+            .find("fn page_side_button(")
+            .expect("the pane's question")..];
+        let ask = &ask[..ask.find("\n    }\n").expect("its end")];
+        assert!(
+            ask.contains("self.page_is_up()") && ask.contains("browsers.side_button("),
+            "{ask}"
+        );
+    }
+
+    /// The wheel's phase reaches the room's swipe: the page's reading of it (the fingers coming
+    /// down, moving, leaving, the momentum) is what the swipe follows, and a swipe the arrow follows
+    /// is kept from the engine. A source scan.
+    #[test]
+    fn the_wheel_phase_reaches_the_rooms_swipe() {
+        let pane = include_str!("pane.rs");
+        let wheel = &pane[pane
+            .find("    pub(crate) fn page_wheel(")
+            .expect("page_wheel")..];
+        let wheel = &wheel[..wheel.find("\n    }\n").expect("its end")];
+        let squeezed: String = wheel.split_whitespace().collect();
+        assert!(
+            squeezed.contains(
+                "browsers.wheel(self,at,crate::native_browser::Wheel{dx,dy,phase,precise},mods)"
+            ) || squeezed.contains(
+                "browsers.wheel(self,at,crate::native_browser::Wheel{dx,dy,phase,precise,},mods,)"
+            ),
+            "{wheel}"
         );
     }
 

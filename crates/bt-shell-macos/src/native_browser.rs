@@ -24,11 +24,13 @@
 //! and drained here ([`PageBrowsers::drain`]), and what that makes the pane do is done after the
 //! queue is let go of, since a menu runs the main queue while it is up.
 
+mod arrow;
 mod input;
 mod install;
 mod jobs;
 mod questions;
 mod route;
+mod swipe;
 
 use route::Probing;
 
@@ -38,16 +40,17 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use browser_ipc::message::{AgentOutput, Command, Cursor, EditAction, KeyData, KeyKind, MouseKind};
 use browser_ipc::{Frame, Surface, import, wgpu};
-use bt_gpu::{Renderer, UiImage, UiList, UiRect};
+use bt_gpu::{Renderer, UiBitmap, UiImage, UiList, UiQuad, UiRect};
 use bt_shell_common::browser::helper::Manager;
 use bt_shell_common::browser::rooms::{Effect, Frames, Rooms};
 use bt_shell_common::native_view::{
-    BrowserAsk, BrowserSlot, BrowserState, Button, GesturePhase, Id, Input, Mods, Outline, Point,
-    Surfaces,
+    BrowserAsk, BrowserSlot, BrowserState, Button, GesturePhase, Id, Input, Mods, Outline, Phase,
+    Point, Surfaces,
 };
 use objc2_app_kit::NSEvent;
 
@@ -79,6 +82,9 @@ struct Shown {
     popup: Option<wgpu::Texture>,
     /// Where the popup goes in the view, device pixels.
     popup_at: Option<(i32, i32)>,
+    /// The arrow of a swipe between pages, since when it has been so, and the pixels to the point
+    /// it is drawn at.
+    arrow: Option<(swipe::Arrow, Instant, f32)>,
 }
 
 impl Pictures {
@@ -90,6 +96,60 @@ impl Pictures {
             wake,
         })
     }
+
+    /// The arrow of the room's swipe between pages is now `arrow`; `scale` is pixels to the point.
+    /// One that moves by itself (it withdraws, or fades after the browser went) is given frames
+    /// until it is over: the page draws only when asked to.
+    fn set_arrow(&self, room: Id, arrow: swipe::Arrow, scale: f32) {
+        {
+            let mut slots = lock(&self.slots);
+            let shown = slots.entry(room).or_default();
+            shown.arrow = (arrow != swipe::Arrow::Hidden).then(|| (arrow, Instant::now(), scale));
+        }
+        (self.wake)();
+        if arrow::moves_alone(arrow) {
+            let wake = self.wake.clone();
+            // The longest a motion of the arrow takes, and a frame's worth more.
+            let frames =
+                (arrow::TAKEN.max(arrow::WITHDRAW) + FRAME * 2).as_millis() / FRAME.as_millis();
+            let ticker = std::thread::Builder::new()
+                .name("swipe-arrow".into())
+                .spawn(move || {
+                    for _ in 0..frames {
+                        std::thread::sleep(FRAME);
+                        wake();
+                    }
+                });
+            drop(ticker);
+        }
+    }
+}
+
+/// How often the arrow that moves by itself is given a frame.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// The arrow's picture, for the way back and the way forward: made once.
+fn glyph(way: swipe::Way) -> &'static [u8] {
+    static BOTH: OnceLock<[Vec<u8>; 2]> = OnceLock::new();
+    let both = BOTH.get_or_init(|| {
+        [
+            arrow::glyph_pixels(swipe::Way::Back),
+            arrow::glyph_pixels(swipe::Way::Forward),
+        ]
+    });
+    match way {
+        swipe::Way::Back => &both[0],
+        swipe::Way::Forward => &both[1],
+    }
+}
+
+/// The renderer's name for the arrow's picture.
+fn glyph_id(way: swipe::Way) -> u64 {
+    0xA220_0000_0000_0000
+        | match way {
+            swipe::Way::Back => 1,
+            swipe::Way::Forward => 2,
+        }
 }
 
 impl Frames for Pictures {
@@ -141,8 +201,8 @@ impl Surfaces for Pictures {
         slot: &BrowserSlot,
         origin: (f32, f32),
     ) {
-        let slots = lock(&self.slots);
-        let Some(shown) = slots.get(&slot.id) else {
+        let mut slots = lock(&self.slots);
+        let Some(shown) = slots.get_mut(&slot.id) else {
             return;
         };
         let room = UiRect::new(
@@ -190,7 +250,64 @@ impl Surfaces for Pictures {
                 UiImage::new(rect).clip(visible).opacity(slot.opacity),
             );
         }
+        if let Some((arrow, since, scale)) = shown.arrow {
+            match arrow::look(arrow, since.elapsed()) {
+                Some(mut look) => {
+                    look.opacity *= f64::from(slot.opacity);
+                    paint_arrow(renderer, list, look, visible, scale);
+                }
+                // The motion is over.
+                None => shown.arrow = None,
+            }
+        }
     }
+}
+
+/// The arrow of a swipe between pages, over the room: a dark disc, a lighter one growing inside it
+/// as the pull fills, and the arrow. `scale` is pixels to the point.
+fn paint_arrow(
+    renderer: &Renderer,
+    list: &mut UiList,
+    look: arrow::Look,
+    visible: UiRect,
+    scale: f32,
+) {
+    let place = arrow::place(look, [visible.x, visible.y, visible.w, visible.h], scale);
+    let rect = |r: [f32; 4]| UiRect::new(r[0], r[1], r[2], r[3]);
+    let alpha = look.opacity as f32;
+    let travel = look.fill.clamp(0.0, 1.0) as f32;
+    let armed = look.fill >= 1.0;
+    list.quad(
+        UiQuad::new(rect(place.disc))
+            .fill([0.0, 0.0, 0.0, 0.62 * alpha])
+            .radius(place.radius)
+            .border(scale.max(1.0), [1.0, 1.0, 1.0, 0.22 * alpha])
+            .shadow(
+                0.0,
+                2.0 * scale,
+                10.0 * scale,
+                [0.0, 0.0, 0.0, 0.35 * alpha],
+            )
+            .clip(visible),
+    );
+    if place.filling[2] >= 1.0 {
+        list.quad(
+            UiQuad::new(rect(place.filling))
+                .fill([1.0, 1.0, 1.0, if armed { 0.34 } else { 0.16 } * alpha])
+                .radius(place.filling[2] / 2.0)
+                .clip(visible),
+        );
+    }
+    let bitmap = UiBitmap {
+        id: glyph_id(look.way),
+        width: arrow::GLYPH,
+        height: arrow::GLYPH,
+        pixels: glyph(look.way),
+    };
+    let image = UiImage::new(rect(place.glyph))
+        .clip(visible)
+        .opacity((0.55 + 0.45 * travel) * alpha);
+    renderer.ui_image(list, &bitmap, image);
 }
 
 fn intersection(a: UiRect, b: UiRect) -> UiRect {
@@ -236,6 +353,13 @@ pub(crate) struct PageBrowsers {
     held: Cell<Option<Id>>,
     /// The room a pinch began in: the fingers are its until they leave the trackpad.
     pinching: Cell<Option<Id>>,
+    /// The room a swipe between pages is followed in ([`swipe`]), and the swipe.
+    swiping: Cell<Option<Id>>,
+    swipe: RefCell<swipe::Swipe>,
+    /// The room a side button of the mouse went down in: its release is that room's.
+    side: Cell<Option<Id>>,
+    /// Device pixels to the point, as the outline last said.
+    scale: Cell<f32>,
     /// The room the pointer is over.
     over: Cell<Option<Id>>,
     /// The shape the engine asked for over `over`.
@@ -286,6 +410,10 @@ impl PageBrowsers {
             last_focused: Cell::new(None),
             held: Cell::new(None),
             pinching: Cell::new(None),
+            swiping: Cell::new(None),
+            swipe: RefCell::new(swipe::Swipe::default()),
+            side: Cell::new(None),
+            scale: Cell::new(1.0),
             over: Cell::new(None),
             shape: Cell::new(Cursor::Arrow),
             down: RefCell::new(HashMap::new()),
@@ -322,10 +450,18 @@ impl PageBrowsers {
     /// so what it makes the page or the pane do waits for the main queue.
     pub(crate) fn outline(&self, outline: &Outline, scale: f32) {
         let mut told = Vec::new();
+        self.scale.set(scale);
         self.rooms
             .borrow_mut()
             .apply(&outline.browsers, scale, &mut told);
         let kept = |id: Id| outline.browsers.iter().any(|b| b.id == id);
+        if self.swiping.get().is_some_and(|id| !kept(id)) {
+            self.swiping.set(None);
+            self.swipe.borrow_mut().reset();
+        }
+        if self.side.get().is_some_and(|id| !kept(id)) {
+            self.side.set(None);
+        }
         if self.focused.get().is_some_and(|id| !kept(id)) {
             self.focused.set(None);
         }
@@ -425,6 +561,10 @@ impl PageBrowsers {
             }
             Effect::Agent(_, req, output) => {
                 self.job_done(req, output);
+                false
+            }
+            Effect::CanScroll(id, req, can) => {
+                self.scrolled(pane, id, req, can);
                 false
             }
             Effect::Diagnostic(_, words) => {
@@ -617,19 +757,55 @@ impl PageBrowsers {
     }
 
     /// The wheel over a room: `true` where a room took it. `dx` and `dy` are the page's reading
-    /// (down and right positive).
-    pub(crate) fn wheel(
-        &self,
-        pane: &TerminalPane,
-        at: Point,
-        dx: f32,
-        dy: f32,
-        precise: bool,
-        mods: Mods,
-    ) -> bool {
-        let Some((id, (x, y))) = self.room_at(pane, at) else {
+    /// (down and right positive). A trackpad's sideways gesture may be a swipe between pages
+    /// ([`swipe`]): then the engine is not given what the fingers do.
+    pub(crate) fn wheel(&self, pane: &TerminalPane, at: Point, wheel: Wheel, mods: Mods) -> bool {
+        let Wheel {
+            dx,
+            dy,
+            phase,
+            precise,
+        } = wheel;
+        // A swipe the arrow follows is its room's, over whatever the fingers pass.
+        let followed = self
+            .swiping
+            .get()
+            .filter(|_| self.swipe.borrow().is_pulling());
+        let found = match followed {
+            Some(id) => self.local_in(pane, id, at).map(|local| (id, local)),
+            None => self.room_at(pane, at),
+        };
+        let Some((id, (x, y))) = found else {
+            if let Some(id) = followed {
+                // The room went while the fingers were on it.
+                self.end_swipe(pane, id);
+                return true;
+            }
             return false;
         };
+        if let Some(other) = self.swiping.get().filter(|room| *room != id) {
+            self.end_swipe(pane, other);
+        }
+        let scroll = swipe::Scroll {
+            // The engine's sign is the opposite of the page's.
+            dx: -f64::from(dx),
+            dy: -f64::from(dy),
+            phase: swipe_phase(phase),
+            momentum: matches!(phase, Phase::Coast | Phase::Stop),
+            precise,
+            at: (x, y),
+        };
+        let (back, forward) = self.rooms.borrow().history(id);
+        let step = self.swipe.borrow_mut().feed(
+            scroll,
+            NSEvent::isSwipeTrackingFromScrollEventsEnabled(),
+            swipe::History { back, forward },
+        );
+        self.swiping.set(Some(id));
+        self.swipe_step(pane, id, step);
+        if !step.forward {
+            return true;
+        }
         let (dx, dy) = input::wheel_of(dx, dy, precise);
         if dx != 0 || dy != 0 {
             let mods = mods_bits(mods);
@@ -642,6 +818,106 @@ impl PageBrowsers {
                 mods,
             });
         }
+        true
+    }
+
+    /// What a step of the swipe asks for: the helper's answer to whether the page scrolls, the
+    /// arrow, and the browser going.
+    fn swipe_step(&self, pane: &TerminalPane, id: Id, step: swipe::Step) {
+        if let Some(ask) = step.ask {
+            self.send(id, |browser| Command::CanScroll {
+                browser,
+                req: ask.req,
+                x: ask.at.0,
+                y: ask.at.1,
+                dx: ask.dx,
+            });
+        }
+        if let Some(arrow) = step.arrow {
+            self.show_arrow(pane, id, arrow);
+        }
+        if let Some(way) = step.go {
+            self.send(id, |browser| match way {
+                swipe::Way::Back => Command::Back { browser },
+                swipe::Way::Forward => Command::Forward { browser },
+            });
+        }
+    }
+
+    /// The arrow is `arrow` in the room. With Reduce Motion nothing moves by itself: what would
+    /// withdraw or fade is gone at once.
+    fn show_arrow(&self, pane: &TerminalPane, id: Id, arrow: swipe::Arrow) {
+        let arrow = if arrow::moves_alone(arrow) && pane.reduces_motion() {
+            swipe::Arrow::Hidden
+        } else {
+            arrow
+        };
+        self.pictures.set_arrow(id, arrow, self.scale.get());
+    }
+
+    /// Whatever of a swipe is left in the room is nobody's: the arrow goes.
+    fn end_swipe(&self, pane: &TerminalPane, id: Id) {
+        self.swiping.set(None);
+        if self.swipe.borrow_mut().reset().is_some() {
+            self.show_arrow(pane, id, swipe::Arrow::Hidden);
+        }
+    }
+
+    /// The helper's answer to whether the page scrolls where the swipe began.
+    fn scrolled(&self, pane: &TerminalPane, id: Id, req: u32, can: bool) {
+        if self.swiping.get() != Some(id) {
+            return;
+        }
+        let (back, forward) = self.rooms.borrow().history(id);
+        let step = self
+            .swipe
+            .borrow_mut()
+            .answer(req, can, swipe::History { back, forward });
+        self.swipe_step(pane, id, step);
+    }
+
+    /// A side button of the mouse (`number` 3 goes back, 4 forward) over a room: `true` where a
+    /// room took it. The page has it first (`mousedown`, `mouseup` with `button` 3 or 4) and the
+    /// engine goes when the button is let go, unless the page took the `mouseup`, as Chrome does
+    /// (the helper's `Command::Mouse`). The release goes where the press did.
+    pub(crate) fn side_button(
+        &self,
+        pane: &TerminalPane,
+        at: Point,
+        number: isize,
+        down: bool,
+        mods: Mods,
+    ) -> bool {
+        let Some(button) = input::side_button_of(number) else {
+            return false;
+        };
+        let (id, (x, y)) = if down {
+            let Some((id, local)) = self.room_at(pane, at) else {
+                return false;
+            };
+            self.side.set(Some(id));
+            (id, local)
+        } else {
+            let Some(id) = self.side.take() else {
+                return false;
+            };
+            let Some(local) = self.local_in(pane, id, at) else {
+                // The room went while the button was down.
+                return true;
+            };
+            (id, local)
+        };
+        let kind = if down { MouseKind::Down } else { MouseKind::Up };
+        let mods = mods_bits(mods);
+        self.send(id, |browser| Command::Mouse {
+            browser,
+            kind,
+            x,
+            y,
+            button,
+            clicks: 1,
+            mods,
+        });
         true
     }
 
@@ -1013,6 +1289,27 @@ fn mouse(
         button: input::button_of(button),
         clicks: clicks.max(1),
         mods,
+    }
+}
+
+/// A wheel event as the page reads it: `dx` and `dy` are down and right positive, `phase` is where
+/// it is in its gesture, and `precise` that the deltas are a trackpad's points and not a wheel's
+/// lines.
+#[derive(Clone, Copy)]
+pub(crate) struct Wheel {
+    pub dx: f32,
+    pub dy: f32,
+    pub phase: Phase,
+    pub precise: bool,
+}
+
+/// What part of a gesture a wheel event is, as the swipe reads it.
+fn swipe_phase(phase: Phase) -> swipe::Phase {
+    match phase {
+        Phase::Begin => swipe::Phase::Began,
+        Phase::Move => swipe::Phase::Changed,
+        Phase::Lift => swipe::Phase::Ended,
+        _ => swipe::Phase::None,
     }
 }
 

@@ -1276,6 +1276,79 @@ fn the_real_engine_takes_a_pinch_as_ctrl_wheel_events_and_zooms_a_page_that_leav
     let _ = std::fs::remove_dir_all(&probe.root);
 }
 
+/// The two things a swipe between pages and a mouse's side buttons need of the engine, with the
+/// real one: the helper says whether a sideways scroll at a point moves the page (`Command::CanScroll`:
+/// not at the left edge of a wide page for the way back, yes for the way forward), and a side
+/// button, pressed and let go over the page, goes back (`Command::Mouse` with `Button::Back`: the
+/// page gets it as `button` 3 and the engine goes on the release). How the boxes, the frames and a
+/// page that takes the `mouseup` are told is the helper's own tests'. Measured on the helper of
+/// `browser` rev 24eb092 (`BATERI_BROWSER_APP=… cargo test -p bt-shell-macos --lib the_real_engine_answers`).
+#[test]
+fn the_real_engine_answers_whether_a_page_scrolls_sideways_and_goes_back_on_a_side_button() {
+    use browser_ipc::message::{Button, Command, Event, MouseKind};
+    let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+        return;
+    };
+    let mut probe = Probe::start("sideways", app);
+    probe.load("<title>init</title><body style='margin:0;width:3000px;height:600px'>first");
+    let id = probe.browser.id();
+    let ask = |probe: &mut Probe, req: u32, dx: i32| {
+        probe.send(Command::CanScroll {
+            browser: id,
+            req,
+            x: 50,
+            y: 50,
+            dx,
+        });
+        let mut answer = None;
+        probe.until("the answer", |e| match e {
+            Event::CanScroll { req: r, can, .. } if *r == req => {
+                answer = Some(*can);
+                true
+            }
+            _ => false,
+        });
+        answer.unwrap()
+    };
+    // At the left edge of a wide page the content cannot move right (that way is history's), and
+    // it can move left.
+    assert!(!ask(&mut probe, 1, 100));
+    assert!(ask(&mut probe, 2, -100));
+    // A second page, and the side button back to the first.
+    probe.send(Command::Navigate {
+        browser: id,
+        url: format!(
+            "data:text/html,{}",
+            percent("<title>second</title><body style='margin:0;height:600px'>second")
+        ),
+    });
+    probe.until(
+        "the second page",
+        |e| matches!(e, Event::State { title, loading: false, .. } if title == "second"),
+    );
+    probe.drain(Duration::from_millis(500));
+    for kind in [MouseKind::Move, MouseKind::Down, MouseKind::Up] {
+        probe.send(Command::Mouse {
+            browser: id,
+            kind,
+            x: 50,
+            y: 50,
+            button: if kind == MouseKind::Move {
+                Button::Left
+            } else {
+                Button::Back
+            },
+            clicks: 1,
+            mods: 0,
+        });
+    }
+    probe.until(
+        "the first page again",
+        |e| matches!(e, Event::State { title, loading: false, .. } if title == "init"),
+    );
+    let _ = std::fs::remove_dir_all(&probe.root);
+}
+
 /// The menu of a link with the real engine: it starts with the rows that open the link and copy
 /// its address, and the words of the first are by where bateri opens a link (`Command::Windows`):
 /// "Open Link in New Tab" for a tab of the page, "Open Link" where the browser goes there itself.

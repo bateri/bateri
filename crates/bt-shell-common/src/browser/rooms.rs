@@ -76,6 +76,9 @@ pub trait Shell {
     fn route(&mut self);
     /// An agent's job in the room is done.
     fn agent(&mut self, _room: Id, _req: u32, _output: AgentOutput) {}
+    /// The answer to the question numbered `req` of `Command::CanScroll` (asked with
+    /// [`Rooms::send`]): `can` is that the page, or the box under the point, scrolls that way.
+    fn can_scroll(&mut self, _room: Id, _req: u32, _can: bool) {}
     /// Something the page's writer may read where a program's diagnostics are read.
     fn diagnostic(&mut self, _room: Id, _words: String) {}
 }
@@ -98,6 +101,8 @@ pub enum Effect {
     NotInstalled(Id),
     Route,
     Agent(Id, u32, AgentOutput),
+    /// The answer to a `Command::CanScroll` ([`Shell::can_scroll`]).
+    CanScroll(Id, u32, bool),
     Diagnostic(Id, String),
 }
 
@@ -140,6 +145,9 @@ impl Shell for Vec<Effect> {
     }
     fn agent(&mut self, room: Id, req: u32, output: AgentOutput) {
         self.push(Effect::Agent(room, req, output));
+    }
+    fn can_scroll(&mut self, room: Id, req: u32, can: bool) {
+        self.push(Effect::CanScroll(room, req, can));
     }
     fn diagnostic(&mut self, room: Id, words: String) {
         self.push(Effect::Diagnostic(room, words));
@@ -746,6 +754,14 @@ impl Rooms {
         }
     }
 
+    /// Whether there is a page to go back to and one to go forward to in the room's browser (what
+    /// its last state said; neither where it has not said).
+    pub fn history(&self, id: Id) -> (bool, bool) {
+        self.rooms
+            .get(&id)
+            .map_or((false, false), |room| (room.state.back, room.state.forward))
+    }
+
     /// Whether the room's engine has the keyboard (the person gave it, and it is open).
     pub fn has_focus(&self, id: Id) -> bool {
         self.rooms.get(&id).is_some_and(|room| room.focus)
@@ -1125,6 +1141,7 @@ impl Rooms {
                 }
             }
             Event::AgentResult { req, output, .. } => shell.agent(id, req, output),
+            Event::CanScroll { req, can, .. } => shell.can_scroll(id, req, can),
             Event::Error { message, .. } => shell.diagnostic(id, message),
             Event::Hello { .. } | Event::Closed { .. } | Event::Popup { .. } => {}
         }

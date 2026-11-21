@@ -6813,11 +6813,41 @@ impl TerminalPane {
     ) -> bool {
         if let Some(browsers) = self.page_browsers()
             && self.page_is_up()
-            && browsers.wheel(self, at, dx, dy, precise, mods)
+            && browsers.wheel(
+                self,
+                at,
+                crate::native_browser::Wheel {
+                    dx,
+                    dy,
+                    phase,
+                    precise,
+                },
+                mods,
+            )
         {
             return true;
         }
         self.page_touch(|page| page.wheel(at, dx, dy, phase, precise, mods))
+    }
+
+    /// A side button of the mouse over a room of a browser: `true` where a room took it, and the
+    /// page is not told.
+    pub(crate) fn page_side_button(
+        &self,
+        at: PagePoint,
+        number: isize,
+        down: bool,
+        mods: PageMods,
+    ) -> bool {
+        self.page_is_up()
+            && self
+                .page_browsers()
+                .is_some_and(|browsers| browsers.side_button(self, at, number, down, mods))
+    }
+
+    /// Reduce Motion, resolved (the setting, and the system's where the setting leaves it to it).
+    pub(crate) fn reduces_motion(&self) -> bool {
+        self.ivars().reduce_motion.get()
     }
 
     /// A pinch over a room of a browser: `true` where a room took it, and the page is not told.
