@@ -837,6 +837,25 @@ pub(crate) fn keyboard_in_page_editor(window: &NSWindow) -> bool {
         .is_some_and(|pane| pane.page_editing().is_some())
 }
 
+/// The pane of the window's first responder, when a browser of its page has the keyboard.
+fn pane_with_browser_keyboard(window: &NSWindow) -> Option<Retained<crate::pane::TerminalPane>> {
+    window
+        .firstResponder()
+        .and_then(|responder| responder.downcast::<crate::view::BateriView>().ok())
+        .and_then(|view| view.pane())
+        .filter(|pane| pane.browser_has_keyboard())
+}
+
+/// Whether the keyboard is in a browser of a page: Edit's items are the browser's.
+pub(crate) fn keyboard_in_browser(window: &NSWindow) -> bool {
+    pane_with_browser_keyboard(window).is_some()
+}
+
+/// Edit ▸ Undo for the browser that has the keyboard. `false` where none has it.
+pub(crate) fn undo_in_browser(window: &NSWindow) -> bool {
+    pane_with_browser_keyboard(window).is_some_and(|pane| pane.browser_undo())
+}
+
 /// AppKit's role, and subrole where one says more, for what the page says an element is.
 fn accessibility_role(
     role: AccessibleRole,

@@ -33,7 +33,9 @@ pub const PROOF_WAIT: Duration = Duration::from_secs(8);
 /// Something that makes connections from the program's machine.
 pub trait Dialer: Send + Sync {
     /// A connection to `host:port` as the program's machine sees them, made within `wait`. The
-    /// `Err` is a line for the person: why the way does not make it.
+    /// `Err` is a line for the person: why the way does not make it. Its words are also how the
+    /// proxy tells the helper what failed (`refused`, `timed out`, a name that is not known: the
+    /// operating system's own, which a way keeps in the line).
     fn dial(&self, host: &str, port: u16, wait: Duration) -> Result<Link, String>;
 }
 

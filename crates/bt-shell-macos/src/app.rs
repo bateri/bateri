@@ -1688,10 +1688,14 @@ define_class!(
                 // Merging needs a second window to take tabs from.
                 self.windows().len() > 1
             } else if item.action() == Some(sel!(undoMove:)) {
-                // Edit ▸ Undo Move.
-                let ready = self.undo_ready();
+                // Edit ▸ Undo Move: or Undo of a browser that has the keyboard, which is the
+                // content's (the item is its Undo and the engine's to run).
+                let in_browser = self
+                    .key_window()
+                    .is_some_and(|window| crate::native_page::keyboard_in_browser(window.ns_window()));
+                let ready = !in_browser && self.undo_ready();
                 item.setTitle(&NSString::from_str(if ready { "Undo Move" } else { "Undo" }));
-                ready
+                ready || in_browser
             } else {
                 true
             }
@@ -1756,6 +1760,13 @@ define_class!(
         /// windows goes back ([`AppDelegate::undo_move`]).
         #[unsafe(method(undoMove:))]
         fn undo_move_action(&self, _sender: Option<&AnyObject>) {
+            // The keyboard in a browser: Undo is the browser's, not the panes'.
+            if self
+                .key_window()
+                .is_some_and(|window| crate::native_page::undo_in_browser(window.ns_window()))
+            {
+                return;
+            }
             self.undo_move();
         }
 

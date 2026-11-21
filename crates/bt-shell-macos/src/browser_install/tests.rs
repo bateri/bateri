@@ -809,12 +809,22 @@ impl Probe {
     }
 
     fn tap(&self, key: browser_ipc::message::KeyData) {
+        self.tap_with(key, &[]);
+    }
+
+    /// A key down with `commands` (what the system's text handling names for it), and up.
+    fn tap_with(&self, key: browser_ipc::message::KeyData, commands: &[&str]) {
         use browser_ipc::message::{Command, KeyKind};
         for kind in [KeyKind::Down, KeyKind::Up] {
             self.send(Command::Key {
                 browser: self.browser.id(),
                 kind,
                 key,
+                commands: if kind == KeyKind::Down {
+                    commands.iter().map(|name| (*name).to_owned()).collect()
+                } else {
+                    Vec::new()
+                },
             });
         }
     }
@@ -855,71 +865,302 @@ const EDIT_PAGE: &str = "<title>init</title><body style='margin:0'>\
     const rep=()=>{document.title='s:'+i.selectionStart+':'+i.selectionEnd+':'+i.value.length};\
     i.addEventListener('keyup',rep);document.addEventListener('selectionchange',rep);</script>";
 
-/// What each candidate for an editing key does in a field of the real engine, as measured on the
-/// helper of `browser` rev efa669d (`BATERI_BROWSER_APP=… cargo test -p bt-shell-macos --lib
-/// the_real_engine_edits`): the keys the engine edits with go in the field and do not come back; the
-/// macOS ones (⌘←, ⌃A and the like) are commands of the system's text, which the engine's own
-/// protocol cannot carry, so they do nothing in a field and come back as if no field were there.
-/// If a change in the helper makes one of them work this fails, and the plan's Phase 5 caveat
-/// (⌘← in a field) is the thing to close.
+/// What the editing keys do in a field of the real engine, with the commands the system's text
+/// handling names for them (`doCommandBySelector:`; the names are the ones of AppKit's standard
+/// key bindings, `StandardKeyBinding.dict`), measured on the helper of `browser` rev 55687f4
+/// (`BATERI_BROWSER_APP=… cargo test -p bt-shell-macos --lib the_real_engine_edits`): each of
+/// them does its work in the field and does not come back as a key nobody used. Outside a field
+/// the same key comes back (a page that binds ⌘← hears it), and the Edit menu's commands run on
+/// the field with the system's pasteboard.
 #[test]
 fn the_real_engine_edits_text_with_these_keys_when_one_is_at_hand() {
-    use browser_ipc::message::{KeyKind, modifier as m};
+    use browser_ipc::message::{Command, EditAction, KeyKind, modifier as m};
     let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
         return;
     };
     let mut probe = Probe::start("edit", app);
-    // (name, vk, native, character, mods)
+    // (name, vk, native, character, mods, commands, caret first at the start, the field's state
+    // after: caret or selection start, its end, the text's length)
+    type Candidate<'a> = (&'a str, i32, i32, u16, u32, &'a [&'a str], bool, &'a str);
     let left = (37, 123, 0xF702);
-    let candidates: &[(&str, i32, i32, u16, u32)] = &[
-        ("left", left.0, left.1, left.2, 0),
-        ("cmd-left", left.0, left.1, left.2, m::COMMAND),
-        ("home", 36, 115, 0xF729, 0),
-        ("ctrl-a", 65, 0, 1, m::CONTROL),
-        ("alt-left", left.0, left.1, left.2, m::ALT),
-        ("ctrl-left", left.0, left.1, left.2, m::CONTROL),
-        ("shift-home", 36, 115, 0xF729, m::SHIFT),
+    let candidates: &[Candidate] = &[
+        (
+            "left",
+            left.0,
+            left.1,
+            left.2,
+            0,
+            &["moveLeft:"],
+            false,
+            "s:14:14:15",
+        ),
+        (
+            "cmd-left",
+            left.0,
+            left.1,
+            left.2,
+            m::COMMAND,
+            &["moveToLeftEndOfLine:"],
+            false,
+            "s:0:0:15",
+        ),
+        (
+            "home",
+            36,
+            115,
+            0xF729,
+            0,
+            &["scrollToBeginningOfDocument:"],
+            false,
+            "s:0:0:15",
+        ),
+        (
+            "ctrl-a",
+            65,
+            0,
+            1,
+            m::CONTROL,
+            &["moveToBeginningOfParagraph:"],
+            false,
+            "s:0:0:15",
+        ),
+        (
+            "alt-left",
+            left.0,
+            left.1,
+            left.2,
+            m::ALT,
+            &["moveWordLeft:"],
+            false,
+            "s:12:12:15",
+        ),
+        (
+            "ctrl-left",
+            left.0,
+            left.1,
+            left.2,
+            m::CONTROL,
+            &["moveToLeftEndOfLine:"],
+            false,
+            "s:0:0:15",
+        ),
+        (
+            "shift-home",
+            36,
+            115,
+            0xF729,
+            m::SHIFT,
+            &["moveToBeginningOfDocumentAndModifySelection:"],
+            false,
+            "s:0:15:15",
+        ),
         (
             "cmd-shift-left",
             left.0,
             left.1,
             left.2,
             m::COMMAND | m::SHIFT,
+            &["moveToLeftEndOfLineAndModifySelection:"],
+            false,
+            "s:0:15:15",
         ),
-        ("cmd-backspace", 8, 51, 0x7F, m::COMMAND),
-        ("alt-backspace", 8, 51, 0x7F, m::ALT),
-        ("ctrl-backspace", 8, 51, 0x7F, m::CONTROL),
-        ("cmd-up", 38, 126, 0xF700, m::COMMAND),
-        ("ctrl-home", 36, 115, 0xF729, m::CONTROL),
-        ("cmd-a", 65, 0, 97, m::COMMAND),
-        ("ctrl-e", 69, 14, 5, m::CONTROL),
-        ("ctrl-k", 75, 40, 11, m::CONTROL),
-        ("ctrl-b", 66, 11, 2, m::CONTROL),
+        (
+            "cmd-backspace",
+            8,
+            51,
+            0x7F,
+            m::COMMAND,
+            &["deleteToBeginningOfLine:"],
+            false,
+            "s:0:0:0",
+        ),
+        (
+            "alt-backspace",
+            8,
+            51,
+            0x7F,
+            m::ALT,
+            &["deleteWordBackward:"],
+            false,
+            "s:12:12:12",
+        ),
+        (
+            "backspace",
+            8,
+            51,
+            0x7F,
+            0,
+            &["deleteBackward:"],
+            false,
+            "s:14:14:14",
+        ),
+        (
+            "ctrl-backspace",
+            8,
+            51,
+            0x7F,
+            m::CONTROL,
+            &["deleteBackwardByDecomposingPreviousCharacter:"],
+            false,
+            "s:14:14:14",
+        ),
+        (
+            "cmd-up",
+            38,
+            126,
+            0xF700,
+            m::COMMAND,
+            &["moveToBeginningOfDocument:"],
+            false,
+            "s:0:0:15",
+        ),
+        (
+            "ctrl-e",
+            69,
+            14,
+            5,
+            m::CONTROL,
+            &["moveToEndOfParagraph:"],
+            true,
+            "s:15:15:15",
+        ),
+        (
+            "ctrl-k",
+            75,
+            40,
+            11,
+            m::CONTROL,
+            &["deleteToEndOfParagraph:"],
+            true,
+            "s:0:0:0",
+        ),
+        (
+            "ctrl-b",
+            66,
+            11,
+            2,
+            m::CONTROL,
+            &["moveBackward:"],
+            false,
+            "s:14:14:15",
+        ),
     ];
-    // The ones the engine edits with itself.
-    let edits = ["left", "home", "alt-left", "shift-home", "alt-backspace"];
-    for (name, vk, native, character, mods) in candidates {
+    for (name, vk, native, character, mods, commands, from_start, after) in candidates {
         probe.load(EDIT_PAGE);
         probe.click(100, 25);
         probe.drain(Duration::from_millis(300));
-        probe.tap(key_data(35, 119, 0xF72B, 0));
+        probe.tap(if *from_start {
+            key_data(36, 115, 0xF729, 0)
+        } else {
+            key_data(35, 119, 0xF72B, 0)
+        });
         probe.settle();
         let before = probe.title.clone();
         probe.returned.clear();
-        probe.tap(key_data(*vk, *native, *character, *mods));
+        probe.tap_with(key_data(*vk, *native, *character, *mods), commands);
         probe.settle();
         let came_back = probe
             .returned
             .iter()
             .any(|(kind, key, _)| *kind == KeyKind::Down && key == vk);
-        let moved = probe.title != before;
-        let edited = edits.contains(name);
+        // What the key does, once: the exact state of the field, and the key not given back.
         assert_eq!(
-            (moved, came_back),
-            (edited, !edited),
-            "{name}: before {before}, after {}",
-            probe.title
+            (probe.title.as_str(), came_back),
+            (*after, false),
+            "{name}: before {before}"
         );
     }
+    // A command the engine does not know takes nothing from the key: it is given back as if it
+    // had none (Escape's `cancelOperation:` is none of the engine's, and neither is a made-up one).
+    for (name, vk, native, character, mods, command) in [
+        ("escape", 27, 53, 0x1B, 0, "cancelOperation:"),
+        ("made-up", 8, 51, 0x7F, m::CONTROL, "aCommandNoEngineHas:"),
+    ] {
+        probe.load(EDIT_PAGE);
+        probe.click(100, 25);
+        probe.drain(Duration::from_millis(300));
+        probe.tap(key_data(35, 119, 0xF72B, 0));
+        probe.settle();
+        probe.returned.clear();
+        probe.tap_with(key_data(vk, native, character, mods), &[command]);
+        probe.settle();
+        assert!(
+            probe
+                .returned
+                .iter()
+                .any(|(kind, key, _)| *kind == KeyKind::Down && *key == vk),
+            "{name} with the command the engine does not know did not come back: {:?}",
+            probe.returned
+        );
+    }
+    // Outside a field the same key is nobody's and comes back (as it does with no command at all):
+    // a page that binds ⌘← hears it.
+    probe.load(EDIT_PAGE);
+    probe.click(100, 150);
+    probe.drain(Duration::from_millis(300));
+    probe.settle();
+    let before = probe.title.clone();
+    probe.returned.clear();
+    probe.tap_with(
+        key_data(left.0, left.1, left.2, m::COMMAND),
+        &["moveToLeftEndOfLine:"],
+    );
+    probe.settle();
+    assert!(
+        probe
+            .returned
+            .iter()
+            .any(|(kind, key, _)| *kind == KeyKind::Down && *key == left.0),
+        "⌘← outside a field did not come back: {:?}",
+        probe.returned
+    );
+    assert_eq!(probe.title, before);
+    // The Edit menu's commands run on the field that has the focus.
+    probe.load(EDIT_PAGE);
+    probe.click(100, 25);
+    probe.drain(Duration::from_millis(300));
+    probe.tap(key_data(35, 119, 0xF72B, 0));
+    probe.settle();
+    let id = probe.browser.id();
+    probe.send(Command::Edit {
+        browser: id,
+        action: EditAction::SelectAll,
+    });
+    probe.settle();
+    assert_eq!(probe.title, "s:0:15:15", "select all in the field");
+    let _ = std::fs::remove_dir_all(&probe.root);
+}
+
+/// The whole way of a failure: a page of a machine the proxy has no way to is a 502 of the
+/// proxy's with the header, and the real helper makes of it the page's load error with the code
+/// the proxy named (the helper's side is tested in its own repository against a stand-in proxy;
+/// this is bateri's proxy against the helper).
+#[test]
+fn the_real_engine_reads_the_proxys_failure_header_as_the_pages_load_error() {
+    use browser_ipc::message::{Command, Event};
+    let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+        return;
+    };
+    let mut probe = Probe::start("noway", app);
+    let id = probe.browser.id();
+    probe.send(Command::Navigate {
+        browser: id,
+        url: "http://nowhere.test/".to_owned(),
+    });
+    let mut failed = None;
+    probe.until("the load error", |event| {
+        if let Event::State {
+            error: Some(error), ..
+        } = event
+        {
+            failed = Some(error.clone());
+            true
+        } else {
+            false
+        }
+    });
+    let error = failed.expect("an error");
+    assert_eq!(error.url, "http://nowhere.test/");
+    assert_eq!(error.code, -130, "no way to the machine: {error:?}");
     let _ = std::fs::remove_dir_all(&probe.root);
 }

@@ -972,13 +972,16 @@ define_class!(
             // No `return`: `define_class!` converts the `bool` to `Bool` at the
             // **end** of the body, an early return does not compile.
             let action = item.action();
-            let editing = self.pane().is_some_and(|pane| pane.page_editing().is_some());
+            // An editor of the page or a browser of it has the keyboard.
+            let editing = self
+                .pane()
+                .is_some_and(|pane| pane.page_editing().is_some() || pane.browser_has_keyboard());
             if editing
                 && [sel!(cut:), sel!(copy:), sel!(paste:), sel!(selectAll:)]
                     .into_iter()
                     .any(|edit| action == Some(edit))
             {
-                // An editor of the page has the keyboard: these four are its.
+                // An editor of the page or a browser has the keyboard: these four are its.
                 true
             } else if self.pane().is_some_and(|pane| pane.view_owns_item(item)) {
                 // A view over the terminal owns Edit: the terminal under it is not what is copied
@@ -1970,13 +1973,13 @@ define_class!(
         /// `keyDown:` would stop there and the Return would be lost
         /// ([`stack_kept_the_key`]).
         #[unsafe(method(doCommandBySelector:))]
-        fn do_command_by_selector(&self, _selector: Sel) {
+        fn do_command_by_selector(&self, selector: Sel) {
             // In a browser the key the system's text did not take is the browser's: the key is sent
-            // as it came, and the command (which the engine's protocol cannot carry) is let go.
+            // as it came, with the command's name beside it for the engine to run (as Chrome does).
             if let Some(browsers) = self.pane().and_then(|pane| pane.page_browsers())
                 && browsers.has_keyboard()
             {
-                browsers.commanded();
+                browsers.commanded(&selector.name().to_string_lossy());
                 return;
             }
             // In an editor of the page, the key the system's text did not take is the editor's.

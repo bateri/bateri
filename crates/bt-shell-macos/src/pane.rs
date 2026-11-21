@@ -6653,18 +6653,13 @@ impl TerminalPane {
     /// Edit ▸ Cut, Copy, Paste and Select All while an editor of the page has the keyboard: the
     /// editor's, as their keys (⌘X, ⌘C, ⌘V, ⌘A) are. `true` when one had it.
     pub(crate) fn page_editor_menu(&self, key: char) -> bool {
-        // The Edit menu with the keyboard in a browser: the pasteboard's text is typed in, and the
-        // rest is the key, which a web page that binds it hears.
+        // The Edit menu with the keyboard in a browser: the command is the engine's, which runs
+        // it on what has the focus and reads and writes the system's pasteboard itself (a paste
+        // is the engine's own, with its `paste` event). Nothing of the pasteboard is read here.
         if let Some(browsers) = self.page_browsers()
             && browsers.has_keyboard()
         {
-            if key == 'v' {
-                if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
-                    browsers.paste(text);
-                }
-            } else {
-                browsers.shortcut(key);
-            }
+            browsers.edit_menu(key);
             return true;
         }
         let Some(editors) = self.page_editing() else {
@@ -6713,6 +6708,18 @@ impl TerminalPane {
             NSSize::new(f64::from(rect.w), f64::from(rect.h)),
         );
         Some(window.convertRectToScreen(self.convertRect_toView(in_pane, None)))
+    }
+
+    /// Whether a browser of the page has the keyboard: Edit's items are its.
+    pub(crate) fn browser_has_keyboard(&self) -> bool {
+        self.page_browsers()
+            .is_some_and(|browsers| browsers.has_keyboard())
+    }
+
+    /// Edit ▸ Undo with the keyboard in a browser: the browser's. `false` where none has it.
+    pub(crate) fn browser_undo(&self) -> bool {
+        self.page_browsers()
+            .is_some_and(|browsers| browsers.edit_menu('z'))
     }
 
     /// Where an input method puts its window for a browser that has the keyboard: a line's height
@@ -9040,12 +9047,13 @@ mod tests {
         assert!(asks < writes, "the write comes before the setting: {copy}");
     }
 
-    /// The general pasteboard is read in a pane's code in four places and a page reaches one of
+    /// The general pasteboard is read in a pane's code in three places and a page reaches one of
     /// them only by the person's act: an editor's paste (`page_editor_route`, whose
-    /// `Route::Paste` comes from ⌘V — a keymap line cannot bind `paste`), a browser's paste
-    /// (`page_editor_menu`, which the Edit menu's Paste row calls and nothing a page says does),
-    /// the pick of a menu line the host shows (`page_menu_pick`, above), and the find
-    /// pasteboard's own name (`find_pasteboard_text`, not the general). A new reader in this file
+    /// `Route::Paste` comes from ⌘V — a keymap line cannot bind `paste`), the pick of a menu line
+    /// the host shows (`page_menu_pick`, above), and the find pasteboard's own name
+    /// (`find_pasteboard_text`, not the general). A browser's paste reads none here: the Edit
+    /// menu's Paste row (`page_editor_menu`) sends the engine the `Edit` command and the engine
+    /// reads the pasteboard, which nothing a page says can make it do. A new reader in this file
     /// fails here until it is looked at. A source scan: the pasteboard is AppKit's.
     #[test]
     fn the_pane_reads_the_general_pasteboard_only_for_the_paste_key_and_the_menu_row() {
@@ -9066,19 +9074,20 @@ mod tests {
             readers,
             [
                 "find_pasteboard_text",
-                "page_editor_menu",
                 "page_editor_route",
                 "page_menu_pick"
             ],
             "a new reader of the pasteboard in the pane: who may make it read?"
         );
-        // A browser's read is the paste row's (`v`) and no other row's.
+        // A browser's paste is the engine's, by the `Edit` command, and reads nothing here.
         let menu = &pane[pane.find("fn page_editor_menu").expect("the menu")..];
         let menu = &menu[..menu.find("\n    }\n").expect("its end")];
-        let only_v = menu.find("if key == 'v'").expect(menu);
-        let read = menu.find("clipboard::read(").expect(menu);
-        let other = menu.find("browsers.shortcut(key)").expect(menu);
-        assert!(only_v < read && read < other, "{menu}");
+        let sends = menu.find("browsers.edit_menu(key)").expect(menu);
+        let route = menu.find("let Some(editors)").expect(menu);
+        assert!(
+            !menu[..route].contains("clipboard::read(") && sends < route,
+            "{menu}"
+        );
         // The editor's read is the `Route::Paste` arm and no other arm.
         let route = &pane[pane.find("fn page_editor_route").expect("the route")..];
         let route = &route[..route.find("\n    }\n").expect("its end")];

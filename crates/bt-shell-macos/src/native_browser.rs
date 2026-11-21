@@ -40,7 +40,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use browser_ipc::message::{AgentOutput, Command, Cursor, KeyData, KeyKind, MouseKind};
+use browser_ipc::message::{AgentOutput, Command, Cursor, EditAction, KeyData, KeyKind, MouseKind};
 use browser_ipc::{Frame, Surface, import, wgpu};
 use bt_gpu::{Renderer, UiImage, UiList, UiRect};
 use bt_shell_common::browser::helper::Manager;
@@ -207,6 +207,16 @@ struct Typing {
     composed: bool,
     /// The input method named a command for the event (the key is no text).
     commanded: bool,
+    /// The commands it named, as the engine is sent them ([`input::edit_command`]).
+    commands: Vec<String>,
+}
+
+/// What the system's text handling made of a key event.
+struct Interpreted {
+    inserted: Option<String>,
+    composed: bool,
+    commanded: bool,
+    commands: Vec<String>,
 }
 
 /// The browsers of one page, and the pane's side of them.
@@ -636,6 +646,20 @@ impl PageBrowsers {
             return false;
         }
         let flags = event.modifierFlags();
+        // ⇧⌘Z: Edit's Redo has no row of the host's menu (Undo's ⌘Z is the row's, and the page's
+        // own keys were asked above), so the key is the command.
+        if flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+            && flags.contains(objc2_app_kit::NSEventModifierFlags::Shift)
+            && !flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
+            && !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+            && event
+                .charactersIgnoringModifiers()
+                .is_some_and(|text| text.to_string().eq_ignore_ascii_case("z"))
+            && self.typing.borrow().marked.is_empty()
+        {
+            self.edit(EditAction::Redo);
+            return true;
+        }
         let shortcut = flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
             || flags.contains(objc2_app_kit::NSEventModifierFlags::Control);
         let characters = event
@@ -644,30 +668,22 @@ impl PageBrowsers {
             .unwrap_or_default();
         let composing = !self.typing.borrow().marked.is_empty();
         if (shortcut || input::is_function_key(&characters)) && !composing {
-            self.raw(room, event, &characters);
+            // The system's text handling has a command for many of these (⌘← is the line's start,
+            // ⌃A the paragraph's): it rides with the key. What else it would make of the key (no
+            // text: a shortcut's key is no text) is let go, as before.
+            let commands = self.interpret(pane, event).commands;
+            self.raw(room, event, &characters, commands);
             return true;
         }
         // Text, or what an input method makes of the key: the system's handling of text says
         // which.
-        {
-            let mut typing = self.typing.borrow_mut();
-            typing.inserted = None;
-            typing.composed = false;
-            typing.commanded = false;
-        }
-        self.interpreting.set(true);
-        pane.view()
-            .interpretKeyEvents(&objc2_foundation::NSArray::from_slice(&[event]));
-        self.interpreting.set(false);
-        let (inserted, composed, commanded, was) = {
-            let mut typing = self.typing.borrow_mut();
-            (
-                typing.inserted.take(),
-                std::mem::take(&mut typing.composed),
-                std::mem::take(&mut typing.commanded),
-                composing,
-            )
-        };
+        let Interpreted {
+            inserted,
+            composed,
+            commanded,
+            commands,
+        } = self.interpret(pane, event);
+        let was = composing;
         match inserted {
             Some(text) => {
                 let one = text.encode_utf16().count() == 1;
@@ -678,27 +694,53 @@ impl PageBrowsers {
                 }
             }
             None if composed => {}
-            None if commanded || !composing => self.raw(room, event, &characters),
+            None if commanded || !composing => self.raw(room, event, &characters, commands),
             // The input method kept the key (a candidate chosen with an arrow).
             None => {}
         }
         true
     }
 
-    /// A key that is no text: down, its character where it makes one, and (when it comes) up.
-    fn raw(&self, room: Id, event: &NSEvent, characters: &str) {
+    /// Hands the key to the system's text handling (`interpretKeyEvents:`) and says what it made
+    /// of it: text, a composition, commands.
+    fn interpret(&self, pane: &TerminalPane, event: &NSEvent) -> Interpreted {
+        {
+            let mut typing = self.typing.borrow_mut();
+            typing.inserted = None;
+            typing.composed = false;
+            typing.commanded = false;
+            typing.commands.clear();
+        }
+        self.interpreting.set(true);
+        pane.view()
+            .interpretKeyEvents(&objc2_foundation::NSArray::from_slice(&[event]));
+        self.interpreting.set(false);
+        let mut typing = self.typing.borrow_mut();
+        Interpreted {
+            inserted: typing.inserted.take(),
+            composed: std::mem::take(&mut typing.composed),
+            commanded: std::mem::take(&mut typing.commanded),
+            commands: std::mem::take(&mut typing.commands),
+        }
+    }
+
+    /// A key that is no text: down (with the commands the system named for it), its character
+    /// where it makes one, and (when it comes) up.
+    fn raw(&self, room: Id, event: &NSEvent, characters: &str, commands: Vec<String>) {
         let key = key_data(event, characters, event.keyCode());
         self.down.borrow_mut().insert(event.keyCode(), key);
         self.send(room, |browser| Command::Key {
             browser,
             kind: KeyKind::Down,
             key,
+            commands,
         });
         if input::has_character(key.vk) {
             self.send(room, |browser| Command::Key {
                 browser,
                 kind: KeyKind::Char,
                 key,
+                commands: Vec::new(),
             });
         }
     }
@@ -712,11 +754,13 @@ impl PageBrowsers {
             browser,
             kind: KeyKind::Down,
             key,
+            commands: Vec::new(),
         });
         self.send(room, |browser| Command::Key {
             browser,
             kind: KeyKind::Char,
             key,
+            commands: Vec::new(),
         });
     }
 
@@ -730,6 +774,7 @@ impl PageBrowsers {
                 browser,
                 kind: KeyKind::Up,
                 key,
+                commands: Vec::new(),
             });
         }
         true
@@ -789,10 +834,18 @@ impl PageBrowsers {
         }
     }
 
-    /// The input method names a command (⌫, an arrow, ⏎) for the key being interpreted: the key
-    /// is no text, and is sent as a key.
-    pub(crate) fn commanded(&self) {
-        self.typing.borrow_mut().commanded = true;
+    /// The system's text handling names a command (`moveToBeginningOfLine:` for ⌘←, ⌫'s
+    /// `deleteBackward:`) for the key being interpreted: the key is no text, and goes as a key with
+    /// the command beside it ([`input::edit_command`] says which names go).
+    pub(crate) fn commanded(&self, selector: &str) {
+        let mut typing = self.typing.borrow_mut();
+        typing.commanded = true;
+        if let Some(name) = input::edit_command(selector)
+            && typing.commands.len() < input::COMMANDS_MAX
+            && !typing.commands.contains(&name)
+        {
+            typing.commands.push(name);
+        }
     }
 
     /// What the input method composes now.
@@ -800,31 +853,21 @@ impl PageBrowsers {
         self.typing.borrow().marked.clone()
     }
 
-    /// Pasted text (⌘V): inserted as the engine's own paste is, as text.
-    pub(crate) fn paste(&self, text: String) {
-        if let Some(room) = self.focused.get() {
-            self.send(room, |browser| Command::ImeCommit { browser, text });
-        }
+    /// An item of the Edit menu (copy, cut, paste, undo, redo, select all) with the keyboard in a
+    /// room: the engine runs it on the field or the page that has the focus, with the system's
+    /// pasteboard (a paste is the engine's own, with its `paste` event). `false` where no room has
+    /// the keyboard.
+    fn edit(&self, action: EditAction) -> bool {
+        let Some(room) = self.focused.get() else {
+            return false;
+        };
+        self.send(room, |browser| Command::Edit { browser, action });
+        true
     }
 
-    /// A shortcut of the Edit menu with the keyboard in a room (⌘A, ⌘C, ⌘X, ⌘Z): as the key, which
-    /// a web page that binds it hears.
-    pub(crate) fn shortcut(&self, character: char) {
-        let Some(room) = self.focused.get() else {
-            return;
-        };
-        let vk = i32::from(character.to_ascii_uppercase() as u8);
-        let key = KeyData {
-            vk,
-            native: 0,
-            character: u16::from(character as u8),
-            unmodified: u16::from(character as u8),
-            mods: browser_ipc::message::modifier::COMMAND,
-            system: false,
-        };
-        for kind in [KeyKind::Down, KeyKind::Up] {
-            self.send(room, |browser| Command::Key { browser, kind, key });
-        }
+    /// The item of the Edit menu that has the key `key` as its shortcut (⌘C, ⌘X, ⌘V, ⌘A, ⌘Z).
+    pub(crate) fn edit_menu(&self, key: char) -> bool {
+        self.edit(input::edit_action(key))
     }
 
     /// Where the input method's window goes: about where the person last pressed in a room, the

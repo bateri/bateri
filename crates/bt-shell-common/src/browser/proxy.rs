@@ -13,8 +13,14 @@
 //! that address with its own head (origin form, no `Proxy-Authorization`: the identity of the
 //! browser must not reach a dev server), the connection to each address kept for the next request of
 //! the same client connection. A machine with no way here gets `502` and the reason.
+//!
+//! **The proxy's own `502`s say what failed to the helper, not only to the person**: the body is
+//! the sentence, and the header [`NET_ERROR`] is the Chromium net error it stands for (`-102`
+//! refused, `-118` timed out, `-105` name not resolved, `-130` no way to the program's machine,
+//! `-109` any other), which the helper turns into the page's load error. The header is the proxy's
+//! alone: a server's answer that has it loses it on the way back ([`answers`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +30,22 @@ use std::time::Duration;
 
 use super::profile::ProfileKey;
 use super::route::{DIAL_WAIT, Dialer, Link, Parts, Routes};
+
+mod answers;
+
+/// The header of the proxy's `502` that names the Chromium net error the failure is (the helper
+/// reads it on a `502` of a page's own document).
+pub const NET_ERROR: &str = "X-Bateri-Net-Error";
+/// `ERR_CONNECTION_REFUSED`.
+const REFUSED: i32 = -102;
+/// `ERR_NAME_NOT_RESOLVED`.
+const NAME_NOT_RESOLVED: i32 = -105;
+/// `ERR_ADDRESS_UNREACHABLE`: any failure that is none of the others.
+const UNREACHABLE: i32 = -109;
+/// `ERR_CONNECTION_TIMED_OUT`.
+const TIMED_OUT: i32 = -118;
+/// `ERR_PROXY_CONNECTION_FAILED`: there is no way to the program's machine.
+const NO_WAY: i32 = -130;
 
 /// The largest request head the proxy reads: a bigger one is not a browser's.
 const HEAD_MAX: usize = 16 * 1024;
@@ -153,11 +175,9 @@ fn serve(mut stream: TcpStream, registry: &Registry) -> io::Result<()> {
     let Some(way) = registry.routes.get(profile.machine()) else {
         return end_with(
             &mut stream,
-            &reply(
-                502,
-                "Bad Gateway",
-                "",
-                "There is no route from this pane to the program's machine.\n",
+            &bad_gateway(
+                NO_WAY,
+                "There is no route from this pane to the program's machine.",
             ),
         );
     };
@@ -194,6 +214,8 @@ struct Upstream {
     end: Arc<dyn Fn() + Send + Sync>,
     /// Set by the thread that carries its answers back when the far end has ended.
     dead: Arc<AtomicBool>,
+    /// The requests sent on it that have no final answer yet (the answers are read as they pass).
+    asking: Arc<answers::Asking>,
 }
 
 /// One client connection of a known profile, and the connections made for it.
@@ -278,7 +300,7 @@ impl Carrying<'_> {
             .ok_or_else(|| format!("{authority} is not an address"))?;
         let link = self.way.dial(&host, port, DIAL_WAIT)?;
         let Parts {
-            mut reader,
+            reader,
             writer,
             end,
             hold,
@@ -287,12 +309,14 @@ impl Carrying<'_> {
         let client = self.client.try_clone().map_err(|e| e.to_string())?;
         let (last, key) = (Arc::clone(&self.last), authority.to_owned());
         let (flag, closing) = (Arc::clone(&dead), Arc::clone(&end));
+        let asking = Arc::new(Mutex::new(VecDeque::new()));
+        let asked = Arc::clone(&asking);
         std::thread::Builder::new()
             .name("browser-proxy-answers".into())
             .spawn(move || {
                 let _hold = hold;
                 let mut client = client;
-                let _ = io::copy(&mut reader, &mut client);
+                let _ = answers::carry(reader, &mut client, &asked);
                 flag.store(true, Ordering::Release);
                 closing();
                 // What the last request asked is answered to its end by this connection's end: the
@@ -302,8 +326,15 @@ impl Carrying<'_> {
                 }
             })
             .map_err(|e| e.to_string())?;
-        self.upstreams
-            .insert(authority.to_owned(), Upstream { writer, end, dead });
+        self.upstreams.insert(
+            authority.to_owned(),
+            Upstream {
+                writer,
+                end,
+                dead,
+                asking,
+            },
+        );
         Ok(())
     }
 
@@ -326,7 +357,7 @@ impl Carrying<'_> {
                 (old.end)();
             }
             if let Err(why) = self.dial(authority) {
-                self.say(&reply(502, "Bad Gateway", "", &format!("{why}\n")))?;
+                self.say(&bad_gateway(net_error(&why), &why))?;
                 return Err(io::Error::other(why));
             }
         }
@@ -337,6 +368,7 @@ impl Carrying<'_> {
         let Some(up) = self.upstreams.get_mut(authority) else {
             return Err(io::Error::other("no connection"));
         };
+        lock(&up.asking).push_back(method.eq_ignore_ascii_case("HEAD"));
         up.writer.write_all(out.as_bytes())?;
         match body {
             Body::None => {}
@@ -355,7 +387,7 @@ impl Carrying<'_> {
         };
         let link = match self.way.dial(&host, port, DIAL_WAIT) {
             Ok(link) => link,
-            Err(why) => return self.say(&reply(502, "Bad Gateway", "", &format!("{why}\n"))),
+            Err(why) => return self.say(&bad_gateway(net_error(&why), &why)),
         };
         self.client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
@@ -525,6 +557,48 @@ fn read_line(stream: &mut TcpStream) -> io::Result<String> {
     ))
 }
 
+/// The proxy's own `502`: `why` is the sentence for the person, `code` the Chromium net error it
+/// stands for, said in [`NET_ERROR`] for the helper.
+fn bad_gateway(code: i32, why: &str) -> String {
+    reply(
+        502,
+        "Bad Gateway",
+        &format!("{NET_ERROR}: {code}\r\n"),
+        &format!("{why}\n"),
+    )
+}
+
+/// The Chromium net error a way's failure (`why`, the line the [`Dialer`] gives for the person) is:
+/// told by what the line says, which is the operating system's own words for what a connection
+/// fails by, or the server's.
+fn net_error(why: &str) -> i32 {
+    let why = why.to_ascii_lowercase();
+    let says = |words: &[&str]| words.iter().any(|word| why.contains(word));
+    if says(&["refused"]) {
+        REFUSED
+    } else if says(&["timed out", "timeout", "too many connections", "in time"]) {
+        TIMED_OUT
+    } else if says(&[
+        "failed to lookup",
+        "nodename nor servname",
+        "not known",
+        "name or service",
+        "no such host",
+        "no address",
+    ]) {
+        NAME_NOT_RESOLVED
+    } else if says(&[
+        "not running",
+        "made no connection",
+        "does not allow",
+        "no route from",
+    ]) {
+        NO_WAY
+    } else {
+        UNREACHABLE
+    }
+}
+
 fn reply(status: u16, reason: &str, extra: &str, body: &str) -> String {
     format!(
         "HTTP/1.1 {status} {reason}\r\n{extra}Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -672,6 +746,10 @@ mod tests {
         let answer = ask(&proxy, &connect_with("user", "secret"));
         assert!(answer.starts_with("HTTP/1.1 502 "), "{answer}");
         assert!(answer.contains("no route"), "{answer}");
+        assert!(
+            answer.contains("X-Bateri-Net-Error: -130\r\n"),
+            "no way is the proxy's own failure: {answer}"
+        );
     }
 
     #[test]

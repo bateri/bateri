@@ -5,13 +5,14 @@
 //! The keys are sent **as keys**: `keydown` for the page's own scripts, then the character, then
 //! `keyup`, and the input method's text only where one is composing. A page that listens for keys
 //! (an editor, a game, a form that validates as it is typed) hears a typist; one that is sent
-//! only text hears a paste. The macOS editing commands (⌘← and the rest) cannot go as commands:
-//! the protocol has no way to carry one, and the keys that stand for them in the engine's table
-//! (Home for ⌘←) scroll a page that has no field, so that a key the page binds (browserpen's ⌘←
-//! is back) would never come back to be the page's. The measurement is the test
-//! `the_real_engine_edits_text_with_these_keys_when_one_is_at_hand`.
+//! only text hears a paste. The macOS editing commands (⌘← and the rest) ride with the key's
+//! `keydown` as the names the system's text handling gave them (`doCommandBySelector:`), as
+//! Chrome sends them ([`edit_command`]): the engine runs them where a field has the keyboard and
+//! the page did not stop the key, and a key it did not use comes back as before, so that a key the
+//! page binds (browserpen's ⌘← is back) is still the page's outside a field. The measurement is
+//! the test `the_real_engine_edits_text_with_these_keys_when_one_is_at_hand`.
 
-use browser_ipc::message::{Button, Cursor, modifier};
+use browser_ipc::message::{Button, Cursor, EditAction, modifier};
 use bt_shell_common::native_view::Button as Pressed;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSCursor, NSEventModifierFlags};
@@ -143,6 +144,33 @@ pub(super) fn has_character(vk: i32) -> bool {
     matches!(vk, 9 | 13)
 }
 
+/// The most commands one key carries (the engine's own limit).
+pub(super) const COMMANDS_MAX: usize = 8;
+
+/// What the system's text handling named (`moveToBeginningOfLine:`) as the command the engine is
+/// sent, or `None` for the ones the engine must not run: the ones that insert text (`insertTab:`,
+/// `insertNewline:`: the key's text is sent as the key's own, and a tab is no tab character in a
+/// field) and `noop:`. The colon goes (Chrome's names have none); anything that is not a plain
+/// name is no command.
+pub(super) fn edit_command(selector: &str) -> Option<String> {
+    let name = selector.strip_suffix(':').unwrap_or(selector);
+    let plain =
+        !name.is_empty() && name.len() <= 48 && name.bytes().all(|b| b.is_ascii_alphanumeric());
+    (plain && !name.starts_with("insert") && name != "noop").then(|| name.to_owned())
+}
+
+/// The command of the Edit menu's item that has `key` as its shortcut (⌘C, ⌘X, ⌘V, ⌘Z; ⌘A is
+/// every other).
+pub(super) fn edit_action(key: char) -> EditAction {
+    match key {
+        'c' => EditAction::Copy,
+        'x' => EditAction::Cut,
+        'v' => EditAction::Paste,
+        'z' => EditAction::Undo,
+        _ => EditAction::SelectAll,
+    }
+}
+
 /// How far the engine scrolls for what the wheel says, in the engine's points: the pane's own
 /// reading of the event is the page's (a line is a dozen points there, a trackpad's own), and a
 /// line of a wheel is about forty points in a browser. The sign is the engine's, up positive.
@@ -192,6 +220,43 @@ pub(super) fn cursor_of(cursor: Cursor) -> Retained<NSCursor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_edit_menus_items_are_the_engines_commands() {
+        assert_eq!(edit_action('c'), EditAction::Copy);
+        assert_eq!(edit_action('x'), EditAction::Cut);
+        assert_eq!(edit_action('v'), EditAction::Paste);
+        assert_eq!(edit_action('z'), EditAction::Undo);
+        assert_eq!(edit_action('a'), EditAction::SelectAll);
+    }
+
+    #[test]
+    fn the_commands_the_system_names_are_sent_as_chrome_sends_them() {
+        assert_eq!(
+            edit_command("moveToBeginningOfLine:").as_deref(),
+            Some("moveToBeginningOfLine")
+        );
+        assert_eq!(
+            edit_command("deleteWordBackward:").as_deref(),
+            Some("deleteWordBackward")
+        );
+        assert_eq!(edit_command("selectAll").as_deref(), Some("selectAll"));
+        // Text the key makes is the key's; nothing is a command.
+        for not in [
+            "insertTab:",
+            "insertNewline:",
+            "insertText:",
+            "noop:",
+            "noop",
+            "",
+            ":",
+        ] {
+            assert_eq!(edit_command(not), None, "{not}");
+        }
+        // A selector the engine would not take as a name.
+        assert_eq!(edit_command("move:to:"), None);
+        assert_eq!(edit_command(&"a".repeat(49)), None);
+    }
 
     #[test]
     fn letters_digits_and_the_keys_beside_them_are_the_engines_virtual_keys() {

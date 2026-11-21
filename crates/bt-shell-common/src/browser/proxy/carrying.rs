@@ -52,6 +52,11 @@ struct Server {
 
 impl Server {
     fn start() -> Self {
+        Self::answering(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+    }
+
+    /// A server that answers every request with `answer`.
+    fn answering(answer: &'static [u8]) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let heard = Arc::new(Mutex::new(Vec::new()));
@@ -82,7 +87,7 @@ impl Server {
                             }
                         };
                         lock(&log).push(Heard { head, body });
-                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                        let _ = stream.write_all(answer);
                     }
                 });
             }
@@ -338,6 +343,122 @@ fn a_connection_the_way_does_not_make_is_a_502_that_says_why() {
         let (head, body) = response(&mut client);
         assert!(head.starts_with("HTTP/1.1 502 "), "{head}");
         assert!(body.contains("no-forwarding"), "{body}");
+        // A way that does not allow it is no way: the helper is told so.
+        assert_eq!(
+            header(&head, "x-bateri-net-error").as_deref(),
+            Some("-130"),
+            "{head}"
+        );
+    }
+}
+
+/// What the helper is told when a connection fails, by the words the way gives: the page's load
+/// error is the Chromium error it stands for, for a plain request and for a tunnel alike.
+#[test]
+fn each_failure_of_a_connection_is_the_net_error_it_stands_for() {
+    for (why, code) in [
+        ("localhost:3000: Connection refused (os error 61)", "-102"),
+        ("localhost:3000: connection timed out", "-118"),
+        (
+            "too many connections are open through the server just now",
+            "-118",
+        ),
+        (
+            "nope.test: failed to lookup address information: nodename nor servname provided, or not known",
+            "-105",
+        ),
+        ("nope.test:80: no address", "-105"),
+        ("bateri's connections are not running", "-130"),
+        ("localhost:3000: No route to host (os error 65)", "-109"),
+        ("something nobody foresaw", "-109"),
+    ] {
+        let (rig, _) = rig("mac");
+        rig.routes.set(
+            "mac",
+            Arc::new(Way {
+                to: 1,
+                asked: Mutex::new(Vec::new()),
+                refuse: Some(why.into()),
+            }),
+        );
+        for request in [
+            format!(
+                "GET http://dev.test/ HTTP/1.1\r\nHost: dev.test\r\n{}\r\n",
+                auth("user", "secret")
+            ),
+            format!(
+                "CONNECT dev.test:443 HTTP/1.1\r\n{}\r\n",
+                auth("user", "secret")
+            ),
+        ] {
+            let mut client = rig.client();
+            client.write_all(request.as_bytes()).unwrap();
+            let (head, body) = response(&mut client);
+            assert!(head.starts_with("HTTP/1.1 502 "), "{head}");
+            assert_eq!(
+                header(&head, "x-bateri-net-error").as_deref(),
+                Some(code),
+                "{why}: {head}"
+            );
+            assert!(body.contains(why), "the person's sentence stays: {body}");
+        }
+    }
+}
+
+/// A connection the program's machine refuses, made for real: the engine's own words for it are
+/// what says so.
+#[test]
+fn a_port_nothing_listens_on_is_a_refused_connection_to_the_helper() {
+    let closed = {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let (rig, _) = rig("mac");
+    rig.routes.set("mac", Way::new(closed));
+    let mut client = rig.client();
+    client
+        .write_all(
+            format!(
+                "GET http://dev.test/ HTTP/1.1\r\nHost: dev.test\r\n{}\r\n",
+                auth("user", "secret")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let (head, _) = response(&mut client);
+    assert!(head.starts_with("HTTP/1.1 502 "), "{head}");
+    assert_eq!(
+        header(&head, "x-bateri-net-error").as_deref(),
+        Some("-102"),
+        "{head}"
+    );
+}
+
+/// The header is the proxy's to say: a server that sends it (to make a page look failed) is
+/// carried as it is without it, whatever else it sends.
+#[test]
+fn a_servers_answer_with_the_proxys_header_is_carried_without_it() {
+    let server = Server::answering(
+        b"HTTP/1.1 502 Bad Gateway\r\nX-Bateri-Net-Error: -102\r\nContent-Length: 2\r\n\r\nok",
+    );
+    let (rig, _) = rig("mac");
+    rig.routes.set("mac", Way::new(server.port));
+    let mut client = rig.client();
+    // Two requests on one connection: both answers lose it.
+    for _ in 0..2 {
+        client
+            .write_all(
+                format!(
+                    "GET http://dev.test/ HTTP/1.1\r\nHost: dev.test\r\n{}\r\n",
+                    auth("user", "secret")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let (head, body) = response(&mut client);
+        assert!(head.starts_with("HTTP/1.1 502 "), "{head}");
+        assert_eq!(header(&head, "x-bateri-net-error"), None, "{head}");
+        assert_eq!(body, "ok");
     }
 }
 
