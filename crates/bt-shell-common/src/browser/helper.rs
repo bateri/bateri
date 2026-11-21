@@ -458,21 +458,54 @@ fn pump_frames(run: &Run, receiver: &Receiver) {
     }
 }
 
+/// A way to tell a browser something and to answer its questions, which does not keep it open:
+/// closing is [`Browser`]'s drop alone. A question of the browser holds one, so that it is
+/// answered whoever is holding the browser by then.
+#[derive(Clone)]
+pub struct Handle {
+    id: u32,
+    run: Arc<Run>,
+}
+
+impl Handle {
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// As [`Browser::send`]; an answer to a browser that is gone, or of a helper that ended,
+    /// is an error nobody needs to act on.
+    pub fn send(&self, command: Command) -> io::Result<()> {
+        send_to(&self.run, self.id, command)
+    }
+}
+
+fn send_to(run: &Run, id: u32, command: Command) -> io::Result<()> {
+    if command.browser().is_some_and(|browser| browser != id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a command for another browser",
+        ));
+    }
+    run.commands.send(&command)
+}
+
 impl Browser {
     pub fn id(&self) -> u32 {
         self.id
     }
 
+    /// A handle on this browser for what answers its questions ([`Handle`]).
+    pub fn handle(&self) -> Handle {
+        Handle {
+            id: self.id,
+            run: self.run.clone(),
+        }
+    }
+
     /// Tells the helper something about this browser (or answers one of its questions: a menu,
     /// a dialog, a download). A command that names another browser is refused.
     pub fn send(&self, command: Command) -> io::Result<()> {
-        if command.browser().is_some_and(|browser| browser != self.id) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a command for another browser",
-            ));
-        }
-        self.run.commands.send(&command)
+        send_to(&self.run, self.id, command)
     }
 
     /// Whether the helper this browser was opened in still runs.
@@ -509,4 +542,4 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

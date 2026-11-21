@@ -113,6 +113,7 @@ impl Installer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn layout(&self) -> &Layout {
         &self.layout
     }

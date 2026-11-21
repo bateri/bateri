@@ -14,16 +14,21 @@
 //! - [`profile`]: a profile's key (machine, application, name) and the folder and the identity
 //!   the helper is given for it.
 //! - [`proxy`]: the loopback proxy that is open before the helper starts, and its credentials.
+//! - [`downloads`]: the name and the place of a file a web page offers.
+//! - `rooms` (macOS): the browsers of one page, and what the engine's questions are made into.
 //! - `helper` (macOS): the helper's life — started with the first browser, ended some time after
 //!   the last one is closed, and what the browsers are told when it dies. It owns no operating
 //!   system service of its own: starting a process and checking a signature are given to it.
 //!
 //! Downloading, unpacking and the signature are the platform shell's (`bt-shell-macos`).
 
+pub mod downloads;
 #[cfg(target_os = "macos")]
 pub mod helper;
 pub mod layout;
 pub mod notice;
 pub mod profile;
 pub mod proxy;
+#[cfg(target_os = "macos")]
+pub mod rooms;
 pub mod version;

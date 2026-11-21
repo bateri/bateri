@@ -1594,6 +1594,35 @@ impl Gpu {
         })
     }
 
+    /// A picture made of a texture the caller made on this device (a frame another process drew,
+    /// say): bound with the linear sampler as the others are, and not copied. The texture's
+    /// pixels are read as a page's image is: premultiplied, encoded, decoded in the shader.
+    fn adopt_texture(&self, label: &'static str, texture: &wgpu::Texture) -> ImageTexture {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &self.plane_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.linear),
+                },
+            ],
+        });
+        let size = texture.size();
+        ImageTexture {
+            texture: texture.clone(),
+            bind,
+            seen: true,
+            revision: 0,
+            size: (size.width, size.height),
+        }
+    }
+
     /// The effects' bind group: both plane views and both samplers.
     fn fx_bind_group(
         &self,
@@ -1969,9 +1998,15 @@ impl Renderer {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn device(&self) -> &wgpu::Device {
+    /// The device the renderer draws on, for a caller that makes textures of its own to hand
+    /// over ([`Renderer::ui_image_texture`]).
+    pub fn device(&self) -> &wgpu::Device {
         &self.gpu.device
+    }
+
+    /// The queue of [`Renderer::device`].
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.gpu.queue
     }
 
     /// The shared device; the window surface is created and configured on it.

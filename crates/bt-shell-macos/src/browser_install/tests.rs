@@ -675,3 +675,251 @@ fn the_real_helper_starts_loads_a_page_and_ends_when_one_is_at_hand() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- editing keys against the real engine ----
+
+/// A key as the helper takes it.
+fn key_data(vk: i32, native: i32, character: u16, mods: u32) -> browser_ipc::message::KeyData {
+    browser_ipc::message::KeyData {
+        vk,
+        native,
+        character,
+        unmodified: character,
+        mods,
+        system: false,
+    }
+}
+
+fn percent(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// The real helper with one browser, for tests that press keys in a page.
+struct Probe {
+    browser: helper::Browser,
+    events: std::sync::mpsc::Receiver<browser_ipc::message::Event>,
+    title: String,
+    returned: Vec<(browser_ipc::message::KeyKind, i32, u32)>,
+    _manager: Arc<Manager>,
+    root: PathBuf,
+}
+
+impl Probe {
+    fn start(name: &str, app: PathBuf) -> Probe {
+        use bt_shell_common::browser::profile::ProfileKey;
+        let root = temp(name);
+        let config = Config {
+            source: Source::Fixed(app),
+            profiles: root.join("profiles"),
+            run: root.join("run"),
+            mock_keychain: true,
+            linger: Duration::from_millis(200),
+            start_timeout: helper::START_TIMEOUT,
+            trust: Arc::new(|_| Ok(())),
+        };
+        let manager = Manager::new(
+            config,
+            Arc::new(Spawner {
+                log: root.join("helper.log"),
+            }),
+        );
+        let (events, heard) = std::sync::mpsc::channel();
+        let key = ProfileKey::new("mac", "test", Some(name)).unwrap();
+        let browser = manager
+            .open(&key, (400, 300), 1.0, Arc::new(Titles(events)))
+            .unwrap();
+        Probe {
+            browser,
+            events: heard,
+            title: String::new(),
+            returned: Vec::new(),
+            _manager: manager,
+            root,
+        }
+    }
+
+    fn send(&self, command: browser_ipc::message::Command) {
+        self.browser.send(command).unwrap();
+    }
+
+    /// Reads events until `done` says one is what is waited for; everything read is remembered.
+    fn until(&mut self, what: &str, mut done: impl FnMut(&browser_ipc::message::Event) -> bool) {
+        use browser_ipc::message::Event;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = self
+                .events
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("never happened: {what}"));
+            match &event {
+                Event::State { title, .. } => self.title.clone_from(title),
+                Event::UnhandledKey { kind, key, .. } => {
+                    self.returned.push((*kind, key.vk, key.mods));
+                }
+                _ => {}
+            }
+            if done(&event) {
+                return;
+            }
+        }
+    }
+
+    fn load(&mut self, html: &str) {
+        use browser_ipc::message::{Command, Event};
+        let id = self.browser.id();
+        self.send(Command::Navigate {
+            browser: id,
+            url: format!("data:text/html,{}", percent(html)),
+        });
+        self.until(
+            "the page's title",
+            |e| matches!(e, Event::State { title, loading: false, .. } if title == "init"),
+        );
+        self.send(Command::Focus {
+            browser: id,
+            on: true,
+        });
+        // The engine takes no key for a while after a load (Phase 3).
+        self.drain(Duration::from_millis(700));
+    }
+
+    fn click(&self, x: i32, y: i32) {
+        use browser_ipc::message::{Button, Command, MouseKind};
+        let id = self.browser.id();
+        for kind in [MouseKind::Move, MouseKind::Down, MouseKind::Up] {
+            self.send(Command::Mouse {
+                browser: id,
+                kind,
+                x,
+                y,
+                button: Button::Left,
+                clicks: 1,
+                mods: 0,
+            });
+        }
+    }
+
+    fn tap(&self, key: browser_ipc::message::KeyData) {
+        use browser_ipc::message::{Command, KeyKind};
+        for kind in [KeyKind::Down, KeyKind::Up] {
+            self.send(Command::Key {
+                browser: self.browser.id(),
+                kind,
+                key,
+            });
+        }
+    }
+
+    /// Reads what comes for `wait`: a page's title follows its keys some time after.
+    fn drain(&mut self, wait: Duration) {
+        use browser_ipc::message::Event;
+        let deadline = std::time::Instant::now() + wait;
+        while let Ok(event) = self
+            .events
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            match &event {
+                Event::State { title, .. } => self.title.clone_from(title),
+                Event::UnhandledKey { kind, key, .. } => {
+                    self.returned.push((*kind, key.vk, key.mods));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Everything pressed so far has been told: a key nobody uses (F1) comes back after it.
+    fn settle(&mut self) {
+        use browser_ipc::message::{Event, KeyKind};
+        self.tap(key_data(112, 122, 0xF704, 0));
+        self.until(
+            "the sentinel's release",
+            |e| matches!(e, Event::UnhandledKey { kind: KeyKind::Up, key, .. } if key.vk == 112),
+        );
+        self.drain(Duration::from_millis(300));
+    }
+}
+
+const EDIT_PAGE: &str = "<title>init</title><body style='margin:0'>\
+    <input id=i style='position:absolute;left:10px;top:10px;width:300px;height:30px' value='hello world foo'>\
+    <script>const i=document.getElementById('i');\
+    const rep=()=>{document.title='s:'+i.selectionStart+':'+i.selectionEnd+':'+i.value.length};\
+    i.addEventListener('keyup',rep);document.addEventListener('selectionchange',rep);</script>";
+
+/// What each candidate for an editing key does in a field of the real engine, as measured on the
+/// helper of `browser` rev efa669d (`BATERI_BROWSER_APP=… cargo test -p bt-shell-macos --lib
+/// the_real_engine_edits`): the keys the engine edits with go in the field and do not come back; the
+/// macOS ones (⌘←, ⌃A and the like) are commands of the system's text, which the engine's own
+/// protocol cannot carry, so they do nothing in a field and come back as if no field were there.
+/// If a change in the helper makes one of them work this fails, and the plan's Phase 5 caveat
+/// (⌘← in a field) is the thing to close.
+#[test]
+fn the_real_engine_edits_text_with_these_keys_when_one_is_at_hand() {
+    use browser_ipc::message::{KeyKind, modifier as m};
+    let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+        return;
+    };
+    let mut probe = Probe::start("edit", app);
+    // (name, vk, native, character, mods)
+    let left = (37, 123, 0xF702);
+    let candidates: &[(&str, i32, i32, u16, u32)] = &[
+        ("left", left.0, left.1, left.2, 0),
+        ("cmd-left", left.0, left.1, left.2, m::COMMAND),
+        ("home", 36, 115, 0xF729, 0),
+        ("ctrl-a", 65, 0, 1, m::CONTROL),
+        ("alt-left", left.0, left.1, left.2, m::ALT),
+        ("ctrl-left", left.0, left.1, left.2, m::CONTROL),
+        ("shift-home", 36, 115, 0xF729, m::SHIFT),
+        (
+            "cmd-shift-left",
+            left.0,
+            left.1,
+            left.2,
+            m::COMMAND | m::SHIFT,
+        ),
+        ("cmd-backspace", 8, 51, 0x7F, m::COMMAND),
+        ("alt-backspace", 8, 51, 0x7F, m::ALT),
+        ("ctrl-backspace", 8, 51, 0x7F, m::CONTROL),
+        ("cmd-up", 38, 126, 0xF700, m::COMMAND),
+        ("ctrl-home", 36, 115, 0xF729, m::CONTROL),
+        ("cmd-a", 65, 0, 97, m::COMMAND),
+        ("ctrl-e", 69, 14, 5, m::CONTROL),
+        ("ctrl-k", 75, 40, 11, m::CONTROL),
+        ("ctrl-b", 66, 11, 2, m::CONTROL),
+    ];
+    // The ones the engine edits with itself.
+    let edits = ["left", "home", "alt-left", "shift-home", "alt-backspace"];
+    for (name, vk, native, character, mods) in candidates {
+        probe.load(EDIT_PAGE);
+        probe.click(100, 25);
+        probe.drain(Duration::from_millis(300));
+        probe.tap(key_data(35, 119, 0xF72B, 0));
+        probe.settle();
+        let before = probe.title.clone();
+        probe.returned.clear();
+        probe.tap(key_data(*vk, *native, *character, *mods));
+        probe.settle();
+        let came_back = probe
+            .returned
+            .iter()
+            .any(|(kind, key, _)| *kind == KeyKind::Down && key == vk);
+        let moved = probe.title != before;
+        let edited = edits.contains(name);
+        assert_eq!(
+            (moved, came_back),
+            (edited, !edited),
+            "{name}: before {before}, after {}",
+            probe.title
+        );
+    }
+    let _ = std::fs::remove_dir_all(&probe.root);
+}

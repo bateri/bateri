@@ -46,6 +46,7 @@ mod look;
 mod page;
 #[cfg(test)]
 mod pane_tests;
+mod surfaces;
 mod transfers;
 pub use files::{
     DropWay, FILE_SCHEME, GivenFile, Outcomes, Quarantine, ViewFiles, drop_way, entries_given,
@@ -60,14 +61,15 @@ pub use pencere_drive::{
 pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script};
 use pencere_sandbox::{FigureKey, Images, draw_figure, figure_key};
 pub use pencere_view::{
-    Accessible, AccessibleRole, Bars, Button, Carry, Command, Cursor, FieldKind, FieldState,
-    FileEntry, FileSource, Fill, GesturePhase, Id, Input, Key, KeyConvention, Keyboard, Menu,
-    MenuEntry, Mods, Panel, Payload, Phase, Point, Rect, Role, Saving, Shortcut, State,
-    TerminalLook, WallTime, copy_key,
+    Accessible, AccessibleRole, Bars, BrowserAsk, BrowserSlot, BrowserState, Button, Carry,
+    Command, Cursor, FieldKind, FieldState, FileEntry, FileSource, Fill, GesturePhase, Id, Input,
+    Key, KeyConvention, Keyboard, Menu, MenuEntry, Mods, Panel, Payload, Phase, Point, Rect, Role,
+    Saving, Shortcut, State, TerminalLook, WallTime, copy_key,
 };
 use pencere_view::{
     Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,
 };
+pub use surfaces::Surfaces;
 pub use transfers::Waits;
 
 /// The greatest level of `raised` that is drawn (the kit's specification, §3.1): the interface
@@ -422,6 +424,7 @@ fn to_list(
     minimum_contrast: f64,
     typeset: &mut Typeset<'_>,
     images: Option<&Images>,
+    surfaces: Option<&dyn Surfaces>,
     draws: &DrawList,
     origin: (f32, f32),
 ) -> UiList {
@@ -494,9 +497,14 @@ fn to_list(
             // An editor's place that no editor filled (the drive's editors fill every one they
             // have): its room's fill, under it, is what shows.
             Paint::Editor(_) => {}
-            // A browser's place: the helper's frame is painted into it by the shell (the room of
-            // `Laid::browsers`); the list holds nothing of it.
-            Paint::Browser(_) => {}
+            // A browser's place: the engine's frame is the shell's ([`Surfaces`]), put here in the
+            // list's order so that what the page drew over the room covers it. A shell with no
+            // browsers has nothing to put (the page was told so and drew a placeholder instead).
+            Paint::Browser(slot) => {
+                if let Some(surfaces) = surfaces {
+                    surfaces.paint(renderer, &mut list, slot, origin);
+                }
+            }
         }
     }
     list

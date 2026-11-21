@@ -1900,6 +1900,16 @@ define_class!(
         /// not repeat).
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text(&self, string: &AnyObject, replacement_range: NSRange) {
+            // A browser with the keyboard is where the text goes: as its key's text, or an input
+            // method's commit.
+            if let Some(browsers) = self.pane().and_then(|pane| pane.page_browsers())
+                && browsers.has_keyboard()
+            {
+                if let Some(text) = resolve_text(string) {
+                    browsers.insert(text);
+                }
+                return;
+            }
             // An editor of the page with the keyboard is where the text goes — from a key, an
             // input method's commit, the character viewer, dictation — in place of the range
             // the system names, where it names one and nothing is composed.
@@ -1961,6 +1971,14 @@ define_class!(
         /// ([`stack_kept_the_key`]).
         #[unsafe(method(doCommandBySelector:))]
         fn do_command_by_selector(&self, _selector: Sel) {
+            // In a browser the key the system's text did not take is the browser's: the key is sent
+            // as it came, and the command (which the engine's protocol cannot carry) is let go.
+            if let Some(browsers) = self.pane().and_then(|pane| pane.page_browsers())
+                && browsers.has_keyboard()
+            {
+                browsers.commanded();
+                return;
+            }
             // In an editor of the page, the key the system's text did not take is the editor's.
             if let Some(pane) = self.pane()
                 && pane.page_editing().is_some()
@@ -1984,6 +2002,16 @@ define_class!(
             selected_range: NSRange,
             replacement_range: NSRange,
         ) {
+            // A browser draws what is composed itself: the engine is told it, and the part of it
+            // the input method selects.
+            if let Some(browsers) = self.pane().and_then(|pane| pane.page_browsers())
+                && browsers.has_keyboard()
+            {
+                if let Some(text) = resolve_text(string) {
+                    browsers.compose(text, (selected_range.location, selected_range.length));
+                }
+                return;
+            }
             // An editor of the page draws what is composed, in its document, the part of it the
             // input method selects with it.
             if let Some(pane) = self.pane()
@@ -2017,6 +2045,12 @@ define_class!(
         /// ghostty do the same thing in the same place.
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
+            if let Some(browsers) = self.pane().and_then(|pane| pane.page_browsers())
+                && browsers.has_keyboard()
+            {
+                browsers.unmark();
+                return;
+            }
             // In an editor of the page what was composed is a document's text: it stays, as
             // Apple's contract says, typed.
             if let Some(pane) = self.pane()
@@ -2035,6 +2069,12 @@ define_class!(
         /// it is `bt-core`'s selection and not a text the stack could edit.
         #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
+            // A browser's caret is the page's: only what is composed is known here.
+            if let Some(browsers) = self.pane().and_then(|pane| pane.page_browsers())
+                && browsers.has_keyboard()
+            {
+                return NSRange::new(browsers.marked().encode_utf16().count(), 0);
+            }
             // An editor of the page is a document: its main selection.
             if let Some(editors) = self.pane().and_then(|pane| pane.page_editing()) {
                 return editors
@@ -2048,6 +2088,14 @@ define_class!(
         /// contract's counterpart of "nothing is marked", not a zero-length range.
         #[unsafe(method(markedRange))]
         fn marked_range(&self) -> NSRange {
+            if let Some(browsers) = self.pane().and_then(|pane| pane.page_browsers())
+                && browsers.has_keyboard()
+            {
+                return match browsers.marked().encode_utf16().count() {
+                    0 => EMPTY_RANGE,
+                    len => NSRange::new(0, len),
+                };
+            }
             if let Some(editors) = self.pane().and_then(|pane| pane.page_editing()) {
                 return editors
                     .marked()
@@ -2062,9 +2110,14 @@ define_class!(
         #[unsafe(method(hasMarkedText))]
         fn has_marked_text(&self) -> bool {
             // No `return`: `define_class!` converts the `bool` at the end of the body.
-            match self.pane().and_then(|pane| pane.page_editing()) {
-                Some(editors) => editors.marked().is_some(),
-                None => !self.ivars().marked_text.borrow().is_empty(),
+            let browser = self
+                .pane()
+                .and_then(|pane| pane.page_browsers())
+                .filter(|browsers| browsers.has_keyboard());
+            match (browser, self.pane().and_then(|pane| pane.page_editing())) {
+                (Some(browsers), _) => !browsers.marked().is_empty(),
+                (None, Some(editors)) => editors.marked().is_some(),
+                (None, None) => !self.ivars().marked_text.borrow().is_empty(),
             }
         }
 
@@ -2122,6 +2175,13 @@ define_class!(
                 if let Some(actual) = actual_range.as_mut() {
                     *actual = range;
                 }
+            }
+            // A browser: about where the person pressed in it, the protocol saying no more of the
+            // caret.
+            if let Some(pane) = self.pane()
+                && let Some(rect) = pane.browser_caret_on_screen()
+            {
+                return rect;
             }
             // An editor of the page: the box of the place the range starts at.
             if let Some(pane) = self.pane()

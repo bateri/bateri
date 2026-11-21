@@ -51,7 +51,7 @@ use pencere_view::{
 
 use super::containers::Demo;
 use super::look::LookSlot;
-use super::{SHAPED_LIMIT, Shaped, Typeset, to_list};
+use super::{SHAPED_LIMIT, Shaped, Surfaces, Typeset, to_list};
 
 /// What a pane opens a page of the kit with, whatever the page is.
 pub struct Opening {
@@ -289,6 +289,7 @@ impl UiPage for PageDrawing {
                 shaped.lines.clear();
             }
         }
+        let surfaces = self.handle.surfaces();
         let (list, mut painted) = {
             let mut page = self.handle.page();
             let painted = page.frame(FrameAt {
@@ -310,6 +311,7 @@ impl UiPage for PageDrawing {
                 cx.minimum_contrast,
                 &mut typeset,
                 page.images(),
+                surfaces.as_deref(),
                 &painted.list,
                 (0.0, inset),
             );
@@ -350,6 +352,8 @@ pub struct PageHandle {
     told: Rc<Cell<Mods>>,
     on_outline: Rc<RefCell<Option<OnOutline>>>,
     on_held: Rc<RefCell<Option<OnHeld>>>,
+    /// The pictures of the page's browsers, if the shell shows any.
+    surfaces: Rc<RefCell<Option<Arc<dyn Surfaces>>>>,
 }
 
 impl PageHandle {
@@ -359,6 +363,7 @@ impl PageHandle {
             told: Rc::new(Cell::new(Mods::default())),
             on_outline: Rc::new(RefCell::new(None)),
             on_held: Rc::new(RefCell::new(None)),
+            surfaces: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -515,6 +520,16 @@ impl PageHandle {
     /// [`Painted::deliver_held`]. The page is not borrowed.
     pub fn watch_held(&self, told: Box<dyn Fn(&mut Painted)>) {
         self.on_held.replace(Some(Rc::from(told)));
+    }
+
+    /// The pictures of the page's browsers: what the shell's engine drew, put in the places of the
+    /// list as each frame is drawn ([`Surfaces`]).
+    pub fn set_surfaces(&self, surfaces: Arc<dyn Surfaces>) {
+        self.surfaces.replace(Some(surfaces));
+    }
+
+    fn surfaces(&self) -> Option<Arc<dyn Surfaces>> {
+        self.surfaces.borrow().clone()
     }
 
     /// A frame's outline if it changed, then what the drive held for its fields: the order a pane

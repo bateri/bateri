@@ -16,11 +16,11 @@ use crate::browser::version::Version;
 
 /// What the stand-in helper does.
 #[derive(Clone, Default)]
-struct Behaviour {
+pub(crate) struct Behaviour {
     /// Says hello with a key that is not the one it was started with.
-    wrong_key: bool,
+    pub(crate) wrong_key: bool,
     /// Does not connect at all (and ends).
-    silent: bool,
+    pub(crate) silent: bool,
 }
 
 struct Fake {
@@ -133,13 +133,13 @@ impl Sink for Log {
     }
 }
 
-struct World {
-    manager: Arc<Manager>,
-    root: PathBuf,
-    spawned: Arc<AtomicUsize>,
-    commands: Inbox<Command>,
-    args: Inbox<Vec<String>>,
-    events: Arc<Mutex<Vec<Writer<Event>>>>,
+pub(crate) struct World {
+    pub(crate) manager: Arc<Manager>,
+    pub(crate) root: PathBuf,
+    pub(crate) spawned: Arc<AtomicUsize>,
+    pub(crate) commands: Inbox<Command>,
+    pub(crate) args: Inbox<Vec<String>>,
+    pub(crate) events: Arc<Mutex<Vec<Writer<Event>>>>,
 }
 
 fn temp(name: &str) -> PathBuf {
@@ -149,7 +149,12 @@ fn temp(name: &str) -> PathBuf {
     dir
 }
 
-fn world(name: &str, behaviour: Behaviour, install: Option<&str>, linger: Duration) -> World {
+pub(crate) fn world(
+    name: &str,
+    behaviour: Behaviour,
+    install: Option<&str>,
+    linger: Duration,
+) -> World {
     let root = temp(name);
     let layout = Layout::new(root.join("helper"));
     if let Some(version) = install {

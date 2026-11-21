@@ -847,6 +847,23 @@ impl Renderer {
         held
     }
 
+    /// An image drawn from a texture the caller made on this renderer's device, in place of the
+    /// bytes of a [`UiBitmap`]: the texture is held under `id` in place of what was there (a new
+    /// one every frame is how a stream of frames is shown), drawn as `image` says. The texture's
+    /// pixels are read as a bitmap's are: premultiplied, encoded as sRGB, `Rgba8` or `Bgra8`.
+    pub fn ui_image_texture(
+        &self,
+        list: &mut UiList,
+        id: u64,
+        texture: &wgpu::Texture,
+        image: UiImage,
+    ) -> bool {
+        let held = self.gpu.adopt_texture("ui image of a texture", texture);
+        self.ui.borrow_mut().images.insert(id, held);
+        list.items.push(UiItem::Image { texture: id, image });
+        true
+    }
+
     /// Lets go of every image texture: the page they were for is gone.
     pub fn ui_release_images(&self) {
         self.ui.borrow_mut().images.clear();

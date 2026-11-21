@@ -4414,6 +4414,7 @@ impl TerminalPane {
         handle: &PageHandle,
         theme: &bt_core::Theme,
         family: Option<String>,
+        browsers: Option<Rc<crate::native_browser::PageBrowsers>>,
     ) -> Rc<crate::native_page::PageFields> {
         // A page is its own: what the one before it said of its text is not this one's.
         self.ivars().page_text_size.set(0);
@@ -4436,7 +4437,15 @@ impl TerminalPane {
         {
             // The page says where its fields are whenever it is laid out another way.
             let fields = Rc::clone(&fields);
-            handle.watch_outline(Box::new(move |outline| fields.apply(outline)));
+            let pane = WeakId::new(self);
+            handle.watch_outline(Box::new(move |outline| {
+                fields.apply(outline);
+                // The browsers are made and moved as the outline says, and told how large the
+                // display is: the engine draws in device pixels.
+                if let (Some(browsers), Some(pane)) = (&browsers, pane.load()) {
+                    browsers.outline(outline, pane.display_scale());
+                }
+            }));
         }
         {
             // What replies asked of the fields a frame brought (a find bar opened, filled and
@@ -4523,6 +4532,12 @@ impl TerminalPane {
     /// The person clicked into the page's field named `field` (or the keyboard left the fields
     /// of itself): the page is told.
     pub(crate) fn page_field_focused(&self, field: Option<bt_shell_common::native_view::Id>) {
+        // A field of the page took the keyboard: it is not a browser's.
+        if field.is_some()
+            && let Some(browsers) = self.page_browsers()
+        {
+            browsers.give_keyboard(None);
+        }
         if let Some(handle) = self.page_handle() {
             handle.page().focus(field);
             self.drain_page();
@@ -5211,6 +5226,11 @@ impl TerminalPane {
         };
         let active = self.is_active() && self.keyboard_here();
         handle.set_active(active);
+        // The engine's focus follows the window's: a caret that blinks in a window that has no
+        // keyboard is a lie.
+        if let Some(browsers) = self.page_browsers() {
+            browsers.set_active(active);
+        }
         if handle.editors().focused().is_some()
             && let Some(link) = self.link()
         {
@@ -6257,7 +6277,7 @@ impl TerminalPane {
         let opening = self.page_opening(family.clone(), None);
         let (page, handle) =
             bt_shell_common::native_view::containers_demo(opening, self.page_wake());
-        let fields = self.page_fields(&handle, &theme, family);
+        let fields = self.page_fields(&handle, &theme, family, None);
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Demo,
@@ -6265,6 +6285,7 @@ impl TerminalPane {
             fields,
             area,
             files: None,
+            browsers: None,
         }));
         link.set_page(Some(page));
         // The header says the demo's words.
@@ -6362,6 +6383,57 @@ impl TerminalPane {
         self.drain_page();
     }
 
+    /// The browsers of the page that is up, if it has any.
+    pub(crate) fn page_browsers(&self) -> Option<Rc<crate::native_browser::PageBrowsers>> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.browsers.clone())
+    }
+
+    /// What the helper's threads call when they have put something out for the page's browsers
+    /// (an event, a frame): it hops to the main queue and drains them there, once for however
+    /// many came meanwhile. It never lays out or draws itself.
+    fn browser_wake(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let id = self.id();
+        let queued = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Arc::new(move || {
+            if queued.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                return;
+            }
+            let queued = Arc::clone(&queued);
+            DispatchQueue::main().exec_async(move || {
+                queued.store(false, std::sync::atomic::Ordering::Release);
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = crate::embed::pane(mtm, id)
+                    && let Some(browsers) = pane.page_browsers()
+                {
+                    browsers.drain(&pane);
+                }
+            });
+        })
+    }
+
+    /// What the profile of a browser is kept under with its name: the machine the program of the
+    /// page runs on. A program on this Mac is `mac`.
+    pub(crate) fn browser_machine(&self) -> String {
+        "mac".to_owned()
+    }
+
+    /// The application's name for a file it quarantines.
+    pub(crate) fn app_name(&self) -> String {
+        self.ivars().identity.app_name.clone()
+    }
+
+    /// How many device pixels a point is on the display the pane is on.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn display_scale(&self) -> f32 {
+        self.window()
+            .map_or(1.0, |window| window.backingScaleFactor() as f32)
+    }
+
     /// What a page's module, and its images, call when they have put something out: it hops to
     /// the main queue, where the pane is found by its id if it is still open, and drains the page.
     /// It never lays out or draws itself: the images' decoder may call it from inside a build.
@@ -6426,6 +6498,11 @@ impl TerminalPane {
             return false;
         }
         if self.page_signal(event) {
+            return true;
+        }
+        if let Some(browsers) = self.page_browsers()
+            && browsers.key_down(self, event)
+        {
             return true;
         }
         if self.page_editor_key(event) {
@@ -6563,6 +6640,20 @@ impl TerminalPane {
     /// Edit ▸ Cut, Copy, Paste and Select All while an editor of the page has the keyboard: the
     /// editor's, as their keys (⌘X, ⌘C, ⌘V, ⌘A) are. `true` when one had it.
     pub(crate) fn page_editor_menu(&self, key: char) -> bool {
+        // The Edit menu with the keyboard in a browser: the pasteboard's text is typed in, and the
+        // rest is the key, which a web page that binds it hears.
+        if let Some(browsers) = self.page_browsers()
+            && browsers.has_keyboard()
+        {
+            if key == 'v' {
+                if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
+                    browsers.paste(text);
+                }
+            } else {
+                browsers.shortcut(key);
+            }
+            return true;
+        }
         let Some(editors) = self.page_editing() else {
             return false;
         };
@@ -6611,6 +6702,16 @@ impl TerminalPane {
         Some(window.convertRectToScreen(self.convertRect_toView(in_pane, None)))
     }
 
+    /// Where an input method puts its window for a browser that has the keyboard: a line's height
+    /// below where the person last pressed in it (the protocol says no more of the caret).
+    pub(crate) fn browser_caret_on_screen(&self) -> Option<NSRect> {
+        let browsers = self
+            .page_browsers()
+            .filter(|browsers| browsers.has_keyboard())?;
+        let at = browsers.caret();
+        self.page_rect_on_screen(PageRect::new(at.x, at.y, 1.0, 18.0))
+    }
+
     /// A point of the screen as the page's (the pane's points from its top). `None` out of a
     /// window.
     pub(crate) fn page_point_from_screen(&self, at: NSPoint) -> Option<PagePoint> {
@@ -6629,6 +6730,13 @@ impl TerminalPane {
     pub(crate) fn page_input(&self, input: Input) -> bool {
         if !self.page_is_up() {
             return false;
+        }
+        // A browser's room takes the pointer over it (what the page drew over the room is the
+        // page's): the page is told nothing of it.
+        if let Some(browsers) = self.page_browsers()
+            && browsers.pointer(self, &input)
+        {
+            return true;
         }
         // A press ends what an input method composes in an editor, as it does in a text view:
         // what it composed stays, and the system forgets it, before the press moves the caret or
@@ -6682,6 +6790,12 @@ impl TerminalPane {
         precise: bool,
         mods: PageMods,
     ) -> bool {
+        if let Some(browsers) = self.page_browsers()
+            && self.page_is_up()
+            && browsers.wheel(self, at, dx, dy, precise, mods)
+        {
+            return true;
+        }
         self.page_touch(|page| page.wheel(at, dx, dy, phase, precise, mods))
     }
 
@@ -6857,6 +6971,11 @@ impl TerminalPane {
     pub(crate) fn page_key_up(&self, event: &NSEvent) -> bool {
         if !self.page_is_up() {
             return false;
+        }
+        if let Some(browsers) = self.page_browsers()
+            && browsers.key_up(event)
+        {
+            return true;
         }
         // An editor with the keyboard took the keys that went down: the page heard none of
         // them go down, and the drive tells it none going up.
@@ -7239,7 +7358,21 @@ impl TerminalPane {
             opening,
             self.page_wake(),
         );
-        let fields = self.page_fields(&handle, &theme, family);
+        // The browsers of the page: where the engine is to be had, the page is told it shows them
+        // and the frames are drawn where the list says.
+        let browsers = crate::browser_install::manager().map(|manager| {
+            let browsers = crate::native_browser::PageBrowsers::new(
+                self,
+                manager,
+                &ivars.renderer,
+                self.browser_wake(),
+            );
+            handle.page().set_browsers(true);
+            handle.set_surfaces(browsers.pictures());
+            crate::native_browser::update_in_background();
+            browsers
+        });
+        let fields = self.page_fields(&handle, &theme, family, browsers.clone());
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Program,
@@ -7247,6 +7380,7 @@ impl TerminalPane {
             fields,
             area,
             files,
+            browsers,
         }));
         link.set_page(Some(page));
         // The mark of what runs in the pane (the tab's tile).
@@ -8654,6 +8788,18 @@ impl PageDriveHost for PageHost<'_> {
     /// where the keyboard already is can send it where it likes: the request is let go, not kept
     /// for the click.
     fn keyboard(&mut self, to: Keyboard) {
+        // A browser is named like a field: the keyboard goes to its room.
+        if let Some(browsers) = self.0.page_browsers()
+            && self.0.holds_keyboard()
+        {
+            match to {
+                Keyboard::Field(id) if browsers.is_room(id) => {
+                    browsers.give_keyboard(Some(id));
+                    return;
+                }
+                _ => browsers.give_keyboard(None),
+            }
+        }
         if let Some(fields) = self.fields() {
             if !self.0.holds_keyboard() {
                 return;
@@ -8716,6 +8862,15 @@ impl PageDriveHost for PageHost<'_> {
     fn panel(&mut self, panel: PagePanel) {
         if self.up() {
             self.0.ask_panel(panel);
+        }
+    }
+
+    /// What the page asks of a browser it named: to the engine of its room.
+    fn browser(&mut self, id: PageId, ask: bt_shell_common::native_view::BrowserAsk) {
+        if self.up()
+            && let Some(browsers) = self.0.page_browsers()
+        {
+            browsers.ask_of(id, ask);
         }
     }
 
@@ -8857,12 +9012,13 @@ mod tests {
         assert!(asks < writes, "the write comes before the setting: {copy}");
     }
 
-    /// The general pasteboard is read in a pane's code in three places and a page reaches one of
+    /// The general pasteboard is read in a pane's code in four places and a page reaches one of
     /// them only by the person's act: an editor's paste (`page_editor_route`, whose
-    /// `Route::Paste` comes from ⌘V — a keymap line cannot bind `paste`), the pick of a menu line
-    /// the host shows (`page_menu_pick`, above), and the find pasteboard's own name
-    /// (`find_pasteboard_text`, not the general). A new reader in this file fails here until it
-    /// is looked at. A source scan: the pasteboard is AppKit's.
+    /// `Route::Paste` comes from ⌘V — a keymap line cannot bind `paste`), a browser's paste
+    /// (`page_editor_menu`, which the Edit menu's Paste row calls and nothing a page says does),
+    /// the pick of a menu line the host shows (`page_menu_pick`, above), and the find
+    /// pasteboard's own name (`find_pasteboard_text`, not the general). A new reader in this file
+    /// fails here until it is looked at. A source scan: the pasteboard is AppKit's.
     #[test]
     fn the_pane_reads_the_general_pasteboard_only_for_the_paste_key_and_the_menu_row() {
         let pane = include_str!("pane.rs");
@@ -8882,11 +9038,19 @@ mod tests {
             readers,
             [
                 "find_pasteboard_text",
+                "page_editor_menu",
                 "page_editor_route",
                 "page_menu_pick"
             ],
             "a new reader of the pasteboard in the pane: who may make it read?"
         );
+        // A browser's read is the paste row's (`v`) and no other row's.
+        let menu = &pane[pane.find("fn page_editor_menu").expect("the menu")..];
+        let menu = &menu[..menu.find("\n    }\n").expect("its end")];
+        let only_v = menu.find("if key == 'v'").expect(menu);
+        let read = menu.find("clipboard::read(").expect(menu);
+        let other = menu.find("browsers.shortcut(key)").expect(menu);
+        assert!(only_v < read && read < other, "{menu}");
         // The editor's read is the `Route::Paste` arm and no other arm.
         let route = &pane[pane.find("fn page_editor_route").expect("the route")..];
         let route = &route[..route.find("\n    }\n").expect("its end")];

@@ -49,9 +49,6 @@ mod agent;
 pub(crate) mod app;
 mod apps_card;
 mod arrange;
-// The pane's browsers (plan 034 Phase 5) are its caller; until they are, the manager and the
-// installer are what the tests and `make dev` reach.
-#[allow(dead_code)]
 mod browser_install;
 mod card;
 mod card_gesture;
@@ -67,6 +64,7 @@ mod launch;
 mod leaving;
 mod locale;
 mod menu;
+mod native_browser;
 mod native_page;
 mod open_files;
 mod overview;

@@ -89,6 +89,9 @@ pub(crate) struct Page {
     /// and of the places it may save in, and the thread that reads and writes them. They live
     /// as long as the page: the demo has none.
     pub files: Option<Arc<ViewFiles>>,
+    /// The browsers of the page, if the shell shows any: a program's view has them, a debug build's
+    /// demo has none.
+    pub browsers: Option<Rc<crate::native_browser::PageBrowsers>>,
 }
 
 define_class!(

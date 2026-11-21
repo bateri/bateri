@@ -231,7 +231,7 @@ objc2-core-foundation = { workspace = true, features = [
     "CFData", "CFNumber", "CFDictionary", "CFError", "CFURL",
 ] }
 # The frames and the messages of the browser helper (`browser_install`, the pane's browsers).
-browser-ipc = { workspace = true }
+browser-ipc = { workspace = true, features = ["wgpu"] }
 # The web view of a program's view (`pencere_view`): a new crate, user-approved
 # (2026-10-21); the rationale for the flags is in the workspace manifest.
 objc2-web-kit = { workspace = true }
