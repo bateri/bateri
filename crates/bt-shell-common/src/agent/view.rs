@@ -7,8 +7,12 @@
 //!   level table is [`super::level`]'s and is not changed for the view.
 //! - **What does the pane show?** ([`Shown`]) A page of the kit the pane built, a web view, a
 //!   terminal, a view not up yet. Only a page is read here.
-//! - **What does the reading say?** ([`read`]) A line that says which pane and which program, then
-//!   the drive's own writing of the reading ([`pencere_drive::Reading`]), as text or as JSON.
+//! - **What does the answer say?** ([`written`]) What was done, what the host did not do, then a
+//!   line that says which pane and which program, and the drive's own writing of the reading
+//!   ([`pencere_drive::Reading`]), as text or as JSON.
+//! - **How is a request carried out?** ([`Run`]) The action is done through the page's own inputs
+//!   ([`act`]), what the page asks of its host meanwhile is held back ([`Held`]), and the answer
+//!   waits for the page to come to rest without blocking.
 //!
 //! The reading is of a [`PageHandle`], the pane's handle on its page, and sees nothing of the
 //! screen: the window's part is to find the pane, to give the texts of the host's fields, and to
@@ -18,13 +22,20 @@
 use std::fmt::Write as _;
 
 pub use kablo_bateri::view::{Action, View};
-use pencere_drive::{FrameAt, Reading, ReadingInput};
+use pencere_drive::Reading;
+
+mod act;
+mod held;
+mod run;
+
+pub use held::{Effects, Held, Session, Shared};
+pub use run::{Ctx, REST_LIMIT, Run, Step};
 
 use super::level::{self, Act, Panes, Verdict};
 use super::listing::{json_optional, json_string};
-use super::message::{Failure, Format, Kind, Reply};
+use super::message::{Failure, Format, Kind};
 use super::serve::{Server, is_own_machine};
-use crate::native_view::PageHandle;
+use crate::native_view::{Id, Menu, MenuEntry, PageHandle};
 
 /// Whether the machine that asked may do `view` to its pane: a pane of its own machine is seen
 /// (read) or changed (driven), whatever the level but `off`, and a pane of another is reached, which
@@ -56,7 +67,10 @@ pub fn allowed(server: &Server, view: &View) -> Result<(), Failure> {
 /// Whether the action does something to the view, and is not only a way of reading it: what the
 /// level judges as a change.
 pub fn drives(action: &Action) -> bool {
-    !matches!(action, Action::Read | Action::Text(_) | Action::Shot { .. })
+    !matches!(
+        action,
+        Action::Read | Action::Text(_) | Action::Wait { .. } | Action::Shot { .. }
+    )
 }
 
 /// What the pane a `view` is about shows.
@@ -88,67 +102,51 @@ pub struct Pane<'a> {
     pub program: Option<&'a str>,
 }
 
-/// The answer to a `view` of `pane`, which shows `shown`: `input` is what only the window has, the
-/// texts of the host's fields and where its keyboard is ([`ReadingInput`]).
-pub fn answer(pane: Pane<'_>, shown: &Shown, view: &View, input: &ReadingInput<'_>) -> Reply {
-    let name = pane.name;
-    let Shown::Page {
-        handle,
-        seen,
-        size,
-        scale,
-        reduce_motion,
-        now,
-    } = shown
-    else {
-        return Reply::Failed(match shown {
-            Shown::Terminal => Failure::new(
-                Kind::Failed,
-                format!("{name} shows a terminal, not a view; `bateri capture {name}` reads it"),
-            ),
-            Shown::NotUp => Failure::new(
-                Kind::Failed,
-                format!("the view of {name} is not up yet: its program has not shown it"),
-            ),
-            Shown::Web => Failure::new(
-                Kind::Failed,
-                format!("the view of {name} is a web view, which `bateri view` does not read yet"),
-            ),
-            Shown::Page { .. } => unreachable!("matched above"),
-        });
-    };
-    if !matches!(view.action, Action::Read) {
-        return Reply::Failed(Failure::new(
-            Kind::Failed,
-            "this bateri reads a view and does not drive it yet",
-        ));
-    }
-    let Some(size) = size.filter(|(width, height)| *width > 0 && *height > 0) else {
-        return Reply::Failed(Failure::new(
-            Kind::Failed,
-            format!("the view of {name} has no room yet: it is not placed; ask again in a moment"),
-        ));
-    };
-    // A pane that is seen has its frames; one that is not is laid out once, here, at its size.
-    if !seen {
-        handle.lay_out_unseen(FrameAt {
-            size,
-            scale: *scale,
-            now: *now,
-            reduce_motion: *reduce_motion,
-        });
-    }
-    let reading = handle.page().reading(input);
-    Reply::Text(written(pane, &reading, view.format))
+/// What an agent's request needs of the host's own fields: the texts they hold, where the keyboard
+/// is in them, and putting text in them. The window's (the page's fields are the system's controls
+/// laid over it), so a trait: the pane implements it, and a test of the page does.
+pub trait Fields {
+    /// What the field `id` holds. Never asked of a secret field.
+    fn text(&self, id: Id) -> Option<String>;
+    /// Puts `text` in the field `id`, in place of what it holds.
+    fn put(&self, id: Id, text: &str);
+    /// Puts `text` after what the field `id` holds, and gives what it holds now, for the page to be
+    /// told: the field may be a secret's, so the answer never says it. `None` for a field that is
+    /// not on the screen.
+    fn append(&self, id: Id, text: &str) -> Option<String>;
+    /// The field the system's keyboard is in, where it is in one.
+    fn keyboard_in(&self) -> Option<Id>;
+}
+
+/// What a request is carried out with: the host's fields, what an agent holds of the pane
+/// ([`Session`]) and the pane's taking in of what the page said (`drain`: told through [`Held`]
+/// while a request is carried out).
+pub struct Env<'a> {
+    pub fields: &'a dyn Fields,
+    pub session: &'a Shared,
+    pub drain: &'a dyn Fn(),
 }
 
 /// The reading as it is written to the agent: the head line (or, as JSON, the pane and the program
-/// in front of what the reading says), then the drive's writing of it.
-pub fn written(pane: Pane<'_>, reading: &Reading, format: Format) -> String {
+/// in front of what the reading says), then the drive's writing of it. What was done leads (`said`),
+/// and what the host did not do (`notes`) follows it.
+pub fn written(
+    pane: Pane<'_>,
+    reading: &Reading,
+    format: Format,
+    said: Option<&str>,
+    notes: &[String],
+) -> String {
     let program = pane.program.map(printable);
     let mut out = String::new();
     match format {
         Format::Text => {
+            if let Some(said) = said {
+                let _ = writeln!(out, "{}", words(said, 400));
+            }
+            for note in notes {
+                let _ = writeln!(out, "{}", words(note, 400));
+            }
             let _ = write!(out, "pane {}", printable(pane.name));
             if let Some(program) = &program {
                 let _ = write!(out, " ({program})");
@@ -163,6 +161,20 @@ pub fn written(pane: Pane<'_>, reading: &Reading, format: Format) -> String {
             json_string(&mut out, &printable(pane.name));
             out.push_str(",\"program\":");
             json_optional(&mut out, program.as_deref());
+            if let Some(said) = said {
+                out.push_str(",\"did\":");
+                json_string(&mut out, &words(said, 400));
+            }
+            if !notes.is_empty() {
+                out.push_str(",\"notes\":[");
+                for (at, note) in notes.iter().enumerate() {
+                    if at > 0 {
+                        out.push(',');
+                    }
+                    json_string(&mut out, &words(note, 400));
+                }
+                out.push(']');
+            }
             if rest.trim_start() != "}" {
                 out.push(',');
             }
@@ -173,6 +185,35 @@ pub fn written(pane: Pane<'_>, reading: &Reading, format: Format) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The lines of a menu as an agent counts them: where each is among the menu's entries (a separator
+/// is counted there and is no line), its title and whether it is on.
+pub fn menu_lines(menu: &Menu) -> Vec<(usize, String, bool)> {
+    menu.entries
+        .iter()
+        .enumerate()
+        .filter_map(|(at, entry)| match entry {
+            MenuEntry::Item { title, enabled, .. } | MenuEntry::Paste { title, enabled, .. } => {
+                Some((at, title.clone(), *enabled))
+            }
+            MenuEntry::Separator => None,
+        })
+        .collect()
+}
+
+/// Words the page or the program wrote, as one line of the answer: what is not printable is a
+/// space, and what is past `limit` characters is cut.
+fn words(text: &str, limit: usize) -> String {
+    let mut line: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(limit)
+        .collect();
+    if text.chars().count() > limit {
+        line.push('…');
+    }
+    line
 }
 
 /// A name or a program as one line of plain text: what is not printable is `?`.
@@ -290,6 +331,11 @@ mod tests {
         assert!(!drives(&Action::Read));
         assert!(!drives(&Action::Text("k3f9qa".into())));
         assert!(!drives(&Action::Shot { full: true }));
+        assert!(!drives(&Action::Wait {
+            text: "Done".into(),
+            gone: false,
+            seconds: None
+        }));
         assert!(drives(&Action::Click("k3f9qa".into())));
         assert!(drives(&Action::Menu("k3f9qa".into())));
         assert!(drives(&Action::Type("a".into())));
@@ -302,13 +348,13 @@ mod tests {
             program: Some("docker\u{1b}pen"),
         };
         let reading = Reading::default();
-        let text = written(pane, &reading, Format::Text);
+        let text = written(pane, &reading, Format::Text, None, &[]);
         assert!(
             text.starts_with("pane p9 (docker?pen)\nfocus: page\n"),
             "{text:?}"
         );
         assert!(text.ends_with('\n'));
-        let json = written(pane, &reading, Format::Json);
+        let json = written(pane, &reading, Format::Json, None, &[]);
         assert!(
             json.starts_with("{\"pane\":\"p9\",\"program\":\"docker?pen\","),
             "{json:?}"
@@ -322,10 +368,114 @@ mod tests {
             },
             &reading,
             Format::Json,
+            None,
+            &[],
         );
         assert!(
             none.starts_with("{\"pane\":\"p9\",\"program\":null,"),
             "{none:?}"
         );
+    }
+
+    #[test]
+    fn what_was_done_and_what_the_host_did_not_do_lead_the_answer() {
+        let pane = Pane {
+            name: "p9",
+            program: None,
+        };
+        let reading = Reading::default();
+        let notes = vec!["link not opened: https://example.com".to_owned()];
+        let text = written(
+            pane,
+            &reading,
+            Format::Text,
+            Some("clicked button \"Save\" (m29gqw)"),
+            &notes,
+        );
+        assert!(
+            text.starts_with(
+                "clicked button \"Save\" (m29gqw)\nlink not opened: https://example.com\npane p9\n"
+            ),
+            "{text:?}"
+        );
+        let json = written(pane, &reading, Format::Json, Some("clicked"), &notes);
+        assert!(
+            json.starts_with(
+                "{\"pane\":\"p9\",\"program\":null,\"did\":\"clicked\",\"notes\":[\"link not opened: https://example.com\"],"
+            ),
+            "{json:?}"
+        );
+        // What the page wrote is one line: nothing in it ends the line or moves the cursor.
+        let hostile = written(
+            pane,
+            &reading,
+            Format::Text,
+            Some("clicked\nbutton \u{1b}[2J"),
+            &[],
+        );
+        assert!(
+            hostile.starts_with("clicked button  [2J\npane p9"),
+            "{hostile:?}"
+        );
+    }
+
+    /// What an agent does reaches the page through the page's own inputs and what the page asks of
+    /// its host is held back: nothing in the actions or the held host names the window's, the
+    /// pasteboard, a panel or a terminal, and the held host passes nothing the person's to the
+    /// pane's own host.
+    #[test]
+    fn what_an_agent_does_reaches_neither_the_window_nor_the_pasteboard_nor_a_terminal() {
+        let sources = [
+            include_str!("view/act.rs"),
+            include_str!("view/held.rs"),
+            include_str!("view/run.rs"),
+        ];
+        for source in sources {
+            let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+            // The words of the comments are left out: they say what is not done.
+            let code: String = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for name in [
+                "makeFirstResponder",
+                "NSPasteboard",
+                "clipboard",
+                "show_page_menu",
+                "ask_panel",
+                "module_link",
+                "module_message",
+                "Pty",
+                "write_to_pty",
+                "send_input",
+            ] {
+                assert!(!code.contains(name), "{name} in\n{code}");
+            }
+        }
+        let held = include_str!("view/held.rs");
+        let held = &held[..held.find("#[cfg(test)]").unwrap_or(held.len())];
+        for method in [
+            "fn keyboard",
+            "fn copy",
+            "fn link",
+            "fn panel",
+            "fn menu",
+            "fn paste",
+            "fn cursor",
+        ] {
+            let start = held.find(method).expect(method);
+            let rest = &held[start + method.len()..];
+            let end = [rest.find("\n    }\n"), rest.find("\n    fn ")]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(rest.len());
+            let body = &held[start..start + method.len() + end];
+            assert!(
+                !body.contains("self.base"),
+                "{method} reaches the pane: {body}"
+            );
+        }
     }
 }

@@ -108,6 +108,10 @@ struct State {
     /// terminal until the pane's pipe has reached it, and a second request for the same
     /// terminal in between must not make a second pane.
     made: Vec<(String, Terminal, Instant)>,
+    /// The `bateri view` requests that wait for their page to come to rest.
+    views: Vec<Pending>,
+    /// Whether the clock that looks at them again is set.
+    looking: bool,
 }
 
 /// How long a pane just made stands in for the service's word that it shows its terminal.
@@ -997,9 +1001,50 @@ fn marks_of(app: &AppDelegate, account: &str, terminal: Terminal, orders: &[u64]
     }
 }
 
-/// `bateri view`: the pane is found, what it shows is read, and the answer goes back. The level
-/// has been judged ([`reading::allowed`]); a pane of another machine is found by
-/// [`find_address`] as for the verbs that work on panes.
+/// A `bateri view` request that has done what it asks and waits for the page to come to rest
+/// ([`reading::Run`]): the letter that is answered when it has.
+struct Pending {
+    letter: Letter,
+    pane: Retained<TerminalPane>,
+    name: String,
+    program: Option<String>,
+    run: reading::Run,
+}
+
+/// How often the requests that wait are looked at again, besides at every drain of the pane: what
+/// the page is waited for to settle may be a frame, which says nothing of itself.
+const VIEW_LOOK: Duration = Duration::from_millis(30);
+
+/// How long a menu an agent asked for is held, if it picks nothing and does nothing else.
+const MENU_HELD: Duration = Duration::from_secs(30);
+
+/// The fields of a pane's page as an agent's request has them: the system's controls laid over it.
+struct PaneFields(Option<std::rc::Rc<crate::native_page::PageFields>>);
+
+impl reading::Fields for PaneFields {
+    fn text(&self, id: bt_shell_common::native_view::Id) -> Option<String> {
+        self.0.as_ref()?.text_of(id)
+    }
+
+    fn put(&self, id: bt_shell_common::native_view::Id, text: &str) {
+        if let Some(fields) = &self.0 {
+            fields.put(id, text);
+        }
+    }
+
+    fn append(&self, id: bt_shell_common::native_view::Id, text: &str) -> Option<String> {
+        self.0.as_ref()?.append(id, text)
+    }
+
+    fn keyboard_in(&self) -> Option<bt_shell_common::native_view::Id> {
+        self.0.as_ref()?.keyboard_in()
+    }
+}
+
+/// `bateri view`: the pane is found, what the request asks is done to the page it shows, and the
+/// answer goes back once the page is at rest. The level has been judged ([`reading::allowed`]); a
+/// pane of another machine is found by [`find_address`] as for the verbs that work on panes. One
+/// request at a time is carried out on a pane.
 fn viewed(
     app: &AppDelegate,
     letter: Letter,
@@ -1007,11 +1052,140 @@ fn viewed(
     from: Option<&str>,
     request: &reading::View,
 ) {
-    let reply = match view_pane(app, server, from, request) {
-        Ok((pane, shown)) => view_reply(&pane, &shown, request),
-        Err(failure) => Reply::Failed(failure),
+    let (pane, shown) = match view_pane(app, server, from, request) {
+        Ok(found) => found,
+        Err(failure) => {
+            letter.answer(Reply::Failed(failure).encode().into_bytes());
+            return;
+        }
     };
-    letter.answer(reply.encode().into_bytes());
+    if state(|state| {
+        state
+            .views
+            .iter()
+            .any(|waiting| waiting.pane.uuid() == pane.uuid())
+    }) {
+        refuse(
+            letter,
+            Kind::Failed,
+            "another `bateri view` of this pane is still being carried out: ask again when it has answered",
+        );
+        return;
+    }
+    let name = shown.terminal.as_str().to_owned();
+    let program = shown.program.clone();
+    let session = pane.agent_session();
+    let fields = PaneFields(pane.page_fields_up());
+    let drain = || pane.drain_page();
+    let env = reading::Env {
+        fields: &fields,
+        session: &session,
+        drain: &drain,
+    };
+    let info = reading::Pane {
+        name: &name,
+        program: program.as_deref(),
+    };
+    match reading::Run::begin(info, &pane.view_shown(), &env, request) {
+        Err(failure) => letter.answer(Reply::Failed(failure).encode().into_bytes()),
+        Ok(run) => {
+            state(|state| {
+                state.views.push(Pending {
+                    letter,
+                    pane: pane.clone(),
+                    name,
+                    program,
+                    run,
+                });
+            });
+            // Looked at once now: a page that is at rest answers without waiting for anything.
+            look_at_views();
+        }
+    }
+}
+
+/// Looks at every request that waits for its page once more: those whose page is at rest, whose wait
+/// has run out or whose view has gone are answered, the others are looked at again soon.
+fn look_at_views() {
+    let waiting = state(|state| std::mem::take(&mut state.views));
+    let mut still = Vec::new();
+    for mut pending in waiting {
+        let step = {
+            let session = pending.pane.agent_session();
+            let fields = PaneFields(pending.pane.page_fields_up());
+            let pane = &pending.pane;
+            let drain = || pane.drain_page();
+            let env = reading::Env {
+                fields: &fields,
+                session: &session,
+                drain: &drain,
+            };
+            let info = reading::Pane {
+                name: &pending.name,
+                program: pending.program.as_deref(),
+            };
+            if pending.pane.is_closed() {
+                session.borrow_mut().active = false;
+                reading::Step::Answer(Reply::Failed(Failure::new(
+                    Kind::Failed,
+                    format!(
+                        "{} was closed while the request was carried out",
+                        pending.name
+                    ),
+                )))
+            } else {
+                pending.run.step(info, &pending.pane.view_shown(), &env)
+            }
+        };
+        match step {
+            reading::Step::Answer(reply) => {
+                hold_menu_a_while(&pending.pane);
+                pending.letter.answer(reply.encode().into_bytes());
+            }
+            reading::Step::Pending => still.push(pending),
+        }
+    }
+    let arm = state(|state| {
+        state.views.extend(still);
+        let wait = !state.views.is_empty() && !state.looking;
+        if wait {
+            state.looking = true;
+        }
+        wait
+    });
+    if arm {
+        crate::arrange::after(VIEW_LOOK, |_| {
+            state(|state| state.looking = false);
+            look_at_views();
+        });
+    }
+}
+
+/// A menu an agent asked for and has not picked from is let go of after a while, if nothing else
+/// the agent does lets go of it first: a menu that the page is waiting on is a page held.
+fn hold_menu_a_while(pane: &TerminalPane) {
+    let session = pane.agent_session();
+    let number = {
+        let session = session.borrow();
+        if session.menu.is_none() {
+            return;
+        }
+        session.menu_number
+    };
+    let uuid = pane.uuid().clone();
+    crate::arrange::after(MENU_HELD, move |app| {
+        for tab in app.tabs() {
+            for pane in tab.panes() {
+                if *pane.uuid() == uuid {
+                    let session = pane.agent_session();
+                    let mut session = session.borrow_mut();
+                    if session.menu_number == number {
+                        session.let_go_of_menu();
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// The pane a `view` is about, and what the service says it shows: the one the request names, or the
@@ -1045,31 +1219,6 @@ fn view_pane(
     };
     let (_, pane, shown) = found;
     Ok((pane, shown))
-}
-
-/// What a `view` of `pane` answers, for what the service says the pane shows.
-fn view_reply(pane: &TerminalPane, shown: &Shown, request: &reading::View) -> Reply {
-    // What the page said since the pane last heard it is taken first, as a frame would.
-    pane.drain_page();
-    let view = pane.view_shown();
-    // The texts the fields hold and where the keyboard is: the window's, which only it has.
-    let fields = pane.page_fields_up();
-    let text = |id: bt_shell_common::native_view::Id| fields.as_ref().and_then(|f| f.text_of(id));
-    let input = bt_shell_common::native_view::ReadingInput {
-        field_text: Some(&text),
-        field_focus: fields.as_ref().and_then(|fields| fields.keyboard_in()),
-        menu: None,
-    };
-    let name = shown.terminal.as_str();
-    reading::answer(
-        reading::Pane {
-            name,
-            program: shown.program.as_deref(),
-        },
-        &view,
-        request,
-        &input,
-    )
 }
 
 /// Answers a request with a mistake or a refusal.
@@ -1360,6 +1509,79 @@ fn tell(mtm: MainThreadMarker, account: &str, host: &str, program: Option<&str>,
 
 #[cfg(test)]
 mod tests {
+    /// An agent's `bateri view` request reaches the page by the page's own inputs, which the
+    /// common layer drives: nothing of it goes through the paths a person's keys and clicks take
+    /// (`page_key`, `page_input`, `page_field_focused`: ⌃C to the program, the user's marked text
+    /// discarded, the order the keyboard came in changed), nothing moves the system's keyboard
+    /// or brings a pane forward, and every letter it takes is answered (the one that is turned
+    /// away, the one that fails at the start, the one that waits). A source scan: the panes are
+    /// AppKit's and need a window server.
+    #[test]
+    fn a_view_request_never_takes_the_paths_of_a_persons_keys_and_answers_every_letter() {
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let start = source.find("fn viewed(").expect("the view request");
+        let end = source[start..]
+            .find("fn hold_menu_a_while(")
+            .map_or(source.len(), |end| start + end);
+        let view = &source[start..end];
+        for person in [
+            "page_key(",
+            "page_input(",
+            "page_field_focused(",
+            "makeFirstResponder",
+            "focus()",
+            "select_tab",
+            "clipboard",
+            "NSPasteboard",
+            "module_link",
+            "module_message",
+        ] {
+            assert!(!view.contains(person), "{person} in the view request");
+        }
+        // Every way out of `viewed` and the look at the waiting requests answers the letter, or
+        // keeps it to answer: the busy refusal, the failure at the start, the answer.
+        assert!(view.contains("refuse(\n            letter,"), "{view}");
+        assert!(view.contains("Err(failure) => letter.answer("), "{view}");
+        assert!(
+            view.contains("pending.letter.answer(reply.encode().into_bytes())"),
+            "{view}"
+        );
+        // A pane that closes while a request waits answers it.
+        assert!(
+            view.contains("was closed while the request was carried out"),
+            "{view}"
+        );
+        // The wait is looked at again by a clock, and a menu is let go of by one.
+        assert!(view.contains("crate::arrange::after(VIEW_LOOK"), "{view}");
+        assert!(source.contains("crate::arrange::after(MENU_HELD"));
+    }
+
+    /// While a request is carried out the pane tells what its page says through `Held`, both where
+    /// a drain is told and where a frame's held words are: a copy and a link and a panel and a menu
+    /// are held back and the system's keyboard stays where it is. A source scan: the pane is
+    /// AppKit's.
+    #[test]
+    fn the_pane_tells_its_page_through_the_held_host_while_a_request_is_carried_out() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        for function in ["    fn deliver_held(", "    pub(crate) fn drain_page("] {
+            let start = pane.find(function).expect("the function");
+            let body = &pane[start..start + pane[start..].find("\n    }\n").unwrap_or(1500)];
+            assert!(body.contains("self.agent_active()"), "{function}: {body}");
+            assert!(
+                body.contains("Held::new(&mut host, &session, &handle)"),
+                "{function}: {body}"
+            );
+        }
+        // And the host's own methods stay the person's: they are not changed to look at the flag.
+        let host = &pane[pane
+            .find("impl PageDriveHost for PageHost")
+            .expect("the host")..];
+        let host = &host[..host.find("#[cfg(test)]").unwrap_or(host.len())];
+        assert!(!host.contains("agent_active"), "{host}");
+    }
+
     /// A place the request names is looked up and judged by the level before anything is made, a
     /// place that is not there is a refusal and not a pane in the wrong tab, and a window made for
     /// a pane takes the keyboard only where the rule gives it. A source scan: the windows are

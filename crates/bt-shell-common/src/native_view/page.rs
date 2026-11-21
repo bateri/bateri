@@ -1068,6 +1068,29 @@ pub(super) mod tests {
             &self.handle
         }
 
+        /// What the page said, done as the pane does it while an agent's request is carried out:
+        /// told through [`Held`], so that what an agent holds back is held back. Whether a frame is
+        /// wanted.
+        pub(in crate::native_view) fn drain_for_agent(
+            &self,
+            session: &crate::agent::view::Shared,
+        ) -> bool {
+            let drained = self.handle.page().drain();
+            let redraw = drained.redraw && drained.ended.is_none();
+            let mut base = Written(Rc::clone(&self.log));
+            drained.deliver(&mut crate::agent::view::Held::new(
+                &mut base,
+                session,
+                &self.handle,
+            ));
+            redraw
+        }
+
+        /// Waits until the module has done what it was told.
+        pub(in crate::native_view) fn flush_module(&self) {
+            self.flush();
+        }
+
         /// The line of what the page heard, as the last frame drew it.
         pub(in crate::native_view) fn said(&self) -> String {
             drawn(&self.list)

@@ -494,6 +494,22 @@ impl PageFields {
         Some(field.view.stringValue().to_string())
     }
 
+    /// Puts `text` in the field `id`, in place of what it holds, as the page's own reply does
+    /// ([`PageFields::fill`]), for an agent's `fill`.
+    pub(crate) fn put(&self, id: Id, text: &str) {
+        self.fill(id, &Fill::text(text));
+    }
+
+    /// Puts `text` after what the field `id` holds, and gives what it holds now: for the page to be
+    /// told, and for nobody else — the field may be a password's. `None` for a field that is not
+    /// on the screen.
+    pub(crate) fn append(&self, id: Id, text: &str) -> Option<String> {
+        let field = self.field(id)?;
+        let now = format!("{}{text}", field.stringValue());
+        field.setStringValue(&NSString::from_str(&now));
+        Some(now)
+    }
+
     /// The field the keyboard is in, where it is in one of the page's.
     pub(crate) fn keyboard_in(&self) -> Option<Id> {
         self.focused.get()

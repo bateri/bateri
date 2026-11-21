@@ -83,7 +83,7 @@ use crate::environment::Wants;
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
-use bt_shell_common::agent::view::Shown as ViewShown;
+use bt_shell_common::agent::view::{Held, Shared as AgentSession, Shown as ViewShown};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{Answer, PaneLink, Shown};
 use bt_shell_common::native_view::{
@@ -2271,6 +2271,10 @@ pub struct PaneIvars {
     /// Whether the pane can be seen — [`TerminalPane::set_visible`]'s last
     /// word; a pane is born seen.
     seen: Cell<bool>,
+    /// What an agent holds of this pane's page between its `bateri view` requests (the menu it
+    /// asked for, the field the page's keyboard is in) and whether one is carried out now: while it
+    /// is, what the page asks of the pane is held back ([`Held`]).
+    agent: AgentSession,
     /// Where this pane stands in the order the keyboard came to the panes of the app: the number
     /// [`KEYBOARD_ORDER`] gave when it last came here, 0 while it has not. `bateri ls` tells the
     /// order ([`TerminalPane::keyboard_order`]).
@@ -3054,6 +3058,7 @@ impl TerminalPane {
             driving: Cell::new(false),
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
+            agent: AgentSession::default(),
             keyboard_order: Cell::new(0),
             pencere: RefCell::new(None),
             stage: RefCell::new(None),
@@ -4406,6 +4411,16 @@ impl TerminalPane {
     /// (`PageFields::apply`, told before this). A page that went down meanwhile is not the pane's
     /// to do anything for ([`PageHost`] does each part only while the page is up).
     fn deliver_held(&self, painted: &mut bt_shell_common::native_view::Painted) {
+        // While an agent's request is carried out, what the frame holds for the fields (a copy, the
+        // keyboard) is told as the rest of what the page says is: held back from the person's pane.
+        if self.agent_active()
+            && let Some(handle) = self.page_handle()
+        {
+            let session = self.agent_session();
+            let mut host = PageHost(self);
+            painted.deliver_held(&mut Held::new(&mut host, &session, &handle));
+            return;
+        }
         painted.deliver_held(&mut PageHost(self));
     }
 
@@ -6421,6 +6436,16 @@ impl TerminalPane {
         })
     }
 
+    /// What an agent holds of this pane's page ([`AgentSession`]).
+    pub(crate) fn agent_session(&self) -> AgentSession {
+        Rc::clone(&self.ivars().agent)
+    }
+
+    /// Whether an agent's request is carried out on this pane's page now.
+    fn agent_active(&self) -> bool {
+        self.ivars().agent.borrow().active
+    }
+
     /// The keyboard came to this pane: it is the latest of the app's panes to have it. A number
     /// that only grows, not a time: `bateri ls` tells the order and nothing of when.
     fn note_keyboard_came(&self) {
@@ -6844,7 +6869,17 @@ impl TerminalPane {
         // Taken first, the page let go of: what is done with it calls back into the pane, which
         // may tell the page more (a menu picked from, the keyboard put in a field).
         let drained = handle.page().drain();
-        drained.deliver(&mut PageHost(self));
+        // While an agent's request is carried out, the page's replies are told through `Held`: a
+        // copy is not written to the pasteboard, a link is not opened, a panel is not shown, a menu
+        // is not popped up (it would hold the main thread until somebody picks) and the system's
+        // keyboard is not moved. Told to the pane's own host in every other case.
+        if self.agent_active() {
+            let session = self.agent_session();
+            let mut host = PageHost(self);
+            drained.deliver(&mut Held::new(&mut host, &session, &handle));
+        } else {
+            drained.deliver(&mut PageHost(self));
+        }
         // A pane that waited for this view's first page has it now, if the module handed it out.
         self.page_drew();
         self.wake_unseen_page();

@@ -16,10 +16,14 @@ use std::fmt::Debug;
 
 use super::{
     Accessible, Bars, Button, Command, Cursor, Fill, Id, Input, Key, Keyboard, Menu, MenuEntry,
-    Mods, Phase, Point, ReadingInput, Scrolling,
+    Mods, Phase, Point, Scrolling,
 };
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::agent::message::{Format, Reply};
-use crate::agent::view::{Action, Pane, Shown, View, answer};
+use crate::agent::view::{Action, Env, Fields, Pane, Run, Session, Shared, Shown, Step, View};
 
 pub(super) use super::page::tests::PaneRig;
 use super::page::{MenuUp, ShownMenu};
@@ -1318,7 +1322,168 @@ fn the_press_that_opens_a_menu_says_whether_it_was_inside_a_selection_or_at_a_ca
     );
 }
 
-// ─── `bateri view`: a pane's page read ──────────────────────────────────────────────────────────
+// ─── `bateri view`: a pane's page read and driven ───────────────────────────────────────────────
+
+/// The host's fields as a pane has them: the texts the system's controls hold.
+#[derive(Default)]
+struct HostFields {
+    texts: RefCell<HashMap<Id, String>>,
+    keyboard: Cell<Option<Id>>,
+    /// What an agent holds of the pane, which is the pane's and outlives a request.
+    session: Shared,
+}
+
+impl HostFields {
+    fn holding(texts: &[(&str, &str)]) -> Self {
+        let held = Self::default();
+        for (name, text) in texts {
+            held.texts
+                .borrow_mut()
+                .insert(Id::named(name), (*text).to_owned());
+        }
+        held
+    }
+
+    fn text_of(&self, name: &str) -> String {
+        self.texts
+            .borrow()
+            .get(&Id::named(name))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+impl Fields for HostFields {
+    fn text(&self, id: Id) -> Option<String> {
+        self.texts.borrow().get(&id).cloned()
+    }
+    fn put(&self, id: Id, text: &str) {
+        self.texts.borrow_mut().insert(id, text.to_owned());
+    }
+    fn append(&self, id: Id, text: &str) -> Option<String> {
+        let mut texts = self.texts.borrow_mut();
+        let held = texts.entry(id).or_default();
+        held.push_str(text);
+        Some(held.clone())
+    }
+    fn keyboard_in(&self) -> Option<Id> {
+        self.keyboard.get()
+    }
+}
+
+fn session() -> Shared {
+    Rc::new(RefCell::new(Session::default()))
+}
+
+fn request(action: Action) -> View {
+    View {
+        terminal: None,
+        format: Format::Text,
+        action,
+    }
+}
+
+fn page_of(rig: &PaneRig, seen: bool, now: f64) -> Shown {
+    Shown::Page {
+        handle: rig.handle().clone(),
+        seen,
+        size: Some((800, 600)),
+        scale: 1.0,
+        reduce_motion: false,
+        now,
+    }
+}
+
+const PANE: Pane<'static> = Pane {
+    name: "p9",
+    program: Some("readpen"),
+};
+
+/// A request carried out as the app does: begun, and then looked at again at each drain and each
+/// frame until it is answered. The clock is the test's: a tenth of a second at each look.
+fn ask_in(
+    rig: &mut PaneRig,
+    seen: bool,
+    action: Action,
+    fields: &HostFields,
+    session: &Shared,
+    format: Format,
+) -> Reply {
+    let view = View {
+        terminal: None,
+        format,
+        action,
+    };
+    let mut now = 1.0;
+    let mut run = {
+        let rig = &*rig;
+        let drain = || {
+            rig.drain_for_agent(session);
+        };
+        let env = Env {
+            fields,
+            session,
+            drain: &drain,
+        };
+        match Run::begin(PANE, &page_of(rig, seen, now), &env, &view) {
+            Ok(run) => run,
+            Err(failure) => return Reply::Failed(failure),
+        }
+    };
+    for _ in 0..400 {
+        rig.flush_module();
+        let step = {
+            let rig = &*rig;
+            let drain = || {
+                rig.drain_for_agent(session);
+            };
+            let env = Env {
+                fields,
+                session,
+                drain: &drain,
+            };
+            run.step(PANE, &page_of(rig, seen, now), &env)
+        };
+        match step {
+            Step::Answer(reply) => return reply,
+            Step::Pending => {
+                if seen {
+                    rig.frame(now);
+                }
+                now += 0.1;
+            }
+        }
+    }
+    panic!("the request was never answered");
+}
+
+fn ask(rig: &mut PaneRig, seen: bool, action: Action, fields: &HostFields) -> Reply {
+    ask_in(rig, seen, action, fields, &fields.session, Format::Text)
+}
+
+fn answered(reply: Reply) -> String {
+    match reply {
+        Reply::Text(text) => text,
+        other => panic!("not an answer: {other:?}"),
+    }
+}
+
+fn refused(reply: Reply) -> String {
+    match reply {
+        Reply::Failed(failure) => failure.text,
+        other => panic!("not a failure: {other:?}"),
+    }
+}
+
+/// The name of the element of `words` in an answer: the first word of its line.
+fn name_of(answer: &str, words: &str) -> String {
+    answer
+        .lines()
+        .find(|line| line.contains(words))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no line with {words} in\n{answer}"))
+        .to_owned()
+}
 
 /// A page of a text field, a secret field, a button and an editor of twenty lines, loaded when the
 /// page is first laid out.
@@ -1346,57 +1511,8 @@ return {
     end,
 }"#;
 
-fn read_of(
-    rig: &PaneRig,
-    shown: &Shown,
-    format: Format,
-    texts: &dyn Fn(Id) -> Option<String>,
-) -> String {
-    let view = View {
-        terminal: None,
-        format,
-        action: Action::Read,
-    };
-    let input = ReadingInput {
-        field_text: Some(texts),
-        field_focus: None,
-        menu: None,
-    };
-    let _ = rig;
-    match answer(
-        Pane {
-            name: "p9",
-            program: Some("readpen"),
-        },
-        shown,
-        &view,
-        &input,
-    ) {
-        Reply::Text(text) => text,
-        other => panic!("not a reading: {other:?}"),
-    }
-}
-
-fn seen_page(rig: &PaneRig, size: Option<(u32, u32)>) -> Shown {
-    Shown::Page {
-        handle: rig.handle().clone(),
-        seen: true,
-        size,
-        scale: 1.0,
-        reduce_motion: false,
-        now: 1.0,
-    }
-}
-
-fn host_text(id: Id) -> Option<String> {
-    if id == Id::named("q") {
-        Some("api".to_owned())
-    } else if id == Id::named("pw") {
-        // The host's secret field does hold it; the reading never asks.
-        Some("hunter2".to_owned())
-    } else {
-        None
-    }
+fn host_texts() -> HostFields {
+    HostFields::holding(&[("q", "api"), ("pw", "hunter2")])
 }
 
 #[test]
@@ -1405,8 +1521,8 @@ fn the_reading_of_a_page_the_pane_shows_has_refs_the_fields_texts_the_editors_li
     let mut rig = PaneRig::open(READABLE);
     rig.frame(0.0);
     rig.settle(0.1);
-    let shown = seen_page(&rig, Some((800, 600)));
-    let text = read_of(&rig, &shown, Format::Text, &host_text);
+    let fields = host_texts();
+    let text = answered(ask(&mut rig, true, Action::Read, &fields));
     assert!(
         text.starts_with("pane p9 (readpen)\nfocus: page\n"),
         "{text}"
@@ -1435,7 +1551,14 @@ fn the_reading_of_a_page_the_pane_shows_has_refs_the_fields_texts_the_editors_li
             "{line}"
         );
     }
-    let json = read_of(&rig, &shown, Format::Json, &host_text);
+    let json = answered(ask_in(
+        &mut rig,
+        true,
+        Action::Read,
+        &fields,
+        &session(),
+        Format::Json,
+    ));
     assert!(
         json.starts_with("{\"pane\":\"p9\",\"program\":\"readpen\","),
         "{json}"
@@ -1446,7 +1569,7 @@ fn the_reading_of_a_page_the_pane_shows_has_refs_the_fields_texts_the_editors_li
         assert!(!written.contains("hunter2"), "{written}");
     }
     // Read again, the page says the same.
-    assert_eq!(read_of(&rig, &shown, Format::Text, &host_text), text);
+    assert_eq!(answered(ask(&mut rig, true, Action::Read, &fields)), text);
 }
 
 /// A pane that is not seen draws no frame, so the page it shows stays as its last frame left it:
@@ -1463,18 +1586,8 @@ fn a_page_that_is_not_seen_is_laid_out_once_for_the_reading_and_draws_nothing() 
     rig.key(Key::Character('a'), Mods::default());
     rig.settle_unseen();
     assert_eq!(rig.said(), "", "no frame was drawn");
-    // A pane that is seen is read as its frames left it; one that is not is laid out first.
-    let shown = |seen: bool| Shown::Page {
-        handle: rig.handle().clone(),
-        seen,
-        size: Some((800, 600)),
-        scale: 1.0,
-        reduce_motion: false,
-        now: 1.0,
-    };
-    let stale = read_of(&rig, &shown(true), Format::Text, &host_text);
-    assert!(!stale.contains("said: a"), "{stale}");
-    let read = read_of(&rig, &shown(false), Format::Text, &host_text);
+    let fields = host_texts();
+    let read = answered(ask(&mut rig, false, Action::Read, &fields));
     assert!(read.contains("said: a"), "{read}");
     assert!(read.contains("button \"Save\""), "{read}");
     assert!(read.contains("field \"Search\" = \"api\""), "{read}");
@@ -1484,8 +1597,20 @@ fn a_page_that_is_not_seen_is_laid_out_once_for_the_reading_and_draws_nothing() 
     assert_eq!(rig.quads(), quads);
 }
 
-/// The one place a hidden pane's page is laid out draws and presents nothing: no list is made of
-/// the layout, no clock is set for the page and no frame is counted.
+/// A page that was never laid out has had no room told it and the module has made nothing: the
+/// request lays it out once, and again for what the module makes of it, and then answers with the
+/// page in it (not with the line the kit shows while a page starts).
+#[test]
+fn a_page_that_has_never_been_laid_out_is_read_once_the_module_has_made_it() {
+    let mut rig = PaneRig::open(READABLE);
+    let fields = host_texts();
+    let read = answered(ask(&mut rig, false, Action::Read, &fields));
+    assert!(read.contains("button \"Save\""), "{read}");
+    assert!(!read.contains("Starting the page"), "{read}");
+    assert_eq!(rig.quads(), 0, "nothing was drawn");
+}
+
+/// The layout for a reading makes no list and counts no frame.
 #[test]
 fn the_layout_for_a_reading_makes_no_list_and_counts_no_frame() {
     let source = include_str!("page.rs");
@@ -1516,36 +1641,687 @@ fn the_layout_for_a_reading_makes_no_list_and_counts_no_frame() {
 #[test]
 fn what_is_not_a_page_is_said_by_what_it_is_and_a_page_with_no_room_says_it_is_not_placed() {
     let rig = PaneRig::open(READABLE);
-    let ask = |shown: &Shown| {
-        let view = View {
-            terminal: None,
-            format: Format::Text,
-            action: Action::Read,
+    let held = session();
+    let fields = HostFields::default();
+    let ask_of = |shown: &Shown| {
+        let drain = || {};
+        let env = Env {
+            fields: &fields,
+            session: &held,
+            drain: &drain,
         };
-        match answer(
-            Pane {
-                name: "p9",
-                program: None,
-            },
-            shown,
-            &view,
-            &ReadingInput::default(),
-        ) {
-            Reply::Failed(failure) => failure.text,
-            other => panic!("not a failure: {other:?}"),
+        match Run::begin(PANE, shown, &env, &request(Action::Read)) {
+            Ok(_) => panic!("a request was begun"),
+            Err(failure) => failure.text,
         }
     };
-    let terminal = ask(&Shown::Terminal);
+    let terminal = ask_of(&Shown::Terminal);
     assert!(
         terminal.contains("terminal") && terminal.contains("bateri capture p9"),
         "{terminal}"
     );
-    let not_up = ask(&Shown::NotUp);
+    let not_up = ask_of(&Shown::NotUp);
     assert!(not_up.contains("not up yet"), "{not_up}");
-    let web = ask(&Shown::Web);
+    let web = ask_of(&Shown::Web);
     assert!(web.contains("web view"), "{web}");
     for size in [None, Some((0, 600)), Some((800, 0))] {
-        let none = ask(&seen_page(&rig, size));
+        let shown = Shown::Page {
+            handle: rig.handle().clone(),
+            seen: true,
+            size,
+            scale: 1.0,
+            reduce_motion: false,
+            now: 1.0,
+        };
+        let none = ask_of(&shown);
         assert!(none.contains("not placed"), "{none}");
     }
+}
+
+/// A page to act on: two commands of one title and one that is off, a text field, a secret field, a
+/// button, an editor with a menu, a box of thirty rows that scrolls, and a line of what the page
+/// heard. Its keys ask for what a host does for a page: `c` a copy, `o` a link, `u` a file panel,
+/// `f` the keyboard in the field `q` with a text for it, `k` a call to the program.
+const ACT: &str = r#"local said = {}
+local function note(words) said[#said + 1] = words end
+local function at(event) return string.format("%g,%g", event.x, event.y) end
+return {
+    render = function()
+        local list = pencere.div():id("list"):h(100):w(200):scroll()
+        for n = 1, 30 do list:child(pencere.div():h(20):child(pencere.text("row " .. n))) end
+        return pencere.div():size_full()
+            :command("run", "Run", "cmd+enter")
+            :command("off", "Off", {}, false)
+            :command("t1", "Twice", {})
+            :command("t2", "twice", {})
+            :child(pencere.div():h(24):row()
+                :child(pencere.div():id("q"):text_field("q"):w(200):h(20):child(pencere.text("Filter")))
+                :child(pencere.div():id("pw"):text_field("pw", "secret"):w(200):h(20):child(pencere.text("Password")))
+                :child(pencere.div():id("save"):w(60):h(20):label("Save"):role("button")))
+            :child(pencere.editor("e", { gutter = false, gestures = { ["right+press"] = "context" } }):h(60):w(400))
+            :child(list)
+            :child(pencere.text("said: " .. table.concat(said, "|")))
+    end,
+    handle = function(event)
+        local t = event.type
+        if t == "editor_ready" then
+            return { editor = { e = { { load = "hello\nworld" } } } }
+        elseif t == "key" then
+            local k = event.key
+            note("key " .. k)
+            if k == "c" then
+                return { redraw = true, copy = "copied words" }
+            elseif k == "o" then
+                return { redraw = true, link = "https://example.com/a" }
+            elseif k == "u" then
+                return { redraw = true, pick = { multiple = false } }
+            elseif k == "f" then
+                return { redraw = true, keyboard = { field = "q" }, fill = { q = "filled" } }
+            elseif k == "k" then
+                pencere.call("save", nil, function(result, err) note("saved") return { redraw = true } end)
+                return true
+            end
+            return { redraw = true }
+        elseif t == "press" then
+            if event.place then
+                if event.button == "right" then
+                    return { redraw = true, menu = { at = { x = event.x, y = event.y }, entries = {
+                        { title = "Cut" }, { title = "Copy", enabled = false }, "-", { title = "Whatever" } } } }
+                end
+                return true
+            end
+            note("press " .. at(event))
+            return { redraw = true }
+        elseif t == "release" then
+            note("release")
+            return { redraw = true }
+        elseif t == "menu" then
+            note("pick " .. event.index)
+            return { redraw = true }
+        elseif t == "command" then
+            note("command " .. event.id)
+            return { redraw = true }
+        elseif t == "text" then
+            if event.field ~= "pw" then note("text " .. event.field .. " " .. event.text) end
+            return { redraw = true }
+        elseif t == "scrolled" then
+            note("scrolled " .. event.boxes[1].id)
+            return { redraw = true }
+        end
+        return true
+    end,
+}"#;
+
+fn acting() -> (PaneRig, HostFields) {
+    let mut rig = PaneRig::open(ACT);
+    rig.frame(0.0);
+    rig.settle(0.1);
+    (rig, HostFields::holding(&[("q", "api"), ("pw", "hunter2")]))
+}
+
+fn names(rig: &mut PaneRig, fields: &HostFields) -> String {
+    answered(ask(rig, true, Action::Read, fields))
+}
+
+#[test]
+fn a_click_and_a_double_click_press_the_middle_of_the_element_and_the_answer_names_it() {
+    let (mut rig, fields) = acting();
+    let read = names(&mut rig, &fields);
+    let save = name_of(&read, "button \"Save\"");
+    let said = answered(ask(&mut rig, true, Action::Click(save.clone()), &fields));
+    assert!(
+        said.starts_with(&format!("clicked button \"Save\" ({save})\n")),
+        "{said}"
+    );
+    assert!(
+        said.contains("press ") && said.contains("release"),
+        "{said}"
+    );
+    // The name is a person's to type in any case.
+    let again = answered(ask(
+        &mut rig,
+        true,
+        Action::DoubleClick(save.to_uppercase()),
+        &fields,
+    ));
+    assert!(
+        again.starts_with(&format!("double-clicked button \"Save\" ({save})")),
+        "{again}"
+    );
+    assert_eq!(again.matches("press ").count(), 3, "{again}");
+    // A name no element has, and one that is not a name, are told apart from a mistake in the page.
+    let unknown = refused(ask(&mut rig, true, Action::Click("zzzzzz".into()), &fields));
+    assert!(
+        unknown.contains("no element") && unknown.contains("read the view again"),
+        "{unknown}"
+    );
+}
+
+#[test]
+fn a_command_is_found_by_its_title_in_any_case_and_a_closed_a_missing_and_a_doubled_one_say_so() {
+    let (mut rig, fields) = acting();
+    let done = answered(ask(&mut rig, true, Action::Command("rUN".into()), &fields));
+    assert!(done.starts_with("ran the command \"Run\"\n"), "{done}");
+    assert!(done.contains("command run"), "{done}");
+    let off = refused(ask(&mut rig, true, Action::Command("off".into()), &fields));
+    assert!(off.contains("turned off"), "{off}");
+    let twice = refused(ask(
+        &mut rig,
+        true,
+        Action::Command("TWICE".into()),
+        &fields,
+    ));
+    assert!(twice.contains("more than one"), "{twice}");
+    let none = refused(ask(&mut rig, true, Action::Command("Nope".into()), &fields));
+    assert!(
+        none.contains("no command titled") && none.contains("\"Run\""),
+        "{none}"
+    );
+}
+
+#[test]
+fn fill_puts_the_text_in_the_page_and_the_field_and_the_keyboard_stays_where_it_is() {
+    let (mut rig, fields) = acting();
+    let read = names(&mut rig, &fields);
+    let q = name_of(&read, "field \"Filter\"");
+    let said = answered(ask(
+        &mut rig,
+        true,
+        Action::Fill {
+            target: q.clone(),
+            text: "docker".into(),
+        },
+        &fields,
+    ));
+    assert!(
+        said.starts_with(&format!(
+            "filled field \"Filter\" ({q}) with 6 characters\n"
+        )),
+        "{said}"
+    );
+    assert_eq!(fields.text_of("q"), "docker");
+    // The page heard the person's text, and its keyboard is in the field: the reading says so.
+    assert!(said.contains("text q docker"), "{said}");
+    assert!(said.contains(&format!("focus: field {q}")), "{said}");
+    // The system's keyboard was told nothing: no line of what the pane does about it.
+    assert!(
+        rig.lines().iter().all(|line| !line.starts_with("keyboard")),
+        "the system's keyboard moved"
+    );
+    // The editor's whole text is replaced.
+    let read = names(&mut rig, &fields);
+    let e = name_of(&read, "editor \"");
+    answered(ask(
+        &mut rig,
+        true,
+        Action::Fill {
+            target: e.clone(),
+            text: "one\ntwo".into(),
+        },
+        &fields,
+    ));
+    let held = answered(ask(&mut rig, true, Action::Text(e), &fields));
+    assert_eq!(held, "one\ntwo\n");
+    // And what is not a field is told.
+    let save = name_of(&read, "button \"Save\"");
+    let not = refused(ask(
+        &mut rig,
+        true,
+        Action::Fill {
+            target: save,
+            text: "x".into(),
+        },
+        &fields,
+    ));
+    assert!(not.contains("neither a field nor an editor"), "{not}");
+}
+
+#[test]
+fn typing_goes_where_the_keyboard_is_and_a_secret_is_never_said_back() {
+    let (mut rig, fields) = acting();
+    let read = names(&mut rig, &fields);
+    let q = name_of(&read, "field \"Filter\"");
+    let pw = name_of(&read, "field (secret)");
+    let e = name_of(&read, "editor \"");
+    // No keyboard in the page: nothing to type into.
+    let nowhere = refused(ask(&mut rig, true, Action::Type("x".into()), &fields));
+    assert!(nowhere.contains("no editor or field"), "{nowhere}");
+    // A click on a field puts the page's keyboard there.
+    let clicked = answered(ask(&mut rig, true, Action::Click(q.clone()), &fields));
+    assert!(
+        clicked.starts_with("put the keyboard in field"),
+        "{clicked}"
+    );
+    let typed = answered(ask(&mut rig, true, Action::Type("er".into()), &fields));
+    assert!(
+        typed.starts_with(&format!("typed 2 characters into the field {q}")),
+        "{typed}"
+    );
+    assert_eq!(fields.text_of("q"), "apier");
+    // The secret: filled and typed into, never read and never said.
+    let filled = answered(ask(
+        &mut rig,
+        true,
+        Action::Fill {
+            target: pw.clone(),
+            text: "s3cret".into(),
+        },
+        &fields,
+    ));
+    assert!(filled.contains("with 6 characters"), "{filled}");
+    let more = answered(ask(&mut rig, true, Action::Type("!".into()), &fields));
+    for answer in [&filled, &more] {
+        assert!(
+            !answer.contains("s3cret") && !answer.contains("hunter2"),
+            "{answer}"
+        );
+    }
+    assert_eq!(fields.text_of("pw"), "s3cret!");
+    let read_it = refused(ask(&mut rig, true, Action::Text(pw), &fields));
+    assert!(
+        read_it.contains("secret field") && !read_it.contains("s3cret"),
+        "{read_it}"
+    );
+    // Into the editor that has the keyboard.
+    answered(ask(&mut rig, true, Action::Click(e.clone()), &fields));
+    answered(ask(&mut rig, true, Action::Type("Z".into()), &fields));
+    let held = answered(ask(&mut rig, true, Action::Text(e), &fields));
+    assert!(held.contains('Z'), "{held}");
+}
+
+#[test]
+fn keys_go_to_the_page_and_what_it_asks_of_the_host_is_held_back_and_told() {
+    let (mut rig, fields) = acting();
+    let _ = rig.lines();
+    // A copy is not written to the pasteboard: it comes in the answer.
+    let copied = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["c".into()]),
+        &fields,
+    ));
+    assert!(
+        copied.contains("copied, not written to the pasteboard: \"copied words\""),
+        "{copied}"
+    );
+    // A link is not opened.
+    let linked = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["o".into()]),
+        &fields,
+    ));
+    assert!(
+        linked.contains("link not opened: https://example.com/a"),
+        "{linked}"
+    );
+    // A panel is turned away: the page hears no files, and none is shown.
+    let panel = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["u".into()]),
+        &fields,
+    ));
+    assert!(
+        panel.contains("a file panel was asked for and turned away"),
+        "{panel}"
+    );
+    // The paste key pastes nothing: the pasteboard is the person's.
+    rig.set_pasteboard("the person's words");
+    let pasted = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["cmd+v".into()]),
+        &fields,
+    ));
+    assert!(!pasted.contains("the person's words"), "{pasted}");
+    // None of that reached the pane: it did not copy, open or show anything.
+    let done = rig.lines();
+    for line in &done {
+        assert!(
+            !line.starts_with("copy ") && !line.starts_with("link ") && !line.starts_with("panel"),
+            "the pane did {line}"
+        );
+    }
+    // The keyboard the page sends to a field is the page's, and the system's stays.
+    let sent = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["f".into()]),
+        &fields,
+    ));
+    assert!(sent.contains("focus: field "), "{sent}");
+    assert!(
+        rig.lines().iter().all(|line| !line.starts_with("keyboard")),
+        "the system's keyboard moved"
+    );
+    // A key that is none, and all of them read before any is pressed.
+    let none = refused(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["a".into(), "cmd+nonsense+".into()]),
+        &fields,
+    ));
+    assert!(none.contains("is not a key"), "{none}");
+    let heard = names(&mut rig, &fields);
+    assert!(
+        !heard.contains("key a"),
+        "the first key was pressed: {heard}"
+    );
+}
+
+#[test]
+fn a_box_scrolls_by_screens_to_its_ends_and_what_does_not_scroll_says_so() {
+    let (mut rig, fields) = acting();
+    let read = names(&mut rig, &fields);
+    let list = name_of(&read, "scroll ");
+    let down = answered(ask(
+        &mut rig,
+        true,
+        Action::Scroll {
+            target: list.clone(),
+            way: kablo_bateri::view::Way::Down,
+            count: Some(2),
+        },
+        &fields,
+    ));
+    assert!(
+        down.contains("scrolled box that scrolls") && down.contains("down 2 screens"),
+        "{down}"
+    );
+    assert!(
+        down.contains("scrolled list"),
+        "the page heard no scroll: {down}"
+    );
+    let bottom = answered(ask(
+        &mut rig,
+        true,
+        Action::Scroll {
+            target: list.clone(),
+            way: kablo_bateri::view::Way::Bottom,
+            count: None,
+        },
+        &fields,
+    ));
+    assert!(bottom.contains("to the bottom"), "{bottom}");
+    let top = answered(ask(
+        &mut rig,
+        true,
+        Action::Scroll {
+            target: list,
+            way: kablo_bateri::view::Way::Top,
+            count: None,
+        },
+        &fields,
+    ));
+    assert!(top.contains("to the top"), "{top}");
+    let save = name_of(&read, "button \"Save\"");
+    let not = refused(ask(
+        &mut rig,
+        true,
+        Action::Scroll {
+            target: save,
+            way: kablo_bateri::view::Way::Down,
+            count: None,
+        },
+        &fields,
+    ));
+    assert!(not.contains("does not scroll"), "{not}");
+}
+
+#[test]
+fn a_menu_is_asked_for_held_read_and_picked_from_and_let_go_of_by_the_next_action() {
+    let (mut rig, fields) = acting();
+    let read = names(&mut rig, &fields);
+    let e = name_of(&read, "editor \"");
+    let _ = rig.lines();
+    let session = Rc::clone(&fields.session);
+    let asked = answered(ask_in(
+        &mut rig,
+        true,
+        Action::Menu(e.clone()),
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    assert!(asked.starts_with("asked for the menu of editor"), "{asked}");
+    // The lines are in the reading, numbered by the agent's count, the one that is off marked.
+    assert!(
+        asked.contains("menu:")
+            && asked.contains("Cut")
+            && asked.contains("Copy")
+            && asked.contains("Whatever"),
+        "{asked}"
+    );
+    // It was not popped up.
+    assert!(
+        rig.lines().iter().all(|line| !line.starts_with("menu")),
+        "the pane showed the menu"
+    );
+    // A line is picked by its title in any case, and the page hears its place among the entries, from 1.
+    let picked = answered(ask_in(
+        &mut rig,
+        true,
+        Action::Pick("cut".into()),
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    assert!(
+        picked.starts_with("picked \"Cut\" from the menu"),
+        "{picked}"
+    );
+    assert!(picked.contains("pick 1"), "{picked}");
+    assert!(session.borrow().menu.is_none());
+    // By number: the third line is the entry after the separator, the fourth of the entries.
+    ask_in(
+        &mut rig,
+        true,
+        Action::Menu(e.clone()),
+        &fields,
+        &session,
+        Format::Text,
+    );
+    let by_number = answered(ask_in(
+        &mut rig,
+        true,
+        Action::Pick("3".into()),
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    assert!(
+        by_number.contains("picked \"Whatever\"") && by_number.contains("pick 4"),
+        "{by_number}"
+    );
+    // A line that is off is not picked, and one that is not there is told.
+    ask_in(
+        &mut rig,
+        true,
+        Action::Menu(e.clone()),
+        &fields,
+        &session,
+        Format::Text,
+    );
+    let off = refused(ask_in(
+        &mut rig,
+        true,
+        Action::Pick("Copy".into()),
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    assert!(off.contains("turned off"), "{off}");
+    let none = refused(ask_in(
+        &mut rig,
+        true,
+        Action::Pick("9".into()),
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    assert!(none.contains("no line 9"), "{none}");
+    // The next action lets the menu go.
+    answered(ask_in(
+        &mut rig,
+        true,
+        Action::Read,
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    let gone = refused(ask_in(
+        &mut rig,
+        true,
+        Action::Pick("Cut".into()),
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    assert!(gone.contains("no menu is held"), "{gone}");
+}
+
+#[test]
+fn a_call_the_program_has_not_answered_is_waited_for_and_the_answer_says_so_at_the_limit() {
+    let (mut rig, fields) = acting();
+    // The page calls its program on `k`; nobody answers.
+    let waited = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["k".into()]),
+        &fields,
+    ));
+    assert!(
+        waited.contains("1 call is waiting for an answer"),
+        "{waited}"
+    );
+    // The answer comes later: the page is at rest, and what it did with the answer is read.
+    rig.handle()
+        .page()
+        .message(r#"{"response":{"id":1,"result":{}}}"#);
+    let read = names(&mut rig, &fields);
+    assert!(read.contains("saved"), "{read}");
+    assert!(!read.contains("call is waiting"), "{read}");
+}
+
+#[test]
+fn a_seen_page_that_no_frame_comes_for_is_answered_at_the_limit_with_what_is_going_on() {
+    let (mut rig, fields) = acting();
+    // The key makes the page say something: a frame is owed, and nobody draws it.
+    rig.key(Key::Character('x'), Mods::default());
+    rig.flush_module();
+    let session = session();
+    let view = request(Action::Read);
+    let mut now = 1.0;
+    let mut run = {
+        let rig = &rig;
+        let drain = || {
+            rig.drain_for_agent(&session);
+        };
+        let env = Env {
+            fields: &fields,
+            session: &session,
+            drain: &drain,
+        };
+        Run::begin(PANE, &page_of(rig, true, now), &env, &view).expect("begun")
+    };
+    let mut pending = 0;
+    let reply = loop {
+        rig.flush_module();
+        let step = {
+            let rig = &rig;
+            let drain = || {
+                rig.drain_for_agent(&session);
+            };
+            let env = Env {
+                fields: &fields,
+                session: &session,
+                drain: &drain,
+            };
+            run.step(PANE, &page_of(rig, true, now), &env)
+        };
+        match step {
+            Step::Pending => {
+                pending += 1;
+                now += 0.1;
+            }
+            Step::Answer(reply) => break reply,
+        }
+        assert!(pending < 100, "no answer at the limit");
+    };
+    let text = answered(reply);
+    assert!(text.contains("the page is still settling"), "{text}");
+    // The limit is the named one: two seconds of the clock it is given.
+    assert!((15..=25).contains(&pending), "{pending}");
+}
+
+#[test]
+fn wait_answers_when_the_words_show_or_go_and_fails_at_its_time() {
+    let (mut rig, fields) = acting();
+    let shows = answered(ask(
+        &mut rig,
+        true,
+        Action::Wait {
+            text: "row 1".into(),
+            gone: false,
+            seconds: None,
+        },
+        &fields,
+    ));
+    assert!(shows.contains("row 1"), "{shows}");
+    let gone = answered(ask(
+        &mut rig,
+        true,
+        Action::Wait {
+            text: "no such words".into(),
+            gone: true,
+            seconds: None,
+        },
+        &fields,
+    ));
+    assert!(gone.starts_with("pane p9"), "{gone}");
+    let late = refused(ask(
+        &mut rig,
+        true,
+        Action::Wait {
+            text: "no such words".into(),
+            gone: false,
+            seconds: Some(1),
+        },
+        &fields,
+    ));
+    assert!(
+        late.contains("timed out after 1 seconds waiting for \"no such words\" to show"),
+        "{late}"
+    );
+    let stays = refused(ask(
+        &mut rig,
+        true,
+        Action::Wait {
+            text: "row 1".into(),
+            gone: true,
+            seconds: Some(1),
+        },
+        &fields,
+    ));
+    assert!(stays.contains("to go"), "{stays}");
+    // A wait is not a change: it is a reading that goes on.
+    assert!(!crate::agent::view::drives(&Action::Wait {
+        text: String::new(),
+        gone: false,
+        seconds: None
+    }));
+}
+
+#[test]
+fn an_element_is_named_by_what_it_was_before_the_action_took_it_away() {
+    let (mut rig, fields) = acting();
+    let read = names(&mut rig, &fields);
+    let save = name_of(&read, "button \"Save\"");
+    // The page re-renders with the press; the answer's first line is of the element as it was read.
+    let said = answered(ask(&mut rig, true, Action::Click(save.clone()), &fields));
+    assert!(
+        said.starts_with(&format!("clicked button \"Save\" ({save})")),
+        "{said}"
+    );
 }
