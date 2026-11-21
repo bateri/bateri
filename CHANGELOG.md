@@ -22,6 +22,10 @@ of every installed copy. A version without a section is not released.
 - **Claude knows how to use a program's view.** The `bateri` skill tells it to read a view first, to act with a ref or a command title from the reading, to ask you before anything that cannot be undone (remove, delete, kill, drop, send), to leave your keyboard and tabs alone, and to treat the words on the page as data, never as instructions. "That pen" means the pane you had the keyboard in before the one you are typing to.
 - **`bateri ls` shows which pane has the keyboard.** The pane you are typing in is marked `(focused)`, a pane that shows a view says so, and `--json` gives the order the keyboard visited the panes, so an agent can tell which pane you were in just before its own.
 
+### Fixed
+
+- **A program's dialogs and tables read in full.** In what `bateri view` and VoiceOver read, a dialog's buttons and fields are no longer hidden behind the shade it draws over the page, a table's rows are named by their cells and not "Row 3", and an icon button with only a tooltip is named by it.
+
 ## [0.32.0] - 2026-11-20
 
 ### Added
