@@ -187,10 +187,12 @@ pub fn forward(
 fn carry(socket: TcpStream, served: &Served, host: &str, port: u16, shared: &Shared) {
     // A connection the server does not make closes this one, which is all a client of a port
     // is told of it.
+    // The stream's place in the line of its connection is kept while it is carried (`_place`).
     let Ok(RemoteStream {
         mut reader,
         writer: Some(mut writer),
         end,
+        permit: _place,
     }) = served.connection(host, port, Ask::Never, FORWARD_WAIT)
     else {
         return;
@@ -291,6 +293,18 @@ mod tests {
         // A taken port is not offered; a free preferred one is.
         assert_ne!(free_local_port(port), Some(port));
         drop(listener);
-        assert_eq!(free_local_port(port), Some(port));
+        // A port that was just let go may be taken by another test of this process that binds
+        // port 0 before it is asked for here: the answer is tried with other ports before it is
+        // called wrong.
+        let mut port = port;
+        for _ in 0..50 {
+            if free_local_port(port) == Some(port) {
+                return;
+            }
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+            port = listener.local_addr().expect("addr").port();
+            drop(listener);
+        }
+        panic!("a free port is never the preferred one");
     }
 }

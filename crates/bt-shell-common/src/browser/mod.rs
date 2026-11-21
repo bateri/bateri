@@ -31,4 +31,5 @@ pub mod profile;
 pub mod proxy;
 #[cfg(target_os = "macos")]
 pub mod rooms;
+pub mod route;
 pub mod version;

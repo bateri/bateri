@@ -887,6 +887,9 @@ impl Desk {
         };
         let mut conversation = Conversation::new(config, store, entropy);
         conversation.offer_stage(stage);
+        // The host can show where a way ends (§4.10), for the browsers of a page: a program that
+        // wants one says so, and one that does not is not told.
+        conversation.offer_probe(true);
         Self {
             inner: Mutex::new(Inner {
                 conversation,

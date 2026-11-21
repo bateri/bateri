@@ -27,6 +27,9 @@
 mod input;
 mod install;
 mod questions;
+mod route;
+
+use route::Probing;
 
 pub(crate) use install::update_in_background;
 
@@ -229,6 +232,11 @@ pub(crate) struct PageBrowsers {
     questions: RefCell<VecDeque<questions::Question>>,
     asking: Cell<bool>,
     installing: Cell<bool>,
+    /// The probe that is out, and the way it is to show ends at the program's machine.
+    probing: RefCell<Option<Probing>>,
+    /// Which page's browsers these are: what a thread says of a way is for the page that asked,
+    /// and not for one that took its place in the pane (a program behind another `ssh`).
+    serial: u64,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -236,22 +244,12 @@ impl PageBrowsers {
     /// The browsers of `pane`'s page. `None` where there is no engine to be had (no home
     /// directory).
     pub(crate) fn new(
-        pane: &TerminalPane,
         manager: Arc<Manager>,
         renderer: &Renderer,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Rc<Self> {
         let pictures = Pictures::new(renderer, wake.clone());
-        // What the profile of a program's browsers is kept under: the machine the program runs
-        // on, which a program of this Mac's is "mac". A server's name is Phase 6's to give.
-        let machine = pane.browser_machine();
-        let rooms = Rooms::new(
-            manager,
-            &machine,
-            APPLICATION,
-            wake.clone(),
-            pictures.clone(),
-        );
+        let rooms = Rooms::new(manager, APPLICATION, wake.clone(), pictures.clone());
         Rc::new(Self {
             rooms: RefCell::new(rooms),
             pictures,
@@ -267,6 +265,11 @@ impl PageBrowsers {
             questions: RefCell::new(VecDeque::new()),
             asking: Cell::new(false),
             installing: Cell::new(false),
+            probing: RefCell::new(None),
+            serial: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
             wake,
         })
     }
@@ -369,6 +372,10 @@ impl PageBrowsers {
             Effect::NotInstalled(id) => {
                 self.not_installed(pane, id);
                 true
+            }
+            Effect::Route => {
+                self.find_route(pane);
+                false
             }
             Effect::Agent(..) => false,
             Effect::Diagnostic(_, words) => {

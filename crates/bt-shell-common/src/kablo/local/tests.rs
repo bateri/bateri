@@ -4361,6 +4361,128 @@ mod relayed {
 /// terminal says otherwise, and the pane's owner tells the session so.
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_browsers_request_over_a_real_kablo_reaches_the_servers_loopback() {
+    use crate::browser::profile::ProfileKey;
+    use crate::browser::proxy::Proxy;
+    use crate::browser::route::{Routes, Through, prove};
+    use crate::kablo::served::Served;
+    let Some(here) = Here::new("browser") else {
+        return;
+    };
+    let served = Served::new(here.service.backend(), super::host());
+    // What is on the far machine's loopback: a dev server, the program's listener of the proof
+    // (which gives its token to one connection), and an echo for a tunnel.
+    let bind = || std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a listener");
+    let (dev, proof, echo) = (bind(), bind(), bind());
+    let (dev_port, proof_port, echo_port) = (
+        dev.local_addr().expect("an address").port(),
+        proof.local_addr().expect("an address").port(),
+        echo.local_addr().expect("an address").port(),
+    );
+    thread::spawn(move || {
+        for connection in dev.incoming().flatten() {
+            thread::spawn(move || {
+                let mut connection = connection;
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && connection.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                // What the dev server reads is a request in origin form, with no identity.
+                let ok = head.starts_with("GET /app HTTP/1.1\r\n")
+                    && !head.to_lowercase().contains("proxy-");
+                let body = if ok {
+                    "from the far loopback"
+                } else {
+                    "the head was wrong"
+                };
+                let _ = write!(
+                    connection,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    thread::spawn(move || {
+        if let Ok((mut connection, _)) = proof.accept() {
+            let _ = connection.write_all(b"0123456789abcdef0123456789abcdef");
+        }
+    });
+    thread::spawn(move || {
+        for connection in echo.incoming().flatten() {
+            thread::spawn(move || {
+                let mut connection = connection;
+                let mut again = connection.try_clone().expect("a clone");
+                let _ = std::io::copy(&mut connection, &mut again);
+            });
+        }
+    });
+
+    // The way is shown, then used by the proxy for the profile of the machine.
+    let way = Arc::new(Through(served));
+    prove(
+        &*way,
+        proof_port,
+        "0123456789abcdef0123456789abcdef",
+        Duration::from_secs(20),
+    )
+    .expect("kablo's connection ends at the loopback of the server");
+    let routes = Routes::new();
+    routes.set("far", way);
+    let proxy = Proxy::bind(routes).expect("a proxy");
+    proxy.allow(
+        "user",
+        "secret",
+        &ProfileKey::new("far", "app", None).expect("a key"),
+    );
+    let credentials = "Proxy-Authorization: Basic dXNlcjpzZWNyZXQ=\r\n";
+
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", proxy.port())).expect("the proxy");
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("a timeout");
+    write!(
+        client,
+        "GET http://127.0.0.1:{dev_port}/app HTTP/1.1\r\nHost: 127.0.0.1:{dev_port}\r\n{credentials}\r\n"
+    )
+    .expect("a request");
+    let mut answer = vec![0u8; 0];
+    let mut byte = [0u8; 1];
+    while !answer.ends_with(b"from the far loopback") {
+        assert!(
+            client.read(&mut byte).expect("an answer") == 1,
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+        answer.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200 OK"));
+
+    let mut tunnel = std::net::TcpStream::connect(("127.0.0.1", proxy.port())).expect("the proxy");
+    tunnel
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("a timeout");
+    write!(
+        tunnel,
+        "CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n{credentials}\r\n"
+    )
+    .expect("a connect");
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        assert!(tunnel.read(&mut byte).expect("a head") == 1);
+        head.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 200 "));
+    tunnel.write_all(b"ping").expect("a write");
+    let mut pong = [0u8; 4];
+    tunnel.read_exact(&mut pong).expect("an echo");
+    assert_eq!(&pong, b"ping");
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_program_whose_marks_went_with_its_relay_is_a_command_once_the_owner_says_so() {
     let Some(bundle) = release() else {
         eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");

@@ -8,8 +8,11 @@
 //! nowhere. A process of this Mac that is not the helper cannot use it either: it does not know a
 //! password.
 //!
-//! The request of a profile that is known is not carried yet (Phase 6 of plan 034 puts the route
-//! behind it): it is answered `502` with the reason.
+//! The request of a profile that is known goes by the way its machine has been shown to have
+//! ([`super::route`]): a `CONNECT` is a tunnel, and a request with an absolute address is made to
+//! that address with its own head (origin form, no `Proxy-Authorization`: the identity of the
+//! browser must not reach a dev server), the connection to each address kept for the next request of
+//! the same client connection. A machine with no way here gets `502` and the reason.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -20,6 +23,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::profile::ProfileKey;
+use super::route::{DIAL_WAIT, Dialer, Link, Parts, Routes};
 
 /// The largest request head the proxy reads: a bigger one is not a browser's.
 const HEAD_MAX: usize = 16 * 1024;
@@ -33,9 +37,10 @@ struct Identity {
     profile: ProfileKey,
 }
 
-#[derive(Default)]
 struct Registry {
     identities: Mutex<HashMap<String, Identity>>,
+    /// The way each machine's connections are made by, once it has been shown.
+    routes: Arc<Routes>,
 }
 
 impl Registry {
@@ -59,12 +64,16 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    /// Starts listening on a port of the loopback the system chooses.
-    pub fn bind() -> io::Result<Proxy> {
+    /// Starts listening on a port of the loopback the system chooses. What a profile's
+    /// connections go by is looked up in `routes`, by its machine, as they are made.
+    pub fn bind(routes: Arc<Routes>) -> io::Result<Proxy> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
-        let registry = Arc::new(Registry::default());
+        let registry = Arc::new(Registry {
+            identities: Mutex::new(HashMap::new()),
+            routes,
+        });
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let (registry, stop) = (registry.clone(), stop.clone());
@@ -138,24 +147,382 @@ fn serve(mut stream: TcpStream, registry: &Registry) -> io::Result<()> {
     stream.set_write_timeout(Some(HEAD_TIMEOUT))?;
     let head = read_head(&mut stream)?;
     let known = header(&head, "proxy-authorization").and_then(|value| registry.profile_of(&value));
-    let answer = match known {
-        None => reply(
-            407,
-            "Proxy Authentication Required",
-            "Proxy-Authenticate: Basic realm=\"bateri\"\r\n",
-            "",
-        ),
-        Some(_) => reply(
-            502,
-            "Bad Gateway",
-            "",
-            "There is no route from this pane to the program's machine yet.\n",
-        ),
+    let Some(profile) = known else {
+        return end_with(&mut stream, &unauthorized());
     };
+    let Some(way) = registry.routes.get(profile.machine()) else {
+        return end_with(
+            &mut stream,
+            &reply(
+                502,
+                "Bad Gateway",
+                "",
+                "There is no route from this pane to the program's machine.\n",
+            ),
+        );
+    };
+    Carrying {
+        client: stream,
+        registry,
+        profile,
+        way,
+        upstreams: HashMap::new(),
+        last: Arc::new(Mutex::new(None)),
+    }
+    .run(head)
+}
+
+fn unauthorized() -> String {
+    reply(
+        407,
+        "Proxy Authentication Required",
+        "Proxy-Authenticate: Basic realm=\"bateri\"\r\n",
+        "",
+    )
+}
+
+fn end_with(stream: &mut TcpStream, answer: &str) -> io::Result<()> {
     stream.write_all(answer.as_bytes())?;
     stream.flush()?;
     let _ = stream.shutdown(Shutdown::Both);
     Ok(())
+}
+
+/// A connection to an address that a client connection's requests were made to, kept for the next.
+struct Upstream {
+    writer: Box<dyn Write + Send>,
+    end: Arc<dyn Fn() + Send + Sync>,
+    /// Set by the thread that carries its answers back when the far end has ended.
+    dead: Arc<AtomicBool>,
+}
+
+/// One client connection of a known profile, and the connections made for it.
+struct Carrying<'a> {
+    client: TcpStream,
+    registry: &'a Registry,
+    profile: ProfileKey,
+    way: Arc<dyn Dialer>,
+    /// By address (`host:port`).
+    upstreams: HashMap<String, Upstream>,
+    /// The address the last request went to: when its connection ends, the answer it was
+    /// carrying ended with it, and the client is told so.
+    last: Arc<Mutex<Option<String>>>,
+}
+
+impl Carrying<'_> {
+    /// Serves requests until the client or the far end is done. `first` is the first head, already
+    /// read.
+    fn run(mut self, first: String) -> io::Result<()> {
+        let result = self.requests(first);
+        for upstream in self.upstreams.values() {
+            (upstream.end)();
+        }
+        let _ = self.client.shutdown(Shutdown::Both);
+        result
+    }
+
+    fn requests(&mut self, first: String) -> io::Result<()> {
+        let mut head = first;
+        loop {
+            if !self.same_identity(&head) {
+                return self.say(&unauthorized());
+            }
+            let line = head.lines().next().unwrap_or_default().to_owned();
+            let mut words = line.split(' ');
+            let (Some(method), Some(target), Some(version)) =
+                (words.next(), words.next(), words.next())
+            else {
+                return self.say(&reply(400, "Bad Request", "", "Not a request.\n"));
+            };
+            if method.eq_ignore_ascii_case("CONNECT") {
+                return self.tunnel(target);
+            }
+            let Some((authority, path)) = split_target(target) else {
+                return self.say(&reply(
+                    400,
+                    "Bad Request",
+                    "",
+                    "A request is made to an address with http:// or is a CONNECT.\n",
+                ));
+            };
+            let upgrade = header(&head, "upgrade").is_some();
+            self.forward(&head, method, &authority, &path, version)?;
+            if upgrade {
+                return self.raw(&authority);
+            }
+            // The client has the answer before it says more: no timeout while it waits for one.
+            self.client.set_read_timeout(None)?;
+            head = match read_head(&mut self.client) {
+                Ok(head) => head,
+                // The client is done with this connection: ended, or silent for good.
+                Err(_) => return Ok(()),
+            };
+        }
+    }
+
+    /// Whether a request of this client connection names the identity the connection began with.
+    fn same_identity(&self, head: &str) -> bool {
+        header(head, "proxy-authorization")
+            .and_then(|value| self.registry.profile_of(&value))
+            .is_some_and(|profile| profile == self.profile)
+    }
+
+    fn say(&mut self, answer: &str) -> io::Result<()> {
+        self.client.write_all(answer.as_bytes())?;
+        self.client.flush()
+    }
+
+    /// Makes the connection to `authority` by the way, and starts carrying what it says back.
+    fn dial(&mut self, authority: &str) -> Result<(), String> {
+        let (host, port) = split_authority(authority, 80)
+            .ok_or_else(|| format!("{authority} is not an address"))?;
+        let link = self.way.dial(&host, port, DIAL_WAIT)?;
+        let Parts {
+            mut reader,
+            writer,
+            end,
+            hold,
+        } = link.split();
+        let dead = Arc::new(AtomicBool::new(false));
+        let client = self.client.try_clone().map_err(|e| e.to_string())?;
+        let (last, key) = (Arc::clone(&self.last), authority.to_owned());
+        let (flag, closing) = (Arc::clone(&dead), Arc::clone(&end));
+        std::thread::Builder::new()
+            .name("browser-proxy-answers".into())
+            .spawn(move || {
+                let _hold = hold;
+                let mut client = client;
+                let _ = io::copy(&mut reader, &mut client);
+                flag.store(true, Ordering::Release);
+                closing();
+                // What the last request asked is answered to its end by this connection's end: the
+                // client waits for no more.
+                if lock(&last).as_deref() == Some(key.as_str()) {
+                    let _ = client.shutdown(Shutdown::Write);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        self.upstreams
+            .insert(authority.to_owned(), Upstream { writer, end, dead });
+        Ok(())
+    }
+
+    /// Sends a request on, with its body, to the connection of its address (made if there is none
+    /// or its far end has ended).
+    fn forward(
+        &mut self,
+        head: &str,
+        method: &str,
+        authority: &str,
+        path: &str,
+        version: &str,
+    ) -> io::Result<()> {
+        let reusable = self
+            .upstreams
+            .get(authority)
+            .is_some_and(|up| !up.dead.load(Ordering::Acquire));
+        if !reusable {
+            if let Some(old) = self.upstreams.remove(authority) {
+                (old.end)();
+            }
+            if let Err(why) = self.dial(authority) {
+                self.say(&reply(502, "Bad Gateway", "", &format!("{why}\n")))?;
+                return Err(io::Error::other(why));
+            }
+        }
+        *lock(&self.last) = Some(authority.to_owned());
+        let out = rewritten(head, method, path, version);
+        let body = body_of(head);
+        let client = &mut self.client;
+        let Some(up) = self.upstreams.get_mut(authority) else {
+            return Err(io::Error::other("no connection"));
+        };
+        up.writer.write_all(out.as_bytes())?;
+        match body {
+            Body::None => {}
+            Body::Length(length) => {
+                io::copy(&mut client.take(length), &mut up.writer)?;
+            }
+            Body::Chunked => copy_chunked(client, &mut up.writer)?,
+        }
+        up.writer.flush()
+    }
+
+    /// `CONNECT host:port`: a tunnel until either end is done.
+    fn tunnel(&mut self, target: &str) -> io::Result<()> {
+        let Some((host, port)) = split_authority(target, 443) else {
+            return self.say(&reply(400, "Bad Request", "", "Not an address.\n"));
+        };
+        let link = match self.way.dial(&host, port, DIAL_WAIT) {
+            Ok(link) => link,
+            Err(why) => return self.say(&reply(502, "Bad Gateway", "", &format!("{why}\n"))),
+        };
+        self.client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+        self.client.flush()?;
+        self.client.set_read_timeout(None)?;
+        self.pipe(link)
+    }
+
+    /// After an `Upgrade` the connection is whatever the two ends make of it.
+    fn raw(&mut self, authority: &str) -> io::Result<()> {
+        let Some(up) = self.upstreams.remove(authority) else {
+            return Ok(());
+        };
+        self.client.set_read_timeout(None)?;
+        // The answers are already carried back by the thread of the connection: only what the
+        // client says now goes on.
+        let mut writer = up.writer;
+        let result = io::copy(&mut self.client, &mut writer).map(|_| ());
+        (up.end)();
+        result
+    }
+
+    /// Copies both ways between the client and `link` until one has no more to say.
+    fn pipe(&mut self, link: Link) -> io::Result<()> {
+        let Parts {
+            mut reader,
+            mut writer,
+            end,
+            hold,
+        } = link.split();
+        let mut to_client = self.client.try_clone()?;
+        let closing = Arc::clone(&end);
+        let answers = std::thread::Builder::new()
+            .name("browser-proxy-tunnel".into())
+            .spawn(move || {
+                let _hold = hold;
+                let _ = io::copy(&mut reader, &mut to_client);
+                let _ = to_client.shutdown(Shutdown::Both);
+                closing();
+            })?;
+        let _ = io::copy(&mut self.client, &mut writer);
+        end();
+        let _ = answers.join();
+        Ok(())
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `http://host:port/path?query` as the address and the path of the request that is made to it.
+fn split_target(target: &str) -> Option<(String, String)> {
+    let scheme = target.get(..7)?;
+    if !scheme.eq_ignore_ascii_case("http://") {
+        return None;
+    }
+    let rest = &target[7..];
+    let (authority, path) = match rest.find(['/', '?']) {
+        Some(at) if rest.as_bytes()[at] == b'/' => (&rest[..at], rest[at..].to_owned()),
+        Some(at) => (&rest[..at], format!("/{}", &rest[at..])),
+        None => (rest, "/".to_owned()),
+    };
+    // A client's own credentials in the address are not carried on.
+    let authority = authority.rsplit('@').next()?;
+    (!authority.is_empty()).then(|| (authority.to_owned(), path))
+}
+
+/// `host:port` (`[::1]:80` for an IPv6 literal) with `default` for a port that is not said.
+fn split_authority(authority: &str, default: u16) -> Option<(String, u16)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        let port = match after.strip_prefix(':') {
+            Some(port) => port.parse().ok()?,
+            None if after.is_empty() => default,
+            None => return None,
+        };
+        return Some((host.to_owned(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => Some((host.to_owned(), port.parse().ok()?)),
+        Some(_) => None,
+        None => (!authority.is_empty()).then(|| (authority.to_owned(), default)),
+    }
+}
+
+/// The request as the server it is made to is to read it: origin form, and without what is the
+/// proxy's alone — the browser's identity (`Proxy-Authorization`) and `Proxy-Connection`.
+fn rewritten(head: &str, method: &str, path: &str, version: &str) -> String {
+    let mut out = format!("{method} {path} {version}\r\n");
+    for line in head.lines().skip(1) {
+        let name = line.split(':').next().unwrap_or_default().trim();
+        if line.is_empty()
+            || name.eq_ignore_ascii_case("proxy-authorization")
+            || name.eq_ignore_ascii_case("proxy-connection")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\n");
+    out
+}
+
+enum Body {
+    None,
+    Length(u64),
+    Chunked,
+}
+
+fn body_of(head: &str) -> Body {
+    if header(head, "transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
+    {
+        return Body::Chunked;
+    }
+    match header(head, "content-length").and_then(|v| v.parse().ok()) {
+        Some(length) if length > 0 => Body::Length(length),
+        _ => Body::None,
+    }
+}
+
+/// A chunked body, framing and all, from one end to the other: the proxy reads it only to know
+/// where it ends.
+fn copy_chunked(from: &mut TcpStream, to: &mut dyn Write) -> io::Result<()> {
+    loop {
+        let line = read_line(from)?;
+        to.write_all(line.as_bytes())?;
+        let size = line
+            .trim()
+            .split(';')
+            .next()
+            .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "a chunk with no size"))?;
+        if size == 0 {
+            // Trailers, to the empty line.
+            loop {
+                let trailer = read_line(from)?;
+                to.write_all(trailer.as_bytes())?;
+                if trailer.trim().is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+        io::copy(&mut from.take(size + 2), to)?;
+    }
+}
+
+/// One line with its line end, up to [`HEAD_MAX`].
+fn read_line(stream: &mut TcpStream) -> io::Result<String> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while line.len() < HEAD_MAX {
+        if stream.read(&mut byte)? == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        line.push(byte[0]);
+        if byte[0] == b'\n' {
+            return Ok(String::from_utf8_lossy(&line).into_owned());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "a line too long",
+    ))
 }
 
 fn reply(status: u16, reason: &str, extra: &str, body: &str) -> String {
@@ -281,7 +648,7 @@ mod tests {
 
     #[test]
     fn a_connection_without_credentials_gets_407_and_nothing_else() {
-        let proxy = Proxy::bind().unwrap();
+        let proxy = Proxy::bind(Routes::new()).unwrap();
         let key = ProfileKey::new("mac", "app", None).unwrap();
         proxy.allow("user", "secret", &key);
         for head in [
@@ -298,8 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn a_known_identity_is_let_past_the_door() {
-        let proxy = Proxy::bind().unwrap();
+    fn a_known_identity_of_a_machine_with_no_way_is_told_so() {
+        let proxy = Proxy::bind(Routes::new()).unwrap();
         let key = ProfileKey::new("mac", "app", Some("work")).unwrap();
         proxy.allow("user", "secret", &key);
         let answer = ask(&proxy, &connect_with("user", "secret"));
@@ -309,7 +676,7 @@ mod tests {
 
     #[test]
     fn it_listens_on_the_loopback_alone_and_stops_with_its_owner() {
-        let proxy = Proxy::bind().unwrap();
+        let proxy = Proxy::bind(Routes::new()).unwrap();
         let port = proxy.port();
         assert_eq!(proxy.url(), format!("http://127.0.0.1:{port}"));
         drop(proxy);
@@ -318,7 +685,7 @@ mod tests {
 
     #[test]
     fn a_head_that_never_ends_is_dropped() {
-        let proxy = Proxy::bind().unwrap();
+        let proxy = Proxy::bind(Routes::new()).unwrap();
         let mut stream = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -330,3 +697,6 @@ mod tests {
         assert!(answer.is_empty(), "{answer:?}");
     }
 }
+
+#[cfg(test)]
+mod carrying;

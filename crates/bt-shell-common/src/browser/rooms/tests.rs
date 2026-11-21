@@ -11,6 +11,7 @@ use pencere_view::{BrowserOptions, Rect};
 
 use super::*;
 use crate::browser::helper::tests::{Behaviour, World, world};
+use crate::browser::route::Direct;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -46,6 +47,10 @@ struct Rig {
 }
 
 fn rig(name: &str, installed: bool) -> Rig {
+    rig_with(name, installed, true)
+}
+
+fn rig_with(name: &str, installed: bool, proven: bool) -> Rig {
     let world = world(
         name,
         Behaviour::default(),
@@ -60,21 +65,26 @@ fn rig(name: &str, installed: bool) -> Rig {
     let counter = woken.clone();
     let rooms = Rooms::new(
         world.manager.clone(),
-        "mac",
         "bateri",
         Arc::new(move || {
             counter.fetch_add(1, Ordering::SeqCst);
         }),
         pictures.clone(),
     );
-    Rig {
+    let mut rig = Rig {
         world,
         rooms,
         pictures,
         woken,
         effects: Vec::new(),
         seen: Vec::new(),
+    };
+    // The way is shown before the rooms are, as it is after a probe: the tests that are not
+    // about the way begin there.
+    if proven {
+        rig.prove("mac");
     }
+    rig
 }
 
 fn room(id: u64, profile: Option<&str>, (w, h): (f32, f32)) -> pencere_drive::Browser {
@@ -91,6 +101,13 @@ fn room(id: u64, profile: Option<&str>, (w, h): (f32, f32)) -> pencere_drive::Br
 }
 
 impl Rig {
+    fn prove(&mut self, machine: &str) {
+        let mut told = Vec::new();
+        self.rooms
+            .route(Ok((machine.to_owned(), Arc::new(Direct))), &mut told);
+        self.effects.extend(told);
+    }
+
     fn apply(&mut self, rooms: &[pencere_drive::Browser], scale: f32) {
         let mut told = Vec::new();
         self.rooms.apply(rooms, scale, &mut told);
@@ -864,4 +881,75 @@ fn a_refused_address_is_an_error_the_page_can_read() {
     let error = all.iter().find_map(|s| s.error.as_ref()).unwrap();
     assert_eq!(error.url, "file:///etc/passwd");
     assert!(error.message.contains("not opened here"));
+}
+
+fn routes_asked(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|e| matches!(e, Effect::Route))
+        .count()
+}
+
+#[test]
+fn no_engine_starts_before_the_way_is_shown_and_the_way_is_asked_for_once() {
+    let mut rig = rig_with("routing", true, false);
+    rig.apply(
+        &[
+            room(1, None, (100.0, 100.0)),
+            room(2, Some("work"), (100.0, 100.0)),
+        ],
+        1.0,
+    );
+    assert_eq!(routes_asked(&rig.effects), 1);
+    for id in [1, 2] {
+        let all = states(&rig.effects, id);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, BrowserState::STARTING);
+        assert_eq!(all[0].message.as_deref(), Some(FINDING));
+    }
+    // Nothing was started: the helper has not been asked for a browser.
+    assert!(
+        rig.world
+            .commands
+            .recv_timeout(Duration::from_millis(300))
+            .is_err()
+    );
+    assert!(rig.world.routes_empty());
+    // Shown: the rooms start and the proxy has the way of the machine.
+    rig.prove("mac");
+    rig.until("ready", |e| ready(e, 1) && ready(e, 2));
+    assert!(rig.world.manager.routes().get("mac").is_some());
+    assert_eq!(routes_asked(&rig.effects), 1);
+}
+
+#[test]
+fn a_way_that_was_not_shown_says_why_and_a_reload_looks_again() {
+    let mut rig = rig_with("noroute", true, false);
+    rig.apply(&[room(1, None, (100.0, 100.0))], 1.0);
+    let mut told = Vec::new();
+    rig.rooms
+        .route(Err("no way, said the proof".into()), &mut told);
+    rig.effects.extend(told);
+    let all = states(&rig.effects, 1);
+    let last = all.last().unwrap();
+    assert_eq!(last.status, BrowserState::NO_ROUTE);
+    assert_eq!(last.message.as_deref(), Some("no way, said the proof"));
+    // A room made after it is told so at once, and the way is not asked for again.
+    rig.apply(
+        &[room(1, None, (100.0, 100.0)), room(2, None, (100.0, 100.0))],
+        1.0,
+    );
+    let second = states(&rig.effects, 2);
+    assert_eq!(second[0].status, BrowserState::NO_ROUTE);
+    assert_eq!(routes_asked(&rig.effects), 1);
+    // The person says reload: the way is looked for again, and if it is found the room starts.
+    let mut told = Vec::new();
+    rig.rooms
+        .ask(Id::new(1), BrowserAsk::Reload { cache: true }, &mut told);
+    assert_eq!(routes_asked(&told), 1, "asked again");
+    rig.effects.extend(told);
+    rig.prove("mac");
+    rig.until("ready", |e| ready(e, 1));
+    // Both rooms start: the other waited for the same answer.
+    rig.until("the other", |e| ready(e, 2));
 }

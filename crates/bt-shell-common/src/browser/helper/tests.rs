@@ -149,6 +149,13 @@ fn temp(name: &str) -> PathBuf {
     dir
 }
 
+impl World {
+    /// Whether the proxy has no way for the machine `mac` yet.
+    pub(crate) fn routes_empty(&self) -> bool {
+        self.manager.routes().get("mac").is_none()
+    }
+}
+
 pub(crate) fn world(
     name: &str,
     behaviour: Behaviour,

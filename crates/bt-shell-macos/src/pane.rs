@@ -6416,10 +6416,23 @@ impl TerminalPane {
         })
     }
 
-    /// What the profile of a browser is kept under with its name: the machine the program of the
-    /// page runs on. A program on this Mac is `mac`.
-    pub(crate) fn browser_machine(&self) -> String {
-        "mac".to_owned()
+    /// The way a browser's requests would go to the program's machine, to be shown before it is
+    /// used ([`bt_shell_common::browser::route::prove`]), and the machine's name it would reach (what
+    /// the profiles of its browsers are kept under): a program of a kablo terminal is reached by the
+    /// connection kept to its server, any other by this Mac's own network (and a program behind
+    /// a plain `ssh` is not shown to be reached by it: its proof fails).
+    pub(crate) fn browser_way(
+        &self,
+    ) -> Result<(String, Arc<dyn bt_shell_common::browser::route::Dialer>), String> {
+        use bt_shell_common::browser::route::{Direct, Through, no_way};
+        let Some((_, target, _)) = self.server_target() else {
+            return Ok(("mac".to_owned(), Arc::new(Direct)));
+        };
+        let Some(shown) = self.host().kept_terminal(self.uuid()) else {
+            return Err(no_way("bateri keeps no connection to the program's server"));
+        };
+        let machine = format!("server:{}", shown.server(target.port).key);
+        Ok((machine, Arc::new(Through(self.served(&target)))))
     }
 
     /// The application's name for a file it quarantines.
@@ -7197,6 +7210,17 @@ impl TerminalPane {
                     }
                 }
                 Action::DestroyView => self.end_view(),
+                // The program's listener that shows where a way ends (the browsers' route).
+                Action::ProbeConnect { probe, port, token } => {
+                    if let Some(browsers) = self.page_browsers() {
+                        browsers.probed(self, probe, Ok((port, token)));
+                    }
+                }
+                Action::ProbeFailed { probe, code } => {
+                    if let Some(browsers) = self.page_browsers() {
+                        browsers.probed(self, probe, Err(code));
+                    }
+                }
                 Action::Consent(consent) => {
                     let app = self.ivars().identity.app_name.clone();
                     let origin = self.view_origin();
@@ -7362,7 +7386,6 @@ impl TerminalPane {
         // and the frames are drawn where the list says.
         let browsers = crate::browser_install::manager().map(|manager| {
             let browsers = crate::native_browser::PageBrowsers::new(
-                self,
                 manager,
                 &ivars.renderer,
                 self.browser_wake(),

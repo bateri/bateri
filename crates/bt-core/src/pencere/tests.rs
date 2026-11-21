@@ -463,9 +463,12 @@ fn a_hello_is_answered_with_a_welcome_and_a_token() {
     assert_eq!(token_of(&written[0]).len(), 22, "16 bytes in base64url");
     assert!(written[0].payload.contains("\"bateri-test\""));
     // Every view arrives as a bundle, so there is no feature to list for it (§5.2): the host
-    // lists what it may or may not do, and closing at the program's request is that.
+    // lists what it may or may not do: closing at the program's request, and showing where a way
+    // to the program's machine ends (the browsers of a page, §4.10).
     assert!(
-        written[0].payload.contains(r#""features":["dismiss"]"#),
+        written[0]
+            .payload
+            .contains(r#""features":["dismiss","probe"]"#),
         "{}",
         written[0].payload
     );
@@ -500,7 +503,7 @@ fn a_welcome_lists_stage_and_says_where_the_folder_is_once_the_pane_offers_one()
     assert!(
         written[0]
             .payload
-            .contains(r#""features":["dismiss","stage"],"stage":{"dir":"/home/alice/.cache/pencere-stage/6d0f9f1c","token":"3f9c2a7be1d84056a9c4e7b1d2f80a65"}"#),
+            .contains(r#""features":["dismiss","stage","probe"],"stage":{"dir":"/home/alice/.cache/pencere-stage/6d0f9f1c","token":"3f9c2a7be1d84056a9c4e7b1d2f80a65"}"#),
         "{}",
         written[0].payload
     );
@@ -524,7 +527,9 @@ fn a_welcome_of_a_pane_that_offers_no_folder_is_the_one_there_always_was() {
     pane.feed(&hello());
     let written = pane.rig.written();
     assert!(
-        written[0].payload.contains(r#""features":["dismiss"]"#)
+        written[0]
+            .payload
+            .contains(r#""features":["dismiss","probe"]"#)
             && !written[0].payload.contains("stage"),
         "{}",
         written[0].payload
@@ -2119,7 +2124,7 @@ fn open_a_script_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["dismiss"],"views":[{"kind":"lua","versions":["0.1"]},{"kind":"web","versions":["0.1"]}]"#),
+            .contains(r#""features":["dismiss","probe"],"views":[{"kind":"lua","versions":["0.1"]},{"kind":"web","versions":["0.1"]}]"#),
         "{}",
         welcome[0].payload
     );

@@ -36,6 +36,7 @@ use browser_ipc::{Frame, Launch, Receiver, Surface, Writer, channel};
 use super::layout::{self, Hold, Layout};
 use super::profile::ProfileKey;
 use super::proxy::Proxy;
+use super::route::Routes;
 
 /// How long the helper has to say hello.
 pub const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -140,6 +141,8 @@ pub struct Manager {
     starting: Mutex<()>,
     next_browser: AtomicU32,
     next_run: AtomicU64,
+    /// How each machine's requests are made, once a way to it has been shown ([`super::route`]).
+    routes: Arc<Routes>,
 }
 
 /// One helper's life.
@@ -179,7 +182,13 @@ impl Manager {
             starting: Mutex::new(()),
             next_browser: AtomicU32::new(1),
             next_run: AtomicU64::new(1),
+            routes: Routes::new(),
         })
+    }
+
+    /// The ways the proxy makes connections by, by machine: a way is set once it has been shown.
+    pub fn routes(&self) -> &Arc<Routes> {
+        &self.routes
     }
 
     pub fn status(&self) -> Status {
@@ -282,7 +291,7 @@ impl Manager {
         (self.config.trust)(&app).map_err(StartError::Untrusted)?;
         layout::make_private(&self.config.profiles)?;
 
-        let proxy = Proxy::bind()?;
+        let proxy = Proxy::bind(self.routes.clone())?;
         let launch = Launch::prepare(&self.config.run)?;
         let receiver = Receiver::register(launch.mach_name())?;
         let args = launch.args(

@@ -9,10 +9,11 @@
 //! (`ask`); one that did not asks nobody, and says why when it cannot go on.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kablo_proto::v1::stream::Command;
 
+use super::queue::{self, Queue};
 use super::remote::{RemoteCommand, RemoteStream};
 use super::service::Backend;
 use crate::ssh_route::Ask;
@@ -67,19 +68,27 @@ pub(crate) fn sh(script: &str) -> Command {
 pub struct Served {
     /// `None` in a process that keeps no connections.
     runs: Option<Arc<dyn Runs>>,
+    /// The line the connections made through this wait in ([`queue`]): the server's, shared by
+    /// everything that makes one through it.
+    line: Option<Arc<Queue>>,
 }
 
 impl Served {
     /// The server `server`, through the connections `backend` keeps.
     pub fn new(backend: Arc<dyn Backend>, server: KabloHost) -> Self {
+        let line = Some(queue::line_of(&server.key));
         Self {
             runs: Some(Arc::new(Through { backend, server })),
+            line,
         }
     }
 
     /// No server: every program asked for is refused, and says that no connections are kept.
     pub fn none() -> Self {
-        Self { runs: None }
+        Self {
+            runs: None,
+            line: None,
+        }
     }
 
     /// Runs the POSIX `script` with the server's `sh`. `ask` is how a password is asked for when
@@ -105,7 +114,20 @@ impl Served {
         ask: Ask,
         wait: Duration,
     ) -> Result<RemoteStream, String> {
-        self.runs()?.connect(host, port, ask, wait)
+        let runs = self.runs()?;
+        // Kablo refuses the streams that come beyond its limits: they wait here for their turn, and
+        // the place is the stream's until it is dropped.
+        let Some(line) = &self.line else {
+            return runs.connect(host, port, ask, wait);
+        };
+        let started = Instant::now();
+        let mut entry = line.enter(wait).ok_or_else(|| {
+            "too many connections are open through the server just now".to_owned()
+        })?;
+        let mut stream = runs.connect(host, port, ask, wait.saturating_sub(started.elapsed()))?;
+        entry.connected();
+        stream.permit = Some(entry);
+        Ok(stream)
     }
 
     fn runs(&self) -> Result<&Arc<dyn Runs>, String> {
@@ -217,6 +239,7 @@ pub(crate) mod fake {
                     home: home.to_owned(),
                     shell: shell.to_owned(),
                 })),
+                line: None,
             }
         }
 
@@ -224,6 +247,15 @@ pub(crate) mod fake {
         pub(crate) fn refusing(why: &str) -> Self {
             Self {
                 runs: Some(Arc::new(Refuses(why.to_owned()))),
+                line: None,
+            }
+        }
+
+        /// A server that refuses everything it is asked, with `why`, through `line`.
+        pub(crate) fn refusing_in(why: &str, line: Arc<Queue>) -> Self {
+            Self {
+                runs: Some(Arc::new(Refuses(why.to_owned()))),
+                line: Some(line),
             }
         }
 
@@ -231,7 +263,40 @@ pub(crate) mod fake {
         pub(crate) fn fake(argv: Vec<String>) -> Self {
             Self {
                 runs: Some(Arc::new(Ssh(argv))),
+                line: None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_that_is_refused_gives_its_place_back() {
+        let line = Queue::new(1, 1);
+        let served = Served::refusing_in("no-forwarding", Arc::clone(&line));
+        for _ in 0..3 {
+            let Err(error) =
+                served.connection("127.0.0.1", 80, Ask::Never, Duration::from_millis(50))
+            else {
+                panic!("a refusal")
+            };
+            assert_eq!(error, "no-forwarding");
+            assert_eq!(line.counts(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn a_connection_with_no_place_in_the_line_says_so() {
+        let line = Queue::new(1, 1);
+        let _taken = line.enter(Duration::ZERO).unwrap();
+        let served = Served::refusing_in("never reached", line);
+        let Err(error) = served.connection("127.0.0.1", 80, Ask::Never, Duration::from_millis(30))
+        else {
+            panic!("no place")
+        };
+        assert!(error.contains("too many connections"), "{error}");
     }
 }

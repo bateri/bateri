@@ -221,6 +221,9 @@ pub struct RemoteStream {
     pub writer: Option<Writer>,
     /// The way to close it.
     pub end: Arc<End>,
+    /// The place the stream has in the line of its connection ([`super::queue`]), given back when
+    /// this is dropped: whoever carries the stream keeps it as long as the stream is open.
+    pub permit: Option<super::queue::Entry>,
 }
 
 impl RemoteStream {
@@ -229,6 +232,7 @@ impl RemoteStream {
             reader: opened.stdout,
             writer: Some(opened.stdin),
             end: opened.end,
+            permit: None,
         }
     }
 }

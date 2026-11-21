@@ -28,6 +28,7 @@ use pencere_view::{
 
 use super::helper::{Browser, Handle, Manager, Sink, StartError};
 use super::profile::ProfileKey;
+use super::route::Dialer;
 
 /// The most asks a room holds for its engine while the engine is being started.
 const HELD_ASKS: usize = 64;
@@ -66,6 +67,9 @@ pub trait Shell {
     fn downloaded(&mut self, room: Id, path: PathBuf, done: bool);
     /// The engine is not on this Mac: the shell asks the person, and [`Rooms::retry`]s.
     fn not_installed(&mut self, room: Id);
+    /// The way to the program's machine is wanted: the shell finds out where its way ends
+    /// ([`super::route::prove`]) and says so with [`Rooms::route`], once, whatever comes of it.
+    fn route(&mut self);
     /// An agent's job in the room is done.
     fn agent(&mut self, _room: Id, _req: u32, _output: AgentOutput) {}
     /// Something the page's writer may read where a program's diagnostics are read.
@@ -86,6 +90,7 @@ pub enum Effect {
     Download(Id, Download),
     Downloaded(Id, PathBuf, bool),
     NotInstalled(Id),
+    Route,
     Agent(Id, u32, AgentOutput),
     Diagnostic(Id, String),
 }
@@ -120,6 +125,9 @@ impl Shell for Vec<Effect> {
     }
     fn not_installed(&mut self, room: Id) {
         self.push(Effect::NotInstalled(room));
+    }
+    fn route(&mut self) {
+        self.push(Effect::Route);
     }
     fn agent(&mut self, room: Id, req: u32, output: AgentOutput) {
         self.push(Effect::Agent(room, req, output));
@@ -339,6 +347,10 @@ impl Sink for RoomSink {
 }
 
 enum Life {
+    /// The way to the program's machine is being found; the engine starts when it is.
+    Routing,
+    /// The page's machine has no way here ([`Route::Refused`]): a reload looks again.
+    NoRoute,
     /// The engine is being started (it takes a while the first time).
     Opening,
     /// The engine is not on this Mac; the shell is asking.
@@ -369,10 +381,24 @@ struct Room {
     opened: bool,
 }
 
+/// Where the way of a page's browsers to its program's machine stands. One for the page: the
+/// program is one, and so is the machine it runs on.
+enum Route {
+    /// Nobody has asked yet.
+    Unknown,
+    /// The shell was asked and has not said.
+    Asked,
+    /// Shown to end at the program's machine: the machine's name (what its profiles are kept under)
+    /// and the way is in the manager's routes.
+    Proven(String),
+    /// Not shown to: why, as a line for the person.
+    Refused(String),
+}
+
 /// The browsers of one page.
 pub struct Rooms {
     manager: Arc<Manager>,
-    machine: String,
+    route: Route,
     application: String,
     shared: Arc<Shared>,
     rooms: HashMap<Id, Room>,
@@ -380,19 +406,18 @@ pub struct Rooms {
 }
 
 impl Rooms {
-    /// `machine` and `application` are what the profiles of this page's browsers are kept under
-    /// ([`ProfileKey`]); `wake` is called from the engine's threads after they put something to
-    /// be drained; `frames` is where the engine's pictures go.
+    /// `application` is what the profiles of this page's browsers are kept under, with the
+    /// machine the way shows ([`ProfileKey`]); `wake` is called from the engine's threads after
+    /// they put something to be drained; `frames` is where the engine's pictures go.
     pub fn new(
         manager: Arc<Manager>,
-        machine: &str,
         application: &str,
         wake: Arc<dyn Fn() + Send + Sync>,
         frames: Arc<dyn Frames>,
     ) -> Self {
         Self {
             manager,
-            machine: machine.to_owned(),
+            route: Route::Unknown,
             application: application.to_owned(),
             shared: Arc::new(Shared {
                 told: Mutex::new(VecDeque::new()),
@@ -464,7 +489,22 @@ impl Rooms {
     ) {
         self.generation += 1;
         let generation = self.generation;
-        let state = BrowserState::with_status(BrowserState::STARTING, Some(STARTING));
+        // An engine starts only once the way to the program's machine is shown: the machine is
+        // part of what its profile is kept under, and its first request goes by that way.
+        let (life, state) = match &self.route {
+            Route::Proven(_) => (
+                Life::Opening,
+                BrowserState::with_status(BrowserState::STARTING, Some(STARTING)),
+            ),
+            Route::Refused(why) => (
+                Life::NoRoute,
+                BrowserState::with_status(BrowserState::NO_ROUTE, Some(why)),
+            ),
+            Route::Unknown | Route::Asked => (
+                Life::Routing,
+                BrowserState::with_status(BrowserState::STARTING, Some(FINDING)),
+            ),
+        };
         shell.state(id, state.clone());
         self.rooms.insert(
             id,
@@ -473,7 +513,7 @@ impl Rooms {
                 options: options.clone(),
                 size,
                 scale,
-                life: Life::Opening,
+                life,
                 asks: Vec::new(),
                 focus: false,
                 find: None,
@@ -482,7 +522,51 @@ impl Rooms {
                 opened: false,
             },
         );
-        self.start(id, generation, options.profile.as_deref(), size, scale);
+        match self.route {
+            Route::Proven(_) => {
+                self.start(id, generation, options.profile.as_deref(), size, scale);
+            }
+            Route::Unknown => {
+                self.route = Route::Asked;
+                shell.route();
+            }
+            Route::Asked | Route::Refused(_) => {}
+        }
+    }
+
+    /// The shell found where the way to the program's machine ends, or that it ends nowhere it
+    /// could show: `Ok` is the machine's name and the way to it (it is set for the proxy here), the
+    /// `Err` a line for the person. The rooms that waited start, or say there is no route.
+    pub fn route(
+        &mut self,
+        proof: Result<(String, Arc<dyn Dialer>), String>,
+        shell: &mut dyn Shell,
+    ) {
+        match proof {
+            Ok((machine, way)) => {
+                self.manager.routes().set(&machine, way);
+                self.route = Route::Proven(machine);
+                let waiting: Vec<Id> = self
+                    .rooms
+                    .iter()
+                    .filter(|(_, room)| matches!(room.life, Life::Routing | Life::NoRoute))
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in waiting {
+                    self.retry(id, shell);
+                }
+            }
+            Err(why) => {
+                self.route = Route::Refused(why.clone());
+                for (id, room) in &mut self.rooms {
+                    if matches!(room.life, Life::Routing) {
+                        room.life = Life::NoRoute;
+                        room.state = BrowserState::with_status(BrowserState::NO_ROUTE, Some(&why));
+                        shell.state(*id, room.state.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Opens the room's engine on a thread of its own: the first open starts the helper and waits
@@ -490,7 +574,10 @@ impl Rooms {
     fn start(&self, id: Id, generation: u64, profile: Option<&str>, size: (u32, u32), scale: f32) {
         let manager = self.manager.clone();
         let shared = self.shared.clone();
-        let key = ProfileKey::new(&self.machine, &self.application, profile);
+        let Route::Proven(machine) = &self.route else {
+            return;
+        };
+        let key = ProfileKey::new(machine, &self.application, profile);
         let _ = std::thread::Builder::new()
             .name("browser-open".into())
             .spawn(move || {
@@ -522,6 +609,20 @@ impl Rooms {
             return;
         };
         if matches!(room.life, Life::Open(_) | Life::Opening) {
+            return;
+        }
+        // No route is looked for again: the program's machine may have changed since.
+        if matches!(room.life, Life::NoRoute) && !matches!(self.route, Route::Proven(_)) {
+            room.life = Life::Routing;
+            room.state = BrowserState::with_status(BrowserState::STARTING, Some(FINDING));
+            shell.state(id, room.state.clone());
+            if !matches!(self.route, Route::Asked) {
+                self.route = Route::Asked;
+                shell.route();
+            }
+            return;
+        }
+        if matches!(room.life, Life::Routing) && !matches!(self.route, Route::Proven(_)) {
             return;
         }
         self.generation += 1;
@@ -564,7 +665,18 @@ impl Rooms {
             Life::NotInstalled if matches!(ask, BrowserAsk::Reload { .. }) => {
                 shell.not_installed(id);
             }
-            Life::Opening | Life::NotInstalled => {
+            // The person says "again" to a way that was not shown: it is looked for again.
+            Life::NoRoute if matches!(ask, BrowserAsk::Reload { .. } | BrowserAsk::Go(_)) => {
+                if room.asks.len() < HELD_ASKS {
+                    room.asks.push(ask);
+                }
+                if matches!(self.route, Route::Refused(_)) {
+                    self.route = Route::Unknown;
+                }
+                self.retry(id, shell);
+            }
+            Life::NoRoute => {}
+            Life::Opening | Life::NotInstalled | Life::Routing => {
                 if room.asks.len() < HELD_ASKS {
                     room.asks.push(ask);
                 }
@@ -931,6 +1043,9 @@ impl Rooms {
 
 /// What the page is told while the engine is being got ready.
 pub const STARTING: &str = "Starting the browser…";
+
+/// What the page says of a browser while the way to the program's machine is looked for.
+pub const FINDING: &str = "Finding the way to the program's machine…";
 
 /// The size the engine draws a room at, points: the room's, a point at least.
 fn size_of(rect: Rect) -> (u32, u32) {

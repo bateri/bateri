@@ -12444,6 +12444,17 @@ impl Session {
         ))
     }
 
+    /// Asks the program for a listener on its machine's loopback, up for `ttl` seconds (1 to 30),
+    /// that gives a token to one connection (§4.10); the id of the `probe`, or `None` where it is
+    /// not asked (no view runs, or the program did not say it can). The answer comes as
+    /// [`pencere::Action::ProbeConnect`] or [`pencere::Action::ProbeFailed`] among the view's
+    /// actions. One probe is out at a time: another asked for gives the first up.
+    pub fn probe(&self, ttl: u8) -> Option<u32> {
+        self.adapter
+            .view(|conversation| conversation.probe(ttl))
+            .flatten()
+    }
+
     /// The person closes the view; the program is told once it is gone.
     pub fn close_view(&self) {
         if let Some(desk) = &self.adapter.0.desk {

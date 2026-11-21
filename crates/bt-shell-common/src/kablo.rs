@@ -78,6 +78,7 @@ pub mod install;
 pub mod ledger;
 pub mod local;
 pub mod mail;
+pub mod queue;
 pub mod quit;
 pub mod remote;
 pub mod removal;
