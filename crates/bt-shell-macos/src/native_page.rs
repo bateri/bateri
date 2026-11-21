@@ -42,9 +42,10 @@ use objc2_app_kit::{
     NSAccessibilitySelectedTextChangedNotification, NSAccessibilitySliderRole,
     NSAccessibilityStaticTextRole, NSAccessibilitySubrole, NSAccessibilitySwitchSubrole,
     NSAccessibilityTabButtonSubrole, NSAccessibilityTextAreaRole,
-    NSAccessibilityValueChangedNotification, NSAutoresizingMaskOptions, NSColor, NSControl,
-    NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder,
-    NSSecureTextFieldCell, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSAccessibilityValueChangedNotification, NSApplication, NSAutoresizingMaskOptions, NSColor,
+    NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont,
+    NSLineBreakMode, NSResponder, NSSecureTextFieldCell, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow,
 };
 use objc2_foundation::{
     NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
@@ -673,6 +674,10 @@ pub(crate) struct PageTextFieldIvars {
     /// What a fill selected while the keyboard was in the field, since a press in it began: put
     /// there again when a press that gave it the keyboard is over.
     asked: Cell<Option<(usize, usize)>>,
+    /// The time of the press that gave the field the keyboard: AppKit makes the field the first
+    /// responder as the button goes down, before its `mouseDown:`, so the press is known by the
+    /// event it was given the keyboard in, not by whether the field had an editor when it began.
+    given_by_press: Cell<Option<f64>>,
     fields: RefCell<Weak<PageFields>>,
 }
 
@@ -701,6 +706,14 @@ define_class!(
                 if !fields.moving.get() {
                     self.ivars().selection.set(None);
                 }
+                // Taken by a press of the main button: that press's own end must not undo what the
+                // page selects in answer to the keyboard coming (`mouse_down`).
+                let press = NSApplication::sharedApplication(self.mtm())
+                    .currentEvent()
+                    .filter(|event| event.r#type() == NSEventType::LeftMouseDown)
+                    .map(|event| event.timestamp());
+                self.ivars().given_by_press.set(press);
+                self.ivars().asked.set(None);
                 fields.focused_by_person(id);
             }
             took
@@ -712,9 +725,12 @@ define_class!(
         /// from where it began, so what the page selected is put back when it is over.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            let had_the_keyboard = self.currentEditor().is_some();
+            let gave_the_keyboard = self.ivars().given_by_press.take() == Some(event.timestamp());
+            let had_the_keyboard = self.currentEditor().is_some() && !gave_the_keyboard;
             let down = event.locationInWindow();
-            self.ivars().asked.set(None);
+            if had_the_keyboard {
+                self.ivars().asked.set(None);
+            }
             // SAFETY: the superclass's own `mouseDown:`, which takes the event and tracks the press
             // until the button is up.
             let _: () = unsafe { msg_send![super(self), mouseDown: event] };
@@ -976,6 +992,7 @@ fn text_field(
         id: Cell::new(None),
         selection: Cell::new(None),
         asked: Cell::new(None),
+        given_by_press: Cell::new(None),
         fields: RefCell::new(Rc::downgrade(fields)),
     });
     // SAFETY: `initWithFrame:` is NSTextField's designated initializer and the ivars are set.
@@ -1547,12 +1564,26 @@ mod tests {
             "{press}"
         );
         assert!(press.contains("if !had_the_keyboard {"), "{press}");
+        // AppKit gives the field the keyboard as the button goes down, before `mouseDown:`: the press
+        // that gave it is known by its event, not by the editor being there already.
+        assert!(
+            press.contains("given_by_press.take() == Some(event.timestamp())"),
+            "{press}"
+        );
         let kept = body("    fn keep_asked_selection(&self, down: NSPoint) {");
         assert!(kept.contains("let dragged ="), "{kept}");
         assert!(kept.contains("if !dragged"), "{kept}");
         let responder = body("        fn become_first_responder(&self) -> bool {");
         assert!(responder.contains("if !fields.moving.get()"), "{responder}");
         assert!(responder.contains("selection.set(None)"), "{responder}");
+        assert!(
+            responder.contains("NSEventType::LeftMouseDown"),
+            "{responder}"
+        );
+        assert!(
+            responder.contains("given_by_press.set(press)"),
+            "{responder}"
+        );
         assert!(
             !code.contains("fn field_key("),
             "the kit's rule replaced it"
