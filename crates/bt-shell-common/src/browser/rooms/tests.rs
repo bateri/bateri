@@ -738,6 +738,7 @@ fn every_question_is_answered_once_whatever_becomes_of_it() {
         enabled: true,
         checked: false,
         separator: false,
+        shortcut: String::new(),
     };
     let menu = |req: u32| Event::Menu {
         browser: 1,

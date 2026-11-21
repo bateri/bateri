@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "git+https://github.com/bateri/kablo?rev=25b3d66c41af879f1885e24d0531d909d0e5b9db#25b3d66c41af879f1885e24d0531d909d0e5b9db"
+source = "git+https://github.com/bateri/kablo?rev=6aa78a2c853a3eed02db3a14288cf6b32d3064d0#6aa78a2c853a3eed02db3a14288cf6b32d3064d0"
 dependencies = [
  "base64",
  "bitflags",
@@ -223,7 +223,7 @@ dependencies = [
 [[package]]
 name = "browser-ipc"
 version = "0.1.0"
-source = "git+https://github.com/bateri/browser?rev=89ee5dec0370aa27b27d944f551f24503ac6a389#89ee5dec0370aa27b27d944f551f24503ac6a389"
+source = "git+https://github.com/bateri/browser?rev=0990358bf970d7c0e9d3dea7b9e7ce7791ec47f0#0990358bf970d7c0e9d3dea7b9e7ce7791ec47f0"
 dependencies = [
  "base64",
  "libc",
@@ -756,7 +756,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1232,7 +1232,7 @@ dependencies = [
 [[package]]
 name = "kablo-bateri"
 version = "0.10.0"
-source = "git+https://github.com/bateri/kablo?rev=25b3d66c41af879f1885e24d0531d909d0e5b9db#25b3d66c41af879f1885e24d0531d909d0e5b9db"
+source = "git+https://github.com/bateri/kablo?rev=6aa78a2c853a3eed02db3a14288cf6b32d3064d0#6aa78a2c853a3eed02db3a14288cf6b32d3064d0"
 dependencies = [
  "kablo-proto",
 ]
@@ -1240,7 +1240,7 @@ dependencies = [
 [[package]]
 name = "kablo-proto"
 version = "0.10.0"
-source = "git+https://github.com/bateri/kablo?rev=25b3d66c41af879f1885e24d0531d909d0e5b9db#25b3d66c41af879f1885e24d0531d909d0e5b9db"
+source = "git+https://github.com/bateri/kablo?rev=6aa78a2c853a3eed02db3a14288cf6b32d3064d0#6aa78a2c853a3eed02db3a14288cf6b32d3064d0"
 
 [[package]]
 name = "kurbo"
@@ -1377,7 +1377,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2151,7 +2151,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2656,7 +2656,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "git+https://github.com/bateri/kablo?rev=25b3d66c41af879f1885e24d0531d909d0e5b9db#25b3d66c41af879f1885e24d0531d909d0e5b9db"
+source = "git+https://github.com/bateri/kablo?rev=6aa78a2c853a3eed02db3a14288cf6b32d3064d0#6aa78a2c853a3eed02db3a14288cf6b32d3064d0"
 dependencies = [
  "arrayvec",
  "bitflags",
@@ -3152,7 +3152,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

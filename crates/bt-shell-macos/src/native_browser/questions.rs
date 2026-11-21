@@ -19,8 +19,8 @@ use bt_shell_common::native_view::Id;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseOK,
-    NSOpenPanel, NSSavePanel, NSTextField,
+    NSAlert, NSAlertFirstButtonReturn, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse,
+    NSModalResponseOK, NSOpenPanel, NSSavePanel, NSTextField,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSString, NSURL, ns_string};
 
@@ -211,6 +211,12 @@ impl PageBrowsers {
             };
             item.setTag(isize::try_from(line.command).unwrap_or(isize::MAX));
             item.setEnabled(line.enabled);
+            // The keys the engine's row says it has (the zoom rows, Inspect) are written beside
+            // it, as the main menu writes its own; the menu is a pop-up and only shows them.
+            if let Some((key, mask)) = key_equivalent(&line.shortcut) {
+                item.setKeyEquivalent(&NSString::from_str(&key));
+                item.setKeyEquivalentModifierMask(mask);
+            }
             if line.checked {
                 item.setState(objc2_app_kit::NSControlStateValueOn);
             }
@@ -443,6 +449,32 @@ fn site_of(url: &str) -> Option<String> {
 }
 
 /// A size in the words a person reads.
+/// The key and the modifiers of a shortcut as the helper writes it (`⌘+`, `⌥⌘I`: the modifier
+/// signs, then one key), as a menu item holds them. `None` for none, or for what is not that.
+fn key_equivalent(shortcut: &str) -> Option<(String, NSEventModifierFlags)> {
+    let mut mask = NSEventModifierFlags::empty();
+    let mut key = None;
+    for sign in shortcut.chars() {
+        mask |= match sign {
+            '⌃' => NSEventModifierFlags::Control,
+            '⌥' => NSEventModifierFlags::Option,
+            '⇧' => NSEventModifierFlags::Shift,
+            '⌘' => NSEventModifierFlags::Command,
+            // The minus sign the helper writes is the hyphen's key.
+            '\u{2212}' | '-' if key.is_none() => {
+                key = Some("-".to_string());
+                continue;
+            }
+            other if key.is_none() => {
+                key = Some(other.to_lowercase().collect());
+                continue;
+            }
+            _ => return None,
+        };
+    }
+    Some((key?, mask))
+}
+
 fn size_words(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["bytes", "KB", "MB", "GB"];
     // A size in words keeps three digits: f64 holds a byte count far beyond what a download is.
@@ -490,6 +522,30 @@ mod tests {
         );
         assert_eq!(site_of("data:text/plain,hi"), None);
         assert_eq!(site_of("https:///x"), None);
+    }
+
+    #[test]
+    fn a_shortcut_is_a_key_and_its_modifiers() {
+        let command = NSEventModifierFlags::Command;
+        assert_eq!(key_equivalent("⌘+"), Some(("+".into(), command)));
+        // The helper writes the minus with the sign of arithmetic; the key is the hyphen.
+        assert_eq!(key_equivalent("⌘\u{2212}"), Some(("-".into(), command)));
+        assert_eq!(key_equivalent("⌘0"), Some(("0".into(), command)));
+        assert_eq!(
+            key_equivalent("⌥⌘I"),
+            Some(("i".into(), command | NSEventModifierFlags::Option))
+        );
+        assert_eq!(
+            key_equivalent("⌃⇧⌘A"),
+            Some((
+                "a".into(),
+                command | NSEventModifierFlags::Control | NSEventModifierFlags::Shift
+            ))
+        );
+        // A row with none, a shortcut that is only signs, one with two keys: no key equivalent.
+        assert_eq!(key_equivalent(""), None);
+        assert_eq!(key_equivalent("⌘"), None);
+        assert_eq!(key_equivalent("⌘AB"), None);
     }
 
     #[test]

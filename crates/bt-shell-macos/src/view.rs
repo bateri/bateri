@@ -1408,7 +1408,8 @@ define_class!(
             self.button_event(event, MouseButton::Middle, false);
         }
 
-        /// A pinch. A page of the kit hears it (a box of its that zooms takes it first,
+        /// A pinch. A browser under the fingers has it first (the engine zooms the view, or its
+        /// page does); then a page of the kit hears it (a box of its that zooms takes it,
         /// `pencere_drive::Page::magnify`); on the grid it is nothing, as it was.
         #[unsafe(method(magnifyWithEvent:))]
         fn magnify_with_event(&self, event: &NSEvent) {
@@ -1420,6 +1421,9 @@ define_class!(
                 let by = event.magnification() as f32;
                 let phase = page_gesture_phase(event.phase());
                 let mods = crate::native_page::mods_of(event.modifierFlags());
+                if pane.page_pinch_in_room(at, by, phase) {
+                    return;
+                }
                 pane.page_touch(|page| page.magnify(at, by, phase, mods));
                 return;
             }
@@ -4311,6 +4315,34 @@ mod tests {
         }
         // The held bits of the three are 1, 2 and 4 (`button_event`), and the others do not meet.
         assert!([1u8, 2, 4].iter().all(|bit| bit & 0b1111_1000 == 0));
+    }
+
+    /// A pinch over a browser is the browser's before it is the page's: the room is asked first,
+    /// and what it leaves goes to the page of the kit as it did. A source scan, because a view
+    /// needs a window server.
+    #[test]
+    fn a_pinch_over_a_browser_goes_to_the_browser_before_the_page() {
+        let source = include_str!("view.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let head = "#[unsafe(method(magnifyWithEvent:))]";
+        let at = source.find(head).expect("magnifyWithEvent:");
+        let body = &source[at..at + source[at..].find("\n        }\n").expect("its end")];
+        let room = body
+            .find("pane.page_pinch_in_room(at, by, phase)")
+            .expect("the room is asked");
+        let page = body.find("page.magnify(").expect("the page is told");
+        assert!(room < page, "{body}");
+        assert!(body[room..page].contains("return;"), "{body}");
+        let pane = include_str!("pane.rs");
+        let ask = &pane[pane
+            .find("fn page_pinch_in_room(")
+            .expect("the pane's question")..];
+        let ask = &ask[..ask.find("\n    }\n").expect("its end")];
+        assert!(
+            ask.contains("self.page_is_up()")
+                && ask.contains("browsers.magnify(self, at, by, phase)"),
+            "{ask}"
+        );
     }
 
     /// A page of the kit hears a pinch, a double tap, a rotation, a swipe and the force of a press

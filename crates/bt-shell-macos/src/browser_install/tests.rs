@@ -1232,6 +1232,50 @@ fn the_real_engine_gives_back_an_edit_key_the_page_did_not_take_and_keeps_one_it
     let _ = std::fs::remove_dir_all(&probe.root);
 }
 
+/// A trackpad pinch with the real engine: the page has it first as `wheel` events with `ctrlKey`
+/// (the way Chrome on a Mac gives it to a map), and a page that does not take it is zoomed
+/// visually, its layout as it was. That the protocol bateri speaks (`Command::Pinch`) is the one
+/// the helper reads is what is measured; how the point stays under the fingers is the helper's
+/// own tests'. Measured on the helper of `browser` rev 0990358
+/// (`BATERI_BROWSER_APP=… cargo test -p bt-shell-macos --lib the_real_engine_takes_a_pinch`).
+#[test]
+fn the_real_engine_takes_a_pinch_as_ctrl_wheel_events_and_zooms_a_page_that_leaves_it() {
+    use browser_ipc::message::{Command, Event, PinchKind};
+    let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+        return;
+    };
+    let mut probe = Probe::start("pinch", app);
+    // The title says nothing until the first `wheel` event, so the load's own title is `init`.
+    probe.load(
+        "<title>init</title><body style='margin:0;width:3000px;height:3000px'><script>\
+         let n=0,c='-',t=0;addEventListener('wheel',e=>{n++;c=e.ctrlKey;if(!t)t=setInterval(()=>{\
+         document.title='n='+n+' ctrl='+c+' s='+visualViewport.scale.toFixed(2)+' iw='+innerWidth},50)},\
+         {passive:false})</script>",
+    );
+    let id = probe.browser.id();
+    let pinch = |kind, scale| {
+        probe.send(Command::Pinch {
+            browser: id,
+            kind,
+            x: 200,
+            y: 150,
+            scale,
+        })
+    };
+    pinch(PinchKind::Begin, 1.0);
+    for _ in 0..4 {
+        pinch(PinchKind::Update, 2f64.powf(0.25));
+    }
+    pinch(PinchKind::End, 1.0);
+    probe.until(
+        "the page zoomed to twice",
+        |e| matches!(e, Event::State { title, .. } if title.contains("s=2.00")),
+    );
+    assert!(probe.title.contains("ctrl=true"), "{}", probe.title);
+    assert!(probe.title.contains("iw=400"), "{}", probe.title);
+    let _ = std::fs::remove_dir_all(&probe.root);
+}
+
 /// The whole way of a failure: a page of a machine the proxy has no way to is a 502 of the
 /// proxy's with the header, and the real helper makes of it the page's load error with the code
 /// the proxy named (the helper's side is tested in its own repository against a stand-in proxy;

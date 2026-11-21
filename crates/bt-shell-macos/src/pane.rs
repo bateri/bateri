@@ -86,7 +86,7 @@ use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{Answer, PaneLink, Shown};
 use bt_shell_common::native_view::{
-    Bars, CarryOut, Cursor as PageCursor, Fault as PageFault, Fill as PageFill,
+    Bars, CarryOut, Cursor as PageCursor, Fault as PageFault, Fill as PageFill, GesturePhase,
     Host as PageDriveHost, Id as PageId, Input, Key as PageKey, Keyboard, LookSlot,
     Menu as PageMenu, Mods as PageMods, Opening, PageEditors, PageHandle, Panel as PagePanel,
     Phase, Point as PagePoint, Rect as PageRect, Route, Scrolling, TerminalLook, caret_width_pt,
@@ -6818,6 +6818,14 @@ impl TerminalPane {
             return true;
         }
         self.page_touch(|page| page.wheel(at, dx, dy, phase, precise, mods))
+    }
+
+    /// A pinch over a room of a browser: `true` where a room took it, and the page is not told.
+    pub(crate) fn page_pinch_in_room(&self, at: PagePoint, by: f32, phase: GesturePhase) -> bool {
+        self.page_is_up()
+            && self
+                .page_browsers()
+                .is_some_and(|browsers| browsers.magnify(self, at, by, phase))
     }
 
     /// What a trackpad's fingers did over a page of the kit's (a pinch, a rotation, a double tap,

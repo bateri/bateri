@@ -46,7 +46,8 @@ use bt_gpu::{Renderer, UiImage, UiList, UiRect};
 use bt_shell_common::browser::helper::Manager;
 use bt_shell_common::browser::rooms::{Effect, Frames, Rooms};
 use bt_shell_common::native_view::{
-    BrowserAsk, BrowserSlot, BrowserState, Button, Id, Input, Mods, Outline, Point, Surfaces,
+    BrowserAsk, BrowserSlot, BrowserState, Button, GesturePhase, Id, Input, Mods, Outline, Point,
+    Surfaces,
 };
 use objc2_app_kit::NSEvent;
 
@@ -233,6 +234,8 @@ pub(crate) struct PageBrowsers {
     last_focused: Cell<Option<Id>>,
     /// The room a pointer button went down in: the pointer is its until every button is up.
     held: Cell<Option<Id>>,
+    /// The room a pinch began in: the fingers are its until they leave the trackpad.
+    pinching: Cell<Option<Id>>,
     /// The room the pointer is over.
     over: Cell<Option<Id>>,
     /// The shape the engine asked for over `over`.
@@ -282,6 +285,7 @@ impl PageBrowsers {
             focused: Cell::new(None),
             last_focused: Cell::new(None),
             held: Cell::new(None),
+            pinching: Cell::new(None),
             over: Cell::new(None),
             shape: Cell::new(Cursor::Arrow),
             down: RefCell::new(HashMap::new()),
@@ -637,6 +641,53 @@ impl PageBrowsers {
                 dy,
                 mods,
             });
+        }
+        true
+    }
+
+    /// A pinch over a room: `true` where a room took it (the page is not told). It is the room's
+    /// from the fingers' coming to their leaving, wherever they go meanwhile; a pinch that began
+    /// on what the page drew is the page's, and one that began in a room is never the page's,
+    /// so a box of the page's that zooms does not zoom behind a browser.
+    pub(crate) fn magnify(
+        &self,
+        pane: &TerminalPane,
+        at: Point,
+        by: f32,
+        phase: GesturePhase,
+    ) -> bool {
+        let (id, (x, y)) = match phase {
+            GesturePhase::Begin => {
+                let Some((id, local)) = self.room_at(pane, at) else {
+                    return false;
+                };
+                self.pinching.set(Some(id));
+                (id, local)
+            }
+            _ => {
+                let Some(id) = self.pinching.get() else {
+                    return false;
+                };
+                let Some(local) = self.local_in(pane, id, at) else {
+                    // The room went while the fingers were on it: what is left of the pinch is
+                    // nobody's.
+                    self.pinching.set(None);
+                    return true;
+                };
+                (id, local)
+            }
+        };
+        for (kind, scale) in input::pinch_of(phase, by) {
+            self.send(id, |browser| Command::Pinch {
+                browser,
+                kind,
+                x,
+                y,
+                scale,
+            });
+        }
+        if phase == GesturePhase::End {
+            self.pinching.set(None);
         }
         true
     }

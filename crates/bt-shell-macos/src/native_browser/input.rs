@@ -12,8 +12,8 @@
 //! page binds (browserpen's ⌘← is back) is still the page's outside a field. The measurement is
 //! the test `the_real_engine_edits_text_with_these_keys_when_one_is_at_hand`.
 
-use browser_ipc::message::{Button, Cursor, EditAction, modifier};
-use bt_shell_common::native_view::Button as Pressed;
+use browser_ipc::message::{Button, Cursor, EditAction, PinchKind, modifier};
+use bt_shell_common::native_view::{Button as Pressed, GesturePhase};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSCursor, NSEventModifierFlags};
 
@@ -203,6 +203,23 @@ pub(super) fn wheel_of(dx: f32, dy: f32, precise: bool) -> (i32, i32) {
     (rounded(-dx * scale), rounded(-dy * scale))
 }
 
+/// What one `magnifyWithEvent:` is to the engine's pinch: `by` is AppKit's `magnification`, the
+/// change since the event before (0.02 is two percent), and the engine takes the factor of the
+/// change (`1 + by`, never less than a hundredth so that a wild reading cannot flip a page's
+/// zoom). An event that changes nothing says nothing but the ends of the gesture.
+pub(super) fn pinch_of(phase: GesturePhase, by: f32) -> Vec<(PinchKind, f64)> {
+    let change =
+        (by != 0.0 && by.is_finite()).then(|| (PinchKind::Update, (1.0 + f64::from(by)).max(0.01)));
+    match phase {
+        GesturePhase::Begin => [Some((PinchKind::Begin, 1.0)), change]
+            .into_iter()
+            .flatten()
+            .collect(),
+        GesturePhase::Move => change.into_iter().collect(),
+        GesturePhase::End => vec![(PinchKind::End, 1.0)],
+    }
+}
+
 pub(super) fn button_of(button: Pressed) -> Button {
     match button {
         Pressed::Left => Button::Left,
@@ -244,6 +261,24 @@ pub(super) fn cursor_of(cursor: Cursor) -> Retained<NSCursor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pinch_is_a_begin_the_changes_and_an_end() {
+        use PinchKind::{Begin, End, Update};
+        // The fingers come (AppKit says no change yet), spread, and go.
+        assert_eq!(pinch_of(GesturePhase::Begin, 0.0), [(Begin, 1.0)]);
+        assert_eq!(
+            pinch_of(GesturePhase::Begin, 0.5),
+            [(Begin, 1.0), (Update, 1.5)]
+        );
+        assert_eq!(pinch_of(GesturePhase::Move, 0.25), [(Update, 1.25)]);
+        assert_eq!(pinch_of(GesturePhase::Move, -0.5), [(Update, 0.5)]);
+        assert_eq!(pinch_of(GesturePhase::End, 0.0), [(End, 1.0)]);
+        // No change is no message, and a reading that cannot be a pinch is held.
+        assert_eq!(pinch_of(GesturePhase::Move, 0.0), []);
+        assert_eq!(pinch_of(GesturePhase::Move, f32::NAN), []);
+        assert_eq!(pinch_of(GesturePhase::Move, -3.0), [(Update, 0.01)]);
+    }
 
     #[test]
     fn the_edit_menus_items_are_the_engines_commands() {
