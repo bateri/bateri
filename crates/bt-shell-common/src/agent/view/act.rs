@@ -69,7 +69,7 @@ pub fn perform(
 // ─── Naming ─────────────────────────────────────────────────────────────────────────────────────
 
 /// The element `word` names, or why none.
-fn target(reading: &Reading, word: &str) -> Result<Id, Failure> {
+pub(super) fn target(reading: &Reading, word: &str) -> Result<Id, Failure> {
     match reading.find(word) {
         Found::One(id) => Ok(id),
         Found::Nothing => Err(mistake(format!(
@@ -84,7 +84,7 @@ fn target(reading: &Reading, word: &str) -> Result<Id, Failure> {
 }
 
 /// The element as the answer names it: what it is, its words and its name.
-fn describe(reading: &Reading, id: Id) -> String {
+pub(super) fn describe(reading: &Reading, id: Id) -> String {
     let name = reference(id);
     let called = |kind: &str, label: &str| {
         if label.trim().is_empty() {

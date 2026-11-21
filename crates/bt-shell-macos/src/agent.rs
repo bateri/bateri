@@ -91,6 +91,7 @@ use crate::hold_service;
 use crate::ids::{Id, Kind as IdKind};
 use crate::launch::{Held, Resume};
 use crate::pane::TerminalPane;
+use crate::pencere_view::agent::WebRun;
 use crate::tab::TerminalTab;
 use crate::uploader;
 use crate::window::{Lodging, TerminalWindow, initial_rect};
@@ -1001,14 +1002,22 @@ fn marks_of(app: &AppDelegate, account: &str, terminal: Terminal, orders: &[u64]
     }
 }
 
-/// A `bateri view` request that has done what it asks and waits for the page to come to rest
-/// ([`reading::Run`]): the letter that is answered when it has.
+/// A `bateri view` request that has done what it asks and waits for the page to come to rest:
+/// the letter that is answered when it has.
 struct Pending {
     letter: Letter,
     pane: Retained<TerminalPane>,
     name: String,
     program: Option<String>,
-    run: reading::Run,
+    runner: Runner,
+}
+
+/// What carries a request out: the kit's page of the pane ([`reading::Run`]) or the program's web
+/// view ([`WebRun`], whose calls into the page answer later).
+enum Runner {
+    Page(reading::Run),
+    /// Boxed: the web run holds the whole of its request and the view.
+    Web(Box<WebRun>),
 }
 
 /// How often the requests that wait are looked at again, besides at every drain of the pane: what
@@ -1082,6 +1091,28 @@ fn viewed(
     }
     let name = shown.terminal.as_str().to_owned();
     let program = shown.program.clone();
+    // A program's web view: the page is the web view's, read and driven through the script of the
+    // agent's own world, and the answers of its calls come later.
+    if matches!(pane.view_shown(), reading::Shown::Web)
+        && let Some(host) = pane.web_host()
+    {
+        match WebRun::begin(host, request, &name, program.as_deref()) {
+            Err(failure) => letter.answer(Reply::Failed(failure).encode().into_bytes()),
+            Ok(run) => {
+                state(|state| {
+                    state.views.push(Pending {
+                        letter,
+                        pane: pane.clone(),
+                        name,
+                        program,
+                        runner: Runner::Web(Box::new(run)),
+                    });
+                });
+                look_at_views();
+            }
+        }
+        return;
+    }
     let session = pane.agent_session();
     let fields = PaneFields(pane.page_fields_up());
     let drain = || pane.drain_page();
@@ -1103,7 +1134,7 @@ fn viewed(
                     pane: pane.clone(),
                     name,
                     program,
-                    run,
+                    runner: Runner::Page(run),
                 });
             });
             // Looked at once now: a page that is at rest answers without waiting for anything.
@@ -1142,7 +1173,17 @@ fn look_at_views() {
                     ),
                 )))
             } else {
-                pending.run.step(info, &pending.pane.view_shown(), &env)
+                match &mut pending.runner {
+                    Runner::Page(run) => run.step(info, &pending.pane.view_shown(), &env),
+                    Runner::Web(run) if pending.pane.shows_web_view() => run.step(),
+                    Runner::Web(_) => reading::Step::Answer(Reply::Failed(Failure::new(
+                        Kind::Failed,
+                        format!(
+                            "the view of {} ended while the request was carried out",
+                            pending.name
+                        ),
+                    ))),
+                }
             }
         };
         match step {

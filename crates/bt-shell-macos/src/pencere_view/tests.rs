@@ -1646,3 +1646,115 @@ fn the_script_declares_the_faces_in_the_views_own_document_and_in_no_other() {
     );
     assert_eq!(run_font_script(&script, &documents), expected);
 }
+
+// ---- what an agent does in the view ------------------------------------------
+
+/// The agent's script is in a world of its own and speaks by a handler of that world alone: the
+/// handler is added with the world and never without one (a handler of the page's world would be
+/// the page's to call), the script is put in with the world, and nothing else of the web view runs
+/// a script in it. A source scan: the web view needs a window server (`tests/pencere.rs` runs the
+/// chain).
+#[test]
+fn the_agents_script_and_its_handler_are_in_a_world_the_page_cannot_see() {
+    let host = include_str!("../pencere_view.rs");
+    let agent = include_str!("agent.rs");
+    // The handler: with the world, and no add of that name without one.
+    assert!(
+        host.contains("addScriptMessageHandler_contentWorld_name("),
+        "the agent's handler is added to the world"
+    );
+    assert_eq!(
+        host.matches("addScriptMessageHandler_name(").count(),
+        2,
+        "the page's two handlers are the only ones of the page's world"
+    );
+    assert!(
+        host.contains("initWithSource_injectionTime_forMainFrameOnly_inContentWorld("),
+        "the script is put in with the world"
+    );
+    // Every frame, from the start of its document: the program's frame is a child of the shell's.
+    let script = &host[host
+        .find("initWithSource_injectionTime_forMainFrameOnly_inContentWorld(")
+        .expect("the agent's script")..];
+    let call = &script[..script.find(");").expect("its end")];
+    assert!(
+        call.contains("WKUserScriptInjectionTime::AtDocumentStart"),
+        "{call}"
+    );
+    assert!(
+        call.contains("false"),
+        "every frame, not the main one only: {call}"
+    );
+    assert!(call.contains("&world"), "{call}");
+    // Calls into the page: by the world, in the frame the script said was the program's, and no
+    // other call of a script runs in the agent's world.
+    assert_eq!(
+        agent
+            .matches("callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(")
+            .count(),
+        1
+    );
+    assert!(
+        agent.contains("&self.world"),
+        "the call is made in the world"
+    );
+    assert!(
+        agent.contains("Some(&frame)"),
+        "and in the frame the script named"
+    );
+    assert!(
+        !agent.contains("evaluateJavaScript")
+            && !host[host.find("fn run(").unwrap_or(0)..].contains("__bateriAgent"),
+        "the shell page's own calls never reach the agent's object"
+    );
+    // The handler's message is one thing: the frame is there.
+    assert_eq!(super::agent::HANDLER, "bateriAgent");
+    assert_ne!(super::agent::HANDLER, HANDLER);
+    assert_ne!(super::agent::HANDLER, LOADED_HANDLER);
+}
+
+/// What the script says of a page is the page's words, written so that none of them can end a
+/// record early, and the script runs nothing the page gives it, builds no markup, and acts only in
+/// the frame whose parent is the top document. A source scan of the script.
+#[test]
+fn the_agents_script_encodes_what_the_page_says_and_runs_nothing_of_it() {
+    let source = include_str!("agent.js");
+    for dangerous in [
+        "eval(",
+        "new Function",
+        "innerHTML",
+        "outerHTML",
+        "document.write",
+        "insertAdjacentHTML",
+        "location.href =",
+        "window.open",
+        "fetch(",
+        "XMLHttpRequest",
+    ] {
+        assert!(
+            !source.contains(dangerous),
+            "the agent's script has {dangerous}"
+        );
+    }
+    // Where the page's words go into a record they go through the encoder.
+    for words in [
+        "enc(role)",
+        "enc(nameOf(el))",
+        "enc(own)",
+        "enc(labelOf(el))",
+    ] {
+        assert!(source.contains(words), "{words}");
+    }
+    // Only the program's frame answers: a child of the top, never the top and never a frame of the
+    // page's own.
+    assert!(source.contains("window === window.top || window.parent !== window.top"));
+    // One message, to the agent's handler, and the object is frozen.
+    assert_eq!(source.matches("postMessage(").count(), 1);
+    assert!(source.contains("postMessage(\"ready\")"));
+    assert!(source.contains("Object.freeze("));
+    // The record's version is what the reader of it expects.
+    assert!(source.contains(&format!(
+        "\"{}\",",
+        bt_shell_common::agent::view::web::RECORD
+    )));
+}

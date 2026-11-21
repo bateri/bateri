@@ -6229,6 +6229,28 @@ impl TerminalPane {
         self.ivars().pencere.borrow().clone()
     }
 
+    /// The web view the pane shows, for an agent's `bateri view` on it.
+    pub(crate) fn web_host(&self) -> Option<ViewHost> {
+        self.view_host()
+    }
+
+    /// An agent's request on the web view this pane shows, begun: `None` when the pane shows none,
+    /// the refusal when the action is not one a web view has. The app carries its requests out
+    /// through the same ([`crate::pencere_view::agent::WebRun`]); this is the way in for what is
+    /// not the app, an embedding test of the whole chain.
+    pub fn web_run(
+        &self,
+        view: &bt_shell_common::agent::view::View,
+        name: &str,
+        program: Option<&str>,
+    ) -> Option<Result<crate::pencere_view::agent::WebRun, bt_shell_common::agent::message::Failure>>
+    {
+        let host = self.web_host()?;
+        Some(crate::pencere_view::agent::WebRun::begin(
+            host, view, name, program,
+        ))
+    }
+
     /// Whether a page of the kit's own — the view a program opened as a module, or a debug
     /// build's gauge page and demos — is over the terminal.
     pub(crate) fn shows_page(&self) -> bool {

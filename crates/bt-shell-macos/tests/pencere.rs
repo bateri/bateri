@@ -55,6 +55,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bt_core::{Chord, Key, Mods, PaneUuid, Settings, Theme};
+use bt_shell_common::agent::message::{Format, Reply};
+use bt_shell_common::agent::view::{Action, Step, View, Way};
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
@@ -1299,6 +1301,9 @@ fn run(dir: &Path) {
             connection_goes_and_comes_back(mtm, &window, frame_rect, dir);
         },
     );
+    section("an agent in a web view", &mut failures, || {
+        agent_in_a_web_view(mtm, &window, frame_rect, dir);
+    });
     // Last: it registers the app's fonts for this process, and with them the default font of
     // every pane opened after it.
     section("the app's fonts in the page", &mut failures, || {
@@ -1657,6 +1662,333 @@ fn app_fonts_in_the_page(mtm: MainThreadMarker, window: &NSWindow, frame_rect: N
         format!("size={};ok={};bad=", app.faces.len(), families.len() * 3),
         "{said}"
     );
+    program.bye(&token);
+    until("the view to go", || !covered(&pane));
+    pane.close();
+}
+
+/// The page an agent reads and drives: a heading, a button that counts, a text field that is
+/// echoed, a password field, a box that scrolls and a line for the last key the page heard. Its
+/// script is the page's own, with what it can see of the agent's world (nothing) in its first call.
+const AGENT_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>agent</title></head>\
+<body><h1>Agent page</h1><p id=count>count 0</p><button id=inc>Increment</button>\
+<label>Name <input id=name></label><label>Secret <input id=pw type=password></label>\
+<p id=echo>echo -</p><p id=keyed>keyed -</p>\
+<div id=list><div id=tall>tall box</div></div><script src=app.js></script></body></html>";
+
+const AGENT_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var n=0,started=false,$=function(id){return document.getElementById(id)};\
+$('list').style.height='60px';$('list').style.overflow='auto';$('tall').style.height='600px';\
+$('inc').addEventListener('click',function(){n++;$('count').textContent='count '+n});\
+$('name').addEventListener('input',function(e){$('echo').textContent='echo '+e.target.value});\
+document.addEventListener('keydown',function(e){$('keyed').textContent='keyed '+e.key});\
+window.addEventListener('message',function(e){\
+if(e.source!==window.parent)return;var m=e.data;\
+if(m.context){if(started)return;started=true;\
+var h=window.webkit&&window.webkit.messageHandlers;\
+send({call:{id:1,method:'hello',params:{agent:typeof window.__bateriAgent,\
+handler:typeof(h&&h.bateriAgent),handlers:h?Object.keys(h).join(','):'none'}}})}});";
+
+/// An agent's request on the web view of `pane`, carried out as the app carries it out: begun, and
+/// asked again between turns of the main loop until it is answered.
+fn view_of(pane: &TerminalPane, action: Action, format: Format) -> Reply {
+    let view = View {
+        terminal: None,
+        format,
+        action,
+    };
+    let mut run = match pane.web_run(&view, "p9", Some("agent-test")) {
+        Some(Ok(run)) => run,
+        Some(Err(failure)) => return Reply::Failed(failure),
+        None => panic!("the pane shows no web view"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match run.step() {
+            Step::Answer(reply) => return reply,
+            Step::Shot { .. } => panic!("a web view's picture is made by its own run"),
+            Step::Pending => {
+                assert!(Instant::now() < deadline, "the request was never answered");
+                spin(0.03);
+            }
+        }
+    }
+}
+
+fn said(pane: &TerminalPane, action: Action) -> String {
+    match view_of(pane, action, Format::Text) {
+        Reply::Text(text) => text,
+        other => panic!("not an answer: {other:?}"),
+    }
+}
+
+fn refused(pane: &TerminalPane, action: Action) -> String {
+    match view_of(pane, action, Format::Text) {
+        Reply::Failed(failure) => failure.text,
+        other => panic!("not a refusal: {other:?}"),
+    }
+}
+
+/// The word that names an element in an answer: the first of the line that has `words`.
+fn ref_of(answer: &str, words: &str) -> String {
+    answer
+        .lines()
+        .find(|line| line.contains(words))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no line with {words} in\n{answer}"))
+        .trim_end_matches('!')
+        .to_owned()
+}
+
+/// The size a PNG says it is.
+fn png_size(bytes: &[u8]) -> (u32, u32) {
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+    let at = |from: usize| {
+        u32::from_be_bytes([
+            bytes[from],
+            bytes[from + 1],
+            bytes[from + 2],
+            bytes[from + 3],
+        ])
+    };
+    (at(16), at(20))
+}
+
+/// An agent in a program's web view, in a pane on a window nobody sees (the window of this test is
+/// never put in front, so the pane is one that is not on the screen): the page is read with a ref
+/// for each element it can be acted on by, and clicked, filled, typed into, pressed keys at, scrolled
+/// and waited on, and a picture of it is a PNG, with nothing of the window's keyboard or the
+/// pasteboard moved. The script lives in a world of its own: the page's own script sees neither
+/// it nor its handler.
+fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect, dir: &Path) {
+    let files = [
+        ("index.html", "text/html", AGENT_PAGE.as_bytes()),
+        ("app.js", "text/javascript", AGENT_SCRIPT.as_bytes()),
+    ];
+    let (pane, mut program) = open_pane(mtm, window, frame_rect, &dir.join("agent"), PANE + 6);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello();
+    program.open(&token, &files, None);
+    program.supply(&files);
+    let hello = watch_it_start(&pane, &mut program);
+    // **The world of its own.** The page's script looks for the agent's object and its handler and
+    // finds neither (a page's `webkit.messageHandlers` has the bridge's two and not the agent's).
+    assert!(hello.contains("\"agent\":\"undefined\""), "{hello}");
+    assert!(hello.contains("\"handler\":\"undefined\""), "{hello}");
+    assert!(
+        !hello.contains("bateriAgent"),
+        "the page can see the agent's handler: {hello}"
+    );
+
+    // The pasteboard and the window's keyboard are where they were.
+    let keyboard = window.firstResponder().map(|responder| {
+        let pointer: *const AnyObject = &*responder as *const _ as *const AnyObject;
+        pointer
+    });
+
+    // **The reading.** A ref for each element that can be acted on, the field's text and no
+    // password.
+    let read = said(&pane, Action::Read);
+    assert!(
+        read.starts_with("pane p9 (agent-test)\nfocus: page\n"),
+        "{read}"
+    );
+    for needle in [
+        "heading1 \"Agent page\"",
+        "button \"Increment\"",
+        "text \"count 0\"",
+        "field \"Name\"",
+        "field (secret) \"Secret\"",
+        "scroll 0% (at the top)",
+        "note: this is a web view",
+    ] {
+        assert!(read.contains(needle), "{needle:?} is not in:\n{read}");
+    }
+    let button = ref_of(&read, "button \"Increment\"");
+    let name = ref_of(&read, "field \"Name\"");
+    let secret = ref_of(&read, "field (secret)");
+    let list = ref_of(&read, "scroll 0%");
+    assert_eq!(button.len(), 6, "{button}");
+    // The same ref names the same element once the page has changed.
+    let json = match view_of(&pane, Action::Read, Format::Json) {
+        Reply::Text(text) => text,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        json.starts_with("{\"pane\":\"p9\",\"program\":\"agent-test\","),
+        "{json}"
+    );
+    assert!(json.contains(&button), "{json}");
+
+    // **Click**, the page's own events: the page counts it.
+    let clicked = said(&pane, Action::Click(button.clone()));
+    assert!(
+        clicked.starts_with(&format!("clicked button \"Increment\" ({button})\n")),
+        "{clicked}"
+    );
+    assert!(clicked.contains("text \"count 1\""), "{clicked}");
+    let again = said(&pane, Action::DoubleClick(button.to_uppercase()));
+    assert!(
+        again.contains("text \"count 3\""),
+        "a double click is two presses: {again}"
+    );
+
+    // **Fill**: the field's value and the page's own handler, and the keyboard is in it.
+    let filled = said(
+        &pane,
+        Action::Fill {
+            target: name.clone(),
+            text: "docker".into(),
+        },
+    );
+    assert!(filled.contains("filled field \"Name\""), "{filled}");
+    assert!(filled.contains("with 6 characters"), "{filled}");
+    assert!(filled.contains("text \"echo docker\""), "{filled}");
+    assert!(filled.contains("= \"docker\""), "{filled}");
+    assert!(filled.contains(&format!("focus: field {name}")), "{filled}");
+    // **Type** goes where the keyboard is; **press** a key the page takes.
+    let typed = said(&pane, Action::Type("er".into()));
+    assert!(
+        typed.contains("typed 2 characters into the field"),
+        "{typed}"
+    );
+    assert!(typed.contains("text \"echo dockerer\""), "{typed}");
+    let pressed = said(&pane, Action::Press(vec!["f5".into()]));
+    assert!(pressed.contains("pressed f5"), "{pressed}");
+    assert!(pressed.contains("text \"keyed F5\""), "{pressed}");
+    // Keys that are none are refused before any is pressed.
+    let bad = refused(
+        &pane,
+        Action::Press(vec!["a".into(), "cmd+nonsense+".into()]),
+    );
+    assert!(bad.contains("is not a key"), "{bad}");
+
+    // **The password**: filled and never said.
+    let hidden = said(
+        &pane,
+        Action::Fill {
+            target: secret.clone(),
+            text: "s3cret!".into(),
+        },
+    );
+    assert!(hidden.contains("with 7 characters"), "{hidden}");
+    assert!(!hidden.contains("s3cret"), "{hidden}");
+    let after = said(&pane, Action::Read);
+    assert!(!after.contains("s3cret"), "{after}");
+
+    // **Scroll** a box by screens and to its ends; what does not scroll says so.
+    let down = said(
+        &pane,
+        Action::Scroll {
+            target: list.clone(),
+            way: Way::Down,
+            count: Some(1),
+        },
+    );
+    assert!(down.contains("down 1 screens"), "{down}");
+    assert!(
+        !down.contains("scroll 0% (at the top)"),
+        "it did not move: {down}"
+    );
+    let bottom = said(
+        &pane,
+        Action::Scroll {
+            target: list.clone(),
+            way: Way::Bottom,
+            count: None,
+        },
+    );
+    assert!(bottom.contains("scroll 100% (at the bottom)"), "{bottom}");
+    let top = said(
+        &pane,
+        Action::Scroll {
+            target: list,
+            way: Way::Top,
+            count: None,
+        },
+    );
+    assert!(top.contains("scroll 0% (at the top)"), "{top}");
+    let not = refused(
+        &pane,
+        Action::Scroll {
+            target: button.clone(),
+            way: Way::Down,
+            count: None,
+        },
+    );
+    assert!(not.contains("does not scroll"), "{not}");
+
+    // **Wait** for words that show, words that go, and the time that runs out.
+    let shows = said(
+        &pane,
+        Action::Wait {
+            text: "count 3".into(),
+            gone: false,
+            seconds: None,
+        },
+    );
+    assert!(shows.starts_with("pane p9"), "{shows}");
+    let late = refused(
+        &pane,
+        Action::Wait {
+            text: "count 9".into(),
+            gone: false,
+            seconds: Some(1),
+        },
+    );
+    assert!(
+        late.contains("timed out after 1 seconds waiting for \"count 9\" to show"),
+        "{late}"
+    );
+
+    // What a web view does not have is told.
+    for (action, word) in [
+        (Action::Command("x".into()), "commands"),
+        (Action::Menu(button.clone()), "menu"),
+        (Action::Text(name.clone()), "`text`"),
+    ] {
+        let told = refused(&pane, action);
+        assert!(
+            told.contains("a web view has no") && told.contains(word),
+            "{told}"
+        );
+    }
+    let nothing = refused(&pane, Action::Click("zzzzzz".into()));
+    assert!(nothing.contains("no element"), "{nothing}");
+
+    // **The picture**: a PNG of the view, brought down to 1280 pixels on its long edge unless the
+    // pane's own size is asked for.
+    let picture = match view_of(&pane, Action::Shot { full: false }, Format::Text) {
+        Reply::Picture(bytes) => bytes,
+        other => panic!("not a picture: {other:?}"),
+    };
+    let (width, height) = png_size(&picture);
+    assert!(
+        width > 0 && height > 0 && width.max(height) <= 1280,
+        "{width}x{height}"
+    );
+    let whole = match view_of(&pane, Action::Shot { full: true }, Format::Text) {
+        Reply::Picture(bytes) => bytes,
+        other => panic!("not a picture: {other:?}"),
+    };
+    let (full_width, full_height) = png_size(&whole);
+    assert!(
+        full_width >= width && full_height >= height,
+        "{full_width}x{full_height}"
+    );
+
+    eprintln!(
+        "pencere: agent in a web view: read {} lines, picture {width}x{height} ({} bytes), whole {full_width}x{full_height}",
+        read.lines().count(),
+        picture.len()
+    );
+    // None of it reached the window: the keyboard is where it was.
+    let now = window.firstResponder().map(|responder| {
+        let pointer: *const AnyObject = &*responder as *const _ as *const AnyObject;
+        pointer
+    });
+    assert_eq!(keyboard, now, "an agent moved the window's keyboard");
+
     program.bye(&token);
     until("the view to go", || !covered(&pane));
     pane.close();

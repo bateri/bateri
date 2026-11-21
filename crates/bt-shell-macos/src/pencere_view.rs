@@ -64,6 +64,7 @@
 //! what the pane does with a view (the actions, the frames that stop, the
 //! deadlines) is `pane`'s.
 
+pub(crate) mod agent;
 pub(crate) mod ask;
 mod engine;
 pub(crate) mod face;
@@ -108,10 +109,10 @@ use objc2_foundation::{
     NSObjectProtocol, NSRect, NSString, NSTimeZone, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
-    WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKOpenPanelParameters, WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKUIDelegate,
-    WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKUserScript,
-    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+    WKContentWorld, WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy,
+    WKNavigationDelegate, WKOpenPanelParameters, WKScriptMessage, WKScriptMessageHandler,
+    WKSecurityOrigin, WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController,
+    WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use objc2_web_kit::{WKMediaCaptureType, WKPermissionDecision};
 
@@ -463,6 +464,9 @@ struct BridgeIvars {
     /// The tab card's picture of the view, shared with the host: the bridge takes the first
     /// one when the shell has loaded ([`still::first`]).
     shot: still::Shared,
+    /// The program's frame, as the agent's script said it is there ([`agent`]): where the agent's
+    /// calls go. Replaced each time a document of the frame is ready.
+    agent_frame: RefCell<Option<Retained<WKFrameInfo>>>,
 }
 
 define_class!(
@@ -506,6 +510,14 @@ define_class!(
         fn receive(&self, _controller: &WKUserContentController, message: &WKScriptMessage) {
             // SAFETY: plain reads of a message the web view just delivered.
             let (top, name) = unsafe { (message.frameInfo().isMainFrame(), message.name()) };
+            // The agent's script, in a world of its own, says its frame is there: the frame is where
+            // its calls go. Only that world has this handler, so no page speaks to it.
+            if name.to_string() == agent::HANDLER {
+                // SAFETY: a plain read of the message's frame.
+                let frame = unsafe { message.frameInfo() };
+                self.ivars().agent_frame.replace(Some(frame));
+                return;
+            }
             if !top {
                 return;
             }
@@ -626,9 +638,15 @@ impl Bridge {
             page: Arc::new(page),
             loads: std::cell::Cell::new(serve::Loads::default()),
             shot,
+            agent_frame: RefCell::new(None),
         });
         // SAFETY: `NSObject`'s `init`.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// The program's frame, once the agent's script has said it is there.
+    fn agent_frame(&self) -> Option<Retained<WKFrameInfo>> {
+        self.ivars().agent_frame.borrow().clone()
     }
 
     /// The URL of a request, as text.
@@ -802,6 +820,8 @@ pub(crate) struct ViewHost {
     bridge: Retained<Bridge>,
     /// The picture the tab's card has of the view ([`still`]).
     shot: still::Shared,
+    /// The content world of the agent's script ([`agent`]).
+    world: Retained<WKContentWorld>,
     /// What the program calls itself ([`said_program`]), for the questions the view asks
     /// after it started.
     program: Option<String>,
@@ -841,6 +861,7 @@ impl ViewHost {
         let font_script = page.font_script();
         let shot = still::Shared::default();
         let bridge = Bridge::new(mtm, Arc::clone(session), page, Rc::clone(&shot));
+        let world = Self::agent_world(mtm);
 
         // SAFETY: configuring a fresh configuration on the main thread; the
         // handlers are the bridge, which the host keeps alive.
@@ -880,6 +901,26 @@ impl ViewHost {
             // The app's own fonts, for the page: declared at the start of every document of the
             // web view, in every frame — the script itself does nothing outside the view's own
             // document ([`fonts::script`]).
+            // The agent's script, in a world of its own and in every frame, and the one handler it
+            // speaks to the app by, in that world alone ([`agent`]).
+            configuration
+                .userContentController()
+                .addScriptMessageHandler_contentWorld_name(
+                    ProtocolObject::from_ref(&*bridge),
+                    &world,
+                    &NSString::from_str(agent::HANDLER),
+                );
+            let agent_script =
+                WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+                    WKUserScript::alloc(mtm),
+                    &NSString::from_str(agent::script()),
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    false,
+                    &world,
+                );
+            configuration
+                .userContentController()
+                .addUserScript(&agent_script);
             if let Some(source) = &font_script {
                 let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
                     WKUserScript::alloc(mtm),
@@ -915,6 +956,7 @@ impl ViewHost {
             web,
             bridge,
             shot,
+            world,
             program: said_program(start).map(str::to_owned),
             words: Words::new(text.clone(), view_icons(start), Exit::Quit),
         };
@@ -1026,6 +1068,10 @@ impl ViewHost {
             controller.removeScriptMessageHandlerForName(&NSString::from_str(serve::HANDLER));
             controller
                 .removeScriptMessageHandlerForName(&NSString::from_str(serve::LOADED_HANDLER));
+            controller.removeScriptMessageHandlerForName_contentWorld(
+                &NSString::from_str(agent::HANDLER),
+                &self.world,
+            );
         }
         self.web.removeFromSuperview();
         // The files that were being read for it are for nobody now.

@@ -46,6 +46,7 @@ use bt_shell_common::child::PaneRuns;
 pub use crate::footer::ListeningPort;
 pub use crate::launch::{Identity, Integration};
 pub use crate::pane::{PaneHost as Host, TerminalPane};
+pub use crate::pencere_view::agent::WebRun;
 pub use crate::pencere_view::{Exit as ViewExit, ViewHead};
 pub use crate::sheets::{Cover, Owner, OwnerSlot, WeakCover};
 pub use bt_shell_common::jobs::Foreground;

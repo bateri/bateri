@@ -21,12 +21,13 @@
 
 use std::fmt::Write as _;
 
-pub use kablo_bateri::view::{Action, View};
+pub use kablo_bateri::view::{Action, View, WAIT_DEFAULT, Way};
 use pencere_drive::Reading;
 
 mod act;
 mod held;
 mod run;
+pub mod web;
 
 pub use held::{Effects, Held, Session, Shared};
 pub use run::{Ctx, REST_LIMIT, Run, Step};

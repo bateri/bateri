@@ -105,7 +105,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 # its rectangle is a `CGRect`, behind the `objc2-core-foundation` flag.
 # `WKUserScript`: the script that gives a view's page the app's own fonts
 # (`pencere_view::fonts`); it needs `NSObject` and `NSString` of `objc2-foundation` and no crate.
-    "WKSnapshotConfiguration", "objc2-core-foundation", "WKUserScript",
+# `WKContentWorld`: the named world the agent's script lives in (`pencere_view::agent`), with the
+# calls and the handler that take a world (`callAsyncJavaScript`, `addScriptMessageHandler:contentWorld:`);
+# no crate: a header flag of the one that is here, as the others.
+    "WKSnapshotConfiguration", "objc2-core-foundation", "WKUserScript", "WKContentWorld",
 ] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision.

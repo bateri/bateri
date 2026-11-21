@@ -80,7 +80,7 @@ impl<'a> Ctx<'a> {
                 Shown::Web => Failure::new(
                     Kind::Failed,
                     format!(
-                        "the view of {name} is a web view, which `bateri view` does not read yet"
+                        "the view of {name} is a web view, which the app reads and drives itself, not through a page of the kit"
                     ),
                 ),
                 Shown::Page { .. } => unreachable!("matched above"),
