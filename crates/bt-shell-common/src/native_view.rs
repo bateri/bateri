@@ -54,8 +54,8 @@ pub use files::{
 pub use look::{LookSlot, caret_width_pt, terminal_look};
 pub use page::{MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, script_page};
 pub use pencere_drive::{
-    CarryOut, Drained, Field, Held, Host, Outline, Painted, Placement, Route, Scrolling, Tip,
-    ZOOM_TEXT, carriable,
+    CarryOut, Drained, Field, Held, Host, Outline, Painted, Placement, Reading, ReadingInput,
+    Route, Scrolling, Tip, ZOOM_TEXT, carriable,
 };
 pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script};
 use pencere_sandbox::{FigureKey, Images, draw_figure, figure_key};

@@ -483,6 +483,22 @@ impl PageFields {
             .map(|field| (field.id, field.kind))
     }
 
+    /// What the field `id` holds, for an agent that reads the page. A secret field gives none, and
+    /// none is asked of it: what a password holds is the person's and is not read from the screen.
+    pub(crate) fn text_of(&self, id: Id) -> Option<String> {
+        let fields = self.fields.borrow();
+        let field = fields.iter().find(|field| field.id == id)?;
+        if field.kind == FieldKind::Secret {
+            return None;
+        }
+        Some(field.view.stringValue().to_string())
+    }
+
+    /// The field the keyboard is in, where it is in one of the page's.
+    pub(crate) fn keyboard_in(&self) -> Option<Id> {
+        self.focused.get()
+    }
+
     /// Whether the keyboard is in one of the page's fields.
     pub(crate) fn typing(&self) -> bool {
         self.fields

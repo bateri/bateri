@@ -16,8 +16,10 @@ use std::fmt::Debug;
 
 use super::{
     Accessible, Bars, Button, Command, Cursor, Fill, Id, Input, Key, Keyboard, Menu, MenuEntry,
-    Mods, Phase, Point, Scrolling,
+    Mods, Phase, Point, ReadingInput, Scrolling,
 };
+use crate::agent::message::{Format, Reply};
+use crate::agent::view::{Action, Pane, Shown, View, answer};
 
 pub(super) use super::page::tests::PaneRig;
 use super::page::{MenuUp, ShownMenu};
@@ -1314,4 +1316,236 @@ fn the_press_that_opens_a_menu_says_whether_it_was_inside_a_selection_or_at_a_ca
         rig.said(),
         "press:right:ctrl=false:inside=false:v1 press:right:ctrl=false:inside=true:v1"
     );
+}
+
+// ─── `bateri view`: a pane's page read ──────────────────────────────────────────────────────────
+
+/// A page of a text field, a secret field, a button and an editor of twenty lines, loaded when the
+/// page is first laid out.
+const READABLE: &str = r#"local loaded = false
+local said = {}
+return {
+    render = function()
+        return pencere.div():size_full()
+            :command("go", "Go", {})
+            :child(pencere.div():id("q"):text_field("q"):h(24):w(200):child(pencere.text("Search")))
+            :child(pencere.div():id("pw"):text_field("pw", "secret"):h(24):w(200):child(pencere.text("Password")))
+            :child(pencere.div():id("save"):press("save"):size(80, 24):child(pencere.text("Save")))
+            :child(pencere.editor("sql", {}):label("Query"):h(60):w(300))
+            :child(pencere.text("said: " .. table.concat(said, "|")))
+    end,
+    handle = function(event)
+        if event.type == "viewport" and not loaded then
+            loaded = true
+            return { editor = { sql = { load = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20" } } }
+        elseif event.type == "key" then
+            said[#said + 1] = event.key
+            return { redraw = true }
+        end
+        return true
+    end,
+}"#;
+
+fn read_of(
+    rig: &PaneRig,
+    shown: &Shown,
+    format: Format,
+    texts: &dyn Fn(Id) -> Option<String>,
+) -> String {
+    let view = View {
+        terminal: None,
+        format,
+        action: Action::Read,
+    };
+    let input = ReadingInput {
+        field_text: Some(texts),
+        field_focus: None,
+        menu: None,
+    };
+    let _ = rig;
+    match answer(
+        Pane {
+            name: "p9",
+            program: Some("readpen"),
+        },
+        shown,
+        &view,
+        &input,
+    ) {
+        Reply::Text(text) => text,
+        other => panic!("not a reading: {other:?}"),
+    }
+}
+
+fn seen_page(rig: &PaneRig, size: Option<(u32, u32)>) -> Shown {
+    Shown::Page {
+        handle: rig.handle().clone(),
+        seen: true,
+        size,
+        scale: 1.0,
+        reduce_motion: false,
+        now: 1.0,
+    }
+}
+
+fn host_text(id: Id) -> Option<String> {
+    if id == Id::named("q") {
+        Some("api".to_owned())
+    } else if id == Id::named("pw") {
+        // The host's secret field does hold it; the reading never asks.
+        Some("hunter2".to_owned())
+    } else {
+        None
+    }
+}
+
+#[test]
+fn the_reading_of_a_page_the_pane_shows_has_refs_the_fields_texts_the_editors_lines_and_no_secret()
+{
+    let mut rig = PaneRig::open(READABLE);
+    rig.frame(0.0);
+    rig.settle(0.1);
+    let shown = seen_page(&rig, Some((800, 600)));
+    let text = read_of(&rig, &shown, Format::Text, &host_text);
+    assert!(
+        text.starts_with("pane p9 (readpen)\nfocus: page\n"),
+        "{text}"
+    );
+    assert!(text.contains("button \"Save\""), "{text}");
+    assert!(text.contains("field \"Search\" = \"api\""), "{text}");
+    assert!(text.contains("field (secret) \"Password\""), "{text}");
+    assert!(
+        text.contains(
+            "editor \"Query\" lines 1-3 of 20, caret 1:1\n  1| line 1\n  2| line 2\n  3| line 3\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\"Go\""), "{text}");
+    // Every element that can be acted on has a ref of six characters, the first word of its line.
+    for line in text
+        .lines()
+        .filter(|line| line.contains("button \"Save\"") || line.contains("field "))
+    {
+        let name = line.split_whitespace().next().unwrap_or_default();
+        assert!(
+            name.len() == 6
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "{line}"
+        );
+    }
+    let json = read_of(&rig, &shown, Format::Json, &host_text);
+    assert!(
+        json.starts_with("{\"pane\":\"p9\",\"program\":\"readpen\","),
+        "{json}"
+    );
+    assert!(json.contains("\"value\":\"api\""), "{json}");
+    assert!(json.contains("\"kind\":\"secret\""), "{json}");
+    for written in [&text, &json] {
+        assert!(!written.contains("hunter2"), "{written}");
+    }
+    // Read again, the page says the same.
+    assert_eq!(read_of(&rig, &shown, Format::Text, &host_text), text);
+}
+
+/// A pane that is not seen draws no frame, so the page it shows stays as its last frame left it:
+/// what the page said since is laid out once, for the reading, and nothing is drawn, listed or
+/// counted as a frame of the pane's.
+#[test]
+fn a_page_that_is_not_seen_is_laid_out_once_for_the_reading_and_draws_nothing() {
+    let mut rig = PaneRig::open(READABLE);
+    rig.frame(0.0);
+    rig.settle(0.1);
+    assert_eq!(rig.said(), "");
+    let quads = rig.quads();
+    // The pane is covered; the page hears a key and says something new, and no frame comes.
+    rig.key(Key::Character('a'), Mods::default());
+    rig.settle_unseen();
+    assert_eq!(rig.said(), "", "no frame was drawn");
+    // A pane that is seen is read as its frames left it; one that is not is laid out first.
+    let shown = |seen: bool| Shown::Page {
+        handle: rig.handle().clone(),
+        seen,
+        size: Some((800, 600)),
+        scale: 1.0,
+        reduce_motion: false,
+        now: 1.0,
+    };
+    let stale = read_of(&rig, &shown(true), Format::Text, &host_text);
+    assert!(!stale.contains("said: a"), "{stale}");
+    let read = read_of(&rig, &shown(false), Format::Text, &host_text);
+    assert!(read.contains("said: a"), "{read}");
+    assert!(read.contains("button \"Save\""), "{read}");
+    assert!(read.contains("field \"Search\" = \"api\""), "{read}");
+    // What the layout would have drawn is let go: the rig, which keeps the list of the last frame
+    // it was given, has the one it had.
+    assert_eq!(rig.said(), "");
+    assert_eq!(rig.quads(), quads);
+}
+
+/// The one place a hidden pane's page is laid out draws and presents nothing: no list is made of
+/// the layout, no clock is set for the page and no frame is counted.
+#[test]
+fn the_layout_for_a_reading_makes_no_list_and_counts_no_frame() {
+    let source = include_str!("page.rs");
+    let start = source
+        .find("pub fn lay_out_unseen")
+        .expect("the layout for a reading is in the page's handle");
+    let body = &source[start
+        ..source[start..]
+            .find("\n    }\n")
+            .map_or(source.len(), |end| start + end)];
+    for drawn in [
+        "to_list",
+        "present",
+        "request_frame",
+        "damage",
+        "frames +=",
+        "Quad",
+        "set_clock",
+    ] {
+        assert!(!body.contains(drawn), "{drawn} in {body}");
+    }
+    assert!(
+        body.contains("frame(at)") && body.contains("tell_frame"),
+        "{body}"
+    );
+}
+
+#[test]
+fn what_is_not_a_page_is_said_by_what_it_is_and_a_page_with_no_room_says_it_is_not_placed() {
+    let rig = PaneRig::open(READABLE);
+    let ask = |shown: &Shown| {
+        let view = View {
+            terminal: None,
+            format: Format::Text,
+            action: Action::Read,
+        };
+        match answer(
+            Pane {
+                name: "p9",
+                program: None,
+            },
+            shown,
+            &view,
+            &ReadingInput::default(),
+        ) {
+            Reply::Failed(failure) => failure.text,
+            other => panic!("not a failure: {other:?}"),
+        }
+    };
+    let terminal = ask(&Shown::Terminal);
+    assert!(
+        terminal.contains("terminal") && terminal.contains("bateri capture p9"),
+        "{terminal}"
+    );
+    let not_up = ask(&Shown::NotUp);
+    assert!(not_up.contains("not up yet"), "{not_up}");
+    let web = ask(&Shown::Web);
+    assert!(web.contains("web view"), "{web}");
+    for size in [None, Some((0, 600)), Some((800, 0))] {
+        let none = ask(&seen_page(&rig, size));
+        assert!(none.contains("not placed"), "{none}");
+    }
 }

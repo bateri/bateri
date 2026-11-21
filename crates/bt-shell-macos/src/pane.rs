@@ -37,7 +37,7 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,7 @@ use crate::environment::Wants;
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
+use bt_shell_common::agent::view::Shown as ViewShown;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{Answer, PaneLink, Shown};
 use bt_shell_common::native_view::{
@@ -406,6 +407,10 @@ impl KeptLogin for NoKeptLogin {
 /// context line; narrower makes the shell's own line wrapping meaningless.
 /// Tuned by eye.
 const MIN_PANE_COLS: u16 = 20;
+
+/// The number the keyboard last came to a pane by ([`TerminalPane::keyboard_order`]): counted up
+/// for each pane it comes to, in the whole app.
+static KEYBOARD_ORDER: AtomicU64 = AtomicU64::new(0);
 
 /// Row count of the smallest pane, grid rows **excluding** the
 /// dock's reserve. Design constant: one command and a few lines of its
@@ -2266,6 +2271,10 @@ pub struct PaneIvars {
     /// Whether the pane can be seen — [`TerminalPane::set_visible`]'s last
     /// word; a pane is born seen.
     seen: Cell<bool>,
+    /// Where this pane stands in the order the keyboard came to the panes of the app: the number
+    /// [`KEYBOARD_ORDER`] gave when it last came here, 0 while it has not. `bateri ls` tells the
+    /// order ([`TerminalPane::keyboard_order`]).
+    keyboard_order: Cell<u64>,
     /// The view a program in this pane shows, over the terminal, while it does
     /// ([`TerminalPane::drain_views`]); the terminal's frames stop for as long as
     /// it is there.
@@ -3045,6 +3054,7 @@ impl TerminalPane {
             driving: Cell::new(false),
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
+            keyboard_order: Cell::new(0),
             pencere: RefCell::new(None),
             stage: RefCell::new(None),
             page_words: RefCell::new(None),
@@ -4523,6 +4533,11 @@ impl TerminalPane {
     /// The person clicked into the page's field named `field` (or the keyboard left the fields
     /// of itself): the page is told.
     pub(crate) fn page_field_focused(&self, field: Option<bt_shell_common::native_view::Id>) {
+        // A person's click into a field is the keyboard coming to the pane as much as its terminal
+        // taking it is.
+        if field.is_some() {
+            self.note_keyboard_came();
+        }
         if let Some(handle) = self.page_handle() {
             handle.page().focus(field);
             self.drain_page();
@@ -5197,6 +5212,7 @@ impl TerminalPane {
         }
         self.report_focus(self.is_active(), here);
         if here {
+            self.note_keyboard_came();
             self.host().focused(self.ivars().id);
         }
         self.tell_page_active();
@@ -6403,6 +6419,70 @@ impl TerminalPane {
             Some(offered) => files.with_way(offered.way.clone()),
             None => files,
         })
+    }
+
+    /// The keyboard came to this pane: it is the latest of the app's panes to have it. A number
+    /// that only grows, not a time: `bateri ls` tells the order and nothing of when.
+    fn note_keyboard_came(&self) {
+        let next = KEYBOARD_ORDER.fetch_add(1, Ordering::Relaxed) + 1;
+        self.ivars().keyboard_order.set(next);
+    }
+
+    /// Where the keyboard has been in this pane, among the app's panes: the number it had the
+    /// last time it came here; the larger, the later. `None` while it has not come since the app
+    /// began.
+    pub(crate) fn keyboard_order(&self) -> Option<u64> {
+        Some(self.ivars().keyboard_order.get()).filter(|order| *order > 0)
+    }
+
+    /// The view the pane shows over its terminal, for `bateri ls`: a page of the kit a program
+    /// drew, or a web view; `None` for a pane that shows its terminal.
+    pub(crate) fn view_kind(&self) -> Option<bt_shell_common::agent::listing::ViewKind> {
+        use bt_shell_common::agent::listing::ViewKind;
+        if self.shows_web_view() {
+            Some(ViewKind::Web)
+        } else if self.program_page_up() {
+            Some(ViewKind::Native)
+        } else {
+            None
+        }
+    }
+
+    /// What this pane shows an agent that reads its view ([`ViewShown`]): the page of the kit a
+    /// program drew with what `bateri view` needs to lay it out when no frame is built for it, a
+    /// web view, the terminal, or a view that has not been shown yet.
+    pub(crate) fn view_shown(&self) -> ViewShown {
+        if self.shows_web_view() {
+            return ViewShown::Web;
+        }
+        if self.program_page_up()
+            && let Some(handle) = self.page_handle()
+        {
+            let ivars = self.ivars();
+            return ViewShown::Page {
+                handle,
+                seen: ivars.seen.get(),
+                size: ivars.surface.size(),
+                scale: ivars.layer.contentsScale(),
+                reduce_motion: ivars.reduce_motion.get(),
+                now: frames_clock(),
+            };
+        }
+        if self.ivars().page_wait.get() {
+            ViewShown::NotUp
+        } else {
+            ViewShown::Terminal
+        }
+    }
+
+    /// The fields the page up has put on the screen, for what a reading needs of them (their texts,
+    /// where the keyboard is).
+    pub(crate) fn page_fields_up(&self) -> Option<Rc<crate::native_page::PageFields>> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .map(|page| Rc::clone(&page.fields))
     }
 
     /// The handle the page up is driven by, if a page is up.

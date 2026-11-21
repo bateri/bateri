@@ -15,6 +15,8 @@ of every installed copy. A version without a section is not released.
 ### Added
 
 - **Programs can draw glowing, shaded shapes.** A program's page can give a shape a soft glow or shadow, fill it with a gradient, mix it with what is under it, draw a dashed line and turn or scale it.
+- **Claude can read a program's view.** `bateri view p7` tells an agent what a view such as dockerpen shows: its buttons, fields and editors, each with a short name to act on, and whether the page has settled. It works on a pane you cannot see, and a password field is never read. For another machine's pane it needs that machine's commands level set to `full`.
+- **`bateri ls` shows which pane has the keyboard.** The pane you are typing in is marked `(focused)`, a pane that shows a view says so, and `--json` gives the order the keyboard visited the panes, so an agent can tell which pane you were in just before its own.
 
 ## [0.32.0] - 2026-11-20
 

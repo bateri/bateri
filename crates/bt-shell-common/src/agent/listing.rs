@@ -260,6 +260,38 @@ pub struct Row {
     pub opened_by: Option<String>,
     /// Its pane waits for the bateri app: it was opened while the bateri app was away.
     pub waiting: bool,
+    /// What its pane shows and where the keyboard has been.
+    pub marks: Marks,
+}
+
+/// What a pane shows besides a terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewKind {
+    /// A page of the kit, drawn by the app.
+    Native,
+    /// A web view.
+    Web,
+}
+
+impl ViewKind {
+    /// The word `ls --json` says.
+    pub const fn word(self) -> &'static str {
+        match self {
+            ViewKind::Native => "native",
+            ViewKind::Web => "web",
+        }
+    }
+}
+
+/// What `ls` tells of a terminal's pane that the server cannot: the view it shows, and in what order the
+/// keyboard has been in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    /// The view the pane shows, where it shows one.
+    pub view: Option<ViewKind>,
+    /// 1 for the pane that has the keyboard now, 2 for the one before it, and so on, among the
+    /// panes of this machine that have had it since the app began; none for a pane that has not.
+    pub focus_rank: Option<u32>,
 }
 
 /// What `ls` is asked about.
@@ -276,11 +308,12 @@ pub struct Scene {
 
 /// The table's rows: each terminal the server said it has, with the terminal that opened it as
 /// the server's records say (a terminal with no record, or opened from none, has no opener) and
-/// whether its pane waits for the bateri app (`waits`).
+/// whether its pane waits for the bateri app (`waits`) and what `marks` says of its pane.
 pub fn rows(
     terminals: Vec<Status>,
     records: &[(Terminal, Record)],
     waits: &dyn Fn(Terminal) -> bool,
+    marks: &dyn Fn(Terminal) -> Marks,
 ) -> Vec<Row> {
     terminals
         .into_iter()
@@ -292,6 +325,7 @@ pub fn rows(
                 .map(|opener| opener.name().to_owned());
             Row {
                 waiting: terminal.is_some_and(waits),
+                marks: terminal.map(marks).unwrap_or_default(),
                 opened_by,
                 status,
             }
@@ -457,6 +491,13 @@ impl Scene {
             .map(printable)
     }
 
+    /// Whether the terminal's pane has the keyboard now.
+    fn is_focused(&self, terminal: &str) -> bool {
+        self.terminals
+            .iter()
+            .any(|row| row.status.id.as_str() == terminal && row.marks.focus_rank == Some(1))
+    }
+
     fn rows(&self) -> Vec<&Row> {
         let mut rows: Vec<&Row> = self.terminals.iter().collect();
         rows.sort_by(|a, b| order(a.status.id.as_str()).cmp(&order(b.status.id.as_str())));
@@ -499,7 +540,11 @@ impl Scene {
             Some(windows) if windows.is_empty() => out.push_str("No windows are open.\n"),
             Some(windows) => {
                 for window in windows {
-                    write_window(&mut out, window, &|name| self.label_of(name));
+                    let notes = PaneNotes {
+                        label: &|name| self.label_of(name),
+                        focused: &|name| self.is_focused(name),
+                    };
+                    write_window(&mut out, window, &notes);
                 }
             }
         }
@@ -527,7 +572,7 @@ impl Scene {
                 cell_name(status.id.as_str()),
                 tab,
                 or_dash(status.label.as_deref().map(printable)),
-                or_dash(status.program.as_deref().map(lossy)),
+                program_cell(status, row.marks.view),
                 Doing::of(status, now).text(),
                 since(now, status.started),
                 since(now, status.output_at),
@@ -651,6 +696,10 @@ impl Scene {
         json_number(out, status.output_at);
         out.push_str(",\"opened_by\":");
         json_optional(out, row.opened_by.as_deref());
+        out.push_str(",\"view\":");
+        json_optional(out, row.marks.view.map(ViewKind::word));
+        out.push_str(",\"focus_rank\":");
+        json_number(out, row.marks.focus_rank.map(u64::from));
         let (placed, at) = match self.tab_of(status.id.as_str()) {
             Some(at) => ("tab", Some(at)),
             None if row.waiting => ("waiting", None),
@@ -883,7 +932,23 @@ fn group_of<'a>(window: &'a Window, tab: &Tab) -> Option<&'a Group> {
     window.groups.iter().find(|group| group.id == number)
 }
 
-fn write_window(out: &mut String, window: &Window, label_of: &dyn Fn(&str) -> Option<String>) {
+/// What the layout says of a pane besides where it is: its label, and whether it has the keyboard.
+struct PaneNotes<'a> {
+    label: &'a dyn Fn(&str) -> Option<String>,
+    focused: &'a dyn Fn(&str) -> bool,
+}
+
+/// The program of a terminal as the table says it: where its pane shows a view, `(view)` after it.
+fn program_cell(status: &Status, view: Option<ViewKind>) -> String {
+    let program = status.program.as_deref().map(lossy);
+    match (program, view) {
+        (program, None) => or_dash(program),
+        (Some(program), Some(_)) => format!("{program} (view)"),
+        (None, Some(_)) => "(view)".to_owned(),
+    }
+}
+
+fn write_window(out: &mut String, window: &Window, notes: &PaneNotes<'_>) {
     if window.tabs.iter().all(Tab::elsewhere) {
         out.push_str("window another machine\n");
         return;
@@ -914,12 +979,12 @@ fn write_window(out: &mut String, window: &Window, label_of: &dyn Fn(&str) -> Op
                     printable(&group.label)
                 );
                 for tab in run {
-                    write_tab(out, window, tab, 4, label_of);
+                    write_tab(out, window, tab, 4, notes);
                 }
             }
             None => {
                 for tab in run {
-                    write_tab(out, window, tab, 2, label_of);
+                    write_tab(out, window, tab, 2, notes);
                 }
             }
         }
@@ -932,7 +997,7 @@ fn write_tab(
     window: &Window,
     tab: &Tab,
     indent: usize,
-    label_of: &dyn Fn(&str) -> Option<String>,
+    pane_notes: &PaneNotes<'_>,
 ) {
     let whole = tab.elsewhere();
     let _ = write!(out, "{}tab", " ".repeat(indent));
@@ -986,7 +1051,7 @@ fn write_tab(
             indent + 2,
             &on_screen,
             Layer::FLAT,
-            label_of,
+            pane_notes,
         );
         // The cards are told after the flat area, back to front, each pane marked as floating.
         for (c, card) in tab.cards.iter().enumerate() {
@@ -997,7 +1062,7 @@ fn write_tab(
                 indent + 2,
                 &over,
                 Layer::of(card),
-                label_of,
+                pane_notes,
             );
         }
     }
@@ -1025,7 +1090,7 @@ fn write_node(
     indent: usize,
     on_screen: &dyn Fn(&str) -> bool,
     layer: Layer,
-    label_of: &dyn Fn(&str) -> Option<String>,
+    notes: &PaneNotes<'_>,
 ) {
     let pad = " ".repeat(indent);
     match node {
@@ -1034,11 +1099,14 @@ fn write_node(
         }
         Node::Pane(Pane::Terminal(name)) => {
             let _ = write!(out, "{pad}pane {}", pane_field(name));
-            if let Some(label) = label_of(name) {
+            if let Some(label) = (notes.label)(name) {
                 let _ = write!(out, " label:\"{label}\"");
             }
             if on_screen(name) && !layer.minimized {
                 out.push_str(" (on screen)");
+            }
+            if (notes.focused)(name) {
+                out.push_str(" (focused)");
             }
             write_layer(out, layer);
             out.push('\n');
@@ -1060,8 +1128,8 @@ fn write_node(
                 Axis::Vertical => "stacked",
             };
             let _ = writeln!(out, "{pad}{word} {a}/{b}");
-            write_node(out, first, indent + 2, on_screen, layer, label_of);
-            write_node(out, second, indent + 2, on_screen, layer, label_of);
+            write_node(out, first, indent + 2, on_screen, layer, notes);
+            write_node(out, second, indent + 2, on_screen, layer, notes);
         }
     }
 }
@@ -1070,7 +1138,7 @@ fn write_node(
 
 /// A JSON string with kablo's rule: quote and backslash escaped, the usual control characters by
 /// letter, any other as `\u00xx`.
-fn json_string(out: &mut String, text: &str) {
+pub(super) fn json_string(out: &mut String, text: &str) {
     out.push('"');
     for c in text.chars() {
         match c {
@@ -1088,7 +1156,7 @@ fn json_string(out: &mut String, text: &str) {
     out.push('"');
 }
 
-fn json_optional(out: &mut String, text: Option<&str>) {
+pub(super) fn json_optional(out: &mut String, text: Option<&str>) {
     match text {
         Some(text) => json_string(out, text),
         None => out.push_str("null"),

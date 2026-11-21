@@ -66,7 +66,7 @@ use bt_core::CommandLevel;
 use bt_core::PaneUuid;
 use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
-use bt_shell_common::agent::listing::{self, Card, Node, Pane, Scene, Tab, Window};
+use bt_shell_common::agent::listing::{self, Card, Marks, Node, Pane, Scene, Tab, Window};
 use bt_shell_common::agent::message::{
     self, Failure, Format, Kind, Place, Placed, Relayed, Reply, WindowHome,
 };
@@ -74,6 +74,7 @@ use bt_shell_common::agent::notes::Note;
 use bt_shell_common::agent::place::{Ask, Landed, Landing, Spot};
 use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell};
 use bt_shell_common::agent::summary;
+use bt_shell_common::agent::view as reading;
 use bt_shell_common::agent::wait::{Queue, Waiting};
 use bt_shell_common::agent::{Anchor, LOCAL_MACHINE, Terminal};
 use bt_shell_common::kablo::SessionId;
@@ -277,6 +278,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         Answer::PlaceOn(place) => reach::place_on(letter, server, from, place),
         Answer::Relay(relay) => reach::relay(app, letter, &server, from.as_deref(), relay),
         Answer::Package(package) => reach::package(letter, &server, package),
+        Answer::View(request) => viewed(app, letter, &server, from.as_deref(), &request),
         Answer::Config(words) => {
             let ran = app.run_config(&words);
             let done = Relayed::of(ran.status, &ran.stderr, &ran.stdout);
@@ -702,20 +704,8 @@ fn find_address(
     server: &Server,
     address: &Anchor,
 ) -> Result<Option<Found>, Failure> {
-    let own_machine = match address.machine() {
-        None => true,
-        Some(machine) => {
-            if local::is_account(&server.account) {
-                machine == LOCAL_MACHINE
-            } else {
-                server
-                    .host_name()
-                    .is_some_and(|host| bt_core::bare_host(host) == machine)
-            }
-        }
-    };
     let machine = address.machine().unwrap_or_default();
-    if own_machine {
+    if serve::is_own_machine(server, address) {
         // A name with the machine written out is the machine's, not an account's: another account
         // on the same host may have a terminal of that name too, and which is meant is not told.
         if address.machine().is_some() && ambiguous(&panes_named(app, machine, address.name())) {
@@ -955,10 +945,21 @@ fn listed(
         return;
     };
     let (windows, typing) = windows_of(app, &server.account, server.level);
+    // The numbers the keyboard came to the app's panes by: a pane's place in the order is how many
+    // came after it, and the one with the largest has it now.
+    let orders: Vec<u64> = app
+        .tabs()
+        .iter()
+        .flat_map(|tab| tab.panes())
+        .filter_map(|pane| pane.keyboard_order())
+        .collect();
     let rows = state(|state| {
-        listing::rows(statuses, &survey.records, &|terminal| {
-            state.waiting.waits(&server.account, terminal)
-        })
+        listing::rows(
+            statuses,
+            &survey.records,
+            &|terminal| state.waiting.waits(&server.account, terminal),
+            &|terminal| marks_of(app, &server.account, terminal, &orders),
+        )
     });
     let scene = Scene {
         caller: from.map(str::to_owned),
@@ -977,6 +978,98 @@ fn listed(
         text.push('\n');
     }
     letter.answer(Reply::Text(text).encode().into_bytes());
+}
+
+/// What `ls` tells of the pane that shows `terminal` of the server `account` beside the server's
+/// own word: the view it shows, and where the keyboard has been in it among the panes whose
+/// numbers are `orders` (1 for the pane that has it now, 2 for the one before, and so on; none for a
+/// pane it has not been in since the app began).
+fn marks_of(app: &AppDelegate, account: &str, terminal: Terminal, orders: &[u64]) -> Marks {
+    let Some((_, pane, _)) = find_pane(app, account, &terminal.to_string()) else {
+        return Marks::default();
+    };
+    Marks {
+        view: pane.view_kind(),
+        focus_rank: pane.keyboard_order().map(|order| {
+            let later = orders.iter().filter(|other| **other > order).count();
+            u32::try_from(later + 1).unwrap_or(u32::MAX)
+        }),
+    }
+}
+
+/// `bateri view`: the pane is found, what it shows is read, and the answer goes back. The level
+/// has been judged ([`reading::allowed`]); a pane of another machine is found by
+/// [`find_address`] as for the verbs that work on panes.
+fn viewed(
+    app: &AppDelegate,
+    letter: Letter,
+    server: &Server,
+    from: Option<&str>,
+    request: &reading::View,
+) {
+    let reply = match view_pane(app, server, from, request) {
+        Ok((pane, shown)) => view_reply(&pane, &shown, request),
+        Err(failure) => Reply::Failed(failure),
+    };
+    letter.answer(reply.encode().into_bytes());
+}
+
+/// The pane a `view` is about, and what the service says it shows: the one the request names, or the
+/// pane the program that asked runs in.
+fn view_pane(
+    app: &AppDelegate,
+    server: &Server,
+    from: Option<&str>,
+    request: &reading::View,
+) -> Result<(Retained<TerminalPane>, Shown), Failure> {
+    let found = match &request.terminal {
+        Some(address) => find_address(app, server, address)?.ok_or_else(|| {
+            let text = if address.machine().is_some() {
+                format!("{address} is no pane")
+            } else {
+                format!("{address} is no pane on this server")
+            };
+            Failure::new(Kind::Unknown, text)
+        })?,
+        None => {
+            let name = from.ok_or_else(|| {
+                Failure::new(
+                    Kind::Usage,
+                    "this was not asked from a terminal and names none",
+                )
+            })?;
+            find_pane(app, &server.account, name).ok_or_else(|| {
+                Failure::new(Kind::Unknown, format!("{name} is no pane on this server"))
+            })?
+        }
+    };
+    let (_, pane, shown) = found;
+    Ok((pane, shown))
+}
+
+/// What a `view` of `pane` answers, for what the service says the pane shows.
+fn view_reply(pane: &TerminalPane, shown: &Shown, request: &reading::View) -> Reply {
+    // What the page said since the pane last heard it is taken first, as a frame would.
+    pane.drain_page();
+    let view = pane.view_shown();
+    // The texts the fields hold and where the keyboard is: the window's, which only it has.
+    let fields = pane.page_fields_up();
+    let text = |id: bt_shell_common::native_view::Id| fields.as_ref().and_then(|f| f.text_of(id));
+    let input = bt_shell_common::native_view::ReadingInput {
+        field_text: Some(&text),
+        field_focus: fields.as_ref().and_then(|fields| fields.keyboard_in()),
+        menu: None,
+    };
+    let name = shown.terminal.as_str();
+    reading::answer(
+        reading::Pane {
+            name,
+            program: shown.program.as_deref(),
+        },
+        &view,
+        request,
+        &input,
+    )
 }
 
 /// Answers a request with a mistake or a refusal.

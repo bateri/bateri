@@ -49,6 +49,7 @@ use super::level::{self, Act, Panes, Verdict, Why};
 use super::message::{Arrange, Failure, Format, Kind, Place, Placed, Relay, Reply, Request};
 use super::notes::Note;
 use super::place::Landed;
+use super::view;
 use super::wait::Waiting;
 use super::{Anchor, Terminal};
 
@@ -162,6 +163,9 @@ pub enum Answer {
     /// — on a thread of its own — and answers how it ended ([`super::relay`]). The level has been
     /// judged.
     Relay(Relay),
+    /// `view`: the shell finds the pane, reads the view it shows and answers ([`super::view`]).
+    /// The level has been judged: what the request does to the view, on the machine the pane is of.
+    View(kablo_bateri::view::View),
     /// `package`: a machine asks the app about its programs. It goes to the internet and to the
     /// machine, so the shell answers on a thread of its own ([`crate::apps::package`]). The level
     /// has been judged: it is not `off`.
@@ -234,6 +238,10 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
             Err(failure) => Answer::Reply(Reply::Failed(failure)),
         },
         Ok(Request::Package(package)) => Answer::Package(package),
+        Ok(Request::View(request)) => match view::allowed(server, &request) {
+            Ok(()) => Answer::View(request),
+            Err(failure) => Answer::Reply(Reply::Failed(failure)),
+        },
         Ok(Request::Config(words)) if crate::kablo::local::is_account(&server.account) => {
             Answer::Config(words)
         }
@@ -244,6 +252,24 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
                 server.host_name().unwrap_or("a server")
             ),
         ))),
+    }
+}
+
+/// Whether the pane `address` names is a pane of the machine that asked: one written with no machine, or
+/// with the machine's own (`@local` for this computer, the host for a server), as `ls` writes them.
+/// The one place that tells a machine's own pane from another's, for the level to judge.
+pub fn is_own_machine(server: &Server, address: &Anchor) -> bool {
+    match address.machine() {
+        None => true,
+        Some(machine) => {
+            if crate::kablo::local::is_account(&server.account) {
+                machine == super::LOCAL_MACHINE
+            } else {
+                server
+                    .host_name()
+                    .is_some_and(|host| bt_core::bare_host(host) == machine)
+            }
+        }
     }
 }
 
@@ -1410,5 +1436,74 @@ mod tests {
         // The anchor's pane is not in a tab yet: it stays.
         let (again, made) = settle_waiting(waiting(10), &|_, _| true, &mut app);
         assert!(again.is_some() && !made);
+    }
+
+    /// What the app does with `bateri view` said from `from` by a server at `level` (or this
+    /// computer): the request it carries out, or the refusal it answers.
+    fn viewed(account: &str, level: CommandLevel, text: &str) -> Result<(), Failure> {
+        let server = Server {
+            account: account.to_owned(),
+            host: if crate::kablo::local::is_account(account) {
+                String::new()
+            } else {
+                "rasp".into()
+            },
+            argv: Vec::new(),
+            level,
+        };
+        let text = format!("bateri 2\nview\n{text}");
+        match serve(&server, Some("p4"), &text, &mut Pretend::default()) {
+            Answer::View(_) => Ok(()),
+            Answer::Reply(Reply::Failed(failure)) => Err(failure),
+            other => panic!("not a view: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_view_of_a_pane_of_the_machine_that_asked_is_let_through_at_every_level_but_off() {
+        let local = crate::kablo::local::ACCOUNT;
+        for account in [local, "ada@rasp:22"] {
+            for level in [CommandLevel::Own, CommandLevel::Screen, CommandLevel::Full] {
+                for text in [
+                    "",
+                    "terminal p9\n",
+                    "terminal p9\naction click\nref k3f9qa\n",
+                ] {
+                    assert_eq!(viewed(account, level, text), Ok(()), "{account} {level:?}");
+                }
+            }
+            let off = viewed(account, CommandLevel::Off, "").expect_err("off");
+            assert_eq!(off.kind, Kind::Refused);
+        }
+        // The machine's own name, written out, is its own.
+        assert_eq!(
+            viewed("ada@rasp:22", CommandLevel::Own, "terminal p9@rasp\n"),
+            Ok(())
+        );
+        assert_eq!(
+            viewed(
+                crate::kablo::local::ACCOUNT,
+                CommandLevel::Own,
+                "terminal p9@local\n"
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_view_of_a_pane_of_another_machine_is_refused_below_full_and_says_the_setting() {
+        let local = crate::kablo::local::ACCOUNT;
+        for (account, other) in [(local, "p9@prod"), ("ada@rasp:22", "p9@local")] {
+            for level in [CommandLevel::Own, CommandLevel::Screen] {
+                let refused =
+                    viewed(account, level, &format!("terminal {other}\n")).expect_err("refused");
+                assert_eq!(refused.kind, Kind::Refused, "{account} {level:?} {other}");
+                assert!(refused.text.contains("full"), "{}", refused.text);
+            }
+            assert_eq!(
+                viewed(account, CommandLevel::Full, &format!("terminal {other}\n")),
+                Ok(())
+            );
+        }
     }
 }
