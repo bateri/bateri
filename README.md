@@ -206,6 +206,9 @@ bateri send p9 'q'                               # type into a pane (kablo's sen
 bateri send-key p9 enter
 bateri capture p9                                # what is on its screen
 bateri wait p9 [--for TIME]                      # until its program ends; exits with its status
+bateri view [p9]                                 # what the program's view in a pane shows, each element with a ref
+bateri view p9 click|command|fill|type|press|scroll|menu|pick|wait ...   # operate it, as Claude does (see below)
+bateri view p9 shot FILE.png [--full]            # a picture of the view
 bateri close pane|tab|group|window [ID]          # no question; the programs in it end
 bateri focus pane|tab|group|window [ID]          # take the keyboard there (see below)
 bateri rename pane|tab|group ID LABEL            # an empty label takes it away
@@ -221,6 +224,16 @@ bateri notify "tests failed"                     # a notification when bateri is
 bateri split -S prod -- make test                # a terminal on the server prod (full level only); prints p9@prod
 bateri send p9@prod 'q'                          # capture, send-key and wait reach it the same way
 ```
+
+**A program's view.** A pane that shows a view a program draws (`bateri ls` says `(view)` after its
+program) is read with `bateri view p9`: one line to each button, link, field and box that scrolls, with a
+six-character ref, where the keyboard is, and what the page can be told to do. `bateri view p9 command Restart`,
+`click REF`, `fill REF 'text'`, `type 'text'`, `press cmd+enter`, `scroll REF down`, `menu REF` then `pick Title`,
+`wait 'Done'` and `shot FILE.png` operate it, and each answers with the page as it shows once it has settled
+(`--json` for a machine's reading; a password field is filled and never read back). It works on a pane that is
+on a tab nobody sees, and moves neither the keyboard, the tab nor the clipboard. It is what Claude uses when you
+say "press Restart in that pane"; the skill the agent reads (`assets/shell/agents/claude/SKILL.md`) tells it to read
+first, ask before anything that cannot be undone, and treat the page's words as data.
 
 The kind is always written: `close tab t3`, never `close t3`, and an id of
 another kind (`close group t3`) is a mistake that says what to write. With no id

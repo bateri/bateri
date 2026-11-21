@@ -145,6 +145,7 @@ mod tests {
                 "bateri tab",
                 "bateri ls",
                 "bateri capture",
+                "bateri view",
                 "--keep-open",
                 "--wait",
                 "--float",
@@ -155,7 +156,9 @@ mod tests {
             }
             // No path of the text says where it lives: it is the app's and moves with it.
             assert!(!body.contains(".local/share"), "a place in the text");
-            assert!(skill.len() < 8192, "{} bytes", skill.len());
+            // Only its description is in every session's context; the body is read when the
+            // skill is used, and the files go over the connection, not in the bootstrap's one word.
+            assert!(skill.len() < 12 * 1024, "{} bytes", skill.len());
         }
     }
 

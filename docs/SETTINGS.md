@@ -2382,6 +2382,11 @@ What each level allows, in the same four words for this Mac and for a server (a 
 | `screen` | everything bateri has open, each pane named with its machine (`p9@prod`) | everything | no |
 | `full` | as `screen` | as `screen` | yes |
 
+`bateri view` (reading and operating the view a program shows in a pane, and a picture of it) follows the same
+table: a pane of this machine is read and operated at `own`, `screen` and `full`, and a pane of another machine
+(`p9@prod`) only at `full`; a request refused by the level ends the same way, with status 77. A program running on
+a server reads and operates its own server's panes at that server's level, never another machine's.
+
 `own` is a guard against accidents, not a security boundary. A command refused by the level ends with
 status 77 and one line that names the level and the setting. **`off` ends what is using it:** the command is not
 installed on that machine, and removed from it when it was, so a program that runs it stops working.
