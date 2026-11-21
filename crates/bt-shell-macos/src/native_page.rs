@@ -609,11 +609,36 @@ pub(crate) fn utf16_range(text: &str, chars: std::ops::Range<usize>) -> (usize, 
 
 impl PageTextField {
     /// Selects `(location, length)` (UTF-16 units) in the field: at once where the keyboard is in
-    /// it, else when the page sends it the keyboard ([`PageTextField::select_waiting`]).
+    /// it (and kept as what the page asked, for a click still going on: see
+    /// [`PageTextField::keep_asked_selection`]), else when the page sends it the keyboard
+    /// ([`PageTextField::select_waiting`]).
     fn select(&self, range: (usize, usize)) {
         match self.currentEditor() {
-            Some(editor) => editor.setSelectedRange(NSRange::new(range.0, range.1)),
+            Some(editor) => {
+                editor.setSelectedRange(NSRange::new(range.0, range.1));
+                self.ivars().asked.set(Some(range));
+            }
             None => self.ivars().selection.set(Some(range)),
+        }
+    }
+
+    /// A click that gave the field the keyboard is over: what the page selected in it meanwhile (its
+    /// reply to the keyboard coming, which a display link brings in the middle of the click: the
+    /// tracking of the press runs until the button is up) is selected again, for the press's own
+    /// selection, made from where it began in the text the field held then, is made last. Not for
+    /// a press that went on to a drag (the dragged selection is the person's), nor for a click in
+    /// a field that had the keyboard already (its caret is where it was put).
+    fn keep_asked_selection(&self, down: NSPoint) {
+        let Some(range) = self.ivars().asked.take() else {
+            return;
+        };
+        let (Some(window), Some(editor)) = (self.window(), self.currentEditor()) else {
+            return;
+        };
+        let now = window.mouseLocationOutsideOfEventStream();
+        let dragged = (now.x - down.x).abs() > 4.0 || (now.y - down.y).abs() > 4.0;
+        if !dragged && range.0 + range.1 <= editor.string().length() {
+            editor.setSelectedRange(NSRange::new(range.0, range.1));
         }
     }
 
@@ -645,6 +670,9 @@ pub(crate) struct PageTextFieldIvars {
     /// What a fill selected while the keyboard was elsewhere, `(location, length)` in UTF-16 units:
     /// put in the field when the page's reply sends the keyboard to it.
     selection: Cell<Option<(usize, usize)>>,
+    /// What a fill selected while the keyboard was in the field, since a press in it began: put
+    /// there again when a press that gave it the keyboard is over.
+    asked: Cell<Option<(usize, usize)>>,
     fields: RefCell<Weak<PageFields>>,
 }
 
@@ -676,6 +704,23 @@ define_class!(
                 fields.focused_by_person(id);
             }
             took
+        }
+
+        /// A press in the field. Where it gives the field the keyboard, the page is told (see
+        /// `becomeFirstResponder`) and answers with the whole address filled in and selected, which
+        /// arrives before the button is up; the press's own tracking would then end by selecting
+        /// from where it began, so what the page selected is put back when it is over.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let had_the_keyboard = self.currentEditor().is_some();
+            let down = event.locationInWindow();
+            self.ivars().asked.set(None);
+            // SAFETY: the superclass's own `mouseDown:`, which takes the event and tracks the press
+            // until the button is up.
+            let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+            if !had_the_keyboard {
+                self.keep_asked_selection(down);
+            }
         }
     }
 );
@@ -930,6 +975,7 @@ fn text_field(
     let this = PageTextField::alloc(mtm).set_ivars(PageTextFieldIvars {
         id: Cell::new(None),
         selection: Cell::new(None),
+        asked: Cell::new(None),
         fields: RefCell::new(Rc::downgrade(fields)),
     });
     // SAFETY: `initWithFrame:` is NSTextField's designated initializer and the ivars are set.
@@ -1490,6 +1536,20 @@ mod tests {
         // at its end.
         assert!(fill.find("setStringValue").unwrap() < fill.find("field.select(range)").unwrap());
         assert!(fill.contains("text.encode_utf16().count(), 0"), "{fill}");
+        // A press that gives the field the keyboard ends with what the page selected meanwhile, unless
+        // it was a drag; one in a field that had the keyboard is AppKit's.
+        let press = body("        fn mouse_down(&self, event: &NSEvent) {");
+        assert!(press.contains("self.currentEditor().is_some()"), "{press}");
+        assert!(press.contains("self.ivars().asked.set(None)"), "{press}");
+        assert!(
+            press.find("mouseDown: event").expect(press)
+                < press.find("self.keep_asked_selection(down)").expect(press),
+            "{press}"
+        );
+        assert!(press.contains("if !had_the_keyboard {"), "{press}");
+        let kept = body("    fn keep_asked_selection(&self, down: NSPoint) {");
+        assert!(kept.contains("let dragged ="), "{kept}");
+        assert!(kept.contains("if !dragged"), "{kept}");
         let responder = body("        fn become_first_responder(&self) -> bool {");
         assert!(responder.contains("if !fields.moving.get()"), "{responder}");
         assert!(responder.contains("selection.set(None)"), "{responder}");
