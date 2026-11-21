@@ -1707,6 +1707,15 @@ fn the_agents_script_and_its_handler_are_in_a_world_the_page_cannot_see() {
             && !host[host.find("fn run(").unwrap_or(0)..].contains("__bateriAgent"),
         "the shell page's own calls never reach the agent's object"
     );
+    // The page's file panel is turned away while a request is carried out, and the pasteboard is
+    // put back if the page wrote it.
+    let files = include_str!("../pane_files.rs");
+    let panel = &files[files.find("fn web_open_panel(").expect("web_open_panel")..];
+    let panel = &panel[..panel.find("let open = ").expect("the panel's making")];
+    assert!(panel.contains("self.agent_active()"), "{panel}");
+    assert!(
+        agent.contains("self.kept = Some(Kept::take());") && agent.contains("impl Drop for WebRun")
+    );
     // The handler's message is one thing: the frame is there.
     assert_eq!(super::agent::HANDLER, "bateriAgent");
     assert_ne!(super::agent::HANDLER, HANDLER);
@@ -1752,6 +1761,17 @@ fn the_agents_script_encodes_what_the_page_says_and_runs_nothing_of_it() {
     assert_eq!(source.matches("postMessage(").count(), 1);
     assert!(source.contains("postMessage(\"ready\")"));
     assert!(source.contains("Object.freeze("));
+    // Past the most of the words the fields and the boxes that scroll are still told of, and what
+    // left the document is let go of.
+    let walk = &source[source.find("const walk = ").expect("walk")..];
+    let cap = &walk[..walk
+        .find("if (el.nodeType !== 1) return;")
+        .expect("the cap's end")];
+    assert!(
+        cap.contains("ITEMS_MOST") && cap.contains("walkInside(el)"),
+        "{cap}"
+    );
+    assert!(source.contains("prune();") && source.contains("!el.isConnected"));
     // The record's version is what the reader of it expects.
     assert!(source.contains(&format!(
         "\"{}\",",

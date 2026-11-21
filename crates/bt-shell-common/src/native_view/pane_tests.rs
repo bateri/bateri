@@ -1933,6 +1933,73 @@ fn typing_goes_where_the_keyboard_is_and_a_secret_is_never_said_back() {
     assert!(held.contains('Z'), "{held}");
 }
 
+/// A backspace with the keyboard in a field of the host takes the last letter out of what the
+/// host's field holds (the key that is no letter was told "pressed" and did nothing), and a request
+/// that puts nothing in the page holds nothing of what the person does meanwhile.
+#[test]
+fn a_backspace_in_a_field_of_the_host_takes_a_letter_out_and_a_read_holds_nothing() {
+    let (mut rig, fields) = acting();
+    let read = names(&mut rig, &fields);
+    let q = name_of(&read, "field \"Filter\"");
+    answered(ask(
+        &mut rig,
+        true,
+        Action::Fill {
+            target: q.clone(),
+            text: "docker".into(),
+        },
+        &fields,
+    ));
+    let said = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["backspace".into(), "backspace".into()]),
+        &fields,
+    ));
+    assert!(said.contains("pressed backspace backspace"), "{said}");
+    assert_eq!(fields.text_of("q"), "dock");
+    // There is nothing after the caret to delete.
+    answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["delete".into()]),
+        &fields,
+    ));
+    assert_eq!(fields.text_of("q"), "dock");
+    // Only a request that drives the page holds the page's replies.
+    let begun = |rig: &PaneRig, action: Action| {
+        let session = Rc::clone(&fields.session);
+        let drain = || {
+            rig.drain_for_agent(&session);
+        };
+        let env = Env {
+            fields: &fields,
+            session: &session,
+            drain: &drain,
+        };
+        let view = View {
+            terminal: None,
+            format: Format::Text,
+            action,
+        };
+        let run = Run::begin(PANE, &page_of(rig, true, 1.0), &env, &view);
+        (run.is_ok(), session.borrow().active)
+    };
+    assert_eq!(begun(&rig, Action::Read), (true, false));
+    assert_eq!(
+        begun(
+            &rig,
+            Action::Wait {
+                text: "x".into(),
+                gone: false,
+                seconds: Some(1)
+            }
+        ),
+        (true, false)
+    );
+    assert_eq!(begun(&rig, Action::Click(q)), (true, true));
+}
+
 #[test]
 fn keys_go_to_the_page_and_what_it_asks_of_the_host_is_held_back_and_told() {
     let (mut rig, fields) = acting();

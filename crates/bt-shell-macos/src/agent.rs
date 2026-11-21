@@ -950,13 +950,13 @@ fn listed(
         return;
     };
     let (windows, typing) = windows_of(app, &server.account, server.level);
-    // The numbers the keyboard came to the app's panes by: a pane's place in the order is how many
-    // came after it, and the one with the largest has it now.
-    let orders: Vec<u64> = app
-        .tabs()
+    // The numbers the keyboard came to the panes of this machine by (the ones the listing is
+    // of): a pane's place in the order is how many came after it, and the one with the largest has
+    // it now. A pane of another machine is not counted, as it is not shown.
+    let orders: Vec<u64> = statuses
         .iter()
-        .flat_map(|tab| tab.panes())
-        .filter_map(|pane| pane.keyboard_order())
+        .filter_map(|status| find_pane(app, &server.account, status.id.as_str()))
+        .filter_map(|(_, pane, _)| pane.keyboard_order())
         .collect();
     let rows = state(|state| {
         listing::rows(
@@ -1020,8 +1020,8 @@ enum Runner {
     Web(Box<WebRun>),
 }
 
-/// How often the requests that wait are looked at again, besides at every drain of the pane: what
-/// the page is waited for to settle may be a frame, which says nothing of itself.
+/// How often the requests that wait are looked at again, by the app's clock alone: what the page is
+/// waited for to settle may be a frame or an image, which says nothing of itself.
 const VIEW_LOOK: Duration = Duration::from_millis(30);
 
 /// How long a menu an agent asked for is held, if it picks nothing and does nothing else.
@@ -1096,7 +1096,13 @@ fn viewed(
     if matches!(pane.view_shown(), reading::Shown::Web)
         && let Some(host) = pane.web_host()
     {
-        match WebRun::begin(host, request, &name, program.as_deref()) {
+        match WebRun::begin(
+            host,
+            pane.agent_session(),
+            request,
+            &name,
+            program.as_deref(),
+        ) {
             Err(failure) => letter.answer(Reply::Failed(failure).encode().into_bytes()),
             Ok(run) => {
                 state(|state| {

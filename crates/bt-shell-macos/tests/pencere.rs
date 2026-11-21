@@ -65,8 +65,8 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString,
+    NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -1673,7 +1673,8 @@ fn app_fonts_in_the_page(mtm: MainThreadMarker, window: &NSWindow, frame_rect: N
 const AGENT_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>agent</title></head>\
 <body><h1>Agent page</h1><p id=count>count 0</p><button id=inc>Increment</button>\
 <label>Name <input id=name></label><label>Secret <input id=pw type=password></label>\
-<p id=echo>echo -</p><p id=keyed>keyed -</p>\
+<p id=echo>echo -</p><p id=keyed>keyed -</p><p id=copied>copied -</p>\
+<button id=cp>Copy it</button><button id=up>Upload it</button><input id=file type=file hidden>\
 <div id=list><div id=tall>tall box</div></div><script src=app.js></script></body></html>";
 
 const AGENT_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
@@ -1682,6 +1683,12 @@ $('list').style.height='60px';$('list').style.overflow='auto';$('tall').style.he
 $('inc').addEventListener('click',function(){n++;$('count').textContent='count '+n});\
 $('name').addEventListener('input',function(e){$('echo').textContent='echo '+e.target.value});\
 document.addEventListener('keydown',function(e){$('keyed').textContent='keyed '+e.key});\
+$('cp').addEventListener('click',function(){var r=document.createRange();r.selectNodeContents($('echo'));\
+var g=getSelection();g.removeAllRanges();g.addRange(r);var a=false;try{a=document.execCommand('copy')}catch(e){}\
+$('copied').textContent='copied exec '+a;\
+try{navigator.clipboard.writeText('agent-copy-marker').then(function(){$('copied').textContent+=' clip yes'},\
+function(e){$('copied').textContent+=' clip '+e.name})}catch(e){$('copied').textContent+=' clip none'}});\
+$('up').addEventListener('click',function(){$('file').click()});\
 window.addEventListener('message',function(e){\
 if(e.source!==window.parent)return;var m=e.data;\
 if(m.context){if(started)return;started=true;\
@@ -1917,6 +1924,41 @@ fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSR
         },
     );
     assert!(not.contains("does not scroll"), "{not}");
+
+    // **What a page does to the person's things.** A Copy button and an Upload button that opens the
+    // file input: an agent's click leaves the pasteboard where it was and no Open sheet on the window.
+    let pasteboard = NSPasteboard::generalPasteboard();
+    // SAFETY: a static of AppKit's, read on the main thread.
+    let string_type = unsafe { NSPasteboardTypeString };
+    pasteboard.clearContents();
+    pasteboard.setString_forType(&NSString::from_str("the person's own text"), string_type);
+    let copy = ref_of(&said(&pane, Action::Read), "button \"Copy it\"");
+    let upload = ref_of(&said(&pane, Action::Read), "button \"Upload it\"");
+    let copied = said(&pane, Action::Click(copy));
+    assert!(
+        copied.contains("text \"copied exec true"),
+        "the page's Copy did not run, so nothing was tried: {copied}"
+    );
+    assert!(
+        copied.contains("the pasteboard is the person's and was put back as it was"),
+        "{copied}"
+    );
+    spin(0.3);
+    let upped = said(&pane, Action::Click(upload));
+    spin(0.5);
+    assert!(upped.contains("clicked button \"Upload it\""), "{upped}");
+    assert_eq!(
+        pasteboard
+            .stringForType(string_type)
+            .map(|text| text.to_string())
+            .as_deref(),
+        Some("the person's own text"),
+        "an agent's click left the person's pasteboard changed"
+    );
+    assert!(
+        window.attachedSheet().is_none(),
+        "an agent's click opened a file panel on the person's window"
+    );
 
     // **Wait** for words that show, words that go, and the time that runs out.
     let shows = said(

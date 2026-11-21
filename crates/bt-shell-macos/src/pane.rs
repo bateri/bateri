@@ -6247,7 +6247,11 @@ impl TerminalPane {
     {
         let host = self.web_host()?;
         Some(crate::pencere_view::agent::WebRun::begin(
-            host, view, name, program,
+            host,
+            self.agent_session(),
+            view,
+            name,
+            program,
         ))
     }
 
@@ -6492,8 +6496,8 @@ impl TerminalPane {
         Rc::clone(&self.ivars().agent)
     }
 
-    /// Whether an agent's request is carried out on this pane's page now.
-    fn agent_active(&self) -> bool {
+    /// Whether an agent's request that drives the pane's page is carried out now.
+    pub(crate) fn agent_active(&self) -> bool {
         self.ivars().agent.borrow().active
     }
 
@@ -8820,6 +8824,13 @@ impl PageDriveHost for PageHost<'_> {
     /// where the keyboard already is can send it where it likes: the request is let go, not kept
     /// for the click.
     fn keyboard(&mut self, to: Keyboard) {
+        // Where the page's own keyboard is, as an agent's reading goes by it, is where the page
+        // last said, an agent's request or not: a person's click on something that is no field
+        // takes the agent's field from the reading as well.
+        self.0.agent_session().borrow_mut().field = match to {
+            Keyboard::Field(id) => Some(id),
+            Keyboard::Page => None,
+        };
         if let Some(fields) = self.fields() {
             if !self.0.holds_keyboard() {
                 return;
@@ -10026,6 +10037,14 @@ mod tests {
             .expect("keyboard");
         let keyboard = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(keyboard.contains("self.0.holds_keyboard()"), "{keyboard}");
+        // An agent's reading goes by where the page's keyboard last was, the person's move of it
+        // included: the host tells the session before it decides whether the keyboard goes there.
+        assert!(
+            keyboard
+                .find("agent_session()")
+                .is_some_and(|told| told < keyboard.find("holds_keyboard()").unwrap_or(0)),
+            "{keyboard}"
+        );
         // The gate stands in `place`, before `put` makes the pane: the rule every keyboard-moving
         // command passes (the cursor is in the pane that asked, its web view's included, or bateri
         // is behind, or the pane goes to another window). `put` gives the keyboard to the new pane

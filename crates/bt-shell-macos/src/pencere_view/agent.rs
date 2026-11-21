@@ -16,8 +16,14 @@
 //! system event reaches a web view only through its window, and needs it to be the window in
 //! front with the keyboard in the view — the user's window, the user's keyboard — and a pane on a
 //! tab that is not shown has no window to give one to. This is why the actions work on a pane
-//! that is not seen, and why nothing here moves the keyboard, brings a window or a tab forward,
-//! or touches the pasteboard.
+//! that is not seen, and why nothing here moves the keyboard or brings a window or a tab forward.
+//!
+//! **What the page does to the person's things is turned back.** The web view runs the agent's
+//! call as a person's gesture, so a page's Copy button writes the pasteboard and its Upload button
+//! asks for the Open panel. A request that drives the page keeps what the pasteboard held and puts
+//! it back if the page wrote it ([`Kept`]), and while a request is carried out the panel is
+//! turned away as a Cancel ([`WebRun`] marks the pane's session active, as a native page's
+//! request does).
 //!
 //! **A request is a short chain of calls, asked again until the page is at rest** ([`WebRun`]):
 //! look (to name the element), act, look until the document has stood still ([`QUIET_MS`], in the
@@ -39,18 +45,20 @@ use block2::RcBlock;
 use bt_shell_common::agent::message::{Failure, Format, Kind, Reply};
 use bt_shell_common::agent::view::web::{self, Act};
 use bt_shell_common::agent::view::{
-    Action, Pane, REST_LIMIT, Step, View, WAIT_DEFAULT, Way, picture_size, written,
+    Action, Pane, REST_LIMIT, Shared, Step, View, WAIT_DEFAULT, Way, drives, picture_size, written,
 };
 use bt_shell_common::native_view::Reading;
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
+use objc2::runtime::ProtocolObject;
+use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
     CGInterpolationQuality, kCGColorSpaceSRGB,
 };
-use objc2_foundation::{NSError, NSString};
+use objc2_foundation::{NSArray, NSData, NSError, NSString};
 use objc2_web_kit::{WKContentWorld, WKFrameInfo};
 
 use super::{ViewHost, serve::js_string, still};
@@ -230,13 +238,81 @@ enum Stage {
     Shooting(PictureSlot),
 }
 
+/// What the person's pasteboard held when a request that drives the page began: every type of every
+/// item, to be put back if the page wrote the pasteboard meanwhile (a Copy button does, as the
+/// web view runs the agent's call as a person's gesture).
+struct Kept {
+    board: Retained<NSPasteboard>,
+    count: isize,
+    items: Vec<Vec<(Retained<NSString>, Retained<NSData>)>>,
+}
+
+impl Kept {
+    fn take() -> Self {
+        let board = NSPasteboard::generalPasteboard();
+        let count = board.changeCount();
+        let mut items = Vec::new();
+        if let Some(found) = board.pasteboardItems() {
+            for item in &found {
+                let mut kept = Vec::new();
+                for kind in &item.types() {
+                    if let Some(data) = item.dataForType(&kind) {
+                        kept.push((kind.clone(), data));
+                    }
+                }
+                items.push(kept);
+            }
+        }
+        Self {
+            board,
+            count,
+            items,
+        }
+    }
+
+    /// Whether the pasteboard was written since, and so put back as it was.
+    fn put_back(&self) -> bool {
+        if self.board.changeCount() == self.count {
+            return false;
+        }
+        self.board.clearContents();
+        let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = self
+            .items
+            .iter()
+            .map(|kept| {
+                let item = NSPasteboardItem::new();
+                for (kind, data) in kept {
+                    item.setData_forType(data, kind);
+                }
+                ProtocolObject::from_retained(item)
+            })
+            .collect();
+        if !items.is_empty() {
+            self.board
+                .writeObjects(&NSArray::from_retained_slice(&items));
+        }
+        true
+    }
+}
+
 /// One `bateri view` on a web view, carried out.
 pub struct WebRun {
     host: ViewHost,
+    /// The pane's session, marked active while the request is: the pane turns a file panel the
+    /// page asks for away meanwhile, as it does for a native page.
+    session: Shared,
+    /// What the pasteboard held before the page was acted on, where the action drives it.
+    kept: Option<Kept>,
+    /// Whether the page wrote the pasteboard and it was put back.
+    copied: bool,
     view: View,
     name: String,
     program: Option<String>,
     began: Instant,
+    /// When the page began to be waited on for rest or for the words of a `wait`: after the
+    /// frame was there and the action was done, so that a frame that came late does not use up
+    /// the time the page has to settle in.
+    settling: Instant,
     /// When the call or the look that is out was asked, for the time it may take.
     asked: Instant,
     stage: Stage,
@@ -254,6 +330,7 @@ impl WebRun {
     /// The action is not one a web view has.
     pub(crate) fn begin(
         host: ViewHost,
+        session: Shared,
         view: &View,
         name: &str,
         program: Option<&str>,
@@ -262,17 +339,31 @@ impl WebRun {
             return Err(failure);
         }
         let now = Instant::now();
+        session.borrow_mut().active = drives(&view.action);
         Ok(Self {
             host,
+            session,
+            kept: None,
+            copied: false,
             view: view.clone(),
             name: name.to_owned(),
             program: program.map(str::to_owned),
             began: now,
+            settling: now,
             asked: now,
             stage: Stage::Ready,
             before: None,
             said: None,
         })
+    }
+
+    /// What the page did to the pasteboard is undone: the pasteboard is the person's.
+    fn put_back(&mut self) {
+        if let Some(kept) = self.kept.take()
+            && kept.put_back()
+        {
+            self.copied = true;
+        }
     }
 
     fn failed(&self, text: impl Into<String>) -> Step {
@@ -282,6 +373,11 @@ impl WebRun {
     /// The time a request has run, in seconds.
     fn elapsed(&self) -> f64 {
         self.began.elapsed().as_secs_f64()
+    }
+
+    /// The time the page has been waited on to settle, in seconds.
+    fn waited(&self) -> f64 {
+        self.settling.elapsed().as_secs_f64()
     }
 
     /// What a failed call says: the view's script could not run, with what the web view said.
@@ -402,6 +498,7 @@ impl WebRun {
                 self.said = planned.said;
                 match Self::call_of(&planned.act) {
                     Some(body) => {
+                        self.kept = Some(Kept::take());
                         self.asked = Instant::now();
                         match self.host.agent_call(&body) {
                             Some(slot) => {
@@ -415,6 +512,7 @@ impl WebRun {
                         }
                     }
                     None => {
+                        self.settling = Instant::now();
                         self.stage = Stage::Settling {
                             out: None,
                             next: Instant::now(),
@@ -441,6 +539,7 @@ impl WebRun {
                         .unwrap_or_else(|| "the element".to_owned());
                     return Step::Answer(Reply::Failed(web::failure(code, detail, &what)));
                 }
+                self.settling = Instant::now();
                 self.stage = Stage::Settling {
                     out: None,
                     next: Instant::now() + Duration::from_secs_f64(LOOK_EVERY),
@@ -498,7 +597,7 @@ impl WebRun {
             Ok(reading) => reading,
             Err(why) => return self.failed(why),
         };
-        let elapsed = self.elapsed();
+        let elapsed = self.waited();
         let again = |this: &mut Self| {
             this.stage = Stage::Settling {
                 out: None,
@@ -544,7 +643,16 @@ impl WebRun {
         }
     }
 
-    fn answer(&self, reading: &Reading) -> Step {
+    fn answer(&mut self, reading: &Reading) -> Step {
+        self.put_back();
+        let notes = if self.copied {
+            vec![
+                "the page copied text: the pasteboard is the person's and was put back as it was"
+                    .to_owned(),
+            ]
+        } else {
+            Vec::new()
+        };
         let format: Format = self.view.format;
         Step::Answer(Reply::Text(written(
             Pane {
@@ -554,7 +662,16 @@ impl WebRun {
             reading,
             format,
             self.said.as_deref(),
-            &[],
+            &notes,
         )))
+    }
+}
+
+impl Drop for WebRun {
+    /// A request that ends, answered or not (the pane closed, the view gone), lets the pane's
+    /// panel through again and puts back what the page wrote.
+    fn drop(&mut self) {
+        self.put_back();
+        self.session.borrow_mut().active = false;
     }
 }

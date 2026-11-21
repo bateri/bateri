@@ -485,11 +485,36 @@ fn press(ctx: &Ctx<'_>, env: &Env<'_>, keys: &[String]) -> Result<Done, Failure>
 /// the key before the editor's own), or to the page. A letter for a field of the host is its text:
 /// the host's own control would have taken it.
 fn press_one(ctx: &Ctx<'_>, env: &Env<'_>, key: Key, mods: Mods) {
-    if let (Key::Character(letter), false) = (key, mods.any_command())
+    if !mods.any_command()
         && let Where::Field(id) = keyboard_in(ctx, env)
     {
-        type_into_field(ctx, env, id, &letter.to_string());
-        return;
+        let done = match key {
+            Key::Character(letter) => Some(type_into_field(ctx, env, id, &letter.to_string())),
+            // The caret of a host's field is at the end of what it holds, as far as an agent goes:
+            // the key before it is taken away, and there is none after it.
+            Key::Backspace => Some(match env.fields.text(id) {
+                Some(mut held) => {
+                    held.pop();
+                    env.fields.put(id, &held);
+                    ctx.handle.page().text(id, &held);
+                    true
+                }
+                None => false,
+            }),
+            Key::Delete => Some(env.fields.text(id).is_some()),
+            _ => None,
+        };
+        match done {
+            Some(true) => return,
+            Some(false) => {
+                env.session.borrow_mut().effects.notes.push(
+                    "the key went nowhere: the field the keyboard is in is not on the page now"
+                        .to_owned(),
+                );
+                return;
+            }
+            None => {}
+        }
     }
     let route = ctx.handle.page().key(key, mods);
     match route {

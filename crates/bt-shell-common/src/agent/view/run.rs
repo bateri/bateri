@@ -1,8 +1,9 @@
-//! One `view` request carried out: begun (the action done), then asked again, at each of the page's
-//! drains and the pane's frames, until the page is at rest, and answered.
+//! One `view` request carried out: begun (the action done), then asked again, by the app's clock,
+//! until the page is at rest, and answered.
 //!
 //! The wait never blocks: [`Run::step`] looks at what there is and says [`Step::Pending`], and the
-//! app asks again at the next drain, frame or tick. Four things are waited for ([`Rest`]): the
+//! app asks again at its next tick (each look takes in what the page said since the last, and
+//! lays out a page that is not seen). Four things are waited for ([`Rest`]): the
 //! module has done what it was told, the calls the page made to its program are answered, the
 //! images are decoded and the page is laid out for what it last was. Motion is told and not
 //! waited for. [`REST_LIMIT`] ends the wait of a page that never comes to rest, and the answer
@@ -32,7 +33,7 @@ pub struct Run {
 /// Whether the request is answered.
 #[derive(Debug)]
 pub enum Step {
-    /// Not yet: ask again at the next drain, frame or tick.
+    /// Not yet: ask again at the next tick of the app's clock.
     Pending,
     /// Now.
     Answer(Reply),
@@ -177,7 +178,10 @@ impl Run {
         let ctx = Ctx::of(pane, shown)?;
         {
             let mut session = env.session.borrow_mut();
-            session.active = true;
+            // Only an action that drives the page has what the page does held for it: a read, a
+            // wait and a picture put nothing in the page, so what the person does meanwhile is
+            // theirs and goes where it goes.
+            session.active = super::drives(&view.action);
             session.effects = super::Effects::default();
             // A menu that was held is let go of by any action but the pick from it.
             if !matches!(view.action, Action::Pick(_)) {

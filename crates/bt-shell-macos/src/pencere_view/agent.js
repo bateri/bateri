@@ -31,9 +31,18 @@
     if (!n) {
       n = ++counter;
       numbers.set(el, n);
-      elements.set(n, new WeakRef(el));
     }
+    // An element that left the document and came back has its number, and is found by it again.
+    if (!elements.has(n)) elements.set(n, new WeakRef(el));
     return n;
+  };
+  // What is gone from the document is let go of: a page that draws again and again would otherwise
+  // make the map as long as the document has lived.
+  const prune = () => {
+    for (const [n, ref] of elements) {
+      const el = ref.deref();
+      if (!el || !el.isConnected) elements.delete(n);
+    }
   };
   const find = (n) => {
     const el = elements.get(n)?.deref();
@@ -194,9 +203,21 @@
     const scrolls = [];
     let more = false;
 
+    const pushField = (el, kind) => {
+      const t = el.tagName;
+      const value =
+        kind === "secret"
+          ? "-"
+          : "+" + enc(t === "SELECT" ? clean(el.selectedOptions[0]?.text || "", 400) : el.isContentEditable && t !== "INPUT" && t !== "TEXTAREA" ? clean(el.textContent, 400) : (el.value || "").slice(0, 400));
+      fields.push(["field", numberOf(el), kind, enc(labelOf(el)), enc(clean(el.getAttribute("placeholder") || "")), value, flag(covered(el)), box(el)].join("\t"));
+    };
+
     const walk = (el) => {
+      // Past the most there are no more words, but the fields and the boxes that scroll are still
+      // what an agent acts on: they are told of to the end.
       if (items.length >= ITEMS_MOST) {
         more = true;
+        walkInside(el);
         return;
       }
       if (el.nodeType !== 1) return;
@@ -206,11 +227,7 @@
 
       const kind = fieldKind(el);
       if (kind) {
-        const value =
-          kind === "secret"
-            ? "-"
-            : "+" + enc(t === "SELECT" ? clean(el.selectedOptions[0]?.text || "", 400) : el.isContentEditable && t !== "INPUT" && t !== "TEXTAREA" ? clean(el.textContent, 400) : (el.value || "").slice(0, 400));
-        fields.push(["field", numberOf(el), kind, enc(labelOf(el)), enc(clean(el.getAttribute("placeholder") || "")), value, flag(covered(el)), box(el)].join("\t"));
+        pushField(el, kind);
         return;
       }
       if (scrolls.length < SCROLLS_MOST && scrollable(el)) scrolls.push(scrollRecord(el));
@@ -236,7 +253,7 @@
       if (el.nodeType !== 1 || !shown(el)) return;
       const kind = fieldKind(el);
       if (kind) {
-        walk(el);
+        pushField(el, kind);
         return;
       }
       if (scrolls.length < SCROLLS_MOST && scrollable(el)) scrolls.push(scrollRecord(el));
@@ -245,6 +262,7 @@
 
     const root = document.body || document.documentElement;
     if (root) walk(root);
+    prune();
     const page = document.scrollingElement;
     if (page && page.scrollHeight > page.clientHeight + 1) {
       const most = page.scrollHeight - page.clientHeight;

@@ -304,7 +304,9 @@ impl TerminalPane {
         multiple: bool,
         answer: RcBlock<dyn Fn(*mut NSArray<NSURL>)>,
     ) {
-        let Some(seat) = self.panel_seat() else {
+        // A page an agent is acting on (its call is run as a person's gesture) asks for no panel
+        // of the person's: it is turned away as their Cancel is.
+        let Some(seat) = self.panel_seat().filter(|_| !self.agent_active()) else {
             answer.call((ptr::null_mut(),));
             return;
         };
