@@ -64,6 +64,28 @@ pub fn allowed(server: &Server, view: &View) -> Result<(), Failure> {
     }
 }
 
+/// The longest edge, in pixels, of the picture `shot` gives unless `--full` asks for the pane's own
+/// size: the size a card of the pane is shrunk to, and what an agent that reads pictures takes in
+/// whole.
+pub const SHOT_LONG_EDGE: u32 = 1280;
+
+/// The size of the picture of a pane that is `source` pixels across: its own with `full`, else
+/// brought down, in the pane's shape, until its longer edge is [`SHOT_LONG_EDGE`] at most. Never
+/// larger than the pane, never an edge of no pixels.
+#[must_use]
+pub fn picture_size(source: (u32, u32), full: bool) -> (u32, u32) {
+    let (width, height) = (source.0.max(1), source.1.max(1));
+    let long = width.max(height);
+    if full || long <= SHOT_LONG_EDGE {
+        return (width, height);
+    }
+    let shrink = |edge: u32| {
+        let scaled = u64::from(edge) * u64::from(SHOT_LONG_EDGE) + u64::from(long) / 2;
+        u32::try_from(scaled / u64::from(long)).map_or(1, |edge| edge.max(1))
+    };
+    (shrink(width), shrink(height))
+}
+
 /// Whether the action does something to the view, and is not only a way of reading it: what the
 /// level judges as a change.
 pub fn drives(action: &Action) -> bool {
@@ -477,5 +499,27 @@ mod tests {
                 "{method} reaches the pane: {body}"
             );
         }
+    }
+
+    /// A picture is the pane's own size with `--full`, else brought down in the pane's shape to a
+    /// long edge of 1280 pixels; it is never larger than the pane and never has an edge of none.
+    #[test]
+    fn a_picture_is_the_panes_size_or_brought_down_in_its_shape_to_a_long_edge() {
+        assert_eq!(picture_size((2880, 1800), true), (2880, 1800));
+        assert_eq!(picture_size((2880, 1800), false), (1280, 800));
+        assert_eq!(picture_size((1800, 2880), false), (800, 1280));
+        assert_eq!(picture_size((1280, 720), false), (1280, 720));
+        assert_eq!(
+            picture_size((640, 400), false),
+            (640, 400),
+            "never larger than the pane"
+        );
+        assert_eq!(
+            picture_size((10_000, 3), false),
+            (1280, 1),
+            "never an edge of none"
+        );
+        assert_eq!(picture_size((0, 0), false), (1, 1));
+        assert_eq!(picture_size((u32::MAX, u32::MAX), false), (1280, 1280));
     }
 }

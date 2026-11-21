@@ -51,8 +51,8 @@ pub fn perform(
     action: &Action,
 ) -> Result<Done, Failure> {
     match action {
-        Action::Read | Action::Wait { .. } => Ok(Done::default()),
-        Action::Shot { .. } => Err(mistake("this bateri takes no picture of a view yet")),
+        // A picture is a reading that ends in pixels: nothing is done to the page for it.
+        Action::Read | Action::Wait { .. } | Action::Shot { .. } => Ok(Done::default()),
         Action::Command(title) => command(ctx, reading, title),
         Action::Click(word) => click(ctx, env, reading, word, 1),
         Action::DoubleClick(word) => click(ctx, env, reading, word, 2),

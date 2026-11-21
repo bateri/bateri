@@ -3465,6 +3465,35 @@ impl TerminalPane {
         self.ivars().link.get()
     }
 
+    /// The pane as a PNG, for an agent's `bateri view … shot`: its terminal or its page, brought
+    /// down to the size `bt_shell_common::agent::view::picture_size` says (the pane's own with
+    /// `full`). A page that is on the screen is the picture its last frame drew; `fresh` (a pane
+    /// that is not seen, whose page was laid out for the request) is the page as it is now, and a
+    /// page that has not drawn is that too. The terminal under a page is never its picture.
+    ///
+    /// Like a card's picture it is pulled and never pushed ([`TerminalPane::snapshot`]): no frame
+    /// is asked for or counted. The buffers it fills are its own (`Shot`) and are given back with
+    /// it, not kept as the card's are. The reason it cannot be made, when it cannot.
+    pub(crate) fn view_picture(&self, full: bool, fresh: bool) -> Result<Vec<u8>, &'static str> {
+        let link = self.link().ok_or("the pane is not up yet")?;
+        let source = self
+            .ivars()
+            .surface
+            .size()
+            .filter(|(width, height)| *width > 0 && *height > 0)
+            .ok_or("the pane has no room yet")?;
+        let tile = bt_shell_common::agent::view::picture_size(source, full);
+        let mut shot = Shot::default();
+        let still = if link.shows_page() {
+            link.snapshot_page(&mut shot, tile, fresh, frames_clock())
+        } else {
+            link.snapshot(&mut shot, tile)
+        };
+        let still = still.ok_or("the GPU could not draw it")?;
+        bt_core::encode_png(still.width, still.height, &still.rgba)
+            .ok_or("the picture could not be encoded")
+    }
+
     /// The pane as it is now, as an image for a tile `size` points across at `scale` pixels to the
     /// point (a split tab's summary card, `tab_bar`): the whole of its frame — grid, history band,
     /// dock, pictures — drawn at the pane's own size and shrunk on the GPU, so the pixels that

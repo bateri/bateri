@@ -151,6 +151,7 @@ use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
 
 mod page;
+mod page_shot;
 mod still;
 pub use still::{Shot, Snapshot, Stage, StageLook};
 

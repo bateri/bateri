@@ -36,6 +36,11 @@ pub enum Step {
     Pending,
     /// Now.
     Answer(Reply),
+    /// The page is at rest (or the wait has run out) and the request is for a picture of the pane:
+    /// the app draws it ([`super::picture_size`]) and answers with it. `seen` says whether the pane
+    /// is on the screen: a pane that is is pictured as its last frame drew it, one that is not as
+    /// the page is laid out now.
+    Shot { full: bool, seen: bool },
 }
 
 /// The page of a pane as a request has it: its handle and the room it has.
@@ -251,6 +256,15 @@ impl Run {
             }
             _ => {
                 if reading.rest.resting() || elapsed >= self.limit {
+                    if let Action::Shot { full } = &self.view.action {
+                        let mut session = env.session.borrow_mut();
+                        session.active = false;
+                        session.effects = super::Effects::default();
+                        return Step::Shot {
+                            full: *full,
+                            seen: ctx.seen,
+                        };
+                    }
                     self.answer_with(pane, &reading, env)
                 } else {
                     Step::Pending

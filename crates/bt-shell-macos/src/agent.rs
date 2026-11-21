@@ -1059,6 +1059,14 @@ fn viewed(
             return;
         }
     };
+    // The picture of a terminal is made now: there is no page to wait for.
+    if let reading::Action::Shot { full } = &request.action
+        && matches!(pane.view_shown(), reading::Shown::Terminal)
+    {
+        let reply = picture_reply(&pane, shown.terminal.as_str(), *full, true);
+        letter.answer(reply.encode().into_bytes());
+        return;
+    }
     if state(|state| {
         state
             .views
@@ -1142,6 +1150,13 @@ fn look_at_views() {
                 hold_menu_a_while(&pending.pane);
                 pending.letter.answer(reply.encode().into_bytes());
             }
+            reading::Step::Shot { full, seen } => {
+                // A pane that is not seen has no frames: its page was laid out for this request, and
+                // the picture is of that.
+                let reply = picture_reply(&pending.pane, &pending.name, full, !seen);
+                hold_menu_a_while(&pending.pane);
+                pending.letter.answer(reply.encode().into_bytes());
+            }
             reading::Step::Pending => still.push(pending),
         }
     }
@@ -1158,6 +1173,17 @@ fn look_at_views() {
             state(|state| state.looking = false);
             look_at_views();
         });
+    }
+}
+
+/// What a `shot` of `pane` answers: its picture, as a PNG, or why there is none.
+fn picture_reply(pane: &TerminalPane, name: &str, full: bool, fresh: bool) -> Reply {
+    match pane.view_picture(full, fresh) {
+        Ok(png) => Reply::Picture(png),
+        Err(why) => Reply::Failed(Failure::new(
+            Kind::Failed,
+            format!("no picture of {name}: {why}"),
+        )),
     }
 }
 
@@ -1555,6 +1581,52 @@ mod tests {
         // The wait is looked at again by a clock, and a menu is let go of by one.
         assert!(view.contains("crate::arrange::after(VIEW_LOOK"), "{view}");
         assert!(source.contains("crate::arrange::after(MENU_HELD"));
+    }
+
+    /// The picture of a pane for `shot` is made the way a card's is, and is no frame: it reads the
+    /// link through the still paths (`snapshot`, `snapshot_page`), fills a `Shot` of its own and gives
+    /// it back, never the card's (`ivars().shot`), and asks for no frame, no redraw, no page and no
+    /// clock. A terminal's picture is answered at once, the page's when it has come to rest. A
+    /// source scan: the panes are AppKit's and the GPU's.
+    #[test]
+    fn the_picture_of_a_pane_is_a_still_and_no_frame() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let start = pane
+            .find("    pub(crate) fn view_picture(")
+            .expect("the picture of a pane");
+        let end = start + pane[start..].find("\n    }\n").expect("its end");
+        let body = &pane[start..end];
+        for state in [
+            "ivars().shot",
+            "release_snapshot",
+            "request_frame",
+            "poke_page",
+            "rearm_page",
+            "set_page",
+            "setNeedsDisplay",
+            "redraw",
+            "wake",
+            "damage",
+            "present",
+        ] {
+            assert!(
+                !body.contains(state),
+                "the picture names `{state}`:\n{body}"
+            );
+        }
+        assert!(body.contains("Shot::default()"), "{body}");
+        assert!(body.contains("link.snapshot_page(&mut shot, tile, fresh, frames_clock())"));
+        assert!(body.contains("link.snapshot(&mut shot, tile)"));
+        assert!(body.contains("bt_core::encode_png("));
+        assert!(body.contains("picture_size(source, full)"));
+        // The pane that shows a terminal is pictured at once; the one that shows a page when it is
+        // at rest, by the step that says so.
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        assert!(source.contains("reading::Shown::Terminal"));
+        assert!(source.contains("reading::Step::Shot { full, seen }"));
+        assert!(source.contains("picture_reply(&pending.pane, &pending.name, full, !seen)"));
     }
 
     /// While a request is carried out the pane tells what its page says through `Held`, both where

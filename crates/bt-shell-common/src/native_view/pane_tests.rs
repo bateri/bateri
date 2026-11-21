@@ -1446,6 +1446,10 @@ fn ask_in(
         };
         match step {
             Step::Answer(reply) => return reply,
+            // The app draws the picture; the test says what it was asked for.
+            Step::Shot { full, seen } => {
+                return Reply::Text(format!("shot full={full} seen={seen}"));
+            }
             Step::Pending => {
                 if seen {
                     rig.frame(now);
@@ -2246,6 +2250,7 @@ fn a_seen_page_that_no_frame_comes_for_is_answered_at_the_limit_with_what_is_goi
                 now += 0.1;
             }
             Step::Answer(reply) => break reply,
+            Step::Shot { .. } => panic!("a reading is answered with text"),
         }
         assert!(pending < 100, "no answer at the limit");
     };
@@ -2324,4 +2329,57 @@ fn an_element_is_named_by_what_it_was_before_the_action_took_it_away() {
         said.starts_with(&format!("clicked button \"Save\" ({save})")),
         "{said}"
     );
+}
+
+#[test]
+fn a_shot_waits_for_the_page_to_rest_does_nothing_to_it_and_is_the_apps_to_draw() {
+    let (mut rig, fields) = acting();
+    let session = Rc::clone(&fields.session);
+    let asked = answered(ask_in(
+        &mut rig,
+        true,
+        Action::Shot { full: false },
+        &fields,
+        &session,
+        Format::Text,
+    ));
+    assert_eq!(asked, "shot full=false seen=true");
+    let full = answered(ask(&mut rig, true, Action::Shot { full: true }, &fields));
+    assert_eq!(full, "shot full=true seen=true");
+    assert!(!session.borrow().active, "the request is over");
+    // Nothing was done to the page: it heard no key and no press.
+    let heard = names(&mut rig, &fields);
+    assert!(heard.contains("text \"said: \""), "{heard}");
+}
+
+/// A pane that is not seen is pictured as the page is laid out now: the request says so, and the
+/// page was laid out for it (it has a layout and the reading of it has the page's things), with
+/// nothing drawn.
+#[test]
+fn a_shot_of_a_pane_that_is_not_seen_says_so_and_has_the_page_laid_out() {
+    let mut rig = PaneRig::open(ACT);
+    let fields = host_texts();
+    let asked = answered(ask(&mut rig, false, Action::Shot { full: false }, &fields));
+    assert_eq!(asked, "shot full=false seen=false");
+    assert!(
+        rig.handle().page().laid().is_some(),
+        "the page was not laid out for the picture"
+    );
+    assert_eq!(rig.quads(), 0, "nothing was drawn for it");
+}
+
+/// A page that never comes to rest is pictured as it is at the limit, as a reading is answered.
+#[test]
+fn a_shot_of_a_page_that_does_not_come_to_rest_is_asked_for_at_the_limit() {
+    let (mut rig, fields) = acting();
+    // The page's program is waited on: no call is answered.
+    let held = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["k".into()]),
+        &fields,
+    ));
+    assert!(held.contains("call is waiting"), "{held}");
+    let asked = answered(ask(&mut rig, true, Action::Shot { full: false }, &fields));
+    assert_eq!(asked, "shot full=false seen=true");
 }
