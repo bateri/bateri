@@ -456,7 +456,8 @@ fn the_browsers_of_a_page_are_listed_by_id_with_what_they_are_and_where() {
     );
     assert!(before.iter().all(|b| b.status == BrowserState::STARTING));
     rig.until("both ready", |e| ready(e, 0xa1) && ready(e, 0xb2));
-    // The engines are numbered in the order the rooms were made: `0xb2` was first.
+    // The engines are numbered as their threads come to the helper, so which room is engine 1 is
+    // not said: the one that is says what it is, and the other still does not.
     rig.say(&Event::State {
         browser: 1,
         url: "https://example.com/".into(),
@@ -470,12 +471,15 @@ fn the_browsers_of_a_page_are_listed_by_id_with_what_they_are_and_where() {
         found: None,
     });
     rig.until("the title", |e| {
-        states(e, 0xb2).iter().any(|s| s.title == "Example")
+        [0xa1, 0xb2]
+            .iter()
+            .any(|id| states(e, *id).iter().any(|s| s.title == "Example"))
     });
     let seen = rig.rooms.seen();
-    assert_eq!(seen[0].url, "");
-    assert_eq!(seen[1].url, "https://example.com/");
-    assert_eq!(seen[1].title, "Example");
+    let (named, unnamed): (Vec<_>, Vec<_>) = seen.iter().partition(|b| b.title == "Example");
+    assert_eq!((named.len(), unnamed.len()), (1, 1));
+    assert_eq!(named[0].url, "https://example.com/");
+    assert_eq!(unnamed[0].url, "");
     assert!(seen.iter().all(|b| b.status == BrowserState::READY));
 }
 
@@ -810,6 +814,68 @@ fn every_question_is_answered_once_whatever_becomes_of_it() {
     rig.command(
         "no",
         |c| matches!(c, Command::DialogResult { req: 21, ok: false, text } if text.is_empty()),
+    );
+    // A dialog the page left behind (it moved on) is void: it is named for the shell to take down
+    // and, taken down, says nothing, where one merely dropped says no.
+    rig.say(&Event::Dialog {
+        browser: 1,
+        req: 22,
+        kind: DialogKind::Confirm,
+        origin: "https://x.test".into(),
+        message: "leave?".into(),
+        default_text: String::new(),
+    });
+    rig.say(&Event::DialogVoid {
+        browser: 1,
+        req: 22,
+    });
+    rig.until("a void dialog", |e| {
+        e.iter().any(|e| matches!(e, Effect::DialogVoid(..)))
+    });
+    let Some(Effect::Dialog(_, dialog)) =
+        take(&mut rig.effects, |e| matches!(e, Effect::Dialog(..)))
+    else {
+        unreachable!()
+    };
+    assert!(
+        rig.effects
+            .iter()
+            .any(|e| matches!(e, Effect::DialogVoid(_, 22))),
+        "the void dialog is named by its number"
+    );
+    assert_eq!(dialog.req(), 22);
+    dialog.void();
+    // Nothing comes of it: the next thing the helper hears is of the question after it.
+    rig.say(&Event::Dialog {
+        browser: 1,
+        req: 23,
+        kind: DialogKind::Alert,
+        origin: "https://x.test".into(),
+        message: "hi".into(),
+        default_text: String::new(),
+    });
+    rig.until("a dialog after it", |e| {
+        e.iter().any(|e| matches!(e, Effect::Dialog(..)))
+    });
+    let Some(Effect::Dialog(_, after)) =
+        take(&mut rig.effects, |e| matches!(e, Effect::Dialog(..)))
+    else {
+        unreachable!()
+    };
+    drop(after);
+    let answered = rig.command("the dialog after it", |c| {
+        matches!(c, Command::DialogResult { .. })
+    });
+    assert!(
+        matches!(
+            answered,
+            Command::DialogResult {
+                req: 23,
+                ok: false,
+                ..
+            }
+        ),
+        "a void dialog answered: {answered:?}"
     );
     // Files turned away say none.
     rig.say(&Event::FileDialog {

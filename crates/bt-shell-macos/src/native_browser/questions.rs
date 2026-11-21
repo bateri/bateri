@@ -28,6 +28,10 @@ use super::PageBrowsers;
 use crate::pane::TerminalPane;
 use crate::sheets::{self, Asker};
 
+/// The response a dialog's sheet ends with when its dialog is void: a code of ours, none of
+/// AppKit's, which says that nobody is to be answered.
+const VOID: NSModalResponse = -9001;
+
 pub(super) enum Question {
     Menu(Id, Menu),
     Dialog(Dialog),
@@ -132,6 +136,36 @@ impl PageBrowsers {
         self.present(pane);
     }
 
+    /// The page moved on while its dialog was up: the dialog numbered `req` is taken down and is
+    /// answered by nobody, whether it is still in the line, a sheet that is open or one parked
+    /// behind another. One that was answered already is none of these, and nothing is done.
+    pub(super) fn dialog_void(&self, pane: &TerminalPane, req: u32) {
+        let queued = {
+            let mut questions = self.questions.borrow_mut();
+            let at = questions.iter().position(
+                |question| matches!(question, Question::Dialog(dialog) if dialog.req() == req),
+            );
+            at.and_then(|at| questions.remove(at))
+        };
+        if let Some(Question::Dialog(dialog)) = queued {
+            dialog.void();
+            return;
+        }
+        let alert = self
+            .dialogs
+            .borrow()
+            .iter()
+            .find(|(number, _)| *number == req)
+            .map(|(_, alert)| alert.clone());
+        // Ending the sheet runs its completion block, which finds the code and says nothing; a
+        // parked one is ended the same way without ever opening.
+        if let Some(alert) = alert
+            && let Some(seat) = sheets::seat(Asker::Pane(pane))
+        {
+            seat.end(&alert.window(), VOID);
+        }
+    }
+
     /// A sheet was answered: the next question may be asked.
     fn answered(pane: &TerminalPane) {
         if let Some(browsers) = pane.page_browsers() {
@@ -225,23 +259,36 @@ impl PageBrowsers {
         }
         self.asking.set(true);
         let (id, lookup) = (pane.id(), pane.lookup());
+        let req = dialog.req();
         // The block is `Fn`: the dialog is answered once.
         let held = RefCell::new(Some((dialog, field)));
         let answered = RcBlock::new(move |response: NSModalResponse| {
             let Some((dialog, field)) = held.borrow_mut().take() else {
                 return;
             };
-            let text = field.map(|field| field.stringValue().to_string());
-            dialog.answer(
-                response == NSAlertFirstButtonReturn,
-                text.unwrap_or_default(),
-            );
             // audit: the sheet's completion block runs on AppKit's main thread.
             let mtm = MainThreadMarker::new().expect("the sheet block is on the main thread");
-            if let Some(pane) = lookup(mtm, id) {
+            let pane = lookup(mtm, id);
+            if let Some(browsers) = pane.as_ref().and_then(|pane| pane.page_browsers()) {
+                browsers
+                    .dialogs
+                    .borrow_mut()
+                    .retain(|(number, _)| *number != req);
+            }
+            if response == VOID {
+                dialog.void();
+            } else {
+                let text = field.map(|field| field.stringValue().to_string());
+                dialog.answer(
+                    response == NSAlertFirstButtonReturn,
+                    text.unwrap_or_default(),
+                );
+            }
+            if let Some(pane) = pane {
                 Self::answered(&pane);
             }
         });
+        self.dialogs.borrow_mut().push((req, alert.clone()));
         seat.begin(&alert, &answered);
     }
 

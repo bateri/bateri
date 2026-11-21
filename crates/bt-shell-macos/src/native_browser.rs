@@ -247,6 +247,9 @@ pub(crate) struct PageBrowsers {
     pressed_at: Cell<Point>,
     questions: RefCell<VecDeque<questions::Question>>,
     asking: Cell<bool>,
+    /// The dialogs of web pages that are up as sheets or parked behind another, by their number:
+    /// a dialog the page left behind is taken down by its sheet ([`questions`]).
+    dialogs: RefCell<Vec<(u32, objc2::rc::Retained<objc2_app_kit::NSAlert>)>>,
     /// The question at the head of the queue waits for a sheet that is up to end.
     seat_wait: Cell<bool>,
     installing: Cell<bool>,
@@ -287,6 +290,7 @@ impl PageBrowsers {
             pressed_at: Cell::new(Point::new(0.0, 0.0)),
             questions: RefCell::new(VecDeque::new()),
             asking: Cell::new(false),
+            dialogs: RefCell::new(Vec::new()),
             seat_wait: Cell::new(false),
             installing: Cell::new(false),
             probing: RefCell::new(None),
@@ -389,6 +393,10 @@ impl PageBrowsers {
             }
             Effect::Dialog(_, dialog) => {
                 self.ask(pane, questions::Question::Dialog(dialog));
+                false
+            }
+            Effect::DialogVoid(_, req) => {
+                self.dialog_void(pane, req);
                 false
             }
             Effect::Files(_, files) => {

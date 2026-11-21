@@ -58,6 +58,10 @@ pub trait Shell {
     fn menu(&mut self, room: Id, menu: Menu);
     /// A dialog of the web page (`alert`, `confirm`, `prompt`, leaving the page) is asked for.
     fn dialog(&mut self, room: Id, dialog: Dialog);
+    /// The page moved on while a dialog was up: the dialog numbered `req` ([`Dialog::req`]) is
+    /// void, and the shell takes it down (it may be a sheet that is open, one parked behind another
+    /// or one still in the line) without answering it ([`Dialog::void`]).
+    fn dialog_void(&mut self, room: Id, req: u32);
     /// Files are asked for.
     fn files(&mut self, room: Id, files: Files);
     /// A download is offered.
@@ -86,6 +90,8 @@ pub enum Effect {
     Cursor(Id, Cursor),
     Menu(Id, Menu),
     Dialog(Id, Dialog),
+    /// The dialog of this number is void ([`Shell::dialog_void`]).
+    DialogVoid(Id, u32),
     Files(Id, Files),
     Download(Id, Download),
     Downloaded(Id, PathBuf, bool),
@@ -113,6 +119,9 @@ impl Shell for Vec<Effect> {
     }
     fn dialog(&mut self, room: Id, dialog: Dialog) {
         self.push(Effect::Dialog(room, dialog));
+    }
+    fn dialog_void(&mut self, room: Id, req: u32) {
+        self.push(Effect::DialogVoid(room, req));
     }
     fn files(&mut self, room: Id, files: Files) {
         self.push(Effect::Files(room, files));
@@ -194,10 +203,22 @@ pub struct Dialog {
     pub origin: String,
     pub message: String,
     pub default_text: String,
+    req: u32,
     answer: Answer,
 }
 
 impl Dialog {
+    /// The dialog's number, which [`Shell::dialog_void`] names it by.
+    pub fn req(&self) -> u32 {
+        self.req
+    }
+
+    /// The dialog is void (the page moved on): taken down with no answer. The engine has no one
+    /// waiting for one and would ignore it.
+    pub fn void(mut self) {
+        self.answer.otherwise = None;
+    }
+
     /// The person's answer: `ok` for OK (or Leave), `text` for a prompt's.
     pub fn answer(self, ok: bool, text: String) {
         let req = self.answer.req();
@@ -1020,6 +1041,7 @@ impl Rooms {
                     origin,
                     message,
                     default_text,
+                    req,
                     answer: Answer::new(
                         handle,
                         Command::DialogResult {
@@ -1030,6 +1052,7 @@ impl Rooms {
                     ),
                 },
             ),
+            Event::DialogVoid { req, .. } => shell.dialog_void(id, req),
             Event::FileDialog {
                 req,
                 mode,
