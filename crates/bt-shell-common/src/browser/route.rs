@@ -1,5 +1,5 @@
-//! The way from this Mac to the program's machine (plan 034 Phase 6, Karar 2): what the proxy
-//! asks to have a connection made, and what shows that a way ends where it is thought to.
+//! The way from this Mac to the program's machine: what the proxy asks to have a connection
+//! made, and what shows that a way ends where it is thought to.
 //!
 //! The proxy knows [`Dialer`] and nothing of kablo or of this Mac's sockets: a way is whatever
 //! makes a connection "as seen from the program's machine" — this Mac's own TCP ([`Direct`]) for a

@@ -1,4 +1,4 @@
-//! A profile's key and what the helper is given for it (Karar 4).
+//! A profile's key and what the helper is given for it.
 //!
 //! The key has three parts: the **machine** (where the program runs: the Mac or one of kablo's
 //! servers), the **application** (the name the program gave itself) and the **name** the page
@@ -15,7 +15,7 @@ use std::fmt;
 
 use crate::digest::sha256_hex;
 
-/// The longest name a page may give (`[a-z0-9-]`, the kit's rule, plan 034 Phase 1).
+/// The longest name a page may give (`[a-z0-9-]`, the kit's rule).
 pub const NAME_MAX: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

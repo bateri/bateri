@@ -1,5 +1,5 @@
 //! `bateri browser`: what an agent asks of the browsers a pane's page shows, and the part of the
-//! answer that needs no window (plan 034, Phase 8). The shell (`bt-shell-macos`) finds the pane
+//! answer that needs no window. The shell (`bt-shell-macos`) finds the pane
 //! and sends the helper its jobs; what is decided here is whose the browser is (the level), what a
 //! word of the request means, and how an answer is put into a reply or into a file.
 //!

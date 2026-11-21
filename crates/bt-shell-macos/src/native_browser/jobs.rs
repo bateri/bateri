@@ -1,4 +1,4 @@
-//! What an agent asks of a page's browsers (`bateri browser`, plan 034 Phase 8): which browser it
+//! What an agent asks of a page's browsers (`bateri browser`): which browser it
 //! means, the job the helper is given for it, and the answer that comes back to whoever waits.
 //!
 //! The helper does a job with the engine's DevTools protocol and says how it ended with the

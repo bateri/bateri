@@ -6440,7 +6440,7 @@ impl TerminalPane {
         self.ivars().identity.app_name.clone()
     }
 
-    /// How many device pixels a point is on the display the pane is on.
+    /// How many device pixels a point is on the display the pane is on (1, 2 or 3: f32 holds it).
     #[allow(clippy::cast_possible_truncation)]
     pub(crate) fn display_scale(&self) -> f32 {
         self.window()
@@ -6659,7 +6659,7 @@ impl TerminalPane {
         if let Some(browsers) = self.page_browsers()
             && browsers.has_keyboard()
         {
-            browsers.edit_menu(key);
+            browsers.edit_menu(self, key);
             return true;
         }
         let Some(editors) = self.page_editing() else {
@@ -6719,7 +6719,7 @@ impl TerminalPane {
     /// Edit ▸ Undo with the keyboard in a browser: the browser's. `false` where none has it.
     pub(crate) fn browser_undo(&self) -> bool {
         self.page_browsers()
-            .is_some_and(|browsers| browsers.edit_menu('z'))
+            .is_some_and(|browsers| browsers.edit_menu(self, 'z'))
     }
 
     /// Where an input method puts its window for a browser that has the keyboard: a line's height
@@ -6738,6 +6738,7 @@ impl TerminalPane {
         let window = self.window()?;
         let in_pane = self.convertPoint_fromView(window.convertPointFromScreen(at), None);
         let bounds = self.bounds();
+        // A point of a pane is a few thousand points at most: f32 holds it to a fraction of one.
         #[allow(clippy::cast_possible_truncation)]
         Some(PagePoint::new(
             (in_pane.x - bounds.origin.x) as f32,
@@ -9082,7 +9083,7 @@ mod tests {
         // A browser's paste is the engine's, by the `Edit` command, and reads nothing here.
         let menu = &pane[pane.find("fn page_editor_menu").expect("the menu")..];
         let menu = &menu[..menu.find("\n    }\n").expect("its end")];
-        let sends = menu.find("browsers.edit_menu(key)").expect(menu);
+        let sends = menu.find("browsers.edit_menu(self, key)").expect(menu);
         let route = menu.find("let Some(editors)").expect(menu);
         assert!(
             !menu[..route].contains("clipboard::read(") && sends < route,

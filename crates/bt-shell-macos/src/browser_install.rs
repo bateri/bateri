@@ -1,6 +1,6 @@
-//! The browser helper on this Mac: finding it, downloading it, checking it, running it (plan 034,
-//! Karar 1, 5, 8). The rules are `bt_shell_common::browser`'s; this is what needs the platform:
-//! `NSURLSession` ([`fetch`]), `ditto`, the signature ([`signature`]) and the process.
+//! The browser helper on this Mac: finding it, downloading it, checking it, running it. The rules
+//! are `bt_shell_common::browser`'s; this is what needs the platform: `NSURLSession`
+//! ([`fetch`]), `ditto`, the signature ([`signature`]) and the process.
 //!
 //! **No download without the person's word.** [`Installer::check`] reads the release notice and
 //! says what is on offer; [`Installer::install`] downloads and is called after the person has
@@ -203,8 +203,13 @@ impl Installer {
         }
         match self.check() {
             Check::Offer(offer) => {
-                let _ = std::fs::write(&stamp, "");
-                Some(self.install(&offer, progress, cancel))
+                // The stamp says "looked and done": a download that failed or was stopped is
+                // tried again at the next start and not in a day.
+                let installed = self.install(&offer, progress, cancel);
+                if installed.is_ok() {
+                    let _ = std::fs::write(&stamp, "");
+                }
+                Some(installed)
             }
             Check::Unavailable(_) => None,
             Check::Current | Check::Refused(_) => {

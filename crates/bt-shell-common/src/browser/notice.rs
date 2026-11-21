@@ -1,4 +1,4 @@
-//! The release notice's offer and what bateri does with it (Karar 5): an offer is taken only when
+//! The release notice's offer and what bateri does with it: an offer is taken only when
 //! it is a version bateri may run, speaks the protocol bateri speaks and is newer than what is
 //! installed. Nothing here reads the network or the disk: the verdict is a function.
 

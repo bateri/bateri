@@ -1,6 +1,5 @@
-//! The way from this Mac to the program's machine, found before the first browser starts (plan
-//! 034 Phase 6): the program is asked for a listener on its machine's loopback that gives a token
-//! to one connection ([`bt_core::Session::probe`], §4.10 of the protocol), and the way that would be
+//! The way from this Mac to the program's machine, found before the first browser starts: the program is asked
+//! for a listener on its machine's loopback that gives a token to one connection ([`bt_core::Session::probe`], §4.10 of the protocol), and the way that would be
 //! used ([`TerminalPane::browser_way`]) connects to it and must read the token back
 //! ([`route::prove`]). What is shown is what the pane's browsers go by; what is not leaves them
 //! with a line that says there is no route, and no engine is started for them.

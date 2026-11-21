@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use browser_ipc::message::{
-    AgentOutput, Command, Cursor, DialogKind, DownloadState, Event, FileMode, KeyData, KeyKind,
-    MenuItem, modifier,
+    AgentOutput, Command, Cursor, DialogKind, DownloadState, EditAction, Event, FileMode, KeyData,
+    KeyKind, MenuItem, modifier,
 };
 use browser_ipc::{Frame, Surface};
 use pencere_view::{
@@ -912,6 +912,7 @@ impl Rooms {
                         count: f.count,
                         current: (f.current > 0).then_some(f.current),
                     }),
+                    // A zoom is a small number (a quarter to five): f32 loses nothing a person sees.
                     #[allow(clippy::cast_possible_truncation)]
                     zoom: zoom as f32,
                 };
@@ -950,6 +951,19 @@ impl Rooms {
                 BrowserWindows::Page => shell.window(id, &url, background),
             },
             Event::UnhandledKey { kind, key, .. } => {
+                // The Edit menu's own keys go to the engine as keys, the page's first (a page
+                // with its own undo takes ⌘Z and the key is not given back); one that comes back
+                // was nobody's, and is the menu's command, which the engine runs on what has the
+                // focus. The page is not given these keys.
+                if let Some(action) = edit_of_key(&key) {
+                    if kind == KeyKind::Down {
+                        let _ = handle.send(Command::Edit {
+                            browser: handle.id(),
+                            action,
+                        });
+                    }
+                    return;
+                }
                 let Some(page_key) = key_of(&key) else {
                     return;
                 };
@@ -1080,6 +1094,7 @@ pub const FINDING: &str = "Finding the way to the program's machine…";
 
 /// The size the engine draws a room at, points: the room's, a point at least.
 fn size_of(rect: Rect) -> (u32, u32) {
+    // `as` from a float saturates: a room is a point at least and never wraps.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let side = |length: f32| length.round().max(1.0) as u32;
     (side(rect.w), side(rect.h))
@@ -1158,6 +1173,24 @@ pub fn mods_of(mods: u32) -> Mods {
     }
 }
 
+/// The command of the Edit menu that a key the engine gave back stands for: ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z
+/// and ⇧⌘Z, with no other modifier (⌥⌘V is nobody's here).
+pub fn edit_of_key(key: &KeyData) -> Option<EditAction> {
+    let mods = mods_of(key.mods);
+    if !mods.command || mods.control || mods.alt {
+        return None;
+    }
+    match (key.vk, mods.shift) {
+        (65, false) => Some(EditAction::SelectAll),
+        (67, false) => Some(EditAction::Copy),
+        (86, false) => Some(EditAction::Paste),
+        (88, false) => Some(EditAction::Cut),
+        (90, false) => Some(EditAction::Undo),
+        (90, true) => Some(EditAction::Redo),
+        _ => None,
+    }
+}
+
 /// The key a key the engine gave back is for the page: the keys the page reads by their
 /// virtual-key number, and the rest by the character they make without the modifiers (⌘K is `k`).
 pub fn key_of(key: &KeyData) -> Option<Key> {
@@ -1175,8 +1208,7 @@ pub fn key_of(key: &KeyData) -> Option<Key> {
         39 => Key::Right,
         40 => Key::Down,
         46 => Key::Delete,
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        vk @ 112..=131 => Key::Function((vk - 111) as u8),
+        vk @ 112..=131 => Key::Function(u8::try_from(vk - 111).unwrap_or(1)),
         _ => {
             let character = char::from_u32(u32::from(key.unmodified))
                 .filter(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(c))

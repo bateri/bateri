@@ -1,5 +1,5 @@
 //! The browser element's side that is the same on every platform: the helper that draws it, what
-//! bateri installs and when (plan 034, Karar 1, 4, 5).
+//! bateri installs and when.
 //!
 //! The element is a page of Chromium, which runs in a helper of its own (`bateri-browser`, a hidden
 //! application in a repository of its own), not in bateri. bateri finds it, checks it, starts it

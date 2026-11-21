@@ -613,6 +613,72 @@ fn a_key_nobody_used_is_the_pages_on_its_press_and_its_release_follows_only_a_pr
 }
 
 #[test]
+fn an_edit_key_the_engine_gives_back_is_the_menus_command_and_is_not_the_pages() {
+    use browser_ipc::message::EditAction;
+    let mut rig = rig("editkeys", true);
+    rig.open(1);
+    for (vk, character, mods, action) in [
+        (65, 'a', modifier::COMMAND, EditAction::SelectAll),
+        (67, 'c', modifier::COMMAND, EditAction::Copy),
+        (88, 'x', modifier::COMMAND, EditAction::Cut),
+        (86, 'v', modifier::COMMAND, EditAction::Paste),
+        (90, 'z', modifier::COMMAND, EditAction::Undo),
+        (
+            90,
+            'z',
+            modifier::COMMAND | modifier::SHIFT,
+            EditAction::Redo,
+        ),
+    ] {
+        rig.say(&unhandled(KeyKind::Down, vk, character, mods));
+        rig.say(&unhandled(KeyKind::Up, vk, character, mods));
+        let command = rig.command("the menu's command", |c| matches!(c, Command::Edit { .. }));
+        assert!(
+            matches!(&command, Command::Edit { action: a, .. } if *a == action),
+            "{vk} {mods}: {command:?}"
+        );
+    }
+    // What is not the menu's key (other modifiers, ⌘K) is the page's as before, and the page is
+    // given none of the edit keys: the press and the release above made no effect for it.
+    rig.say(&unhandled(
+        KeyKind::Down,
+        67,
+        'c',
+        modifier::COMMAND | modifier::ALT,
+    ));
+    rig.say(&unhandled(KeyKind::Down, 67, 'c', modifier::CONTROL));
+    rig.say(&unhandled(KeyKind::Down, 75, 'k', modifier::COMMAND));
+    rig.until("the keys", |e| {
+        e.iter()
+            .filter(|e| matches!(e, Effect::UnusedKey(..)))
+            .count()
+            >= 3
+    });
+    let keys: Vec<Key> = rig
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::UnusedKey(_, key, _, true) => Some(*key),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            Key::Character('c'),
+            Key::Character('c'),
+            Key::Character('k')
+        ]
+    );
+    assert!(
+        !rig.effects
+            .iter()
+            .any(|e| matches!(e, Effect::UnusedKey(_, _, _, false))),
+        "the release of an edit key is the page's"
+    );
+}
+
+#[test]
 fn a_key_is_the_pages_before_the_browsers_where_the_page_asked_for_it() {
     let mut rig = rig("pagekeys", true);
     let mut page = room(1, None, (100.0, 100.0));

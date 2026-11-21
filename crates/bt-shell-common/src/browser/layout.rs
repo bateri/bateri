@@ -1,4 +1,4 @@
-//! Where the installed helpers are, and which of them stays (Karar 5).
+//! Where the installed helpers are, and which of them stays.
 //!
 //! One folder per version under a root only this user can enter (`0700`): the helper is
 //! started from here, so another user able to write here could be a helper. A version is
@@ -6,8 +6,10 @@
 //! folder of its own, so a download that stops halfway is never taken for one. What is below the
 //! newest version and no running helper uses is deleted ([`Layout::prune`]): a helper holds a
 //! shared lock on its version's `.in-use` while it runs, and prune takes that lock to delete,
-//! so it can neither delete a version in use (of this bateri or of another one that shares the
-//! folder) nor race the helper's start.
+//! so it cannot delete a version in use (of this bateri or of another one that shares the
+//! folder). A start chooses a version and then claims it, and a prune can come between the two:
+//! [`Layout::hold_newest`] looks again, once the claim is made, that the app is still in its
+//! place, and chooses again when it is not.
 //!
 //! Beside the folders sits `floor`: the highest version number any notice has named as the oldest
 //! to run and the highest ever installed. Nothing below it is installed again (`notice::judge`).
@@ -29,6 +31,8 @@ pub const EXECUTABLE: &str = "Contents/MacOS/bateri-browser";
 const IN_USE: &str = ".in-use";
 const FLOOR: &str = "floor";
 const STAGING: &str = ".staging-";
+/// How many times a start chooses a version again when a prune took the one it chose.
+const HOLD_TRIES: usize = 4;
 /// A staging folder nobody has written to for this long is the leftover of a stopped install.
 const STAGING_LIFE: Duration = Duration::from_secs(60 * 60);
 
@@ -168,6 +172,27 @@ impl Layout {
         let temporary = self.root.join(format!("{FLOOR}.{}", std::process::id()));
         fs::write(&temporary, version.to_string())?;
         fs::rename(&temporary, self.root.join(FLOOR))
+    }
+
+    /// The newest version, claimed for a helper about to run from it. A prune that took the
+    /// version between its choice and its claim (the claim does not stop one that already holds
+    /// the lock) is seen by the look at the app after it, and the newest is chosen again.
+    pub fn hold_newest(&self) -> io::Result<Option<(Version, Hold)>> {
+        for _ in 0..HOLD_TRIES {
+            let Some(version) = self.newest() else {
+                return Ok(None);
+            };
+            match self.hold(&version) {
+                Ok(hold) if self.app(&version).is_dir() => return Ok(Some((version, hold))),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the installed versions kept going while one was claimed",
+        ))
     }
 
     /// Claims `version` for a helper about to run from it.
@@ -348,6 +373,24 @@ mod tests {
         assert_eq!(layout.prune(), vec![v("0.2.0")]);
         assert_eq!(layout.installed(), vec![v("0.3.0")]);
         assert!(layout.prune().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_newest_version_is_claimed_and_a_claimed_one_is_not_pruned() {
+        let root = temp("hold-newest");
+        let layout = Layout::new(&root);
+        assert!(layout.hold_newest().unwrap().is_none());
+        install(&layout, "0.1.0", "0");
+        let (version, held) = layout.hold_newest().unwrap().expect("one is installed");
+        assert_eq!(version, v("0.1.0"));
+        // A newer one comes and the pruning that follows leaves the claimed one: it runs.
+        install(&layout, "0.2.0", "0");
+        assert!(layout.prune().is_empty());
+        drop(held);
+        assert_eq!(layout.prune(), vec![v("0.1.0")]);
+        let (version, _held) = layout.hold_newest().unwrap().expect("one is installed");
+        assert_eq!(version, v("0.2.0"));
         fs::remove_dir_all(&root).unwrap();
     }
 

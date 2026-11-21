@@ -1,5 +1,5 @@
-//! The line in front of a kablo connection's streams (plan 034, Karar 2): kablo keeps 128 streams
-//! open on a connection and lets 16 be connecting at once, and refuses the rest. A cold page of a
+//! The line in front of a kablo connection's streams: kablo keeps 128
+//! streams open on a connection and lets 16 be connecting at once, and refuses the rest. A cold page of a
 //! dev server asks for twenty at the same moment, so what asks waits here for its turn instead —
 //! at most [`MAX_CONNECTING`] connecting and [`MAX_OPEN`] open, a little under what kablo takes,
 //! counted **together** for everything that makes a stream through the connection: the browsers'

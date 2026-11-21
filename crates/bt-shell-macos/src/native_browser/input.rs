@@ -171,14 +171,36 @@ pub(super) fn edit_action(key: char) -> EditAction {
     }
 }
 
+/// Whether the event that ran the Edit menu's item for `item` (`c`, `x`, `v`, `a`, `z`) was the
+/// item's own key: ⌘ and that key, nothing else held. A click on the row has no key; ⇧⌘Z is not
+/// Undo's.
+pub(super) fn is_key_of(
+    item: char,
+    ignoring: Option<&str>,
+    flags: objc2_app_kit::NSEventModifierFlags,
+) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as Flag;
+    flags.contains(Flag::Command)
+        && !flags.intersects(Flag::Shift | Flag::Option | Flag::Control)
+        && ignoring.is_some_and(|text| {
+            let mut chars = text.chars();
+            chars.next().is_some_and(|c| c.eq_ignore_ascii_case(&item)) && chars.next().is_none()
+        })
+}
+
+/// A length in points, rounded to the whole points the engine counts in. `as` from a float
+/// saturates, and a length on a screen is nowhere near what an `i32` holds.
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn rounded(length: f32) -> i32 {
+    length.round() as i32
+}
+
 /// How far the engine scrolls for what the wheel says, in the engine's points: the pane's own
 /// reading of the event is the page's (a line is a dozen points there, a trackpad's own), and a
 /// line of a wheel is about forty points in a browser. The sign is the engine's, up positive.
 pub(super) fn wheel_of(dx: f32, dy: f32, precise: bool) -> (i32, i32) {
     let scale = if precise { 1.0 } else { 40.0 / 12.0 };
-    #[allow(clippy::cast_possible_truncation)]
-    let part = |d: f32| (-d * scale).round() as i32;
-    (part(dx), part(dy))
+    (rounded(-dx * scale), rounded(-dy * scale))
 }
 
 pub(super) fn button_of(button: Pressed) -> Button {
@@ -200,7 +222,6 @@ pub(super) fn held_bit(button: Pressed) -> u32 {
 
 /// The pointer the page asks for, as AppKit has it.
 pub(super) fn cursor_of(cursor: Cursor) -> Retained<NSCursor> {
-    #[allow(deprecated)]
     match cursor {
         Cursor::Hand => NSCursor::pointingHandCursor(),
         Cursor::IBeam | Cursor::VerticalText => NSCursor::IBeamCursor(),
@@ -211,7 +232,10 @@ pub(super) fn cursor_of(cursor: Cursor) -> Retained<NSCursor> {
         Cursor::Copy => NSCursor::dragCopyCursor(),
         Cursor::Alias => NSCursor::dragLinkCursor(),
         Cursor::ContextMenu => NSCursor::contextualMenuCursor(),
+        // The two resize cursors' replacements are macOS 15's; bateri runs on 14.
+        #[allow(deprecated)]
         Cursor::ColumnResize | Cursor::ResizeEastWest => NSCursor::resizeLeftRightCursor(),
+        #[allow(deprecated)]
         Cursor::RowResize | Cursor::ResizeNorthSouth => NSCursor::resizeUpDownCursor(),
         _ => NSCursor::arrowCursor(),
     }
@@ -228,6 +252,21 @@ mod tests {
         assert_eq!(edit_action('v'), EditAction::Paste);
         assert_eq!(edit_action('z'), EditAction::Undo);
         assert_eq!(edit_action('a'), EditAction::SelectAll);
+    }
+
+    #[test]
+    fn an_edit_item_is_run_by_its_key_only_when_the_event_is_that_key() {
+        use objc2_app_kit::NSEventModifierFlags as Flag;
+        assert!(is_key_of('z', Some("z"), Flag::Command));
+        assert!(is_key_of('c', Some("C"), Flag::Command | Flag::CapsLock));
+        // A click on the row (no characters), another key, ⇧⌘Z, ⌥⌘Z, ⌃⌘Z and a bare z are not.
+        assert!(!is_key_of('z', None, Flag::Command));
+        assert!(!is_key_of('z', Some("x"), Flag::Command));
+        assert!(!is_key_of('z', Some("z"), Flag::Command | Flag::Shift));
+        assert!(!is_key_of('z', Some("z"), Flag::Command | Flag::Option));
+        assert!(!is_key_of('z', Some("z"), Flag::Command | Flag::Control));
+        assert!(!is_key_of('z', Some("z"), Flag::empty()));
+        assert!(!is_key_of('z', Some("zz"), Flag::Command));
     }
 
     #[test]

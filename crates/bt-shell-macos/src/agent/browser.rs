@@ -1,4 +1,4 @@
-//! `bateri browser` (plan 034, Phase 8): the app finds the pane a request names, judges the level
+//! `bateri browser`: the app finds the pane a request names, judges the level
 //! for the browser's machine ([`browser::judge`]) and does what is asked of the pane's browsers,
 //! which are the helper's, on this computer. The pane's page is where they are; the pane is the
 //! one of the terminal the request names, so a program on a server asks for the browsers of its

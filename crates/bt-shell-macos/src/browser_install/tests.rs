@@ -505,6 +505,34 @@ fn the_daily_look_is_made_once_a_day_and_only_where_an_engine_is_installed() {
 }
 
 #[test]
+fn an_update_that_did_not_come_to_an_end_is_looked_for_again_and_not_a_day_later() {
+    let rig = rig("daily-failed");
+    Release::new("0.1.0").publish(&rig.server, &rig.root);
+    install(&rig, &offer(rig.installer.check())).unwrap();
+    let release = Release::new("0.2.0");
+    release.publish(&rig.server, &rig.root);
+    let never = AtomicBool::new(false);
+    // The download is not what the notice says it is.
+    rig.server
+        .put(&offer(rig.installer.check()).asset.name, b"not the archive");
+    let failed = rig
+        .installer
+        .update_if_due(&|_, _| {}, &never)
+        .expect("due");
+    assert!(failed.is_err(), "a download that is not the release");
+    // The day's look is the one that ended in an engine (or in none to be had): this one is due
+    // again.
+    release.publish(&rig.server, &rig.root);
+    let updated = rig
+        .installer
+        .update_if_due(&|_, _| {}, &never)
+        .expect("due again")
+        .unwrap();
+    assert_eq!(updated, v("0.2.0"));
+    std::fs::remove_dir_all(&rig.root).unwrap();
+}
+
+#[test]
 fn what_is_signed_meets_its_requirement_and_nothing_changed_after_does() {
     let dir = temp("signed");
     let app = signed_app(&dir, IDENTIFIER);
@@ -570,7 +598,7 @@ fn a_team_identifier_is_ten_letters_and_digits_and_nothing_else_gets_into_the_re
     }
 }
 
-/// The helper Phase 3 built, when `BATERI_BROWSER_APP` names it: signed by the team of the
+/// The real helper, when `BATERI_BROWSER_APP` names it: signed by the team of the
 /// Developer ID, which an ad-hoc test cannot be. Not part of the gate (the app is a build of
 /// another repository).
 #[test]
@@ -788,7 +816,7 @@ impl Probe {
             browser: id,
             on: true,
         });
-        // The engine takes no key for a while after a load (Phase 3).
+        // The engine takes no key for a while after a load.
         self.drain(Duration::from_millis(700));
     }
 
@@ -1128,6 +1156,79 @@ fn the_real_engine_edits_text_with_these_keys_when_one_is_at_hand() {
     });
     probe.settle();
     assert_eq!(probe.title, "s:0:15:15", "select all in the field");
+    let _ = std::fs::remove_dir_all(&probe.root);
+}
+
+/// The keys of the Edit menu with the real engine: sent as keys (the page has them first, as in
+/// Chrome), the engine does none of their work itself and gives each one back when the page took
+/// it not, and keeps one the page took (its `keydown` handler said `preventDefault`). That is why
+/// the menu's command may wait for the key to come back ([`bt_shell_common::browser::rooms`]).
+/// Measured on the helper of `browser` rev 55687f4
+/// (`BATERI_BROWSER_APP=… cargo test -p bt-shell-macos --lib the_real_engine_gives_back`).
+#[test]
+fn the_real_engine_gives_back_an_edit_key_the_page_did_not_take_and_keeps_one_it_did() {
+    use browser_ipc::message::{KeyKind, modifier as m};
+    let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+        return;
+    };
+    let mut probe = Probe::start("editkeys", app);
+    // (name, virtual key, native key, character, mods)
+    let keys: &[(&str, i32, i32, u16, u32)] = &[
+        ("cmd-a", 65, 0, 'a' as u16, m::COMMAND),
+        ("cmd-c", 67, 8, 'c' as u16, m::COMMAND),
+        ("cmd-x", 88, 7, 'x' as u16, m::COMMAND),
+        ("cmd-v", 86, 9, 'v' as u16, m::COMMAND),
+        ("cmd-z", 90, 6, 'z' as u16, m::COMMAND),
+        ("cmd-shift-z", 90, 6, 'z' as u16, m::COMMAND | m::SHIFT),
+    ];
+    for (name, vk, native, character, mods) in keys {
+        probe.load(EDIT_PAGE);
+        probe.click(100, 25);
+        probe.drain(Duration::from_millis(300));
+        probe.tap(key_data(35, 119, 0xF72B, 0));
+        probe.settle();
+        let before = probe.title.clone();
+        probe.returned.clear();
+        probe.tap(key_data(*vk, *native, *character, *mods));
+        probe.settle();
+        // The engine did none of the work (the field and the pasteboard are as they were) and
+        // gave the press back, with its modifiers, and the release after it.
+        let back: Vec<_> = probe
+            .returned
+            .iter()
+            .filter(|(_, key, _)| key == vk)
+            .map(|(kind, _, mods)| (*kind, *mods))
+            .collect();
+        assert_eq!(
+            (probe.title.as_str(), back),
+            (
+                before.as_str(),
+                vec![(KeyKind::Down, *mods), (KeyKind::Up, *mods)]
+            ),
+            "{name}"
+        );
+    }
+    // A page that takes ⌘Z (its own undo: `preventDefault`) is not given it back, and the key is
+    // the page's alone.
+    probe.load(
+        "<title>init</title><body><script>document.addEventListener('keydown',e=>{\
+         if(e.metaKey&&e.key=='z'){e.preventDefault();document.title='mine'}})</script>",
+    );
+    probe.click(100, 150);
+    probe.drain(Duration::from_millis(300));
+    probe.settle();
+    probe.returned.clear();
+    probe.tap(key_data(90, 6, 'z' as u16, m::COMMAND));
+    probe.settle();
+    assert_eq!(probe.title, "mine");
+    assert!(
+        !probe
+            .returned
+            .iter()
+            .any(|(kind, key, _)| *kind == KeyKind::Down && *key == 90),
+        "a key the page took was given back: {:?}",
+        probe.returned
+    );
     let _ = std::fs::remove_dir_all(&probe.root);
 }
 

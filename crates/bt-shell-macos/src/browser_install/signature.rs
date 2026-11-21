@@ -1,4 +1,4 @@
-//! Whose an app is (Karar 5): the helper is run only when its signature is ours. The static check
+//! Whose an app is: the helper is run only when its signature is ours. The static check
 //! of Security.framework (`SecStaticCodeCheckValidity`) against a requirement — "signed by
 //! Apple's chain, and by our team" — over the app **at the path that will be run**, its nested
 //! code and every architecture, strictly (a changed byte, a file added to the bundle and a

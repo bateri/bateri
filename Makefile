@@ -877,7 +877,7 @@ install: kablo-rev bundle
 # first time). It never updates itself (no Sparkle) and does not answer `bateri://` links (the
 # installed bateri does). A copy that is open is not quit for you: ⌘Q ends its terminals unless
 # `keep_running = "quit"`, so quit it yourself and run this again.
-# The browser element's engine (plan 034) is a release, which a copy with no team signature does
+# The browser element's engine is a release, which a copy with no team signature does
 # not trust: `make dev BROWSER_APP=<the helper's app>` makes the copy run that app where it is
 # (`BateriBrowserApp` in its `Info.plist`, read only by a copy that names a profile), with no
 # signature check and no keychain; without it the copy has no engine.

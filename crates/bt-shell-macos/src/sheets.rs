@@ -391,6 +391,10 @@ pub(crate) fn open_parked(pane: &TerminalPane) {
     if pane.is_closed() {
         return;
     }
+    // The questions of the pane's browsers wait for the same seat: a sheet that ended gives it.
+    if let Some(browsers) = pane.page_browsers() {
+        browsers.seat_may_be_free(pane);
+    }
     let (Some(seat), Some(container)) = (seat(Asker::Pane(pane)), cover_of(pane)) else {
         return;
     };

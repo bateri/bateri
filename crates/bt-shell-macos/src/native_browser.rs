@@ -1,4 +1,4 @@
-//! The browsers of a page in a pane (plan 034, Phase 5): the room a page names for a browser is
+//! The browsers of a page in a pane: the room a page names for a browser is
 //! where the engine's frames are drawn, and what the person does there goes to the engine.
 //!
 //! The engine runs in the helper ([`bt_shell_common::browser`]); this is the pane's side of it.
@@ -161,6 +161,7 @@ impl Surfaces for Pictures {
             // the new size the old one stays sharp, cut to the room, with the room's fill
             // showing where it is short.
             let size = texture.size();
+            // A texture's side is a few thousand pixels at most: f32 holds it exactly.
             #[allow(clippy::cast_precision_loss)]
             let rect = UiRect::new(room.x, room.y, size.width as f32, size.height as f32);
             let clip = intersection(room, visible);
@@ -173,6 +174,7 @@ impl Surfaces for Pictures {
         }
         if let (Some(texture), Some((x, y))) = (&shown.popup, shown.popup_at) {
             let size = texture.size();
+            // The popup's place and size are a few thousand pixels at most: f32 holds them exactly.
             #[allow(clippy::cast_precision_loss)]
             let rect = UiRect::new(
                 room.x + x as f32,
@@ -227,6 +229,8 @@ pub(crate) struct PageBrowsers {
     effects: RefCell<Vec<Effect>>,
     /// The room the person has the keyboard in.
     focused: Cell<Option<Id>>,
+    /// The room that had it last: where the host's own keys go when the keyboard is on the page.
+    last_focused: Cell<Option<Id>>,
     /// The room a pointer button went down in: the pointer is its until every button is up.
     held: Cell<Option<Id>>,
     /// The room the pointer is over.
@@ -243,6 +247,8 @@ pub(crate) struct PageBrowsers {
     pressed_at: Cell<Point>,
     questions: RefCell<VecDeque<questions::Question>>,
     asking: Cell<bool>,
+    /// The question at the head of the queue waits for a sheet that is up to end.
+    seat_wait: Cell<bool>,
     installing: Cell<bool>,
     /// The probe that is out, and the way it is to show ends at the program's machine.
     probing: RefCell<Option<Probing>>,
@@ -271,6 +277,7 @@ impl PageBrowsers {
             pictures,
             effects: RefCell::new(Vec::new()),
             focused: Cell::new(None),
+            last_focused: Cell::new(None),
             held: Cell::new(None),
             over: Cell::new(None),
             shape: Cell::new(Cursor::Arrow),
@@ -280,6 +287,7 @@ impl PageBrowsers {
             pressed_at: Cell::new(Point::new(0.0, 0.0)),
             questions: RefCell::new(VecDeque::new()),
             asking: Cell::new(false),
+            seat_wait: Cell::new(false),
             installing: Cell::new(false),
             probing: RefCell::new(None),
             jobs: RefCell::new(HashMap::new()),
@@ -312,6 +320,9 @@ impl PageBrowsers {
         let kept = |id: Id| outline.browsers.iter().any(|b| b.id == id);
         if self.focused.get().is_some_and(|id| !kept(id)) {
             self.focused.set(None);
+        }
+        if self.last_focused.get().is_some_and(|id| !kept(id)) {
+            self.last_focused.set(None);
         }
         if self.over.get().is_some_and(|id| !kept(id)) {
             self.over.set(None);
@@ -426,6 +437,9 @@ impl PageBrowsers {
     /// back to the page (`None`).
     pub(crate) fn give_keyboard(&self, id: Option<Id>) {
         let before = self.focused.replace(id);
+        if id.is_some() {
+            self.last_focused.set(id);
+        }
         if before != id {
             let mut rooms = self.rooms.borrow_mut();
             if let Some(before) = before {
@@ -467,10 +481,9 @@ impl PageBrowsers {
                 && at.y < room.rect.y + room.rect.h
                 && page.reaches(room.id, at)
         })?;
-        #[allow(clippy::cast_possible_truncation)]
         let local = (
-            (at.x - room.rect.x).round() as i32,
-            (at.y - room.rect.y).round() as i32,
+            input::rounded(at.x - room.rect.x),
+            input::rounded(at.y - room.rect.y),
         );
         Some((room.id, local))
     }
@@ -480,10 +493,9 @@ impl PageBrowsers {
         let handle = pane.page_handle()?;
         let page = handle.page();
         let room = page.browsers().iter().find(|room| room.id == id)?;
-        #[allow(clippy::cast_possible_truncation)]
         Some((
-            (at.x - room.rect.x).round() as i32,
-            (at.y - room.rect.y).round() as i32,
+            input::rounded(at.x - room.rect.x),
+            input::rounded(at.y - room.rect.y),
         ))
     }
 
@@ -626,40 +638,29 @@ impl PageBrowsers {
     /// A key down with the keyboard in a room. `true`: the room took it. A key the page asked for
     /// (its `keys`) is the page's and is not taken.
     pub(crate) fn key_down(&self, pane: &TerminalPane, event: &NSEvent) -> bool {
-        let Some(room) = self.focused.get() else {
-            return false;
-        };
-        // ⌥⌘I opens the engine's tools for the room: the host's own key, as in a browser.
+        // ⌥⌘I opens the engine's tools: the host's own key, as in a browser. With the keyboard on
+        // the page (after a load error's card, say) it is the browser that had the keyboard last.
         let flags = event.modifierFlags();
         if event.keyCode() == 34
             && flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
             && flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
             && !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+            && let Some(room) = self.tools_for(pane)
         {
             self.send(room, |browser| Command::DevTools { browser });
             return true;
         }
+        let Some(room) = self.focused.get() else {
+            return false;
+        };
         if let Some((key, mods)) = crate::native_page::event_key_of(event)
             && self.rooms.borrow().page_key(room, key, mods)
             && self.typing.borrow().marked.is_empty()
         {
             return false;
         }
-        let flags = event.modifierFlags();
-        // ⇧⌘Z: Edit's Redo has no row of the host's menu (Undo's ⌘Z is the row's, and the page's
-        // own keys were asked above), so the key is the command.
-        if flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
-            && flags.contains(objc2_app_kit::NSEventModifierFlags::Shift)
-            && !flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
-            && !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
-            && event
-                .charactersIgnoringModifiers()
-                .is_some_and(|text| text.to_string().eq_ignore_ascii_case("z"))
-            && self.typing.borrow().marked.is_empty()
-        {
-            self.edit(EditAction::Redo);
-            return true;
-        }
+        // ⇧⌘Z (Edit's Redo, which has no row in the host's menu) goes below as any ⌘ key does: to
+        // the engine as a key, and back as the menu's command when the page did not take it.
         let shortcut = flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
             || flags.contains(objc2_app_kit::NSEventModifierFlags::Control);
         let characters = event
@@ -810,8 +811,8 @@ impl PageBrowsers {
             self.send(room, |browser| Command::ImeCancel { browser });
             return;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let (from, to) = (selected.0 as u32, (selected.0 + selected.1) as u32);
+        let at = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let (from, to) = (at(selected.0), at(selected.0 + selected.1));
         self.send(room, |browser| Command::ImeCompose {
             browser,
             text,
@@ -866,8 +867,67 @@ impl PageBrowsers {
     }
 
     /// The item of the Edit menu that has the key `key` as its shortcut (⌘C, ⌘X, ⌘V, ⌘A, ⌘Z).
-    pub(crate) fn edit_menu(&self, key: char) -> bool {
+    ///
+    /// Run by its key, the item is the page's second: the key goes to the engine as a key and the
+    /// engine gives it back if the page did not take it (a page with its own undo, an editor),
+    /// and then it is the command ([`bt_shell_common::browser::rooms::edit_of_key`]), as in
+    /// Chrome. Run by a click on its row there is no key, and the command is run at once.
+    pub(crate) fn edit_menu(&self, pane: &TerminalPane, key: char) -> bool {
+        let Some(room) = self.focused.get() else {
+            return false;
+        };
+        let app = objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadOnly::mtm(pane));
+        if let Some(event) = app.currentEvent()
+            && event.r#type() == objc2_app_kit::NSEventType::KeyDown
+            && input::is_key_of(
+                key,
+                event
+                    .charactersIgnoringModifiers()
+                    .map(|text| text.to_string())
+                    .as_deref(),
+                event.modifierFlags(),
+            )
+        {
+            let characters = event
+                .characters()
+                .map(|text| text.to_string())
+                .unwrap_or_default();
+            let data = key_data(&event, &characters, event.keyCode());
+            // Down and up together: the up of a key a menu took is not waited for.
+            for kind in [KeyKind::Down, KeyKind::Up] {
+                self.send(room, |browser| Command::Key {
+                    browser,
+                    kind,
+                    key: data,
+                    commands: Vec::new(),
+                });
+            }
+            return true;
+        }
         self.edit(input::edit_action(key))
+    }
+
+    /// The browser the host's tools key means: the one the keyboard is in, or with it on the page
+    /// the one that had it last if it is shown, or the page's only shown one.
+    fn tools_for(&self, pane: &TerminalPane) -> Option<Id> {
+        if let Some(room) = self.focused.get() {
+            return Some(room);
+        }
+        let handle = pane.page_handle()?;
+        let page = handle.page();
+        let shown: Vec<Id> = page
+            .browsers()
+            .iter()
+            .filter(|room| !room.hidden)
+            .map(|room| room.id)
+            .collect();
+        self.last_focused
+            .get()
+            .filter(|id| shown.contains(id))
+            .or(match shown.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            })
     }
 
     /// Where the input method's window goes: about where the person last pressed in a room, the

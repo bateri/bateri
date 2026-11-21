@@ -10,14 +10,12 @@
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use block2::RcBlock;
 use browser_ipc::message::{DialogKind, FileMode};
 use bt_shell_common::browser::downloads;
 use bt_shell_common::browser::rooms::{Dialog, Download, Files, Menu};
 use bt_shell_common::native_view::Id;
-use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -103,7 +101,9 @@ impl PageBrowsers {
     }
 
     /// The question back if a sheet can open for it now. If another sheet is up it goes back in the
-    /// queue and the pane tries again soon: the engine waits (a web page's dialog blocks it).
+    /// queue and waits: the engine waits (a web page's dialog blocks it), and the question is
+    /// asked again when a sheet ends ([`Self::seat_may_be_free`], which `sheets::open_parked`
+    /// calls where the end of a sheet is heard).
     fn sheet_for<T>(
         &self,
         pane: &TerminalPane,
@@ -115,24 +115,21 @@ impl PageBrowsers {
         }
         self.questions.borrow_mut().push_front(wrap(question));
         self.asking.set(true);
-        let (id, lookup) = (pane.id(), pane.lookup());
-        if let Ok(when) = DispatchTime::try_from(Duration::from_millis(300)) {
-            let _ = DispatchQueue::main().after(when, move || {
-                // audit: a block running on the main queue is on the main thread by definition.
-                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                if let Some(pane) = lookup(mtm, id)
-                    && let Some(browsers) = pane.page_browsers()
-                {
-                    browsers.asking.set(false);
-                    browsers.present(&pane);
-                }
-            });
-        } else {
-            // No timer: the question is let go (and says no), and the next is tried.
-            self.questions.borrow_mut().pop_front();
-            self.asking.set(false);
-        }
+        self.seat_wait.set(true);
         None
+    }
+
+    /// A sheet ended where the pane's questions sit: a question that waited for the seat is asked
+    /// if the seat is free now.
+    pub(crate) fn seat_may_be_free(&self, pane: &TerminalPane) {
+        if !self.seat_wait.get()
+            || sheets::seat(Asker::Pane(pane)).is_some_and(|seat| seat.is_taken())
+        {
+            return;
+        }
+        self.seat_wait.set(false);
+        self.asking.set(false);
+        self.present(pane);
     }
 
     /// A sheet was answered: the next question may be asked.
@@ -178,8 +175,7 @@ impl PageBrowsers {
                 item.setTarget(Some(&target));
                 item
             };
-            #[allow(clippy::cast_possible_wrap)]
-            item.setTag(line.command as isize);
+            item.setTag(isize::try_from(line.command).unwrap_or(isize::MAX));
             item.setEnabled(line.enabled);
             if line.checked {
                 item.setState(objc2_app_kit::NSControlStateValueOn);
@@ -194,8 +190,7 @@ impl PageBrowsers {
         self.asking.set(true);
         shown.popUpMenuPositioningItem_atLocation_inView(None, at, Some(pane.view()));
         self.asking.set(false);
-        #[allow(clippy::cast_possible_truncation)]
-        let picked = target.ivars().get().map(|tag| tag as i32);
+        let picked = target.ivars().get().and_then(|tag| i32::try_from(tag).ok());
         menu.pick(picked);
     }
 
@@ -403,6 +398,7 @@ fn site_of(url: &str) -> Option<String> {
 /// A size in the words a person reads.
 fn size_words(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["bytes", "KB", "MB", "GB"];
+    // A size in words keeps three digits: f64 holds a byte count far beyond what a download is.
     #[allow(clippy::cast_precision_loss)]
     let mut size = bytes as f64;
     let mut unit = 0;

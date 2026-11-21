@@ -1,4 +1,4 @@
-//! The helper's life (Karar 1, 5): started with the first browser, ended some time after the last
+//! The helper's life: started with the first browser, ended some time after the last
 //! one is closed, and what the browsers are told when it dies.
 //!
 //! [`Manager`] is one for the application. A browser is [`Manager::open`]ed (a [`Browser`] is its
@@ -226,11 +226,19 @@ impl Manager {
         scale: f32,
         sink: Arc<dyn Sink>,
     ) -> Result<Browser, StartError> {
-        let run = self.running()?;
-        let id = self.next_browser.fetch_add(1, Ordering::Relaxed);
-        let profile = run.profile(key, id);
-        lock(&run.browsers).insert(id, sink);
-        run.epoch.fetch_add(1, Ordering::AcqRel);
+        // The helper that is found, the browser that is put in it and the count that says it was
+        // used are one step under the start lock: the end of an idle helper (`stop_if_idle`)
+        // takes the same lock, so it cannot come between a browser finding its helper and being
+        // put there, and then find the helper idle.
+        let (run, id, profile) = {
+            let _one = lock(&self.starting);
+            let run = self.running_locked()?;
+            let id = self.next_browser.fetch_add(1, Ordering::Relaxed);
+            let profile = run.profile(key, id);
+            lock(&run.browsers).insert(id, sink);
+            run.epoch.fetch_add(1, Ordering::AcqRel);
+            (run, id, profile)
+        };
         let sent = run.commands.send(&Command::Open {
             browser: id,
             profile,
@@ -257,9 +265,8 @@ impl Manager {
         })
     }
 
-    /// The running helper, started first if there is none.
-    fn running(self: &Arc<Self>) -> Result<Arc<Run>, StartError> {
-        let _one_start = lock(&self.starting);
+    /// The running helper, started first if there is none. The caller holds `starting`.
+    fn running_locked(self: &Arc<Self>) -> Result<Arc<Run>, StartError> {
         if let Some(run) = lock(&self.current).clone()
             && !run.over.load(Ordering::Acquire)
         {
@@ -273,8 +280,7 @@ impl Manager {
     fn start(self: &Arc<Self>) -> Result<Arc<Run>, StartError> {
         let (app, executable, hold) = match &self.config.source {
             Source::Installed(layout) => {
-                let version = layout.newest().ok_or(StartError::NotInstalled)?;
-                let hold = layout.hold(&version)?;
+                let (version, hold) = layout.hold_newest()?.ok_or(StartError::NotInstalled)?;
                 (
                     layout.app(&version),
                     layout.executable(&version),

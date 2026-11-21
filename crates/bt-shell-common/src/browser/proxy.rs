@@ -1,4 +1,4 @@
-//! The loopback proxy every request of the helper goes through (Karar 2).
+//! The loopback proxy every request of the helper goes through.
 //!
 //! It is open before the helper starts and its port is on the helper's command line for the
 //! helper's whole life. It listens on `127.0.0.1` only and wants credentials: every profile the
@@ -181,12 +181,17 @@ fn serve(mut stream: TcpStream, registry: &Registry) -> io::Result<()> {
             ),
         );
     };
+    // The head is read and the identity is known: from here the client is the browser, which may
+    // read as slowly as a page of a few megabytes takes it to (an answer, a tunnel). The timeout
+    // is for a client that says nothing, and for the short answers above.
+    stream.set_write_timeout(None)?;
     Carrying {
         client: stream,
         registry,
         profile,
         way,
         upstreams: HashMap::new(),
+        generations: 0,
         last: Arc::new(Mutex::new(None)),
     }
     .run(head)
@@ -214,6 +219,9 @@ struct Upstream {
     end: Arc<dyn Fn() + Send + Sync>,
     /// Set by the thread that carries its answers back when the far end has ended.
     dead: Arc<AtomicBool>,
+    /// Which connection this is of the client's (they are numbered as they are made): an address
+    /// has another connection when the one it had ended.
+    generation: u64,
     /// The requests sent on it that have no final answer yet (the answers are read as they pass).
     asking: Arc<answers::Asking>,
 }
@@ -226,9 +234,12 @@ struct Carrying<'a> {
     way: Arc<dyn Dialer>,
     /// By address (`host:port`).
     upstreams: HashMap<String, Upstream>,
-    /// The address the last request went to: when its connection ends, the answer it was
-    /// carrying ended with it, and the client is told so.
-    last: Arc<Mutex<Option<String>>>,
+    /// The connections made so far, as many as the last one's number.
+    generations: u64,
+    /// The connection the last request went to (its address and number): when it ends, the answer
+    /// it was carrying ended with it, and the client is told so. An earlier connection to the same
+    /// address that ends late is no such end.
+    last: Arc<Mutex<Option<(String, u64)>>>,
 }
 
 impl Carrying<'_> {
@@ -307,7 +318,9 @@ impl Carrying<'_> {
         } = link.split();
         let dead = Arc::new(AtomicBool::new(false));
         let client = self.client.try_clone().map_err(|e| e.to_string())?;
-        let (last, key) = (Arc::clone(&self.last), authority.to_owned());
+        self.generations += 1;
+        let generation = self.generations;
+        let (last, key) = (Arc::clone(&self.last), (authority.to_owned(), generation));
         let (flag, closing) = (Arc::clone(&dead), Arc::clone(&end));
         let asking = Arc::new(Mutex::new(VecDeque::new()));
         let asked = Arc::clone(&asking);
@@ -321,7 +334,7 @@ impl Carrying<'_> {
                 closing();
                 // What the last request asked is answered to its end by this connection's end: the
                 // client waits for no more.
-                if lock(&last).as_deref() == Some(key.as_str()) {
+                if lock(&last).as_ref() == Some(&key) {
                     let _ = client.shutdown(Shutdown::Write);
                 }
             })
@@ -332,6 +345,7 @@ impl Carrying<'_> {
                 writer,
                 end,
                 dead,
+                generation,
                 asking,
             },
         );
@@ -361,7 +375,8 @@ impl Carrying<'_> {
                 return Err(io::Error::other(why));
             }
         }
-        *lock(&self.last) = Some(authority.to_owned());
+        let generation = self.upstreams.get(authority).map_or(0, |up| up.generation);
+        *lock(&self.last) = Some((authority.to_owned(), generation));
         let out = rewritten(head, method, path, version);
         let body = body_of(head);
         let client = &mut self.client;
