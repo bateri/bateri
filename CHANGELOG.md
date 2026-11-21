@@ -24,6 +24,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **Text in a program's search boxes sits in the middle.** In boxes like toppen's filter, the grey hint and what you typed sat a little high, more so with a large font, and jumped down when you clicked in. They now stay centred.
 - **A program's dialogs and tables read in full.** In what `bateri view` and VoiceOver read, a dialog's buttons and fields are no longer hidden behind the shade it draws over the page, a table's rows are named by their cells and not "Row 3", an icon button with only a tooltip is named by it, and a table's column edges and a tree's arrows say what they do.
 
 ## [0.32.0] - 2026-11-20

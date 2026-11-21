@@ -505,7 +505,7 @@ impl PageFields {
     /// on the screen.
     pub(crate) fn append(&self, id: Id, text: &str) -> Option<String> {
         let field = self.field(id)?;
-        let now = format!("{}{text}", field.stringValue());
+        let now = field.held(&format!("{}{text}", field.stringValue()));
         field.setStringValue(&NSString::from_str(&now));
         Some(now)
     }
@@ -605,15 +605,18 @@ impl PageFields {
     /// not told of a text it put in itself (setting the value sends no change). Where a text is put
     /// in and none selected, the caret goes to its end, where AppKit's own rule would select it all
     /// once the keyboard comes. A field that does not have the keyboard has no editor to select in:
-    /// the selection waits for the keyboard the page sends it (`send_keyboard`).
+    /// the selection waits for the keyboard the page sends it (`send_keyboard`). A field of one line
+    /// holds a text's line breaks as spaces ([`one_line`]), one for one, so a selection counted in
+    /// the page's text selects the same characters.
     pub(crate) fn fill(&self, id: Id, fill: &Fill) {
         let Some(field) = self.field(id) else {
             return;
         };
         let text = match &fill.text {
             Some(text) => {
-                field.setStringValue(&NSString::from_str(text));
-                text.clone()
+                let text = field.held(text);
+                field.setStringValue(&NSString::from_str(&text));
+                text
             }
             None => field.stringValue().to_string(),
         };
@@ -636,7 +639,27 @@ pub(crate) fn utf16_range(text: &str, chars: std::ops::Range<usize>) -> (usize, 
     (from, to.saturating_sub(from))
 }
 
+/// `text` with each line and paragraph separator (`\n`, `\r`, U+2028, U+2029) as a space, one for
+/// one, as AppKit's single-line cells take a paste; `None` where it has none. What a field of one
+/// line holds, whoever puts it there: the person ([`PageTextField`]'s editor) or the page
+/// ([`PageFields::fill`]).
+fn one_line(text: &str) -> Option<String> {
+    let breaks = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+    text.contains(breaks).then(|| text.replace(breaks, " "))
+}
+
 impl PageTextField {
+    /// What the field holds of `text`: a field of one line its line breaks as spaces
+    /// ([`one_line`]), another the text itself.
+    fn held(&self, text: &str) -> String {
+        self.ivars()
+            .one_line
+            .get()
+            .then(|| one_line(text))
+            .flatten()
+            .unwrap_or_else(|| text.to_owned())
+    }
+
     /// Selects `(location, length)` (UTF-16 units) in the field: at once where the keyboard is in
     /// it, else when the page sends it the keyboard ([`PageTextField::select_waiting`]).
     fn select(&self, range: (usize, usize)) {
@@ -675,6 +698,8 @@ pub(crate) struct PageTextFieldIvars {
     /// put in the field when the page's reply sends the keyboard to it.
     selection: Cell<Option<(usize, usize)>>,
     fields: RefCell<Weak<PageFields>>,
+    /// The field is one line (a line or a secret, not lines): it takes no line break.
+    one_line: Cell<bool>,
 }
 
 define_class!(
@@ -705,6 +730,45 @@ define_class!(
                 fields.focused_by_person(id);
             }
             took
+        }
+
+        /// What the person puts in a field of one line (a paste, a drop, what the keyboard makes)
+        /// takes no line break: each line or paragraph separator becomes a space ([`one_line`]), as
+        /// in AppKit's single-line cells. The field is not one of those (see [`text_field`]), so it
+        /// does it itself: the words go in through the editor in place of the ones it was asked
+        /// for, which leaves the caret after them and makes one step of undo, and the editor asks
+        /// again with words that now pass.
+        #[unsafe(method(textView:shouldChangeTextInRange:replacementString:))]
+        fn should_change_text(
+            &self,
+            editor: &AnyObject,
+            range: NSRange,
+            words: Option<&NSString>,
+        ) -> bool {
+            let flat = words
+                .filter(|_| self.ivars().one_line.get())
+                .and_then(|words| one_line(&words.to_string()));
+            if let Some(flat) = flat {
+                let flat = NSString::from_str(&flat);
+                // SAFETY: a field's editor is an NSTextView, which takes `insertText:replacementRange:`
+                // (NSTextInputClient) with a string and a range of its own text: the range it asked
+                // this field about.
+                let _: () = unsafe {
+                    msg_send![editor, insertText: &*flat, replacementRange: range]
+                };
+                false
+            } else {
+                // SAFETY: NSTextField's own answer to its editor (it implements the method), asked
+                // with what the editor asked.
+                unsafe {
+                    msg_send![
+                        super(self),
+                        textView: editor,
+                        shouldChangeTextInRange: range,
+                        replacementString: words
+                    ]
+                }
+            }
         }
     }
 );
@@ -941,6 +1005,7 @@ fn text_field(
         id: Cell::new(None),
         selection: Cell::new(None),
         fields: RefCell::new(Rc::downgrade(fields)),
+        one_line: Cell::new(kind != FieldKind::Lines),
     });
     // SAFETY: `initWithFrame:` is NSTextField's designated initializer and the ivars are set.
     let field: Retained<PageTextField> =
@@ -958,15 +1023,22 @@ fn text_field(
     field.setFocusRingType(NSFocusRingType::None);
     field.setFont(Some(&face(family, FIELD_TEXT)));
     if let Some(cell) = field.cell() {
+        // Not AppKit's single-line mode, for any kind: its cell draws the text at a baseline set
+        // by the control's size whatever the face, and in most of the terminal's faces that stood
+        // a point or more above the room's middle (four at 17 points), and moved down once the
+        // field was typed into, where the editor draws it at the face's own baseline, the one
+        // `text_top` centres. The one other thing that mode does, turning a pasted line break
+        // into a space, the field does itself (`one_line`).
+        cell.setUsesSingleLineMode(false);
         match kind {
-            // One line: a hint that is too long for the room is cut, not wrapped onto a line
-            // below it that the room does not show (which leaves the first line high in the box).
+            // One line: it scrolls as it is typed, and a hint that is too long for the room is
+            // cut with "…" (the break mode below), not wrapped onto a line below it that the room
+            // does not show (which left the first line high in the box).
             FieldKind::Line | FieldKind::Secret => {
-                cell.setUsesSingleLineMode(true);
+                cell.setWraps(false);
                 cell.setScrollable(true);
             }
             FieldKind::Lines => {
-                cell.setUsesSingleLineMode(false);
                 cell.setWraps(true);
                 cell.setScrollable(false);
             }
@@ -1049,7 +1121,8 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
 /// (`firstBaselineOffsetFromTop`, not the font's ascent, which AppKit rounds up), and the frame goes
 /// where that baseline is half a capital below the middle. Centring the frame instead put the text a
 /// point and a half below the words beside the field in a face whose line AppKit draws lower.
-/// Rounded to the screen's pixels.
+/// Rounded to the screen's pixels. That offset is where the field draws its text, hint or value,
+/// typed into or not, because its cell is not in single-line mode ([`text_field`]).
 fn text_top(field: &PageTextField, middle: f64, height: f64) -> f64 {
     let Some(font) = field.font() else {
         return (middle - height / 2.0).round();
@@ -1515,6 +1588,48 @@ mod tests {
         assert!(command.contains("state.takes(key, mods)"), "{command}");
         assert!(command.contains("field_command_key("), "{command}");
         assert!(command.contains("field.state(kind)"), "{command}");
+    }
+
+    /// A field of one line takes no line break, as AppKit's single-line cells take a paste: each
+    /// separator a space, one for one (so a selection counted in the page's text still fits it).
+    #[test]
+    fn a_line_holds_its_breaks_as_spaces_one_for_one() {
+        assert_eq!(one_line("plain words"), None);
+        assert_eq!(one_line("one\ntwo").as_deref(), Some("one two"));
+        assert_eq!(one_line("a\r\nb").as_deref(), Some("a  b"));
+        assert_eq!(one_line("a\u{2028}b\u{2029}c").as_deref(), Some("a b c"));
+        assert_eq!(
+            one_line("\nlead and tail\n").as_deref(),
+            Some(" lead and tail ")
+        );
+        let text = "x\n😀\ny";
+        let flat = one_line(text).expect("it has breaks");
+        assert_eq!(flat.chars().count(), text.chars().count());
+    }
+
+    /// The text of a page's field is drawn where `text_top` puts its baseline only while its cell
+    /// is not in AppKit's single-line mode (that mode's cell draws at a baseline set by the
+    /// control's size: a point or more high in most of the terminal's faces, and lower once typed
+    /// into); a field of one line takes no break from the person's editor nor from the page. A
+    /// source scan: the field is AppKit's and needs a window server (the drawn text is measured in
+    /// `tests/pencere.rs`).
+    #[test]
+    fn a_fields_cell_is_never_appkits_single_line_cell() {
+        let source = include_str!("native_page.rs");
+        let code = &source[..source.find("#[cfg(test)]").expect("the tests follow")];
+        assert!(!code.contains("setUsesSingleLineMode(true)"));
+        assert!(code.contains("cell.setUsesSingleLineMode(false);"));
+        let body = |signature: &str| {
+            let at = code.find(signature).expect(signature);
+            &code[at..at + code[at..].find("\n    }\n").expect("its end")]
+        };
+        let changes = body("        fn should_change_text(");
+        assert!(changes.contains("one_line("), "{changes}");
+        assert!(changes.contains("insertText: &*flat"), "{changes}");
+        for setter in ["    pub(crate) fn fill(", "    pub(crate) fn append("] {
+            let body = body(setter);
+            assert!(body.contains("field.held("), "{body}");
+        }
     }
 
     #[test]

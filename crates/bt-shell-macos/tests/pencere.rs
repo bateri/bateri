@@ -642,10 +642,18 @@ fn open_pane(
     dir: &Path,
     id: u64,
 ) -> (Retained<TerminalPane>, Program) {
-    open_hosted_pane(mtm, window, frame_rect, dir, id, Rc::new(Quiet::default()))
+    open_hosted_pane(
+        mtm,
+        window,
+        frame_rect,
+        dir,
+        id,
+        Rc::new(Quiet::default()),
+        Settings::default(),
+    )
 }
 
-/// [`open_pane`], for a host the test keeps.
+/// [`open_pane`], for a host the test keeps and with `settings` (its font, say).
 fn open_hosted_pane(
     mtm: MainThreadMarker,
     window: &NSWindow,
@@ -653,6 +661,7 @@ fn open_hosted_pane(
     dir: &Path,
     id: u64,
     host: Rc<Quiet>,
+    settings: Settings,
 ) -> (Retained<TerminalPane>, Program) {
     fs::create_dir_all(dir.join("zdot")).expect("the pane's folder");
     let identity = Rc::new(Identity {
@@ -662,8 +671,7 @@ fn open_hosted_pane(
         fish_wrapper_dir: None,
         bash_wrapper_dir: None,
     });
-    let mut config =
-        embed::Config::new(mtm, id, host, identity, Settings::default(), Theme::BATERI);
+    let mut config = embed::Config::new(mtm, id, host, identity, settings, Theme::BATERI);
     // No user dotfiles: the shell reads what it is typed and nothing of the account's.
     config.env = vec![
         ("ZDOTDIR".to_owned(), dir.join("zdot").display().to_string()),
@@ -1309,6 +1317,10 @@ fn run(dir: &Path) {
     section("the app's fonts in the page", &mut failures, || {
         app_fonts_in_the_page(mtm, &window, frame_rect, dir);
     });
+    // After the fonts: its fields are in the app's faces, which that section registered.
+    section("a field's text on its baseline", &mut failures, || {
+        field_text_on_its_baseline(mtm, &window, frame_rect, dir);
+    });
 
     pane.close();
     assert!(failures.is_empty(), "failed: {failures:?}");
@@ -1333,6 +1345,7 @@ fn connection_goes_and_comes_back(
         &dir.join("connection"),
         PANE + 40,
         Rc::clone(&host),
+        Settings::default(),
     );
     let say = |front: &str, link: PaneLink, program_fresh: bool| {
         host.1.replace(Some(Shown {
@@ -2345,6 +2358,157 @@ fn page_keyboard(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect, d
     program.bye(&token);
     holder.close();
     asker.close();
+    window.orderOut(None);
+}
+
+/// A page with a field of one line and a secret, each with a hint in capitals: the ink of a hint is
+/// its capitals, top to baseline.
+const FIELDS_PAGE: &str = r#"return {
+    render = function()
+        return pencere.div():col():gap(16):p(20):w(420):h(200)
+            :child(pencere.div():text_field("line"):w(300):h(20):child(pencere.text("FILTER BY NAME")))
+            :child(pencere.div():text_field("secret", "secret"):w(300):h(20):child(pencere.text("SECRET")))
+    end,
+}"#;
+
+/// How far the middle of the capitals `field` draws stands from the middle bateri centred them on
+/// (its frame's top, AppKit's baseline in it, half a capital up: where the room's middle is), in
+/// points, down positive; `None` where it drew nothing. Read from the field's own drawing, which
+/// has no ground: what it draws is its text.
+fn caps_off(field: &NSTextField) -> Option<f64> {
+    // SAFETY: reading the superview, on the main thread.
+    let host = unsafe { field.superview() }?;
+    let frame = field.frame();
+    let font = field.font()?;
+    // SAFETY: NSView's `firstBaselineOffsetFromTop`, which takes nothing and gives a CGFloat.
+    let baseline: f64 = unsafe { msg_send![field, firstBaselineOffsetFromTop] };
+    let aimed = frame.origin.y + baseline - font.capHeight() / 2.0;
+    let picture = host.bitmapImageRepForCachingDisplayInRect(frame)?;
+    host.cacheDisplayInRect_toBitmapImageRep(frame, &picture);
+    let (wide, high) = (picture.pixelsWide(), picture.pixelsHigh());
+    // The most opaque pixel of each row: a hint is drawn in a lighter ink than a text, so a row is
+    // inked where it holds half of the darkest row's.
+    let rows: Vec<f64> = (0..high)
+        .map(|y| {
+            (0..wide)
+                .filter_map(|x| picture.colorAtX_y(x, y))
+                .map(|colour| colour.alphaComponent())
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    let most = rows.iter().copied().fold(0.0, f64::max);
+    let inked: Vec<usize> = (0..rows.len()).filter(|&y| rows[y] > most / 2.0).collect();
+    let (first, last) = (*inked.first()?, *inked.last()?);
+    #[allow(clippy::cast_precision_loss)]
+    let scale = high as f64 / frame.size.height;
+    #[allow(clippy::cast_precision_loss)]
+    let middle = frame.origin.y + (first + last + 1) as f64 / 2.0 / scale;
+    Some(middle - aimed)
+}
+
+/// A page's fields draw their text where bateri centres it on the room, in the app's faces: a
+/// hint at rest and with the keyboard in its field, a text while it is typed and after. (AppKit's
+/// single-line cell drew the text at rest at a baseline of its own, set by the control's size: a
+/// point or more above in most of the terminal's faces, four at 17 points, and lower once typed
+/// into.) A line takes a line break put in it as a space; a secret's hint stands as a line's.
+fn field_text_on_its_baseline(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    // Drawn only while it is seen: on screen, as for the page's keyboard.
+    window.setLevel(objc2_app_kit::NSFloatingWindowLevel);
+    window.setCollectionBehavior(
+        objc2_app_kit::NSWindowCollectionBehavior::CanJoinAllSpaces
+            | objc2_app_kit::NSWindowCollectionBehavior::FullScreenAuxiliary
+            | objc2_app_kit::NSWindowCollectionBehavior::Stationary,
+    );
+    window.setFrameOrigin(NSPoint::new(40.0, 120.0));
+    window.orderFrontRegardless();
+    // The face a terminal is most often in, at a size where the single-line cell stood four points
+    // high; and one whose line that cell drew lower, at the kit's own size.
+    for (family, size, id) in [("JetBrains Mono", 17.0, 50), ("Cascadia Code", 12.5, 51)] {
+        let mut settings = Settings::default();
+        settings.font.family = Some(family.to_owned());
+        settings.font.size = size;
+        let (pane, mut program) = open_hosted_pane(
+            mtm,
+            window,
+            frame_rect,
+            &dir.join(format!("field-{id}")),
+            PANE + id,
+            Rc::new(Quiet::default()),
+            settings,
+        );
+        pane.set_visibility(true);
+        program.say(&format!("{ESC}[?1049h"));
+        let token = program.hello_kind("lua");
+        program.open_script(&token, FIELDS_PAGE);
+        program.supply(&[("page.lua", "text/x-lua", FIELDS_PAGE.as_bytes())]);
+        let fields = || {
+            let mut found: Vec<Retained<NSTextField>> = pane
+                .subviews()
+                .iter()
+                .flat_map(descendants)
+                .filter_map(|view| view.downcast::<NSTextField>().ok())
+                .filter(|field| field.isEditable())
+                .collect();
+            found.sort_by(|a, b| a.frame().origin.y.total_cmp(&b.frame().origin.y));
+            found
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fields().len() < 2 && Instant::now() < deadline {
+            spin(0.05);
+        }
+        let found = fields();
+        if found.len() < 2 {
+            // As for the page's keyboard: a covered window, or a display asleep, draws no page.
+            eprintln!(
+                "pencere: the page was not drawn (window occlusion {:?}): its fields are not measured",
+                window.occlusionState()
+            );
+            program.bye(&token);
+            pane.close();
+            continue;
+        }
+        let (line, secret) = (&found[0], &found[1]);
+        let mut offs = Vec::new();
+        let mut look = |what: &str, field: &NSTextField| {
+            spin(0.2);
+            let off = caps_off(field)
+                .unwrap_or_else(|| panic!("{family} at {size}: the {what} drew nothing"));
+            eprintln!("pencere: {family} at {size}: the {what} is {off:+.2} pt off its middle");
+            offs.push(format!("{what} {off:+.2}"));
+            off
+        };
+        let mut worst: f64 = 0.0;
+        worst = worst.max(look("line's hint", line).abs());
+        window.makeFirstResponder(Some(line));
+        worst = worst.max(look("line's hint with the keyboard", line).abs());
+        let editor = line.currentEditor().expect("the line has an editor");
+        // What a paste puts in: through the editor, as the person's.
+        // SAFETY: a field's editor is an NSTextView, which takes `insertText:` with a string.
+        let _: () = unsafe { msg_send![&*editor, insertText: &*NSString::from_str("FX\nZ")] };
+        assert_eq!(
+            line.stringValue().to_string(),
+            "FX Z",
+            "a line takes no break"
+        );
+        worst = worst.max(look("line's text while typed", line).abs());
+        window.makeFirstResponder(None);
+        worst = worst.max(look("line's text", line).abs());
+        // At rest only: the keyboard in a secret is a question of its own (its cell is a secure
+        // one in a plain field, which AppKit may refuse an editor).
+        worst = worst.max(look("secret's hint", secret).abs());
+        assert!(
+            worst <= 0.5,
+            "{family} at {size}: a field's capitals stand off their middle: {offs:?}"
+        );
+        program.bye(&token);
+        until("the view to go", || !covered(&pane));
+        pane.close();
+    }
     window.orderOut(None);
 }
 
