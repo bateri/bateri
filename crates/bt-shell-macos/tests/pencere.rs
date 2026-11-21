@@ -61,17 +61,17 @@ use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString,
-    NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardItem,
+    NSPasteboardTypeString, NSPasteboardWriting, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize,
-    NSString,
+    NSArray, NSData, NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSRunLoop, NSSize, NSString,
 };
 
 /// What a host heard: nothing this test is about, but the trait wants an answer to each. The
@@ -1761,6 +1761,62 @@ fn png_size(bytes: &[u8]) -> (u32, u32) {
     (at(16), at(20))
 }
 
+/// The person's general pasteboard as this process found it, written back when it is dropped (a
+/// failed assertion included): a web view writes only the general one, so the check that an agent's
+/// click leaves it alone has to look at that one, and must leave the developer's clipboard as it was
+/// whatever came of the check.
+struct PasteboardAsFound {
+    board: Retained<NSPasteboard>,
+    items: Vec<Vec<(Retained<NSString>, Retained<NSData>)>>,
+}
+
+impl PasteboardAsFound {
+    fn take() -> Self {
+        let board = NSPasteboard::generalPasteboard();
+        let mut items = Vec::new();
+        if let Some(found) = board.pasteboardItems() {
+            for item in &found {
+                let mut kept = Vec::new();
+                for kind in &item.types() {
+                    if let Some(data) = item.dataForType(&kind) {
+                        kept.push((kind.clone(), data));
+                    }
+                }
+                items.push(kept);
+            }
+        }
+        Self { board, items }
+    }
+
+    /// The text a paste would give.
+    fn text(&self) -> Option<String> {
+        // SAFETY: a static of AppKit's, read on the main thread.
+        let kind = unsafe { NSPasteboardTypeString };
+        self.board.stringForType(kind).map(|text| text.to_string())
+    }
+}
+
+impl Drop for PasteboardAsFound {
+    fn drop(&mut self) {
+        self.board.clearContents();
+        let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = self
+            .items
+            .iter()
+            .map(|kept| {
+                let item = NSPasteboardItem::new();
+                for (kind, data) in kept {
+                    item.setData_forType(data, kind);
+                }
+                ProtocolObject::from_retained(item)
+            })
+            .collect();
+        if !items.is_empty() {
+            self.board
+                .writeObjects(&NSArray::from_retained_slice(&items));
+        }
+    }
+}
+
 /// An agent in a program's web view, in a pane on a window nobody sees (the window of this test is
 /// never put in front, so the pane is one that is not on the screen): the page is read with a ref
 /// for each element it can be acted on by, and clicked, filled, typed into, pressed keys at, scrolled
@@ -1927,11 +1983,8 @@ fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSR
 
     // **What a page does to the person's things.** A Copy button and an Upload button that opens the
     // file input: an agent's click leaves the pasteboard where it was and no Open sheet on the window.
-    let pasteboard = NSPasteboard::generalPasteboard();
-    // SAFETY: a static of AppKit's, read on the main thread.
-    let string_type = unsafe { NSPasteboardTypeString };
-    pasteboard.clearContents();
-    pasteboard.setString_forType(&NSString::from_str("the person's own text"), string_type);
+    let found = PasteboardAsFound::take();
+    let text_before = found.text();
     let copy = ref_of(&said(&pane, Action::Read), "button \"Copy it\"");
     let upload = ref_of(&said(&pane, Action::Read), "button \"Upload it\"");
     let copied = said(&pane, Action::Click(copy));
@@ -1948,11 +2001,8 @@ fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSR
     spin(0.5);
     assert!(upped.contains("clicked button \"Upload it\""), "{upped}");
     assert_eq!(
-        pasteboard
-            .stringForType(string_type)
-            .map(|text| text.to_string())
-            .as_deref(),
-        Some("the person's own text"),
+        found.text(),
+        text_before,
         "an agent's click left the person's pasteboard changed"
     );
     assert!(
