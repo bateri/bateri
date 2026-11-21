@@ -26,6 +26,7 @@
 
 mod input;
 mod install;
+mod jobs;
 mod questions;
 mod route;
 
@@ -36,9 +37,10 @@ pub(crate) use install::update_in_background;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use browser_ipc::message::{Command, Cursor, KeyData, KeyKind, MouseKind};
+use browser_ipc::message::{AgentOutput, Command, Cursor, KeyData, KeyKind, MouseKind};
 use browser_ipc::{Frame, Surface, import, wgpu};
 use bt_gpu::{Renderer, UiImage, UiList, UiRect};
 use bt_shell_common::browser::helper::Manager;
@@ -234,6 +236,10 @@ pub(crate) struct PageBrowsers {
     installing: Cell<bool>,
     /// The probe that is out, and the way it is to show ends at the program's machine.
     probing: RefCell<Option<Probing>>,
+    /// The jobs an agent gave the helper that have not come back, by their number, and the last
+    /// number used ([`jobs`]).
+    jobs: RefCell<HashMap<u32, Sender<AgentOutput>>>,
+    next_job: Cell<u32>,
     /// Which page's browsers these are: what a thread says of a way is for the page that asked,
     /// and not for one that took its place in the pane (a program behind another `ssh`).
     serial: u64,
@@ -266,12 +272,19 @@ impl PageBrowsers {
             asking: Cell::new(false),
             installing: Cell::new(false),
             probing: RefCell::new(None),
+            jobs: RefCell::new(HashMap::new()),
+            next_job: Cell::new(0),
             serial: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             },
             wake,
         })
+    }
+
+    /// Which page's browsers these are ([`PageBrowsers::serial`]'s field).
+    pub(crate) fn serial(&self) -> u64 {
+        self.serial
     }
 
     /// The pictures, for the page's list.
@@ -377,7 +390,10 @@ impl PageBrowsers {
                 self.find_route(pane);
                 false
             }
-            Effect::Agent(..) => false,
+            Effect::Agent(_, req, output) => {
+                self.job_done(req, output);
+                false
+            }
             Effect::Diagnostic(_, words) => {
                 eprintln!("bateri: the browser: {words}");
                 false

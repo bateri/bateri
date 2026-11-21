@@ -145,6 +145,7 @@ mod tests {
                 "bateri tab",
                 "bateri ls",
                 "bateri capture",
+                "bateri browser",
                 "--keep-open",
                 "--wait",
                 "--float",

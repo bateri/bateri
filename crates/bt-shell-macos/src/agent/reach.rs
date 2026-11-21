@@ -345,11 +345,26 @@ fn ssh_args(server: &Server) -> Vec<String> {
 
 /// The machine a `fetch` writes its file on: found when it is first needed, over the connection
 /// bateri keeps to it.
-struct Machine {
+pub(super) struct Machine {
     backend: Option<Arc<dyn Backend>>,
     who: Who,
     /// The `ssh` arguments that reach it ([`ssh_args`]).
     ssh: Vec<String>,
+}
+
+impl Machine {
+    /// The machine of `server`, which is this computer when its account is.
+    pub(super) fn of(server: &Server) -> Machine {
+        Machine {
+            backend: hold_service::backend(),
+            who: Who {
+                account: server.account.clone(),
+                host: server.host.clone(),
+                local: local::is_account(&server.account),
+            },
+            ssh: ssh_args(server),
+        }
+    }
 }
 
 impl Channel for Machine {

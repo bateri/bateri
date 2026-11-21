@@ -55,6 +55,7 @@
 //! is read and written there only.
 
 mod arrange;
+mod browser;
 mod reach;
 
 use std::cell::RefCell;
@@ -277,6 +278,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         Answer::PlaceOn(place) => reach::place_on(letter, server, from, place),
         Answer::Relay(relay) => reach::relay(app, letter, &server, from.as_deref(), relay),
         Answer::Package(package) => reach::package(letter, &server, package),
+        Answer::Browser(request) => browser::browse(app, letter, &server, request),
         Answer::Config(words) => {
             let ran = app.run_config(&words);
             let done = Relayed::of(ran.status, &ran.stderr, &ran.stdout);

@@ -42,6 +42,7 @@
 //! level the server carries, never in a sheet.
 
 use bt_core::CommandLevel;
+use kablo_bateri::browser::Browser;
 use kablo_bateri::package::Package;
 use kablo_proto::v1::{State, Status};
 
@@ -166,6 +167,11 @@ pub enum Answer {
     /// machine, so the shell answers on a thread of its own ([`crate::apps::package`]). The level
     /// has been judged: it is not `off`.
     Package(Package),
+    /// `browser`: a pane's browsers, asked about or told what to do ([`super::browser`]). The helper
+    /// that draws them is on this computer, so the request is never carried to another machine;
+    /// the shell finds the pane, which says whose the browser is, judges the level for it
+    /// ([`super::browser::judge`]) and answers when the helper has. The level is not `off`.
+    Browser(Browser),
 }
 
 fn waiting_reply(anchor: &Anchor) -> Reply {
@@ -234,6 +240,12 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
             Err(failure) => Answer::Reply(Reply::Failed(failure)),
         },
         Ok(Request::Package(package)) => Answer::Package(package),
+        Ok(Request::Browser(browser)) => Answer::Browser(browser),
+        // A view is for the bateri that shows them: this one does not yet.
+        Ok(Request::View(_)) => Answer::Reply(Reply::Failed(Failure::new(
+            Kind::Failed,
+            "this bateri does not show views yet",
+        ))),
         Ok(Request::Config(words)) if crate::kablo::local::is_account(&server.account) => {
             Answer::Config(words)
         }
@@ -625,6 +637,38 @@ mod tests {
             &server(),
             None,
             "bateri 2\npackage offer\nsource bateri/textpen\n",
+            &mut Pretend::default(),
+        ) {
+            Answer::Reply(Reply::Failed(failure)) => assert_eq!(failure.kind, Kind::Usage),
+            other => panic!("not a mistake: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_question_about_a_browser_is_the_shells_to_answer_unless_the_level_is_off() {
+        let ask = "bateri 2\nbrowser text\npane p9@prod\npart 1a2b-3c-0\n";
+        for level in [CommandLevel::Own, CommandLevel::Screen, CommandLevel::Full] {
+            let mut server = server();
+            server.level = level;
+            match serve(&server, Some("p3"), ask, &mut Pretend::default()) {
+                Answer::Browser(browser) => {
+                    assert_eq!(browser.pane.to_string(), "p9@prod");
+                    assert_eq!(browser.action.word(), "text");
+                }
+                other => panic!("{level:?}: not a question about a browser: {other:?}"),
+            }
+        }
+        let mut off = server();
+        off.level = CommandLevel::Off;
+        match serve(&off, Some("p3"), ask, &mut Pretend::default()) {
+            Answer::Reply(Reply::Failed(failure)) => assert_eq!(failure.kind, Kind::Refused),
+            other => panic!("off: not refused: {other:?}"),
+        }
+        // What is not a request of the verb is a mistake in it, as for the others.
+        match serve(
+            &server(),
+            None,
+            "bateri 2\nbrowser click\npane p9\n",
             &mut Pretend::default(),
         ) {
             Answer::Reply(Reply::Failed(failure)) => assert_eq!(failure.kind, Kind::Usage),

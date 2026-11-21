@@ -32,6 +32,7 @@
 //! conversation, which names the terminal the request came from.
 
 pub mod arrange;
+pub mod browser;
 pub mod level;
 pub mod listing;
 pub mod message;

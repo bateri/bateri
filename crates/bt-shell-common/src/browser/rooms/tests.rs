@@ -438,6 +438,88 @@ fn the_engines_state_is_the_pages_and_a_search_with_no_match_has_no_current() {
 }
 
 #[test]
+fn the_browsers_of_a_page_are_listed_by_id_with_what_they_are_and_where() {
+    let mut rig = rig("seen", true);
+    assert!(rig.rooms.seen().is_empty());
+    rig.apply(
+        &[
+            room(0xb2, None, (400.0, 300.0)),
+            room(0xa1, None, (400.0, 300.0)),
+        ],
+        2.0,
+    );
+    // Before the engines say anything they are starting.
+    let before = rig.rooms.seen();
+    assert_eq!(
+        before.iter().map(|b| b.id).collect::<Vec<_>>(),
+        vec![Id::new(0xa1), Id::new(0xb2)]
+    );
+    assert!(before.iter().all(|b| b.status == BrowserState::STARTING));
+    rig.until("both ready", |e| ready(e, 0xa1) && ready(e, 0xb2));
+    // The engines are numbered in the order the rooms were made: `0xb2` was first.
+    rig.say(&Event::State {
+        browser: 1,
+        url: "https://example.com/".into(),
+        title: "Example".into(),
+        loading: false,
+        can_back: false,
+        can_forward: false,
+        status: String::new(),
+        zoom: 1.0,
+        error: None,
+        found: None,
+    });
+    rig.until("the title", |e| {
+        states(e, 0xb2).iter().any(|s| s.title == "Example")
+    });
+    let seen = rig.rooms.seen();
+    assert_eq!(seen[0].url, "");
+    assert_eq!(seen[1].url, "https://example.com/");
+    assert_eq!(seen[1].title, "Example");
+    assert!(seen.iter().all(|b| b.status == BrowserState::READY));
+}
+
+/// An agent's job is a command with a number the answer comes back with, to the room that has
+/// the browser.
+#[test]
+fn an_agents_job_is_sent_to_the_browser_and_its_answer_comes_back_for_the_room() {
+    let mut rig = rig("agent-job", true);
+    rig.open(1);
+    assert!(rig.rooms.send(Id::new(1), |browser| Command::Agent {
+        browser,
+        req: 41,
+        op: browser_ipc::message::AgentOp::Text,
+    }));
+    let Command::Agent { browser, req, op } =
+        rig.command("the job", |c| matches!(c, Command::Agent { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!((browser, req), (1, 41));
+    assert_eq!(op, browser_ipc::message::AgentOp::Text);
+    rig.say(&Event::AgentResult {
+        browser: 1,
+        req: 41,
+        output: browser_ipc::message::AgentOutput::Text {
+            text: "hello".into(),
+            truncated: false,
+        },
+    });
+    rig.until("the answer", |e| {
+        e.iter().any(|e| {
+            matches!(e, Effect::Agent(room, 41, browser_ipc::message::AgentOutput::Text { text, .. })
+                if *room == Id::new(1) && text == "hello")
+        })
+    });
+    // A browser that is not open cannot be given one.
+    assert!(!rig.rooms.send(Id::new(9), |browser| Command::Agent {
+        browser,
+        req: 42,
+        op: browser_ipc::message::AgentOp::Shot,
+    }));
+}
+
+#[test]
 fn a_link_that_opens_a_window_goes_here_or_is_the_pages_to_decide() {
     let mut rig = rig("window", true);
     rig.open(1);

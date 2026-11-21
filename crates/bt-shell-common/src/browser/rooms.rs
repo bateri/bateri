@@ -288,6 +288,17 @@ enum Told {
     },
 }
 
+/// A browser of the page, as an agent's `ls` has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Seen {
+    pub id: Id,
+    /// What the browser is ([`BrowserState::status`]).
+    pub status: String,
+    /// The address it is at, empty before the first load.
+    pub url: String,
+    pub title: String,
+}
+
 /// What the helper's threads and the main thread share.
 struct Shared {
     told: Mutex<VecDeque<Told>>,
@@ -725,6 +736,26 @@ impl Rooms {
     /// The rooms that hold a browser (for the shell's walk of them).
     pub fn ids(&self) -> impl Iterator<Item = Id> + '_ {
         self.rooms.keys().copied()
+    }
+
+    /// What `bateri browser ls` tells of the page's browsers, by id.
+    pub fn seen(&self) -> Vec<Seen> {
+        let mut seen: Vec<Seen> = self
+            .rooms
+            .iter()
+            .map(|(id, room)| Seen {
+                id: *id,
+                status: if room.state.status.is_empty() {
+                    BrowserState::READY.to_owned()
+                } else {
+                    room.state.status.clone()
+                },
+                url: room.state.url.clone(),
+                title: room.state.title.clone(),
+            })
+            .collect();
+        seen.sort_by_key(|browser| browser.id);
+        seen
     }
 
     /// The handle on the browser of `id`, for what answers for it (the agent's jobs).
