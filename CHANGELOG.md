@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Programs can draw glowing, shaded shapes.** A program's page can give a shape a soft glow or shadow, fill it with a gradient, mix it with what is under it, draw a dashed line and turn or scale it.
+
 ## [0.32.0] - 2026-11-20
 
 ### Added
