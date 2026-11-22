@@ -52,8 +52,7 @@ use objc2_app_kit::{
     NSAccessibilityTableRole, NSAccessibilityTextAreaRole, NSAccessibilityValueChangedNotification,
     NSApplication, NSAutoresizingMaskOptions, NSColor, NSControl, NSEvent, NSEventModifierFlags,
     NSEventType, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder, NSSecureTextField,
-    NSTextField, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow,
+    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange,
