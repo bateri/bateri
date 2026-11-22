@@ -291,7 +291,7 @@ serde_json = "1"
 # name it are `cfg(target_os = "macos")`. Its `wgpu` feature (a frame as a texture) is not on yet.
 # It brings no crate the build does not have (`mach2`, `base64`, `objc2-io-surface` are in the
 # graph).
-browser-ipc = { git = "https://github.com/bateri/browser", rev = "c24469caf5b8df2a9edaee7f2d8be23020b138f3" }
+browser-ipc = { git = "https://github.com/bateri/browser", rev = "339f2059b91475476d2e2d8f366b23c7eccaa946" }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
