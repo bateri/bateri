@@ -25,30 +25,38 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
+use block2::RcBlock;
 use bt_core::Theme;
+use bt_shell_common::native_view::ax::{self, AxNode};
 use bt_shell_common::native_view::{
     Accessible, AccessibleRole, Command, Field, FieldKind, FieldState, Fill, Id, Key, Mods,
-    Outline, PageHandle, Point, Role, Shortcut, Tip, ViewFiles, tone_linear,
+    Outline, PageHandle, Point, Role, Shortcut, Sort, Tip, ViewFiles, tone_linear,
 };
 use objc2::rc::{Retained, Weak as WeakId};
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityCheckBoxRole,
-    NSAccessibilityElement, NSAccessibilityGroupRole, NSAccessibilityImageRole,
-    NSAccessibilityLayoutChangedNotification, NSAccessibilityLinkRole, NSAccessibilityMenuItemRole,
-    NSAccessibilityPostNotification, NSAccessibilityProgressIndicatorRole,
-    NSAccessibilityRadioButtonRole, NSAccessibilityRole,
+    NSAccessibility, NSAccessibilityAnnouncementKey,
+    NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
+    NSAccessibilityCellRole, NSAccessibilityCheckBoxRole, NSAccessibilityCustomAction,
+    NSAccessibilityDialogSubrole, NSAccessibilityElement, NSAccessibilityGroupRole,
+    NSAccessibilityImageRole, NSAccessibilityLayoutChangedNotification, NSAccessibilityLinkRole,
+    NSAccessibilityListRole, NSAccessibilityMenuItemRole, NSAccessibilityOutlineRole,
+    NSAccessibilityPostNotification, NSAccessibilityPostNotificationWithUserInfo,
+    NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel, NSAccessibilityProgressIndicatorRole,
+    NSAccessibilityRadioButtonRole, NSAccessibilityRole, NSAccessibilityRowRole,
     NSAccessibilitySelectedTextChangedNotification, NSAccessibilitySliderRole,
-    NSAccessibilityStaticTextRole, NSAccessibilitySubrole, NSAccessibilitySwitchSubrole,
-    NSAccessibilityTabButtonSubrole, NSAccessibilityTextAreaRole,
-    NSAccessibilityValueChangedNotification, NSApplication, NSAutoresizingMaskOptions, NSColor,
-    NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont,
-    NSLineBreakMode, NSResponder, NSSecureTextField, NSTextField, NSTrackingArea,
+    NSAccessibilitySortDirection, NSAccessibilityStaticTextRole, NSAccessibilitySubrole,
+    NSAccessibilitySwitchSubrole, NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole,
+    NSAccessibilityTableRole, NSAccessibilityTextAreaRole, NSAccessibilityValueChangedNotification,
+    NSApplication, NSAutoresizingMaskOptions, NSColor, NSControl, NSEvent, NSEventModifierFlags,
+    NSEventType, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder, NSSecureTextField,
+    NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindow,
 };
 use objc2_foundation::{
-    NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+    NSArray, NSDictionary, NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange,
+    NSRect, NSSize, NSString,
 };
 
 use crate::pane::TerminalPane;
@@ -177,9 +185,13 @@ pub(crate) struct PageFields {
     /// changes and the page's outline does not ([`PageFields::place_again`]).
     outline: RefCell<Option<Outline>>,
     accessible: RefCell<Vec<Accessible>>,
-    /// What a screen reader is given for each of `accessible`, in order: an element for a button
-    /// or words, the field itself for a field.
+    /// What a screen reader is given of the page as its own: an element for a button or words,
+    /// the field itself for a field, those that nothing holds (a dialog, a table, a button on the
+    /// page); what a group holds is under it ([`ax::plan`]).
     elements: RefCell<Vec<Retained<AnyObject>>>,
+    /// Every element made for `accessible`, those inside a group too, for what asks which of the
+    /// pane's accessibility children are the page's.
+    owned: RefCell<Vec<Retained<AnyObject>>>,
     /// The page's tooltips as its outline last said, and the ones put on the pane's view for
     /// them: AppKit's tag of each and the words it shows (the view does not keep them).
     tips: RefCell<Vec<Tip>>,
@@ -210,6 +222,7 @@ impl PageFields {
             outline: RefCell::new(None),
             accessible: RefCell::new(Vec::new()),
             elements: RefCell::new(Vec::new()),
+            owned: RefCell::new(Vec::new()),
             tips: RefCell::new(Vec::new()),
             tip_tags: RefCell::new(Vec::new()),
             focused: Cell::new(None),
@@ -274,18 +287,45 @@ impl PageFields {
         }
         self.outline.replace(Some(outline.clone()));
         if *self.accessible.borrow() != outline.accessible {
+            // What the page says out loud, and was not saying: told to the screen reader at once.
+            let said: Vec<String> = ax::alerts(&self.accessible.borrow())
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let alerts: Vec<String> = ax::alerts(&outline.accessible)
+                .into_iter()
+                .filter(|words| !said.iter().any(|before| before == words))
+                .map(str::to_owned)
+                .collect();
             self.accessible.replace(outline.accessible.clone());
-            let elements = outline
+            let nodes = ax::plan(&outline.accessible);
+            let made: Vec<Option<Made>> = outline
                 .accessible
                 .iter()
-                .filter_map(|item| self.element_of(&pane, item))
+                .map(|item| self.element_of(&pane, item))
                 .collect();
-            self.elements.replace(elements);
+            relate(&pane, &outline.accessible, &nodes, &made);
+            let seen = |at: usize| made.get(at).and_then(Option::as_ref).map(Made::object);
+            // The page's own: what nothing that was made holds (a node whose group has no element
+            // is not under it).
+            let top = outline
+                .accessible
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| nearest(&nodes, &made, *at).is_none())
+                .filter_map(|(at, _)| seen(at))
+                .collect();
+            self.elements.replace(top);
+            self.owned
+                .replace((0..made.len()).filter_map(seen).collect());
             // SAFETY: the pane is an element of the accessibility tree (a view), and the name is
             // one of AppKit's own.
             unsafe {
                 NSAccessibilityPostNotification(&pane, NSAccessibilityLayoutChangedNotification)
             };
+            for words in alerts {
+                announce(&pane, &words);
+            }
         }
     }
 
@@ -359,24 +399,29 @@ impl PageFields {
     /// it as AppKit's), an element of the pane for the rest, where it stands in the pane, as what
     /// the page says it is ([`accessibility_role`]) and with its state: checked, chosen, open, of
     /// no use now, the value it shows.
-    fn element_of(&self, pane: &TerminalPane, item: &Accessible) -> Option<Retained<AnyObject>> {
+    fn element_of(&self, pane: &TerminalPane, item: &Accessible) -> Option<Made> {
         if item.role == AccessibleRole::Editor {
-            return editor_element(pane, item);
+            return editor_element(pane, item).map(Made::Other);
         }
         if let AccessibleRole::Field(_) = item.role {
             // The field itself, whichever class it is: NSTextField, then up to AnyObject.
             let field: Retained<NSTextField> = self.field(item.id?)?.retain();
-            return Some(Retained::into_super(Retained::into_super(
+            return Some(Made::Other(Retained::into_super(Retained::into_super(
                 Retained::into_super(Retained::into_super(Retained::into_super(field))),
-            )));
+            ))));
         }
         let state = &item.state;
         let element = PageElement::alloc(pane.mtm()).set_ivars(PageElementIvars {
-            press: Cell::new((pressed_by_role(item.role) && !state.disabled).then(|| {
-                let rect = item.rect;
-                (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
-            })),
+            // What answers the pointer is pressed whatever it says it is (an option, a tree's row, a
+            // header that sorts), and what a role has always meant pressed is, with no word of the page.
+            press: Cell::new(
+                ((item.pressable || pressed_by_role(item.role)) && !state.disabled).then(|| {
+                    let rect = item.rect;
+                    (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+                }),
+            ),
             pane: WeakId::new(pane),
+            target: item.id,
         });
         // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
         let element: Retained<PageElement> = unsafe { msg_send![super(element), init] };
@@ -398,10 +443,13 @@ impl PageFields {
             element.setAccessibilityRoleDescription(Some(&said));
         }
         // SAFETY: the values are those AppKit's own controls of each role have: a number for what
-        // is checked (0 or 1), a string for words and what a progress or a slider shows.
+        // is checked (0 or 1, and 2 for a box some of what it stands for is checked), a string for
+        // words and what a progress or a slider shows.
         unsafe {
             if let Some(checked) = state.checked {
                 element.setAccessibilityValue(Some(&NSNumber::new_i32(i32::from(checked))));
+            } else if state.mixed {
+                element.setAccessibilityValue(Some(&NSNumber::new_i32(2)));
             } else if let Some(value) = &state.value {
                 element.setAccessibilityValue(Some(&NSString::from_str(value)));
             } else if matches!(item.role, AccessibleRole::Text | AccessibleRole::Heading(_)) {
@@ -415,16 +463,8 @@ impl PageFields {
             element.setAccessibilityExpanded(open);
         }
         element.setAccessibilityEnabled(!state.disabled);
-        // The pane's own coordinates grow upward, the page's downward.
-        let rect = item.rect;
-        let height = pane.bounds().size.height;
-        element.setAccessibilityFrameInParentSpace(NSRect::new(
-            NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
-            NSSize::new(f64::from(rect.w), f64::from(rect.h)),
-        ));
-        Some(Retained::into_super(Retained::into_super(
-            Retained::into_super(element),
-        )))
+        element.setAccessibilityFrameInParentSpace(frame_in_pane(pane, item));
+        Some(Made::Page(element))
     }
 
     /// What the page can be told to do now, as its outline last said: the nearest the keyboard
@@ -437,9 +477,25 @@ impl PageFields {
             .unwrap_or_default()
     }
 
-    /// What a screen reader is given of the page, in the order it reads it.
+    /// What a screen reader is given of the page as its own, in the order it reads it: what nothing
+    /// holds (what a group holds is under it).
     pub(crate) fn elements(&self) -> Vec<Retained<AnyObject>> {
         self.elements.borrow().clone()
+    }
+
+    /// Every object that stands for the page to a screen reader, those inside a group too, and the
+    /// views of all its fields: what the pane's own answer is cleared of, so that a field a modal in
+    /// front shuts out is not given back as the pane's.
+    pub(crate) fn owned(&self) -> Vec<Retained<AnyObject>> {
+        let mut all = self.owned.borrow().clone();
+        all.extend(self.fields.borrow().iter().map(|field| {
+            let view: Retained<NSTextField> = field.view.retain();
+            let object: Retained<AnyObject> = Retained::into_super(Retained::into_super(
+                Retained::into_super(Retained::into_super(Retained::into_super(view))),
+            ));
+            object
+        }));
+        all
     }
 
     /// The editor named `id` may have changed its text or moved its selection: a screen reader is
@@ -915,6 +971,9 @@ page_field_class!(
 pub(crate) struct PageElementIvars {
     press: Cell<Option<(f32, f32)>>,
     pane: WeakId<TerminalPane>,
+    /// The page's name for the element, which the page is asked to show when the screen reader moves
+    /// to it (`reveal`).
+    target: Option<Id>,
 }
 
 define_class!(
@@ -938,6 +997,21 @@ define_class!(
                     true
                 }
                 _ => false,
+            }
+        }
+
+        /// The screen reader moves to the element, or away from it: where it moves to, the page is
+        /// asked to show it (a row that stands half out of what its list shows, or one the list has
+        /// built past its edge), and to move its cursor there. AppKit has no request for scrolling an
+        /// element into view that an element can answer.
+        #[unsafe(method(setAccessibilityFocused:))]
+        fn set_accessibility_focused(&self, focused: bool) {
+            // SAFETY: NSAccessibilityElement's own setter, with the same argument.
+            let _: () = unsafe { msg_send![super(self), setAccessibilityFocused: focused] };
+            if let (true, Some(target), Some(pane)) =
+                (focused, self.ivars().target, self.ivars().pane.load())
+            {
+                pane.page_reveal(target, None);
             }
         }
     }
@@ -1118,7 +1192,235 @@ fn accessibility_role(
             AccessibleRole::Text | AccessibleRole::Heading(_) | AccessibleRole::Field(_) => {
                 (NSAccessibilityStaticTextRole, None)
             }
+            // What the page says is no control to a person who reads by ear is not read at all (it is
+            // not in the outline); a group is the plain container.
+            AccessibleRole::None | AccessibleRole::Group | AccessibleRole::ListItem => {
+                (NSAccessibilityGroupRole, None)
+            }
+            // A dialog is a group that says it is one; an alert dialog says so in its words
+            // (`ax::plan` gives them as its role description).
+            AccessibleRole::Dialog | AccessibleRole::AlertDialog => {
+                (NSAccessibilityGroupRole, Some(NSAccessibilityDialogSubrole))
+            }
+            AccessibleRole::List | AccessibleRole::ListBox => (NSAccessibilityListRole, None),
+            // An option is chosen and pressed as a row of a list is.
+            AccessibleRole::ListOption | AccessibleRole::Row | AccessibleRole::TreeItem => {
+                (NSAccessibilityRowRole, None)
+            }
+            AccessibleRole::Table => (NSAccessibilityTableRole, None),
+            AccessibleRole::Cell | AccessibleRole::ColumnHeader => (NSAccessibilityCellRole, None),
+            AccessibleRole::Tree => (NSAccessibilityOutlineRole, None),
+            AccessibleRole::TabList => (NSAccessibilityTabGroupRole, None),
+            // What is said in place: static text, the page's own words (`status`, told as they come up;
+            // `alert`, which is announced).
+            AccessibleRole::Status | AccessibleRole::Alert => (NSAccessibilityStaticTextRole, None),
         }
+    }
+}
+
+/// What a screen reader is given for an element of the page: the element made for it
+/// ([`PageElement`], which can be given a place in a tree), or an object that is the page's already (a
+/// field, an editor's text area).
+pub(crate) enum Made {
+    Page(Retained<PageElement>),
+    Other(Retained<AnyObject>),
+}
+
+impl Made {
+    fn object(&self) -> Retained<AnyObject> {
+        match self {
+            Self::Page(element) => {
+                Retained::into_super(Retained::into_super(Retained::into_super(element.clone())))
+            }
+            Self::Other(object) => object.clone(),
+        }
+    }
+}
+
+/// The element of the nearest of what holds `at`, at any depth, that was made.
+fn nearest(nodes: &[AxNode], made: &[Option<Made>], at: usize) -> Option<usize> {
+    let mut outer = nodes.get(at)?.parent;
+    while let Some(held) = outer {
+        if made.get(held).is_some_and(Option::is_some) {
+            return Some(held);
+        }
+        outer = nodes.get(held)?.parent;
+    }
+    None
+}
+
+/// Where `item` stands, in the pane's coordinates, which grow upward where the page's go downward.
+fn frame_in_pane(pane: &TerminalPane, item: &Accessible) -> NSRect {
+    let rect = item.rect;
+    let height = pane.bounds().size.height;
+    NSRect::new(
+        NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
+        NSSize::new(f64::from(rect.w), f64::from(rect.h)),
+    )
+}
+
+/// An array of the elements made for `places`.
+fn array_of(made: &[Option<Made>], places: &[usize]) -> Retained<NSArray> {
+    let objects: Vec<Retained<AnyObject>> = places
+        .iter()
+        .filter_map(|at| made.get(*at).and_then(Option::as_ref).map(Made::object))
+        .collect();
+    NSArray::from_retained_slice(&objects)
+}
+
+/// The tree the plan says, put on the elements: who holds whom (with each place in its holder's
+/// space), and what a table, an outline, a row, a header, a cell and a list say of themselves; the
+/// kind the page gave, the help, the commands that can be done on it.
+fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[Option<Made>]) {
+    for (at, (item, node)) in items.iter().zip(nodes).enumerate() {
+        let Some(Made::Page(element)) = made.get(at).and_then(Option::as_ref) else {
+            continue;
+        };
+        // SAFETY: each setter takes what AppKit's own elements of that property are given: elements
+        // of this tree (the made ones), numbers and ranges; the parent and the children outlive
+        // them (they are the page's outline's, and go with it).
+        unsafe {
+            if let Some((holder, held)) = nearest(nodes, made, at)
+                .and_then(|holder| Some((holder, made.get(holder)?.as_ref()?)))
+            {
+                element.setAccessibilityParent(Some(&*held.object()));
+                // In its holder's space: where it stands less where the holder does.
+                let (mine, theirs) = (
+                    frame_in_pane(pane, item),
+                    frame_in_pane(pane, &items[holder]),
+                );
+                element.setAccessibilityFrameInParentSpace(NSRect::new(
+                    NSPoint::new(
+                        mine.origin.x - theirs.origin.x,
+                        mine.origin.y - theirs.origin.y,
+                    ),
+                    mine.size,
+                ));
+            }
+            let children: Vec<usize> = node
+                .children
+                .iter()
+                .copied()
+                .filter(|child| made.get(*child).is_some_and(Option::is_some))
+                .collect();
+            if !children.is_empty() {
+                element.setAccessibilityChildren(Some(&array_of(made, &children)));
+            }
+            if let Some(words) = &node.role_description {
+                element.setAccessibilityRoleDescription(Some(&NSString::from_str(words)));
+            }
+            if let Some(help) = &node.help {
+                element.setAccessibilityHelp(Some(&NSString::from_str(help)));
+            }
+            if let Some(index) = node.index {
+                element.setAccessibilityIndex(index as NSInteger);
+            }
+            if let Some(level) = node.disclosure_level {
+                element.setAccessibilityDisclosureLevel(level as NSInteger);
+            }
+            if let Some(by) = node.disclosed_by.and_then(|by| made.get(by)?.as_ref()) {
+                element.setAccessibilityDisclosedByRow(Some(&*by.object()));
+            }
+            if matches!(item.role, AccessibleRole::TreeItem) && !node.disclosed_rows.is_empty() {
+                element.setAccessibilityDisclosedRows(Some(&array_of(made, &node.disclosed_rows)));
+            }
+            if matches!(item.role, AccessibleRole::Table | AccessibleRole::Tree) {
+                let rows = array_of(made, &node.rows);
+                element.setAccessibilityRows(Some(&rows));
+                element.setAccessibilityVisibleRows(Some(&rows));
+                element.setAccessibilitySelectedRows(Some(&array_of(made, &node.selected_rows)));
+                if let Some(count) = node.row_count {
+                    element.setAccessibilityRowCount(count as NSInteger);
+                }
+                if let Some(count) = node.column_count {
+                    element.setAccessibilityColumnCount(count as NSInteger);
+                }
+                if !node.column_headers.is_empty() {
+                    element.setAccessibilityColumnHeaderUIElements(Some(&array_of(
+                        made,
+                        &node.column_headers,
+                    )));
+                }
+                if let Some(head) = node.header.and_then(|head| made.get(head)?.as_ref()) {
+                    element.setAccessibilityHeader(Some(&*head.object()));
+                }
+            }
+            if !node.selected_children.is_empty() {
+                element.setAccessibilitySelectedChildren(Some(&array_of(
+                    made,
+                    &node.selected_children,
+                )));
+            }
+            if let Some((first, many)) = node.row_range {
+                element.setAccessibilityRowIndexRange(NSRange::new(first as usize, many as usize));
+            }
+            if let Some((first, many)) = node.column_range {
+                element
+                    .setAccessibilityColumnIndexRange(NSRange::new(first as usize, many as usize));
+            }
+            if let Some(sort) = node.sort {
+                element.setAccessibilitySortDirection(match sort {
+                    Sort::Ascending => NSAccessibilitySortDirection::Ascending,
+                    Sort::Descending => NSAccessibilitySortDirection::Descending,
+                });
+            }
+        }
+        if let (Some(target), false) = (item.id, node.actions.is_empty()) {
+            let actions: Vec<Retained<NSAccessibilityCustomAction>> = node
+                .actions
+                .iter()
+                .map(|(title, command)| custom_action(pane, title, *command, target))
+                .collect();
+            element.setAccessibilityCustomActions(Some(&NSArray::from_retained_slice(&actions)));
+        }
+    }
+}
+
+/// The command the page defined on `target`, as a screen reader's action of its own: its name is the
+/// command's, and doing it tells the page so (`PageHandle`'s page, `command_on`).
+fn custom_action(
+    pane: &TerminalPane,
+    title: &str,
+    command: Id,
+    target: Id,
+) -> Retained<NSAccessibilityCustomAction> {
+    let pane = WeakId::new(pane);
+    let handler = RcBlock::new(move || -> Bool {
+        Bool::new(
+            pane.load()
+                .is_some_and(|pane| pane.page_command_on(command, target)),
+        )
+    });
+    let name = NSString::from_str(title);
+    NSAccessibilityCustomAction::initWithName_handler(
+        NSAccessibilityCustomAction::alloc(),
+        &name,
+        Some(&handler),
+    )
+}
+
+/// The page says `words` out loud (an `alert`): the screen reader is told at once and above what it is
+/// saying.
+fn announce(pane: &TerminalPane, words: &str) {
+    let message = NSString::from_str(words);
+    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::High.0);
+    let objects: [&AnyObject; 2] = [message.as_ref(), priority.as_ref()];
+    // SAFETY: AppKit's announcement and priority keys (extern statics) with the `NSString` and the
+    // `NSNumber` they document.
+    let info = unsafe {
+        NSDictionary::<objc2_app_kit::NSAccessibilityNotificationUserInfoKey, AnyObject>::from_slices(
+            &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
+            &objects,
+        )
+    };
+    // SAFETY: the pane is an accessibility element (a view) and the user info is the announcement the
+    // notification documents.
+    unsafe {
+        NSAccessibilityPostNotificationWithUserInfo(
+            pane,
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
     }
 }
 

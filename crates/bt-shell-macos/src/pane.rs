@@ -4563,6 +4563,37 @@ impl TerminalPane {
         self.drain_page();
     }
 
+    /// A screen reader chose the command `command` of the element `target` (an action it lists for
+    /// it): the page is told it, as it is told a command from the menu. `false` where no page is up.
+    pub(crate) fn page_command_on(
+        &self,
+        command: bt_shell_common::native_view::Id,
+        target: bt_shell_common::native_view::Id,
+    ) -> bool {
+        let Some(handle) = self.page_handle() else {
+            return false;
+        };
+        handle.page().command_on(command, target);
+        self.drain_page();
+        true
+    }
+
+    /// A screen reader or an agent asks for the element `target`, or the `index`th row (from 1) of
+    /// the list, table or tree of that name, to be shown: the page scrolls it into view and moves
+    /// its cursor there. `false` where no page is up.
+    pub(crate) fn page_reveal(
+        &self,
+        target: bt_shell_common::native_view::Id,
+        index: Option<u32>,
+    ) -> bool {
+        let Some(handle) = self.page_handle() else {
+            return false;
+        };
+        handle.page().reveal(target, index);
+        self.drain_page();
+        true
+    }
+
     /// What the screen reader is given of the pane while a page of the kit is up: the page's own
     /// elements and fields in the order it reads them, after the pane's other views but in place of the terminal's view, which the page covers. `None` while no page is up.
     pub(crate) fn page_accessibility(
@@ -4572,6 +4603,9 @@ impl TerminalPane {
         let page = self.ivars().page_up.borrow();
         let page = page.as_ref()?;
         let elements = page.fields.elements();
+        // Of the page's own, whatever it is and wherever it stands in a group, none is given twice,
+        // and none the page shut out (a field behind a modal) is given at all.
+        let owned = page.fields.owned();
         let terminal: &AnyObject = self.view();
         let mut children: Vec<Retained<AnyObject>> = below
             .map(|below| below.to_vec())
@@ -4580,9 +4614,7 @@ impl TerminalPane {
             .filter(|child| {
                 let child: &AnyObject = child;
                 !std::ptr::eq(child, terminal)
-                    && !elements
-                        .iter()
-                        .any(|element| std::ptr::eq(child, &**element))
+                    && !owned.iter().any(|element| std::ptr::eq(child, &**element))
             })
             .collect();
         children.extend(elements);

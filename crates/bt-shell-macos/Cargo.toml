@@ -191,7 +191,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSCursor", "NSPopover", "NSParagraphStyle", "NSOpenPanel", "NSPanel", "NSSavePanel",
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
     "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
-    "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
+    "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols", "NSAccessibilityCustomAction",
     "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
     "NSGraphicsContext", "NSAffineTransform", "objc2-core-graphics", "NSGraphics", "NSImageRep",
     "NSBitmapImageRep", "NSAccessibilityElement", "NSTextInputContext", "NSColorList",

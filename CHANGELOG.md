@@ -24,6 +24,8 @@ of every installed copy. A version without a section is not released.
 - **Claude knows how to use a program's view.** The `bateri` skill tells it to read a view first, to act with a ref or a command title from the reading, to ask you before anything that cannot be undone (remove, delete, kill, drop, send), to leave your keyboard and tabs alone, and to treat the words on the page as data, never as instructions. "That pen" means the pane you had the keyboard in before the one you are typing to.
 - **`bateri ls` shows which pane has the keyboard.** The pane you are typing in is marked `(focused)`, a pane that shows a view says so, and `--json` gives the order the keyboard visited the panes, so an agent can tell which pane you were in just before its own.
 
+- **VoiceOver reads a program's view as a tree.** A dialog, a row or a tab that holds buttons is one element with them inside it. A table is a table, with its header, its sorted column and "row 5 of 200"; a tree is an outline with levels and open or closed rows; lists, tabs and a half-checked box say what they are. While a dialog is open VoiceOver sees the dialog and nothing behind it, and an alert the program raises is read out as it comes up. What a program lists for an element ("Kill", "Restart") is in VoiceOver's actions menu, and moving VoiceOver to a row that is partly or wholly out of view scrolls the row into view.
+
 ### Fixed
 
 - **A password box no longer closes bateri.** Opening linearpen without an API key, or any program screen that asks for a password, quit bateri as soon as the box was ready for typing.

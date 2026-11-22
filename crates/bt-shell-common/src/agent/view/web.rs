@@ -26,6 +26,7 @@ use super::words;
 use crate::agent::message::{Failure, Kind};
 use crate::native_view::{FieldKind, Id, Key, KeyConvention, Rect, Shortcut, State};
 use kablo_bateri::view::{Action, Way};
+use pencere_view::Detail;
 
 /// How long, in milliseconds, the page's document must have stood still for the page to be at rest.
 pub const QUIET_MS: u32 = 300;
@@ -91,6 +92,10 @@ pub fn parse(record: &str) -> Result<Reading, String> {
                     words: decode(words),
                     state: state_of(flags, optional(value)),
                     rect: rect_of(x, y, w, h),
+                    pressable: false,
+                    parent: None,
+                    behind: false,
+                    detail: Detail::default(),
                 });
             }
             ["field", n, kind, label, hint, value, covered, x, y, w, h] => {
@@ -174,6 +179,7 @@ fn state_of(flags: &str, value: Option<String>) -> State {
         },
         disabled: has("disabled"),
         value,
+        ..State::default()
     }
 }
 
