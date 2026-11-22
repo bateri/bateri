@@ -1315,6 +1315,13 @@ fn run(dir: &Path) {
     section("an agent reads a web page as a tree", &mut failures, || {
         agent_reads_a_web_page_as_a_tree(mtm, &window, frame_rect, dir);
     });
+    section(
+        "an agent reads a dialog behind a large page",
+        &mut failures,
+        || {
+            agent_reads_a_dialog_behind_a_large_page(mtm, &window, frame_rect, dir);
+        },
+    );
     // Last: it registers the app's fonts for this process, and with them the default font of
     // every pane opened after it.
     section("the app's fonts in the page", &mut failures, || {
@@ -2247,6 +2254,11 @@ const TREE_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>t
 <div role=checkbox aria-checked=mixed aria-label=\"All\" tabindex=0></div>\
 <div role=grid aria-label=\"Board\"><div role=row><span role=columnheader>Lane</span><span role=columnheader>Cards</span></div>\
 <div role=row aria-rowindex=7><span role=gridcell>Todo</span><span role=gridcell>nine</span></div></div>\
+<div role=listbox aria-label=\"Library\"><div role=option aria-posinset=55 aria-setsize=1000>fifty-five</div>\
+<div role=option aria-posinset=56 aria-setsize=1000>fifty-six</div></div>\
+<div role=tree aria-label=\"Outline\"><div role=treeitem aria-expanded=true>top<div role=group>\
+<div role=treeitem>leaf</div></div></div><div role=treeitem aria-expanded=false>closed<div role=group style=\"display:none\">\
+<div role=treeitem>secret</div></div></div><div role=treeitem>last</div></div>\
 <div id=scrim style=\"display:none;position:fixed;left:0;top:0;right:0;bottom:0\">\
 <div id=dlg role=dialog aria-modal=true aria-label=\"Settings\" style=\"margin:40px;padding:10px;background:#eee\">\
 <h2>Settings</h2><button id=ok>OK</button></div></div><script src=app.js></script></body></html>";
@@ -2385,6 +2397,56 @@ fn agent_reads_a_web_page_as_a_tree(
     );
     assert!(far.contains("no such row"), "{far}");
 
+    // A list says its items' places as `N of M`, and `reveal` takes that number: item 55 of a list
+    // that has built only 55 and 56 is the first of them, not the "55th built".
+    let library = ref_of(&read, "listbox \"Library\"");
+    let fifty_five = said(
+        &pane,
+        Action::Reveal {
+            target: library.clone(),
+            index: Some(55),
+        },
+    );
+    assert!(
+        fifty_five.starts_with("brought row 55 of listbox \"Library\""),
+        "{fifty_five}"
+    );
+    let first = refused(
+        &pane,
+        Action::Reveal {
+            target: library,
+            index: Some(1),
+        },
+    );
+    assert!(
+        first.contains("no such row"),
+        "1 of 1000 is not built: {first}"
+    );
+    // An outline's rows are numbered as they are shown, top to bottom: a closed branch's rows are not.
+    let outline = ref_of(&read, "tree \"Outline\"");
+    let fourth = said(
+        &pane,
+        Action::Reveal {
+            target: outline.clone(),
+            index: Some(4),
+        },
+    );
+    assert!(
+        fourth.starts_with("brought row 4 of tree \"Outline\""),
+        "{fourth}"
+    );
+    let fifth = refused(
+        &pane,
+        Action::Reveal {
+            target: outline,
+            index: Some(5),
+        },
+    );
+    assert!(
+        fifth.contains("no such row"),
+        "the closed branch's row is not a row: {fifth}"
+    );
+
     // **A dialog that says it is modal** shuts the page behind it out; a scrim that answers a click and
     // holds the dialog does not swallow what is in it.
     let open = ref_of(&read, "button \"Open settings\"");
@@ -2422,6 +2484,59 @@ fn agent_reads_a_web_page_as_a_tree(
     assert!(closed.contains("table \"Processes\""), "{closed}");
     assert!(!closed.contains("behind the modal"), "{closed}");
 
+    program.bye(&token);
+    until("the view to go", || !covered(&pane));
+    pane.close();
+}
+
+/// A page whose script builds thousands of elements before its dialog (which is open from the start
+/// and comes last in the document).
+const BIG_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>big</title></head><body>\
+<div id=dlg role=dialog aria-modal=true aria-label=\"Last words\"><h2>Last words</h2><button>Fine</button></div>\
+<script src=app.js></script></body></html>";
+
+/// The script of the large page: 6000 paragraphs, which it puts in front of the dialog, and a page's
+/// hello to the program.
+const BIG_SCRIPT: &str = "var d=document.getElementById('dlg'),started=false;\
+for(var i=0;i<6000;i++){var p=document.createElement('p');p.textContent='x';document.body.insertBefore(p,d)}\
+window.addEventListener('message',function(e){if(e.source!==window.parent)return;var m=e.data;\
+if(m.context){if(started)return;started=true;\
+window.parent.postMessage({call:{id:1,method:'hello',params:{}}},'*')}});";
+
+/// A page so large that its walk would end before its dialog (which comes last in the document) is
+/// reached still reads the dialog: what is behind the modal has a budget of its own.
+fn agent_reads_a_dialog_behind_a_large_page(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    let files = [
+        ("index.html", "text/html", BIG_PAGE.as_bytes()),
+        ("app.js", "text/javascript", BIG_SCRIPT.as_bytes()),
+    ];
+    let (pane, mut program) = open_pane(mtm, window, frame_rect, &dir.join("big"), PANE + 9);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello();
+    program.open(&token, &files, None);
+    program.supply(&files);
+    watch_it_start(&pane, &mut program);
+    let read = said(&pane, Action::Read);
+    assert!(
+        read.contains("dialog \"Last words\""),
+        "{}",
+        &read[..read.len().min(600)]
+    );
+    assert!(
+        read.contains("button \"Fine\""),
+        "{}",
+        &read[..read.len().min(600)]
+    );
+    assert!(
+        read.contains("note: behind the modal in front,"),
+        "{}",
+        &read[..read.len().min(600)]
+    );
     program.bye(&token);
     until("the view to go", || !covered(&pane));
     pane.close();

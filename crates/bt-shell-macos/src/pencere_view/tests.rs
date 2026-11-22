@@ -1777,7 +1777,7 @@ fn the_agents_script_encodes_what_the_page_says_and_runs_nothing_of_it() {
     // left the document is let go of.
     let walk = &source[source.find("const walk = ").expect("walk")..];
     let cap = &walk[..walk
-        .find("if (spent() || el.nodeType !== 1) return;")
+        .find("if (over(el) || el.nodeType !== 1) return;")
         .expect("the cap's end")];
     assert!(
         cap.contains("ITEMS_MOST") && cap.contains("walkInside(el)"),
@@ -1789,6 +1789,7 @@ fn the_agents_script_encodes_what_the_page_says_and_runs_nothing_of_it() {
     assert!(
         source.contains("fields.length >= FIELDS_MOST")
             && source.contains("++visited <= WALK_MOST")
+            && source.contains("++afar > WALK_MOST")
     );
     // The record's version is what the reader of it expects.
     assert!(source.contains(&format!(

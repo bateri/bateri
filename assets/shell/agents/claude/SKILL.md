@@ -29,7 +29,7 @@ The user's words:
 
 - "what is in that pane": `bateri view PANE`.
 - "press Restart", "click Save": a command by its title, `bateri view PANE command Restart`, or an element by its ref, `click REF`. A command that one element lists (`action "Kill"` on its line, a row of a list of processes) is done on it: `command REF Kill`.
-- "go to row 248", "show me the end of the table": `reveal REF` scrolls an element into view, `reveal REF 248` the 248th row (from 1) of a list, a table or an outline, which the page then builds and lists. REF is the list, table or outline's own, from the reading.
+- "go to row 248", "show me the end of the table": `reveal REF` scrolls an element into view, `reveal REF 248` row 248 of a list, a table or an outline, which the page then builds and lists. REF is the list, table or outline's own, from the reading; the number is the one it prints: a table row's `rowindex=` (a header row counts where the page counts it), a list item's place in `N of M`, and in an outline the row's place among those shown, from the top.
 - "type X in the search": `fill REF 'X'` fills a field and leaves the keyboard in it; `type 'X'` goes where the keyboard is; `press cmd+enter`, `press escape`.
 - "scroll down", "go to the bottom": `scroll REF down [N]` (`up`, `top`, `bottom`), REF from the reading's scrolls.
 - a context menu: `menu REF`, then `pick TITLE` (or its number).

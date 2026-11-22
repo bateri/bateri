@@ -327,6 +327,26 @@ fn reveal(
 ) -> Result<Done, Failure> {
     let id = target(reading, word)?;
     let what = describe(reading, id);
+    if let Some(row) = index {
+        // The row is of a list, a table or an outline, and one it has: a button has none, and a table
+        // that says how many rows it has has none past them (the web way says as much).
+        let item = reading.items.iter().find(|item| item.id == Some(id));
+        if !item
+            .is_some_and(|item| matches!(item.role.as_str(), "list" | "listbox" | "table" | "tree"))
+        {
+            return Err(mistake(format!(
+                "{what} is not a list, a table or an outline: `reveal REF N` brings row N of one of \
+                 those into view"
+            )));
+        }
+        let most = item.and_then(|item| item.state.rowcount);
+        if row == 0 || most.is_some_and(|most| row > most) {
+            let upto = most.map_or_else(String::new, |most| format!(" to {most}"));
+            return Err(mistake(format!(
+                "no such row {row} in {what}: its rows are numbered from 1{upto}"
+            )));
+        }
+    }
     ctx.handle.page().reveal(id, index);
     Done::said(match index {
         Some(row) => format!("brought row {row} of {what} into view"),

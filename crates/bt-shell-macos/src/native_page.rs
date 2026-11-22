@@ -34,7 +34,7 @@ use bt_shell_common::native_view::{
 };
 use objc2::rc::{Retained, Weak as WeakId};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
-use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
     NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
@@ -432,6 +432,12 @@ impl PageFields {
                 let rect = item.rect;
                 rect.x < 0.0 || rect.y < 0.0 || rect.x + rect.w > width || rect.y + rect.h > height
             }),
+            disclosed: Cell::new(
+                state
+                    .expanded
+                    .filter(|_| matches!(item.role, AccessibleRole::TreeItem)),
+            ),
+            cells: RefCell::new(Vec::new()),
         });
         // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
         let element: Retained<PageElement> = unsafe { msg_send![super(element), init] };
@@ -471,6 +477,11 @@ impl PageFields {
         }
         if let Some(open) = state.expanded {
             element.setAccessibilityExpanded(open);
+            // An outline's row is open or closed as AXDisclosing says (set after the element knows
+            // which it is, so that the request below sees no change in what is set here).
+            if matches!(item.role, AccessibleRole::TreeItem) {
+                element.setAccessibilityDisclosed(open);
+            }
         }
         element.setAccessibilityEnabled(!state.disabled);
         element.setAccessibilityFrameInParentSpace(frame_in_pane(pane, item));
@@ -984,6 +995,12 @@ pub(crate) struct PageElementIvars {
     /// The page's name for an element that is partly out of view, which the page is asked to show when
     /// the screen reader moves to it (`reveal`).
     target: Option<Id>,
+    /// Whether the row of an outline is open now, where it can be opened (a tree's row that holds
+    /// others): what a screen reader's request to open or close it is measured against.
+    disclosed: Cell<Option<bool>>,
+    /// A table's cells, by the place of their row among its rows and of the cell in its row (from 0),
+    /// which `accessibilityCellForColumn:row:` answers from.
+    cells: RefCell<Vec<(i64, i64, Retained<AnyObject>)>>,
 }
 
 define_class!(
@@ -1008,6 +1025,34 @@ define_class!(
                 }
                 _ => false,
             }
+        }
+
+        /// The screen reader opens or closes a row of an outline: the page is pressed there, which is
+        /// what a click on a row that holds others does (it opens or closes it). A request that says
+        /// what the row is already is not one.
+        #[unsafe(method(setAccessibilityDisclosed:))]
+        fn set_accessibility_disclosed(&self, open: bool) {
+            let was = self.ivars().disclosed.get();
+            // SAFETY: NSAccessibilityElement's own setter, with the same argument.
+            let _: () = unsafe { msg_send![super(self), setAccessibilityDisclosed: open] };
+            if was.is_some_and(|was| was != open)
+                && let (Some((x, y)), Some(pane)) =
+                    (self.ivars().press.get(), self.ivars().pane.load())
+            {
+                pane.press_page_at(Point::new(x, y));
+            }
+        }
+
+        /// A table's cell at a column and a row (each from 0, among the rows and the cells the page
+        /// has built), which a screen reader asks for to go from cell to cell.
+        #[unsafe(method_id(accessibilityCellForColumn:row:))]
+        fn accessibility_cell(&self, column: NSInteger, row: NSInteger) -> Option<Retained<AnyObject>> {
+            self.ivars()
+                .cells
+                .borrow()
+                .iter()
+                .find(|(at_row, at_column, _)| *at_row == row as i64 && *at_column == column as i64)
+                .map(|(_, _, cell)| cell.clone())
         }
 
         /// The screen reader moves to the element, or away from it: where it moves to, the page is
@@ -1221,8 +1266,8 @@ fn accessibility_role(
             AccessibleRole::Cell | AccessibleRole::ColumnHeader => (NSAccessibilityCellRole, None),
             AccessibleRole::Tree => (NSAccessibilityOutlineRole, None),
             AccessibleRole::TabList => (NSAccessibilityTabGroupRole, None),
-            // What is said in place: static text, the page's own words (`status`, told as they come up;
-            // `alert`, which is announced).
+            // What is said in place: static text, the page's own words (`status` is read where it
+            // stands, not announced; `alert` is announced as it comes up).
             AccessibleRole::Status | AccessibleRole::Alert => (NSAccessibilityStaticTextRole, None),
         }
     }
@@ -1283,6 +1328,26 @@ fn array_of(made: &[Option<Made>], places: &[usize]) -> Retained<NSArray> {
 /// kind the page gave, the help, the commands that can be done on it.
 fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[Option<Made>]) {
     for (at, (item, node)) in items.iter().zip(nodes).enumerate() {
+        // A field or an editor's text area (not made here) stands under what holds it in the tree, as
+        // that holds it among its children.
+        if let Some(Made::Other(object)) = made.get(at).and_then(Option::as_ref) {
+            if let Some(held) =
+                nearest(nodes, made, at).and_then(|holder| made.get(holder)?.as_ref())
+            {
+                let parent = held.object();
+                // SAFETY: `setAccessibilityParent:` is the setter of NSAccessibility's property of
+                // that name, which an NSView and an NSAccessibilityElement answer; what is asked
+                // first is whether this object does, and the argument is an element of this tree.
+                unsafe {
+                    let answers: bool =
+                        msg_send![&**object, respondsToSelector: sel!(setAccessibilityParent:)];
+                    if answers {
+                        let _: () = msg_send![&**object, setAccessibilityParent: &*parent];
+                    }
+                }
+            }
+            continue;
+        }
         let Some(Made::Page(element)) = made.get(at).and_then(Option::as_ref) else {
             continue;
         };
@@ -1354,6 +1419,29 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                 if let Some(head) = node.header.and_then(|head| made.get(head)?.as_ref()) {
                     element.setAccessibilityHeader(Some(&*head.object()));
                 }
+                // The cells by their row's place among the rows and their own in the row.
+                let mut cells = Vec::new();
+                for (row_at, row) in node.rows.iter().enumerate() {
+                    let Some(row_node) = nodes.get(*row) else {
+                        continue;
+                    };
+                    let mut column = 0;
+                    for child in &row_node.children {
+                        if !matches!(
+                            items[*child].role,
+                            AccessibleRole::Cell | AccessibleRole::ColumnHeader
+                        ) {
+                            continue;
+                        }
+                        let Some(cell) = made.get(*child).and_then(Option::as_ref) else {
+                            continue;
+                        };
+                        let place = nodes[*child].index.unwrap_or(column);
+                        cells.push((row_at as i64, place, cell.object()));
+                        column += 1;
+                    }
+                }
+                element.ivars().cells.replace(cells);
             }
             if !node.selected_children.is_empty() {
                 element.setAccessibilitySelectedChildren(Some(&array_of(

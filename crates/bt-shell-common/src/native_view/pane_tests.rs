@@ -2573,7 +2573,7 @@ const PROCESSES: &str = r#"
 local said = {}
 return {
     render = function()
-        local list = pencere.div():id("procs"):role("list"):label("Processes"):h(100):w(300):scroll()
+        local list = pencere.div():id("procs"):role("list"):label("Processes"):h(100):w(300):scroll():table_size(3, 1)
         for n = 1, 3 do
             list:child(pencere.div():id("p" .. n):role("listitem"):label("proc " .. n):press("p" .. n):h(20)
                 :command("stop", "Stop", {})
@@ -2685,5 +2685,58 @@ fn a_command_an_element_lists_is_done_on_it_by_its_title_and_the_ones_it_does_no
             "brought listitem \"proc 2\" ({second}) into view\n"
         )),
         "{revealed}"
+    );
+    // A row is of a list, a table or an outline, and a first one is row 1: a row of a row is none.
+    let list = name_of(&read, "list \"Processes\"");
+    let row_two = answered(ask(
+        &mut rig,
+        true,
+        Action::Reveal {
+            target: list.clone(),
+            index: Some(2),
+        },
+        &fields,
+    ));
+    assert!(
+        row_two.starts_with(&format!(
+            "brought row 2 of list \"Processes\" ({list}) into view\n"
+        )),
+        "{row_two}"
+    );
+    let not_a_list = refused(ask(
+        &mut rig,
+        true,
+        Action::Reveal {
+            target: second.clone(),
+            index: Some(2),
+        },
+        &fields,
+    ));
+    assert!(
+        not_a_list.contains("is not a list, a table or an outline"),
+        "{not_a_list}"
+    );
+    let zero = refused(ask(
+        &mut rig,
+        true,
+        Action::Reveal {
+            target: list,
+            index: Some(0),
+        },
+        &fields,
+    ));
+    assert!(zero.contains("no such row 0"), "{zero}");
+    let past = refused(ask(
+        &mut rig,
+        true,
+        Action::Reveal {
+            target: name_of(&read, "list \"Processes\""),
+            index: Some(4),
+        },
+        &fields,
+    ));
+    assert!(
+        past.contains("no such row 4") && past.contains("1 to 3"),
+        "{past}"
     );
 }

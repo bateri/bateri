@@ -395,8 +395,16 @@
       more = true;
       return true;
     };
+    // What is behind the modal is walked on a budget of its own, so that a large page behind a dialog
+    // does not use up the walk before the dialog (which comes last in the document) is reached. Past
+    // it the count of what is behind is a floor, not the whole.
+    let afar = 0;
+    const spentBehind = () => ++afar > WALK_MOST;
     // Whether the element is of what the modal shows (the page behind is not).
     const inFront = (el) => !modal || modal.contains(el);
+    // Whether the walk has no more visits for the element: what is of the page behind the modal is
+    // counted against the budget of its own.
+    const over = (el) => (modal && !inFront(el) && !el.contains(modal) ? spentBehind() : spent());
     const optional = (words) => (words ? "+" + enc(words) : "-");
 
     // An item is told, under the item that holds it where one does (`parent`, the place of that in the
@@ -445,7 +453,7 @@
         walkInside(el);
         return;
       }
-      if (spent() || el.nodeType !== 1) return;
+      if (over(el) || el.nodeType !== 1) return;
       const t = el.tagName;
       if (t === "SCRIPT" || t === "STYLE" || t === "NOSCRIPT" || t === "TEMPLATE") return;
       if (!shown(el) || el.inert) return;
@@ -486,7 +494,7 @@
 
     // The fields and the boxes that scroll inside what is already named: no more words of it.
     const walkInside = (el) => {
-      if (spent() || el.nodeType !== 1 || !shown(el) || el.inert) return;
+      if (over(el) || el.nodeType !== 1 || !shown(el) || el.inert) return;
       const kind = fieldKind(el);
       if (kind) {
         pushField(el, kind);
@@ -706,18 +714,25 @@
     return ok();
   };
 
-  // Brings an element, or the row of the list, the table or the outline it is that the reading says is
-  // row `index` (from 1: what the page says its place is, as the reading prints it), into view: the page
-  // scrolls to it. A row the page has not built (a list that builds what is in view) is no row; the
-  // detail says how many it has built.
+  // Brings an element, or the row `index` (from 1) of the list, the table or the outline it is, into
+  // view: the page scrolls to it. The number is the one the reading prints: a table's row is its
+  // `rowindex`, a list's item its `posinset` ("N of M"); an outline's rows are numbered as they are
+  // shown, top to bottom, which the reading's `posinset` (among the siblings) does not say. A row the
+  // page has not built (a list that builds what is in view) is no row; the detail says how many it has
+  // built.
   const reveal = (n, index) => {
     const el = find(n);
     if (!el) return err("gone");
     let target = el;
     if (index) {
       rowsets = new Map();
+      peersets = new Map();
       const rows = rowsOf(el);
-      target = rows.find((row) => rowIndexOf(row) === index);
+      const kind = roleOf(el);
+      if (kind === "tree") target = rows.filter(shown)[index - 1];
+      else if (kind === "list" || kind === "listbox" || kind === "tablist")
+        target = rows.find((row) => (whole(row.getAttribute("aria-posinset")) || peers(row, roleOf(row)).indexOf(row) + 1) === index);
+      else target = rows.find((row) => rowIndexOf(row) === index);
       if (!target) return err("norow", String(rows.length));
     }
     if (!shown(target)) return err("hidden");
