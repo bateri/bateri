@@ -393,6 +393,8 @@ pub(crate) struct FakeDepot {
     pub(crate) keep: AtomicBool,
     /// The first this many tellings of the switch fail.
     pub(crate) switch_failures: AtomicU32,
+    /// The far end ends at once and says no hello (a server with no kablo that keeps profiles).
+    pub(crate) mute: AtomicBool,
     /// What the machine was told, in order: the switch, and how many times the home had been
     /// opened and had a live record when it was.
     pub(crate) told: Mutex<Vec<Told>>,
@@ -450,7 +452,11 @@ impl Depot for FakeDepot {
             return Err("not yet".into());
         }
         let (client, server) = UnixStream::pair().map_err(|e| e.to_string())?;
-        self.home.serve(server);
+        if self.mute.load(Ordering::Relaxed) {
+            drop(server);
+        } else {
+            self.home.serve(server);
+        }
         let closing = client.try_clone().map_err(|e| e.to_string())?;
         Ok(Link::new(
             client.try_clone().map_err(|e| e.to_string())?,
@@ -470,6 +476,7 @@ pub(crate) fn depot(home: &FakeHome) -> Arc<FakeDepot> {
         failures: AtomicU32::new(0),
         keep: AtomicBool::new(true),
         switch_failures: AtomicU32::new(0),
+        mute: AtomicBool::new(false),
         told: Mutex::new(Vec::new()),
     })
 }
@@ -1129,6 +1136,67 @@ fn a_close_that_fails_is_tried_again_and_one_the_home_already_made_is_not_told()
     other.end();
     assert_eq!(other.mark().recall(), Some(false));
     assert!(lock(&depot2.told).is_empty());
+}
+
+#[test]
+fn a_server_that_ends_the_command_without_a_hello_lets_the_browser_go_on_and_is_tried_slowly() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    depot.mute.store(true, Ordering::Relaxed);
+    let mac = Mac::new("mute", depot, &bell);
+    mac.attach();
+    assert!(
+        mac.sync
+            .gate()
+            .wait(Stage::AfterOpen, Instant::now() + Duration::from_secs(5)),
+        "the browser goes on with what the Mac has"
+    );
+    assert_eq!(home.opens(), 0);
+}
+
+#[test]
+fn a_home_that_says_hello_and_then_goes_slow_holds_the_pages_for_the_wait_and_not_longer() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    home.seed(&cookie("sid", Some("home")), &[], &[]);
+    let mac = Mac::new("slowhold", depot, &bell);
+    mac.attach();
+    bell.until("joined", || joined(&mac));
+    // The home goes away and comes back, and says hello and nothing more.
+    home.stall(true);
+    home.cut();
+    let end = Instant::now() + Duration::from_secs(10);
+    while mac.sync.gate().wait_released(Instant::now()) {
+        assert!(Instant::now() < end, "the requests were held");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let held = Instant::now();
+    assert!(
+        mac.sync
+            .gate()
+            .wait_released(held + super::SYNC_WAIT + Duration::from_secs(3)),
+        "let go with the join not over"
+    );
+    assert!(held.elapsed() < super::SYNC_WAIT + Duration::from_secs(2));
+    home.stall(false);
+}
+
+#[test]
+fn a_number_a_live_sync_has_is_not_given_to_another() {
+    let bell = Arc::new(Bell::default());
+    let (_home, depot) = started(&bell);
+    let (a, b) = (
+        Mac::new("ids-a", depot.clone(), &bell),
+        Mac::new("ids-b", depot, &bell),
+    );
+    let syncs = super::Syncs::new();
+    syncs.join("a", 1, |_| Ok(a.sync.clone())).unwrap();
+    // The counter comes round to the number the first one has.
+    lock(&syncs.slots).next = super::MAX_SYNCS;
+    syncs.join("b", 2, |_| Ok(b.sync.clone())).unwrap();
+    let slots = lock(&syncs.slots);
+    assert_eq!(slots.by_id.len(), 2, "two numbers, two syncs");
+    assert_eq!(slots.by_id.get(&1).map(String::as_str), Some("a"));
 }
 
 #[test]

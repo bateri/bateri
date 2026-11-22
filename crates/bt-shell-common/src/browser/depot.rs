@@ -44,6 +44,12 @@ pub trait Depot: Send + Sync {
         true
     }
 
+    /// The name the person gave the machine, as they typed it (the key of the switch). Two names
+    /// of one machine may give two switches ([`Depots::set`]).
+    fn host(&self) -> &str {
+        ""
+    }
+
     /// Tells the machine that profiles are kept there (`on`: the mark that none is kept is taken
     /// away) or are not (`off`: what is kept is deleted and the mark is left), within `wait`. The
     /// `Err` is a line for the person. A depot that cannot say so does not take a turn.
@@ -82,11 +88,17 @@ fn kablo_script(args: &str) -> String {
 pub struct ServedDepot {
     pub served: Served,
     pub keep: bool,
+    /// The server as the person typed it, for the switch.
+    pub host: String,
 }
 
 impl Depot for ServedDepot {
     fn kept(&self) -> bool {
         self.keep
+    }
+
+    fn host(&self) -> &str {
+        &self.host
     }
 
     fn switch(&self, on: bool, wait: Duration) -> Result<(), String> {
@@ -210,12 +222,21 @@ impl Depots {
         Arc::new(Self::default())
     }
 
-    /// `machine` keeps its profiles at `depot` from now on.
+    /// `machine` keeps its profiles at `depot` from now on. **A machine that is switched off under
+    /// one name stays so under another**: a server has more names than one (`box`, `box.lan`) and
+    /// the person's entry may be for only one of them; the name that says no is not overruled by
+    /// the one that says nothing, or the profile would be put where the person said it is not.
+    /// The name that said no ends it by saying yes itself.
     pub fn set(&self, machine: &str, depot: Arc<dyn Depot>) {
-        self.homes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(machine.to_owned(), depot);
+        let mut homes = self.homes.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(old) = homes.get(machine)
+            && !old.kept()
+            && depot.kept()
+            && old.host() != depot.host()
+        {
+            return;
+        }
+        homes.insert(machine.to_owned(), depot);
     }
 
     pub fn get(&self, machine: &str) -> Option<Arc<dyn Depot>> {
@@ -244,6 +265,35 @@ mod tests {
         fn open(&self, _wait: Duration) -> Result<Link, String> {
             Err("no home".into())
         }
+    }
+
+    struct Named(&'static str, bool);
+
+    impl Depot for Named {
+        fn open(&self, _wait: Duration) -> Result<Link, String> {
+            Err("no home".into())
+        }
+        fn kept(&self) -> bool {
+            self.1
+        }
+        fn host(&self) -> &str {
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_machine_switched_off_under_one_name_is_not_switched_on_by_another() {
+        let depots = Depots::new();
+        depots.set("server:a", Arc::new(Named("box", false)));
+        // Another name of the same machine that says nothing does not overrule the no.
+        depots.set("server:a", Arc::new(Named("box.lan", true)));
+        assert!(!depots.get("server:a").unwrap().kept());
+        // The name that said no says yes: it is on.
+        depots.set("server:a", Arc::new(Named("box", true)));
+        assert!(depots.get("server:a").unwrap().kept());
+        // And a no overrules a yes, whichever name says it.
+        depots.set("server:a", Arc::new(Named("box.lan", false)));
+        assert!(!depots.get("server:a").unwrap().kept());
     }
 
     #[test]

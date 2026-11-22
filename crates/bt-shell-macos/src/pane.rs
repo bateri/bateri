@@ -6454,6 +6454,7 @@ impl TerminalPane {
         Some(Arc::new(ServedDepot {
             served: self.served(&target),
             keep,
+            host: target.host.clone(),
         }))
     }
 

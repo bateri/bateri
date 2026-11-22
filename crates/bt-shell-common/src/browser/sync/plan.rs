@@ -62,6 +62,15 @@ pub fn plan(entries: &[Entry], mode: Mode, known: &HashMap<Id, Known>, local: &[
         };
         if same {
             plan.same.push(entry.clone());
+        } else if let (Some(l), Some(k)) = (have, known.get(&id))
+            && mode == Mode::Diff
+            && k.applied >= entry.seq
+        {
+            // The home sent it again (what is newer than `since` comes again when an earlier
+            // record was not applied) but the Mac took it already, and what differs is what the
+            // Mac did to it since: that goes to the home on the number the Mac took, and the home
+            // decides. The home's old copy is not written over it.
+            plan.send.push(((*l).clone(), k.applied));
         } else {
             plan.apply.push(entry.clone());
         }
@@ -188,6 +197,28 @@ mod tests {
         let plan = super::plan(&entries, Mode::Diff, &known, &[now]);
         assert_eq!(plan.apply.len(), 1);
         assert!(plan.send.is_empty());
+    }
+
+    #[test]
+    fn a_record_the_home_sends_again_that_the_mac_took_and_changed_is_the_macs_to_send() {
+        // `since` lags behind a record that could not be applied, so an earlier one comes again.
+        let taken = local("sid", "old");
+        let now = local("sid", "changed while away");
+        let known: HashMap<_, _> = [known_of(&taken, 7)].into();
+        let again = [entry(7, &cookie("sid", Some("old")))];
+        let plan = plan(&again, Mode::Diff, &known, std::slice::from_ref(&now));
+        assert!(
+            plan.apply.is_empty(),
+            "the home's old copy is not written over it"
+        );
+        assert_eq!((plan.send.len(), plan.send[0].1), (1, 7));
+        // A newer number is the home's change: the home wins, as before.
+        let newer = [entry(8, &cookie("sid", Some("theirs")))];
+        let plan = super::plan(&newer, Mode::Diff, &known, std::slice::from_ref(&now));
+        assert_eq!((plan.apply.len(), plan.send.len()), (1, 0));
+        // A whole state is another home's numbers: nothing is told by them.
+        let plan = super::plan(&again, Mode::Full, &known, &[now]);
+        assert_eq!((plan.apply.len(), plan.send.len()), (1, 0));
     }
 
     #[test]

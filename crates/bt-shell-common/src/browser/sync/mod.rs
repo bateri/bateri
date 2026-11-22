@@ -50,8 +50,12 @@ const RETRY_FIRST: Duration = if cfg!(test) {
 };
 const RETRY_LONGEST: Duration = Duration::from_secs(60);
 
-/// How often what is to be kept is written.
+/// How often what is to be kept is written, while there is something to write.
 const SAVE_EVERY: Duration = Duration::from_secs(1);
+
+/// How long the thread sleeps when nothing is to be written and nothing is waited for: it is
+/// woken by what comes, not by the clock.
+const IDLE_WAIT: Duration = Duration::from_secs(3600);
 
 enum Msg {
     Input(Input),
@@ -131,9 +135,15 @@ impl ProfileSync {
         let _ = self.tx.send(Msg::Input(Input::Detach(browser)));
     }
 
-    /// The helper's news of the profile.
-    pub fn event(&self, event: Event) {
-        let _ = self.tx.send(Msg::Input(Input::Helper(event)));
+    /// The helper's news of the profile; given back when the sync is over and nobody reads it.
+    pub fn event(&self, event: Event) -> Option<Event> {
+        match self.tx.send(Msg::Input(Input::Helper(event))) {
+            Ok(()) => None,
+            Err(e) => match e.0 {
+                Msg::Input(Input::Helper(event)) => Some(event),
+                _ => None,
+            },
+        }
     }
 
     /// Ends the sync: what is kept is written, the home is hung up on, nothing waits any more.
@@ -216,6 +226,9 @@ fn drive(
     let mut saved_at = Instant::now();
     let mut told_at = Instant::now();
     let mut told_failures = 0u32;
+    // When the profile's requests stop waiting for a join that is not over (one bound for each
+    // connection: a home that says hello and then goes slow does not hold a page for ever).
+    let mut hold_until: Option<Instant> = None;
     loop {
         if conn.is_none()
             && engine.is_down()
@@ -250,11 +263,18 @@ fn drive(
             }
         }
         let now = Instant::now();
-        let wait = if conn.is_none() && engine.is_down() && engine.refused().is_none() {
+        let retrying = conn.is_none() && engine.is_down() && engine.refused().is_none();
+        let busy = engine.is_dirty() || turn.is_some() || conn.as_ref().is_some_and(|c| c.greeting);
+        let mut wait = if retrying {
             retry_at.saturating_duration_since(now)
-        } else {
+        } else if busy {
             SAVE_EVERY
+        } else {
+            IDLE_WAIT
         };
+        if let Some(at) = hold_until {
+            wait = wait.min(at.saturating_duration_since(now));
+        }
         let message = match rx.recv_timeout(wait.max(Duration::from_millis(1))) {
             Ok(message) => Some(message),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
@@ -267,10 +287,13 @@ fn drive(
                     c.greeting = false;
                     match writer {
                         Some(writer) => {
-                            failures = 0;
                             engine.connected(Box::new(WireHome { writer }));
+                            hold_until = Some(Instant::now() + SYNC_WAIT);
                         }
                         None => {
+                            // No hello: the server has no kablo that keeps profiles, or it
+                            // answers nothing. A browser does not wait for it.
+                            engine.unreachable();
                             (c.end)();
                         }
                     }
@@ -283,10 +306,14 @@ fn drive(
             }
             Some(Msg::Closed(id)) => {
                 if conn.as_ref().is_some_and(|c| c.id == id) {
-                    let was_up = !engine.is_down();
+                    // A connection that got as far as being live was a good one; one that was
+                    // let down before that (a hello that did not come, a join that did not end)
+                    // is one more failure, and the next try waits longer.
+                    let was_live = engine.is_live();
                     conn = None;
                     engine.lost();
-                    failures = if was_up { 0 } else { failures + 1 };
+                    hold_until = None;
+                    failures = if was_live { 0 } else { failures + 1 };
                     retry_at = Instant::now() + backoff(failures);
                 }
             }
@@ -298,6 +325,13 @@ fn drive(
                 return;
             }
             None => {}
+        }
+        if engine.is_live() {
+            failures = 0;
+            hold_until = None;
+        } else if hold_until.is_some_and(|at| Instant::now() >= at) {
+            engine.let_requests_go();
+            hold_until = None;
         }
         // A hello that is not answered ends the connection.
         if let Some(c) = &conn
@@ -370,7 +404,11 @@ struct Slot {
 
 /// The helper's requests of a sync are numbered from `id << REQ_BITS`, so that an answer that
 /// names no browser (a folder read or written) is found by its number.
-const REQ_BITS: u32 = 20;
+const REQ_BITS: u32 = engine::REQ_BITS;
+
+/// How many syncs may run beside one helper: the numbers of their requests are `id << REQ_BITS`
+/// in a `u32`.
+const MAX_SYNCS: u32 = (1 << (32 - REQ_BITS)) - 1;
 
 impl Syncs {
     pub fn new() -> Arc<Syncs> {
@@ -391,8 +429,19 @@ impl Syncs {
     ) -> io::Result<Arc<ProfileSync>> {
         let mut slots = self.slots();
         if !slots.by_dir.contains_key(dir) {
-            slots.next = slots.next % 4095 + 1;
-            let id = slots.next;
+            // The next number that no live sync has: a number given again would send the
+            // answers of one profile's folders to another's.
+            let mut id = 0;
+            for _ in 0..MAX_SYNCS {
+                slots.next = slots.next % MAX_SYNCS + 1;
+                if !slots.by_id.contains_key(&slots.next) {
+                    id = slots.next;
+                    break;
+                }
+            }
+            if id == 0 {
+                return Err(io::Error::other("too many profiles are being synced"));
+            }
             let sync = make(Arc::new(AtomicU32::new(id << REQ_BITS)))?;
             slots.by_id.insert(id, dir.to_owned());
             slots.by_dir.insert(
@@ -454,10 +503,13 @@ impl Syncs {
             dir.and_then(|dir| slots.by_dir.get(dir))
                 .map(|s| s.sync.clone())
         };
-        if let Some(sync) = target {
-            sync.event(event);
-        }
-        None
+        let Some(sync) = target else {
+            // A folder answer with nobody to read it is given back: its stage is the caller's to
+            // drop. The rest is news of a profile that is gone.
+            return matches!(event, Event::IndexedDbRecords { .. }).then_some(event);
+        };
+        sync.event(event)
+            .filter(|event| matches!(event, Event::IndexedDbRecords { .. }))
     }
 
     /// How many profiles have a sync.

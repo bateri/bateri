@@ -219,6 +219,22 @@ pub fn wire_of(record: &Record, sums: &[Digest]) -> Wired {
     Wired { body, big_value }
 }
 
+/// Whether `path` is a relative path of plain names (`leveldb/000003.log`): no `..`, no `.`, no
+/// empty part, no root, no NUL. What a home says is not trusted to name where a file goes on this
+/// Mac: a path that leaves the folder it is joined to would write anywhere the person can.
+pub fn is_plain_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+/// Whether `name` is one plain name, as a database's origin folder is.
+pub fn is_plain_name(name: &str) -> bool {
+    is_plain_path(name) && !name.contains('/')
+}
+
 fn text(value: &[u8], what: &'static str) -> Result<String, Unreadable> {
     String::from_utf8(value.to_vec()).map_err(|_| Unreadable(what))
 }
@@ -294,6 +310,9 @@ pub fn record_of(body: &Body, blob: Option<&[u8]>) -> Result<Record, Unreadable>
                 }
             }
             let origin = origin.ok_or(Unreadable("a database without its origin"))?;
+            if !is_plain_name(&origin) {
+                return Err(Unreadable("a database origin that is not a plain name"));
+            }
             let value = value_bytes
                 .map(|bytes| folder_value(bytes).map(|f| (f.format, f.major, f.files)))
                 .transpose()?
@@ -369,6 +388,9 @@ pub fn folder_value(bytes: &[u8]) -> Result<Folder, Unreadable> {
                 let (Some(path), Some(sha256), Some(size)) = (path, sum, size) else {
                     return Err(Unreadable("a database file without its parts"));
                 };
+                if !is_plain_path(&path) {
+                    return Err(Unreadable("a database file whose path leaves its folder"));
+                }
                 files.push(SummedFile { path, sha256, size });
             }
             _ => {}
@@ -523,6 +545,51 @@ mod tests {
         };
         assert_eq!(back(&gone, &[]), gone);
         assert!(wire_of(&gone, &[]).body.deleted);
+    }
+
+    #[test]
+    fn what_a_home_says_does_not_name_a_place_outside_the_folder_it_is_put_in() {
+        for path in ["ok", "leveldb/000003.log", "blob/1/00/1"] {
+            assert!(is_plain_path(path), "{path}");
+        }
+        for path in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "a/../../x",
+            "a//b",
+            "./a",
+            "a/.",
+            "a/\0b",
+            "..",
+        ] {
+            assert!(!is_plain_path(path), "{path:?}");
+        }
+        assert!(is_plain_name("https_site.test_0") && !is_plain_name("a/b"));
+        // A database whose file leaves its folder, or whose origin does, is not a record.
+        let database = |origin: &str, path: &str| Record::IndexedDb {
+            origin: origin.into(),
+            value: Some(IndexedDbValue {
+                format: "chromium-idb-leveldb".into(),
+                major: 1,
+                files: vec![IndexedDbFile {
+                    path: path.into(),
+                    size: 1,
+                }],
+            }),
+        };
+        let sums = [wire::sum(b"x")];
+        for (origin, path) in [
+            ("http_site.test_0", "../../../Library/LaunchAgents/x.plist"),
+            ("http_site.test_0", "/etc/cron.d/x"),
+            ("../../outside", "leveldb/000003.log"),
+            ("", "leveldb/000003.log"),
+        ] {
+            let body = wire_of(&database(origin, path), &sums).body;
+            assert!(record_of(&body, None).is_err(), "{origin:?} {path:?}");
+        }
+        let body = wire_of(&database("http_site.test_0", "leveldb/000003.log"), &sums).body;
+        assert!(record_of(&body, None).is_ok());
     }
 
     #[test]

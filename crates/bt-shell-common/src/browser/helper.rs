@@ -556,6 +556,16 @@ impl Run {
         let Some(event) = self.syncs.route(event) else {
             return;
         };
+        // A copy of a profile's folders that nobody is left to read (the sync ended before the
+        // helper answered) is taken off the disk.
+        if let Event::IndexedDbRecords { stage, .. } = &event {
+            if !stage.is_empty() {
+                let _ = self.commands.send(&Command::StageDrop {
+                    stage: stage.clone(),
+                });
+            }
+            return;
+        }
         let browser = match &event {
             Event::Download { browser, req, .. } => {
                 lock(&self.downloads).insert(*req, *browser);

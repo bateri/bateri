@@ -34,7 +34,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use browser_ipc::message::{Command, Event, Record};
 use kablo_proto::profile::{
@@ -58,6 +58,10 @@ pub trait Helper: Send {
 pub trait Home: Send {
     fn send(&mut self, message: &Client) -> io::Result<()>;
 }
+
+/// The helper's requests of a sync are numbered from `id << REQ_BITS`, so that an answer that
+/// names no browser (a folder read or written) is found by its number.
+pub const REQ_BITS: u32 = 20;
 
 pub struct Config {
     /// The profile's folder under the helper's root.
@@ -214,7 +218,6 @@ pub struct Engine {
     /// Blobs the home said it does not have.
     missing: HashSet<Digest>,
     stages: HashMap<String, usize>,
-    stage_seq: u32,
     /// The code the home turned the Mac away with: it is not asked again.
     refused: Option<u16>,
 }
@@ -272,7 +275,6 @@ impl Engine {
             waiting: Vec::new(),
             missing: HashSet::new(),
             stages: HashMap::new(),
-            stage_seq: 0,
             refused: None,
         }
     }
@@ -293,6 +295,17 @@ impl Engine {
         self.state == State::Down
     }
 
+    /// The requests of the profile are not held any longer for a join that is not over: a home
+    /// that said hello and then went slow is not waited for beyond the bound ([`Gate::hold`]).
+    pub fn let_requests_go(&mut self) {
+        self.gate.hold(false);
+    }
+
+    /// Whether something is yet to be written, so that the thread must wake to write it.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     pub fn is_live(&self) -> bool {
         self.state == State::Live
     }
@@ -305,8 +318,15 @@ impl Engine {
         self.saved.since
     }
 
+    /// The next number of a request: they run in the range the sync owns (`id << REQ_BITS`) and
+    /// go round in it, so that they never become another sync's.
     fn req(&self) -> u32 {
-        self.reqs.fetch_add(1, Ordering::Relaxed)
+        const MASK: u32 = (1 << REQ_BITS) - 1;
+        self.reqs
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some((n & !MASK) | (n.wrapping_add(1) & MASK))
+            })
+            .unwrap_or_default()
     }
 
     fn carrier(&self) -> Option<u32> {
@@ -673,9 +693,12 @@ impl Engine {
 
     // ---- join: the folders of IndexedDB ----
 
+    /// A stage's name is the process's own: the profiles of a helper share its root, and two
+    /// that join at once must not build one folder.
     fn stage_name(&mut self) -> String {
-        self.stage_seq += 1;
-        format!(".stage/b{}-{}", std::process::id(), self.stage_seq)
+        static STAGES: AtomicU64 = AtomicU64::new(0);
+        let n = STAGES.fetch_add(1, Ordering::Relaxed) + 1;
+        format!(".stage/b{}-{n}", std::process::id())
     }
 
     fn stage_dir(&self, stage: &str) -> PathBuf {
@@ -912,7 +935,21 @@ impl Engine {
                 let (Record::IndexedDb { origin, .. }, Some(folder)) = (record, folder) else {
                     continue;
                 };
+                // Nothing a home says goes outside the stage: the names were checked when the
+                // record was read, and are checked again where they are joined.
+                if !super::records::is_plain_name(origin) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "a database origin that is not a plain name",
+                    ));
+                }
                 for spec in &folder.files {
+                    if !super::records::is_plain_path(&spec.path) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "a database file whose path leaves its folder",
+                        ));
+                    }
                     let to = dir.join(origin).join(&spec.path);
                     if let Some(parent) = to.parent() {
                         fs::create_dir_all(parent)?;

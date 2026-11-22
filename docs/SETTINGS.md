@@ -2566,8 +2566,13 @@ command line of a program running as root, so a script run with `sudo`
   included. **The mark wins**: a Mac whose key is still `false` writes
   it again when it connects, and only a Mac whose key was turned from `false` to
   `true` takes the mark away (`kablo profile on`) and then gives the server its
-  profile. Like `integration` it may stand alone, takes the first entry that says it,
-  and takes effect the moment you save.
+  profile. Like `integration` it may stand alone and takes the first entry that says it.
+  It is read when a page's profile is opened: **a page that is open keeps
+  its profile in step until it is closed**, and a server turned off is told at
+  the next page that opens. A server has more names than one (`box`, `box.lan`)
+  and the entry may be for one: a name that says `false` is not overruled by
+  another that says nothing, until bateri restarts or the entry that said it says
+  `true`.
 - **A broken entry** (an unknown `mark`, an entry without `host`, an entry
   carrying none of `mark`, `integration`, `commands` and `profiles`, an `integration`
   or `profiles` that is not `true`/`false`, an item that is not a table) rejects the **whole** list: at
