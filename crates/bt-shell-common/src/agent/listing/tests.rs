@@ -24,6 +24,7 @@ fn row(status: Status) -> Row {
         status,
         opened_by: None,
         waiting: false,
+        marks: Marks::default(),
     }
 }
 
@@ -1005,6 +1006,8 @@ fn the_json_is_json_and_says_what_the_text_says() {
             "front_is_own",
             "output_at",
             "opened_by",
+            "view",
+            "focus_rank",
             "placed",
             "window",
             "group",
@@ -1089,7 +1092,7 @@ fn the_json_of_a_small_scene_is_this_exactly() {
     let expected = "{\"caller\":\"p4\",\"typing\":null,\"windows\":[
 {\"id\":\"w1\",\"visible\":true,\"groups\":[{\"id\":\"g1\",\"label\":\"api\"}],\"tabs\":[{\"id\":\"t3\",\"group\":\"g1\",\"keys\":\"⌘1\",\"label\":null,\"title\":null,\"selected\":true,\"zoomed\":null,\"tree\":{\"axis\":\"stacked\",\"ratio\":0.333,\"first\":{\"id\":\"p4\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true,\"floating\":false,\"minimized\":false},\"second\":{\"id\":\"p5\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true,\"floating\":false,\"minimized\":false}},\"cards\":[]}]}
 ],\"terminals\":[
-{\"id\":\"p4\",\"name\":null,\"machine\":null,\"state\":\"running\",\"activity\":\"idle\",\"program\":\"zsh\",\"directory\":\"/home/ada\",\"cols\":120,\"rows\":30,\"exit\":null,\"secret\":false,\"label\":null,\"started\":100,\"front_started\":null,\"front_is_own\":true,\"output_at\":160,\"opened_by\":null,\"placed\":\"tab\",\"window\":\"w1\",\"group\":\"g1\",\"tab\":\"t3\"}
+{\"id\":\"p4\",\"name\":null,\"machine\":null,\"state\":\"running\",\"activity\":\"idle\",\"program\":\"zsh\",\"directory\":\"/home/ada\",\"cols\":120,\"rows\":30,\"exit\":null,\"secret\":false,\"label\":null,\"started\":100,\"front_started\":null,\"front_is_own\":true,\"output_at\":160,\"opened_by\":null,\"view\":null,\"focus_rank\":null,\"placed\":\"tab\",\"window\":\"w1\",\"group\":\"g1\",\"tab\":\"t3\"}
 ]}
 ";
     assert_eq!(scene.json(), expected);
@@ -1244,6 +1247,7 @@ fn the_rows_know_who_opened_each_terminal_and_which_wait_for_a_pane() {
         ],
         &records,
         &|terminal| terminal == Terminal(9),
+        &|_| Marks::default(),
     );
     let opened: Vec<_> = rows.iter().map(|row| row.opened_by.as_deref()).collect();
     assert_eq!(opened, [Some("p4"), None, None, None]);
@@ -1452,4 +1456,77 @@ fn a_card_that_is_a_terminal_of_another_machine_seen_by_the_level_is_marked_too(
     assert_eq!(card.get("minimized"), &Json::Bool(true));
     // The level sees another machine's pane but not whether it is on screen: no such key.
     assert!(!card.keys().contains(&"on_screen"), "{card:?}");
+}
+
+/// `scene()` with the marks of its terminals: the view each pane shows and the order the keyboard
+/// has been in them.
+fn marked(marks: &[(&str, Marks)]) -> Scene {
+    let mut scene = scene();
+    for (name, mark) in marks {
+        if let Some(row) = scene
+            .terminals
+            .iter_mut()
+            .find(|row| row.status.id.as_str() == *name)
+        {
+            row.marks = *mark;
+        }
+    }
+    scene
+}
+
+#[test]
+fn the_pane_with_the_keyboard_is_focused_and_a_pane_that_shows_a_view_says_so_in_the_table() {
+    let scene = marked(&[
+        (
+            "p7",
+            Marks {
+                view: Some(ViewKind::Native),
+                focus_rank: Some(1),
+            },
+        ),
+        (
+            "p9",
+            Marks {
+                view: Some(ViewKind::Web),
+                focus_rank: Some(2),
+            },
+        ),
+    ]);
+    let text = scene.text(NOW);
+    // Only the pane that has the keyboard now is focused, wherever it stands in the layout.
+    assert!(
+        text.contains("pane id:p7 (on screen) (focused)\n"),
+        "{text}"
+    );
+    assert!(text.contains("pane id:p9 (on screen)\n"), "{text}");
+    assert!(!text.contains("p4 (on screen) (focused)"), "{text}");
+    assert_eq!(text.matches("(focused)").count(), 1, "{text}");
+    // The program says it is a view.
+    let table: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("p7 "))
+        .collect();
+    assert!(table.iter().any(|line| line.contains("(view)")), "{text}");
+
+    let parsed = Json::parse(&scene.json());
+    let rows = parsed.get("terminals").items();
+    let row = |name: &str| {
+        rows.iter()
+            .find(|row| row.get("id") == &Json::String(name.to_owned()))
+            .unwrap_or_else(|| panic!("no {name}: {rows:?}"))
+    };
+    assert_eq!(row("p7").get("view"), &Json::String("native".to_owned()));
+    assert_eq!(row("p7").get("focus_rank"), &Json::Number(1.0));
+    assert_eq!(row("p9").get("view"), &Json::String("web".to_owned()));
+    assert_eq!(row("p9").get("focus_rank"), &Json::Number(2.0));
+    // A pane that shows no view and has not had the keyboard says neither.
+    assert_eq!(row("p4").get("view"), &Json::Null);
+    assert_eq!(row("p4").get("focus_rank"), &Json::Null);
+}
+
+#[test]
+fn no_pane_is_focused_while_none_has_had_the_keyboard() {
+    let text = scene().text(NOW);
+    assert!(!text.contains("(focused)"), "{text}");
+    assert!(!text.contains("(view)"), "{text}");
 }

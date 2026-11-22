@@ -66,6 +66,7 @@ mod link;
 mod notify;
 pub mod pencere;
 mod picture;
+mod png_out;
 mod pointer;
 mod program_status;
 mod reader;
@@ -98,6 +99,7 @@ pub use input::{
 };
 pub use notify::Notification;
 pub use picture::pictured;
+pub use png_out::encode_png;
 pub use pointer::PointerShape;
 pub use program_status::{ProgramActivity, ProgramReport, State as ProgramState};
 pub use reset::keeping_history as reset_keeping_history;

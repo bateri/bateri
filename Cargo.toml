@@ -109,7 +109,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 # its rectangle is a `CGRect`, behind the `objc2-core-foundation` flag.
 # `WKUserScript`: the script that gives a view's page the app's own fonts
 # (`pencere_view::fonts`); it needs `NSObject` and `NSString` of `objc2-foundation` and no crate.
-    "WKSnapshotConfiguration", "objc2-core-foundation", "WKUserScript",
+# `WKContentWorld`: the named world the agent's script lives in (`pencere_view::agent`), with the
+# calls and the handler that take a world (`callAsyncJavaScript`, `addScriptMessageHandler:contentWorld:`);
+# no crate: a header flag of the one that is here, as the others.
+    "WKSnapshotConfiguration", "objc2-core-foundation", "WKUserScript", "WKContentWorld",
 ] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision.
@@ -275,15 +278,15 @@ kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "3c067099a0bde1e
 # All of pencere is Apache-2.0 (GPL-3 compatible), and `rev` must be a commit at or after the
 # relicensing (`75a78e3`). `make audit` fails if `rev` is not a full hash or does not resolve,
 # and if any of them comes from anywhere else.
-pencere-host = { git = "https://github.com/bateri/pencere", rev = "5b6681ff4b36a7afb66cb3b9d8533ba31c31288e" }
-pencere-view = { git = "https://github.com/bateri/pencere", rev = "5b6681ff4b36a7afb66cb3b9d8533ba31c31288e" }
-pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "5b6681ff4b36a7afb66cb3b9d8533ba31c31288e" }
-pencere-drive = { git = "https://github.com/bateri/pencere", rev = "5b6681ff4b36a7afb66cb3b9d8533ba31c31288e" }
+pencere-host = { git = "https://github.com/bateri/pencere", rev = "1cb4fe73e807e88599d7bda5d8c24d9ddbe1fe31" }
+pencere-view = { git = "https://github.com/bateri/pencere", rev = "1cb4fe73e807e88599d7bda5d8c24d9ddbe1fe31" }
+pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "1cb4fe73e807e88599d7bda5d8c24d9ddbe1fe31" }
+pencere-drive = { git = "https://github.com/bateri/pencere", rev = "1cb4fe73e807e88599d7bda5d8c24d9ddbe1fe31" }
 # And the program's side of the same protocol (`pencere`, the library of pencere's `program/`),
 # at the same `rev`, as a **dev**-dependency of `bt-core` alone: the program the end-to-end tests
 # of a pane run in it (`crates/bt-core/examples/demopen.rs`). It ships nowhere. It brings no crate
 # the build does not have already (`serde`, `serde_json`, `libc` and `pencere-wire`).
-pencere = { git = "https://github.com/bateri/pencere", rev = "5b6681ff4b36a7afb66cb3b9d8533ba31c31288e" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "1cb4fe73e807e88599d7bda5d8c24d9ddbe1fe31" }
 serde_json = "1"
 # The browser helper's conversation: the control messages, the socket and its
 # handshake, the frames over mach and the release notice, written once in the helper's repository

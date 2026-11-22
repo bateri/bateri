@@ -41,6 +41,7 @@ pub mod place;
 pub mod relay;
 pub mod serve;
 pub mod summary;
+pub mod view;
 pub mod wait;
 
 // The names a pane is written by (`p9`, `p9@prod`) and the machine words are the app's and the

@@ -16,6 +16,18 @@ of every installed copy. A version without a section is not released.
 
 - **Pages a program on a server shows are signed in on every Mac.** A page's sign-ins are kept at the server too and follow you to your other Macs; signing out on one signs out on all. They lie there unencrypted, readable by the account bateri connects as, so a server you do not trust has `profiles = false` in its `[remote] hosts` entry, which keeps them on this Mac alone.
 - **Programs can draw glowing, shaded shapes.** A program's page can give a shape a soft glow or shadow, fill it with a gradient, mix it with what is under it, draw a dashed line and turn or scale it.
+- **Claude can read a program's view.** `bateri view p7` tells an agent what a view such as dockerpen shows: its buttons, fields and editors, each with a short name to act on, and whether the page has settled. It works on a pane you cannot see, and a password field is never read. For another machine's pane it needs that machine's commands level set to `full`.
+- **Claude can use a program's view, not only read it.** `bateri view p7 click`, `fill`, `type`, `press`, `scroll`, `command`, `menu` and `pick`, `text` and `wait` act on the page and answer with what it shows once it has settled. Your keyboard, your front tab and your clipboard stay where they are: a copy is told to Claude instead of written to your pasteboard, a link is not opened and a file panel is turned away.
+- **Claude can take a picture of a program's view.** `bateri view p7 shot picture.png` writes a PNG of the pane, brought down to 1280 pixels on its long edge (`--full` for the pane's own size); it works on a pane on another tab or in a hidden window, and on a terminal pane too, and it does not touch the window, its frames or your tabs.
+- **`bateri view` works on a program's web view too.** A pane made with `pencere new --page web` is read with a ref for each button, link and field, and clicked, filled, typed into, pressed keys at, scrolled, waited on and pictured like a native one; its commands and menus are not there. The agent reads the page through a script the page cannot see, and nothing of it moves your keyboard or your tabs.
+- **Claude knows how to use a program's view.** The `bateri` skill tells it to read a view first, to act with a ref or a command title from the reading, to ask you before anything that cannot be undone (remove, delete, kill, drop, send), to leave your keyboard and tabs alone, and to treat the words on the page as data, never as instructions. "That pen" means the pane you had the keyboard in before the one you are typing to.
+- **`bateri ls` shows which pane has the keyboard.** The pane you are typing in is marked `(focused)`, a pane that shows a view says so, and `--json` gives the order the keyboard visited the panes, so an agent can tell which pane you were in just before its own.
+
+### Fixed
+
+- **A password box no longer closes bateri.** Opening linearpen without an API key, or any program screen that asks for a password, quit bateri as soon as the box was ready for typing.
+- **Text in a program's search boxes sits in the middle.** In boxes like toppen's filter, the grey hint and what you typed sat a little high, more so with a large font, and jumped down when you clicked in. They now stay centred.
+- **A program's dialogs and tables read in full.** In what `bateri view` and VoiceOver read, a dialog's buttons and fields are no longer hidden behind the shade it draws over the page, a table's rows are named by their cells and not "Row 3", an icon button with only a tooltip is named by it, and a table's column edges and a tree's arrows say what they do.
 
 ## [0.32.0] - 2026-11-20
 

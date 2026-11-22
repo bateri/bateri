@@ -55,21 +55,23 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bt_core::{Chord, Key, Mods, PaneUuid, Settings, Theme};
+use bt_shell_common::agent::message::{Format, Reply};
+use bt_shell_common::agent::view::{Action, Step, View, Way};
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardItem,
+    NSPasteboardTypeString, NSPasteboardWriting, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize,
-    NSString,
+    NSArray, NSData, NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSRunLoop, NSSize, NSString,
 };
 
 /// What a host heard: nothing this test is about, but the trait wants an answer to each. The
@@ -640,10 +642,18 @@ fn open_pane(
     dir: &Path,
     id: u64,
 ) -> (Retained<TerminalPane>, Program) {
-    open_hosted_pane(mtm, window, frame_rect, dir, id, Rc::new(Quiet::default()))
+    open_hosted_pane(
+        mtm,
+        window,
+        frame_rect,
+        dir,
+        id,
+        Rc::new(Quiet::default()),
+        Settings::default(),
+    )
 }
 
-/// [`open_pane`], for a host the test keeps.
+/// [`open_pane`], for a host the test keeps and with `settings` (its font, say).
 fn open_hosted_pane(
     mtm: MainThreadMarker,
     window: &NSWindow,
@@ -651,6 +661,7 @@ fn open_hosted_pane(
     dir: &Path,
     id: u64,
     host: Rc<Quiet>,
+    settings: Settings,
 ) -> (Retained<TerminalPane>, Program) {
     fs::create_dir_all(dir.join("zdot")).expect("the pane's folder");
     let identity = Rc::new(Identity {
@@ -660,8 +671,7 @@ fn open_hosted_pane(
         fish_wrapper_dir: None,
         bash_wrapper_dir: None,
     });
-    let mut config =
-        embed::Config::new(mtm, id, host, identity, Settings::default(), Theme::BATERI);
+    let mut config = embed::Config::new(mtm, id, host, identity, settings, Theme::BATERI);
     // No user dotfiles: the shell reads what it is typed and nothing of the account's.
     config.env = vec![
         ("ZDOTDIR".to_owned(), dir.join("zdot").display().to_string()),
@@ -1299,10 +1309,17 @@ fn run(dir: &Path) {
             connection_goes_and_comes_back(mtm, &window, frame_rect, dir);
         },
     );
+    section("an agent in a web view", &mut failures, || {
+        agent_in_a_web_view(mtm, &window, frame_rect, dir);
+    });
     // Last: it registers the app's fonts for this process, and with them the default font of
     // every pane opened after it.
     section("the app's fonts in the page", &mut failures, || {
         app_fonts_in_the_page(mtm, &window, frame_rect, dir);
+    });
+    // After the fonts: its fields are in the app's faces, which that section registered.
+    section("a field's text on its baseline", &mut failures, || {
+        field_text_on_its_baseline(mtm, &window, frame_rect, dir);
     });
 
     pane.close();
@@ -1328,6 +1345,7 @@ fn connection_goes_and_comes_back(
         &dir.join("connection"),
         PANE + 40,
         Rc::clone(&host),
+        Settings::default(),
     );
     let say = |front: &str, link: PaneLink, program_fresh: bool| {
         host.1.replace(Some(Shown {
@@ -1662,6 +1680,551 @@ fn app_fonts_in_the_page(mtm: MainThreadMarker, window: &NSWindow, frame_rect: N
     pane.close();
 }
 
+/// The page an agent reads and drives: a heading, a button that counts, a text field that is
+/// echoed, a password field, a box that scrolls and a line for the last key the page heard. Its
+/// script is the page's own, with what it can see of the agent's world (nothing) in its first call.
+const AGENT_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>agent</title></head>\
+<body><h1>Agent page</h1><p id=count>count 0</p><button id=inc>Increment</button>\
+<label>Name <input id=name></label><label>Secret <input id=pw type=password></label>\
+<p id=echo>echo -</p><p id=keyed>keyed -</p><p id=copied>copied -</p>\
+<button id=cp>Copy it</button><button id=up>Upload it</button><input id=file type=file hidden>\
+<div id=list><div id=tall>tall box</div></div><div id=many></div><script src=app.js></script></body></html>";
+
+const AGENT_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var n=0,started=false,$=function(id){return document.getElementById(id)};\
+$('list').style.height='60px';$('list').style.overflow='auto';$('tall').style.height='600px';\
+var many=$('many');many.style.display='flex';many.style.flexWrap='wrap';many.style.width='400px';\
+many.style.height='20px';many.style.overflow='hidden';\
+for(var i=0;i<1200;i++){var f=document.createElement('input');f.style.width='2px';f.style.height='2px';\
+f.style.padding='0';f.style.border='0';f.style.flex='none';many.appendChild(f)}\
+$('inc').addEventListener('click',function(){n++;$('count').textContent='count '+n});\
+$('name').addEventListener('input',function(e){$('echo').textContent='echo '+e.target.value});\
+document.addEventListener('keydown',function(e){$('keyed').textContent='keyed '+e.key});\
+$('cp').addEventListener('click',function(){var r=document.createRange();r.selectNodeContents($('echo'));\
+var g=getSelection();g.removeAllRanges();g.addRange(r);var a=false;try{a=document.execCommand('copy')}catch(e){}\
+$('copied').textContent='copied exec '+a;\
+try{navigator.clipboard.writeText('agent-copy-marker').then(function(){$('copied').textContent+=' clip yes'},\
+function(e){$('copied').textContent+=' clip '+e.name})}catch(e){$('copied').textContent+=' clip none'}});\
+$('up').addEventListener('click',function(){$('file').click()});\
+window.addEventListener('message',function(e){\
+if(e.source!==window.parent)return;var m=e.data;\
+if(m.context){if(started)return;started=true;\
+var h=window.webkit&&window.webkit.messageHandlers;\
+send({call:{id:1,method:'hello',params:{agent:typeof window.__bateriAgent,\
+handler:typeof(h&&h.bateriAgent),handlers:h?Object.keys(h).join(','):'none'}}})}});";
+
+/// An agent's request on the web view of `pane`, carried out as the app carries it out: begun, and
+/// asked again between turns of the main loop until it is answered.
+fn view_of(pane: &TerminalPane, action: Action, format: Format) -> Reply {
+    let view = View {
+        terminal: None,
+        format,
+        action,
+    };
+    let mut run = match pane.web_run(&view, "p9", Some("agent-test")) {
+        Some(Ok(run)) => run,
+        Some(Err(failure)) => return Reply::Failed(failure),
+        None => panic!("the pane shows no web view"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match run.step() {
+            Step::Answer(reply) => return reply,
+            Step::Shot { .. } => panic!("a web view's picture is made by its own run"),
+            Step::Pending => {
+                assert!(Instant::now() < deadline, "the request was never answered");
+                spin(0.03);
+            }
+        }
+    }
+}
+
+/// Requests on several panes at once, as the app carries them out when they overlap: all begun, and
+/// each asked again between turns of the main loop until it is answered.
+fn together(requests: Vec<(&TerminalPane, Action)>) -> Vec<Reply> {
+    let mut runs: Vec<_> = requests
+        .into_iter()
+        .map(|(pane, action)| {
+            let view = View {
+                terminal: None,
+                format: Format::Text,
+                action,
+            };
+            match pane.web_run(&view, "p9", Some("agent-test")) {
+                Some(Ok(run)) => run,
+                _ => panic!("no web view to begin on"),
+            }
+        })
+        .collect();
+    let mut replies: Vec<Option<Reply>> = runs.iter().map(|_| None).collect();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while replies.iter().any(Option::is_none) {
+        for (run, reply) in runs.iter_mut().zip(replies.iter_mut()) {
+            if reply.is_none() {
+                match run.step() {
+                    Step::Answer(answer) => *reply = Some(answer),
+                    Step::Pending => {}
+                    Step::Shot { .. } => panic!("a web view's picture is made by its own run"),
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the requests were never answered"
+        );
+        spin(0.03);
+    }
+    replies.into_iter().flatten().collect()
+}
+
+fn said(pane: &TerminalPane, action: Action) -> String {
+    match view_of(pane, action, Format::Text) {
+        Reply::Text(text) => text,
+        other => panic!("not an answer: {other:?}"),
+    }
+}
+
+fn refused(pane: &TerminalPane, action: Action) -> String {
+    match view_of(pane, action, Format::Text) {
+        Reply::Failed(failure) => failure.text,
+        other => panic!("not a refusal: {other:?}"),
+    }
+}
+
+/// The word that names an element in an answer: the first of the line that has `words`.
+fn ref_of(answer: &str, words: &str) -> String {
+    answer
+        .lines()
+        .find(|line| line.contains(words))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no line with {words} in\n{answer}"))
+        .trim_end_matches('!')
+        .to_owned()
+}
+
+/// The size a PNG says it is.
+fn png_size(bytes: &[u8]) -> (u32, u32) {
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+    let at = |from: usize| {
+        u32::from_be_bytes([
+            bytes[from],
+            bytes[from + 1],
+            bytes[from + 2],
+            bytes[from + 3],
+        ])
+    };
+    (at(16), at(20))
+}
+
+/// The person's general pasteboard as this process found it, written back when it is dropped if it
+/// changed meanwhile (a failed assertion included): a web view writes only the general one, so the check that an agent's
+/// click leaves it alone has to look at that one, and must leave the developer's clipboard as it was
+/// whatever came of the check.
+struct PasteboardAsFound {
+    board: Retained<NSPasteboard>,
+    /// Its change count then: it is written back only if it changed since.
+    count: isize,
+    items: Vec<Vec<(Retained<NSString>, Retained<NSData>)>>,
+}
+
+impl PasteboardAsFound {
+    fn take() -> Self {
+        let board = NSPasteboard::generalPasteboard();
+        let mut items = Vec::new();
+        if let Some(found) = board.pasteboardItems() {
+            for item in &found {
+                let mut kept = Vec::new();
+                for kind in &item.types() {
+                    if let Some(data) = item.dataForType(&kind) {
+                        kept.push((kind.clone(), data));
+                    }
+                }
+                items.push(kept);
+            }
+        }
+        let count = board.changeCount();
+        Self {
+            board,
+            count,
+            items,
+        }
+    }
+
+    /// The text a paste would give.
+    fn text(&self) -> Option<String> {
+        // SAFETY: a static of AppKit's, read on the main thread.
+        let kind = unsafe { NSPasteboardTypeString };
+        self.board.stringForType(kind).map(|text| text.to_string())
+    }
+}
+
+impl Drop for PasteboardAsFound {
+    fn drop(&mut self) {
+        // A pasteboard that was not written since is left as it is: writing it back would drop what
+        // could not be read and bump its count for nothing.
+        if self.board.changeCount() == self.count {
+            return;
+        }
+        self.board.clearContents();
+        let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = self
+            .items
+            .iter()
+            .map(|kept| {
+                let item = NSPasteboardItem::new();
+                for (kind, data) in kept {
+                    item.setData_forType(data, kind);
+                }
+                ProtocolObject::from_retained(item)
+            })
+            .collect();
+        if !items.is_empty() {
+            self.board
+                .writeObjects(&NSArray::from_retained_slice(&items));
+        }
+    }
+}
+
+/// An agent in a program's web view, in a pane on a window nobody sees (the window of this test is
+/// never put in front, so the pane is one that is not on the screen): the page is read with a ref
+/// for each element it can be acted on by, and clicked, filled, typed into, pressed keys at, scrolled
+/// and waited on, and a picture of it is a PNG, with nothing of the window's keyboard or the
+/// pasteboard moved. The script lives in a world of its own: the page's own script sees neither
+/// it nor its handler.
+fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect, dir: &Path) {
+    let files = [
+        ("index.html", "text/html", AGENT_PAGE.as_bytes()),
+        ("app.js", "text/javascript", AGENT_SCRIPT.as_bytes()),
+    ];
+    let (pane, mut program) = open_pane(mtm, window, frame_rect, &dir.join("agent"), PANE + 6);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello();
+    program.open(&token, &files, None);
+    program.supply(&files);
+    let hello = watch_it_start(&pane, &mut program);
+    // **The world of its own.** The page's script looks for the agent's object and its handler and
+    // finds neither (a page's `webkit.messageHandlers` has the bridge's two and not the agent's).
+    assert!(hello.contains("\"agent\":\"undefined\""), "{hello}");
+    assert!(hello.contains("\"handler\":\"undefined\""), "{hello}");
+    assert!(
+        !hello.contains("bateriAgent"),
+        "the page can see the agent's handler: {hello}"
+    );
+
+    // The pasteboard and the window's keyboard are where they were.
+    let keyboard = window.firstResponder().map(|responder| {
+        let pointer: *const AnyObject = &*responder as *const _ as *const AnyObject;
+        pointer
+    });
+
+    // **The reading.** A ref for each element that can be acted on, the field's text and no
+    // password.
+    let read = said(&pane, Action::Read);
+    assert!(
+        read.starts_with("pane p9 (agent-test)\nfocus: page\n"),
+        "{read}"
+    );
+    for needle in [
+        "heading1 \"Agent page\"",
+        "button \"Increment\"",
+        "text \"count 0\"",
+        "field \"Name\"",
+        "field (secret) \"Secret\"",
+        "scroll 0% (at the top)",
+        "note: this is a web view",
+    ] {
+        assert!(read.contains(needle), "{needle:?} is not in:\n{read}");
+    }
+    let button = ref_of(&read, "button \"Increment\"");
+    let name = ref_of(&read, "field \"Name\"");
+    let secret = ref_of(&read, "field (secret)");
+    let list = ref_of(&read, "scroll 0%");
+    assert_eq!(button.len(), 6, "{button}");
+    // The same ref names the same element once the page has changed.
+    let json = match view_of(&pane, Action::Read, Format::Json) {
+        Reply::Text(text) => text,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        json.starts_with("{\"pane\":\"p9\",\"program\":\"agent-test\","),
+        "{json}"
+    );
+    assert!(json.contains(&button), "{json}");
+
+    // **Click**, the page's own events: the page counts it.
+    let clicked = said(&pane, Action::Click(button.clone()));
+    assert!(
+        clicked.starts_with(&format!("clicked button \"Increment\" ({button})\n")),
+        "{clicked}"
+    );
+    assert!(clicked.contains("text \"count 1\""), "{clicked}");
+    let again = said(&pane, Action::DoubleClick(button.to_uppercase()));
+    assert!(
+        again.contains("text \"count 3\""),
+        "a double click is two presses: {again}"
+    );
+
+    // **Fill**: the field's value and the page's own handler, and the keyboard is in it.
+    let filled = said(
+        &pane,
+        Action::Fill {
+            target: name.clone(),
+            text: "docker".into(),
+        },
+    );
+    assert!(filled.contains("filled field \"Name\""), "{filled}");
+    assert!(filled.contains("with 6 characters"), "{filled}");
+    assert!(filled.contains("text \"echo docker\""), "{filled}");
+    assert!(filled.contains("= \"docker\""), "{filled}");
+    assert!(filled.contains(&format!("focus: field {name}")), "{filled}");
+    // **Type** goes where the keyboard is; **press** a key the page takes.
+    let typed = said(&pane, Action::Type("er".into()));
+    assert!(
+        typed.contains("typed 2 characters into the field"),
+        "{typed}"
+    );
+    assert!(typed.contains("text \"echo dockerer\""), "{typed}");
+    let pressed = said(&pane, Action::Press(vec!["f5".into()]));
+    assert!(pressed.contains("pressed f5"), "{pressed}");
+    assert!(pressed.contains("text \"keyed F5\""), "{pressed}");
+    // Keys that are none are refused before any is pressed.
+    let bad = refused(
+        &pane,
+        Action::Press(vec!["a".into(), "cmd+nonsense+".into()]),
+    );
+    assert!(bad.contains("is not a key"), "{bad}");
+
+    // **The password**: filled and never said.
+    let hidden = said(
+        &pane,
+        Action::Fill {
+            target: secret.clone(),
+            text: "s3cret!".into(),
+        },
+    );
+    assert!(hidden.contains("with 7 characters"), "{hidden}");
+    assert!(!hidden.contains("s3cret"), "{hidden}");
+    let after = said(&pane, Action::Read);
+    assert!(!after.contains("s3cret"), "{after}");
+
+    // **Scroll** a box by screens and to its ends; what does not scroll says so.
+    let down = said(
+        &pane,
+        Action::Scroll {
+            target: list.clone(),
+            way: Way::Down,
+            count: Some(1),
+        },
+    );
+    assert!(down.contains("down 1 screens"), "{down}");
+    assert!(
+        !down.contains("scroll 0% (at the top)"),
+        "it did not move: {down}"
+    );
+    let bottom = said(
+        &pane,
+        Action::Scroll {
+            target: list.clone(),
+            way: Way::Bottom,
+            count: None,
+        },
+    );
+    assert!(bottom.contains("scroll 100% (at the bottom)"), "{bottom}");
+    let top = said(
+        &pane,
+        Action::Scroll {
+            target: list,
+            way: Way::Top,
+            count: None,
+        },
+    );
+    assert!(top.contains("scroll 0% (at the top)"), "{top}");
+    let not = refused(
+        &pane,
+        Action::Scroll {
+            target: button.clone(),
+            way: Way::Down,
+            count: None,
+        },
+    );
+    assert!(not.contains("does not scroll"), "{not}");
+
+    // **What a page does to the person's things.** A Copy button and an Upload button that opens the
+    // file input: an agent's click leaves the pasteboard where it was and no Open sheet on the window.
+    let found = PasteboardAsFound::take();
+    let text_before = found.text();
+    let copy = ref_of(&said(&pane, Action::Read), "button \"Copy it\"");
+    let upload = ref_of(&said(&pane, Action::Read), "button \"Upload it\"");
+    let copied = said(&pane, Action::Click(copy.clone()));
+    assert!(
+        copied.contains("text \"copied exec true"),
+        "the page's Copy did not run, so nothing was tried: {copied}"
+    );
+    assert!(
+        copied.contains("the page wrote text to the pasteboard: it was put back as it was"),
+        "{copied}"
+    );
+    spin(0.3);
+    let upped = said(&pane, Action::Click(upload));
+    spin(0.5);
+    assert!(upped.contains("clicked button \"Upload it\""), "{upped}");
+    eprintln!(
+        "pencere: agent in a web view: the file panel was {}",
+        if upped.contains("a file panel was asked for and turned away") {
+            "asked for and turned away"
+        } else {
+            "never asked for"
+        }
+    );
+    assert_eq!(
+        found.text(),
+        text_before,
+        "an agent's click left the person's pasteboard changed"
+    );
+    assert!(
+        window.attachedSheet().is_none(),
+        "an agent's click opened a file panel on the person's window"
+    );
+
+    // **Two requests at once**, on two panes whose pages both copy: the pasteboard is kept once, and
+    // what the first page wrote is not kept as the person's by the second.
+    let files_two = [
+        ("index.html", "text/html", AGENT_PAGE.as_bytes()),
+        ("app.js", "text/javascript", AGENT_SCRIPT.as_bytes()),
+    ];
+    let (pane_two, mut program_two) =
+        open_pane(mtm, window, frame_rect, &dir.join("agent-two"), PANE + 7);
+    program_two.say(&format!("{ESC}[?1049h"));
+    let token_two = program_two.hello();
+    program_two.open(&token_two, &files_two, None);
+    program_two.supply(&files_two);
+    watch_it_start(&pane_two, &mut program_two);
+    let copy_two = ref_of(&said(&pane_two, Action::Read), "button \"Copy it\"");
+    let both = together(vec![
+        (&pane, Action::Click(copy)),
+        (&pane_two, Action::Click(copy_two)),
+    ]);
+    let both: Vec<String> = both
+        .into_iter()
+        .map(|reply| match reply {
+            Reply::Text(text) => text,
+            other => panic!("not an answer: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        both.iter()
+            .filter(|text| text.contains("it was put back as it was"))
+            .count(),
+        1,
+        "the last to end puts it back, once: {both:?}"
+    );
+    assert!(
+        both.iter().all(|text| !text.contains("was not put back")),
+        "{both:?}"
+    );
+    assert_eq!(
+        found.text(),
+        text_before,
+        "two requests that overlapped left the person's pasteboard changed"
+    );
+    program_two.bye(&token_two);
+    until("the second view to go", || !covered(&pane_two));
+    pane_two.close();
+    drop(found);
+
+    // **A page larger than a reading lists** (a table of a thousand inputs): the fields are told of
+    // to a most, and the reading says it is cut.
+    let big = said(&pane, Action::Read);
+    let fields = big
+        .lines()
+        .filter(|line| line.split_whitespace().nth(1) == Some("field"))
+        .count();
+    assert!(fields <= 200, "{fields} fields in\n{big}");
+    assert!(fields >= 150, "the fields of the page came to {fields}");
+    assert!(
+        big.contains("note: the page is larger than a reading lists"),
+        "{big}"
+    );
+    assert!(
+        big.contains("field \"Name\""),
+        "the first fields stay: {big}"
+    );
+
+    // **Wait** for words that show, words that go, and the time that runs out.
+    let shows = said(
+        &pane,
+        Action::Wait {
+            text: "count 3".into(),
+            gone: false,
+            seconds: None,
+        },
+    );
+    assert!(shows.starts_with("pane p9"), "{shows}");
+    let late = refused(
+        &pane,
+        Action::Wait {
+            text: "count 9".into(),
+            gone: false,
+            seconds: Some(1),
+        },
+    );
+    assert!(
+        late.contains("timed out after 1 seconds waiting for \"count 9\" to show"),
+        "{late}"
+    );
+
+    // What a web view does not have is told.
+    for (action, word) in [
+        (Action::Command("x".into()), "commands"),
+        (Action::Menu(button.clone()), "menu"),
+        (Action::Text(name.clone()), "`text`"),
+    ] {
+        let told = refused(&pane, action);
+        assert!(
+            told.contains("a web view has no") && told.contains(word),
+            "{told}"
+        );
+    }
+    let nothing = refused(&pane, Action::Click("zzzzzz".into()));
+    assert!(nothing.contains("no element"), "{nothing}");
+
+    // **The picture**: a PNG of the view, brought down to 1280 pixels on its long edge unless the
+    // pane's own size is asked for.
+    let picture = match view_of(&pane, Action::Shot { full: false }, Format::Text) {
+        Reply::Picture(bytes) => bytes,
+        other => panic!("not a picture: {other:?}"),
+    };
+    let (width, height) = png_size(&picture);
+    assert!(
+        width > 0 && height > 0 && width.max(height) <= 1280,
+        "{width}x{height}"
+    );
+    let whole = match view_of(&pane, Action::Shot { full: true }, Format::Text) {
+        Reply::Picture(bytes) => bytes,
+        other => panic!("not a picture: {other:?}"),
+    };
+    let (full_width, full_height) = png_size(&whole);
+    assert!(
+        full_width >= width && full_height >= height,
+        "{full_width}x{full_height}"
+    );
+
+    eprintln!(
+        "pencere: agent in a web view: read {} lines, picture {width}x{height} ({} bytes), whole {full_width}x{full_height}",
+        read.lines().count(),
+        picture.len()
+    );
+    // None of it reached the window: the keyboard is where it was.
+    let now = window.firstResponder().map(|responder| {
+        let pointer: *const AnyObject = &*responder as *const _ as *const AnyObject;
+        pointer
+    });
+    assert_eq!(keyboard, now, "an agent moved the window's keyboard");
+
+    program.bye(&token);
+    until("the view to go", || !covered(&pane));
+    pane.close();
+}
+
 /// The page of a pane that is not the person's, which asks for the keyboard when its program says
 /// something (a message that no call of its waits for): into its field or into the page, and says
 /// it asked.
@@ -1795,6 +2358,164 @@ fn page_keyboard(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect, d
     program.bye(&token);
     holder.close();
     asker.close();
+    window.orderOut(None);
+}
+
+/// A page with a field of one line and a secret, each with a hint in capitals: the ink of a hint is
+/// its capitals, top to baseline.
+const FIELDS_PAGE: &str = r#"return {
+    render = function()
+        return pencere.div():col():gap(16):p(20):w(420):h(200)
+            :child(pencere.div():text_field("line"):w(300):h(20):child(pencere.text("FILTER BY NAME")))
+            :child(pencere.div():text_field("secret", "secret"):w(300):h(20):child(pencere.text("SECRET")))
+    end,
+}"#;
+
+/// How far the middle of the capitals `field` draws stands from the middle bateri centred them on
+/// (its frame's top, AppKit's baseline in it, half a capital up: where the room's middle is), in
+/// points, down positive; `None` where it drew nothing. Read from the field's own drawing, which
+/// has no ground: what it draws is its text.
+fn caps_off(field: &NSTextField) -> Option<f64> {
+    // SAFETY: reading the superview, on the main thread.
+    let host = unsafe { field.superview() }?;
+    let frame = field.frame();
+    let font = field.font()?;
+    // SAFETY: NSView's `firstBaselineOffsetFromTop`, which takes nothing and gives a CGFloat.
+    let baseline: f64 = unsafe { msg_send![field, firstBaselineOffsetFromTop] };
+    let aimed = frame.origin.y + baseline - font.capHeight() / 2.0;
+    let picture = host.bitmapImageRepForCachingDisplayInRect(frame)?;
+    host.cacheDisplayInRect_toBitmapImageRep(frame, &picture);
+    let (wide, high) = (picture.pixelsWide(), picture.pixelsHigh());
+    // The most opaque pixel of each row: a hint is drawn in a lighter ink than a text, so a row is
+    // inked where it holds half of the darkest row's.
+    let rows: Vec<f64> = (0..high)
+        .map(|y| {
+            (0..wide)
+                .filter_map(|x| picture.colorAtX_y(x, y))
+                .map(|colour| colour.alphaComponent())
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    let most = rows.iter().copied().fold(0.0, f64::max);
+    let inked: Vec<usize> = (0..rows.len()).filter(|&y| rows[y] > most / 2.0).collect();
+    let (first, last) = (*inked.first()?, *inked.last()?);
+    #[allow(clippy::cast_precision_loss)]
+    let scale = high as f64 / frame.size.height;
+    #[allow(clippy::cast_precision_loss)]
+    let middle = frame.origin.y + (first + last + 1) as f64 / 2.0 / scale;
+    Some(middle - aimed)
+}
+
+/// A page's fields draw their text where bateri centres it on the room, in the app's faces: a
+/// hint at rest and with the keyboard in its field, a text while it is typed and after. (AppKit's
+/// single-line cell drew the text at rest at a baseline of its own, set by the control's size: a
+/// point or more above in most of the terminal's faces, four at 17 points, and lower once typed
+/// into.) A line takes a line break put in it as a space, and a secret takes the keyboard.
+fn field_text_on_its_baseline(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    // Drawn only while it is seen: on screen, as for the page's keyboard.
+    window.setLevel(objc2_app_kit::NSFloatingWindowLevel);
+    window.setCollectionBehavior(
+        objc2_app_kit::NSWindowCollectionBehavior::CanJoinAllSpaces
+            | objc2_app_kit::NSWindowCollectionBehavior::FullScreenAuxiliary
+            | objc2_app_kit::NSWindowCollectionBehavior::Stationary,
+    );
+    window.setFrameOrigin(NSPoint::new(40.0, 120.0));
+    window.orderFrontRegardless();
+    // The face a terminal is most often in, at a size where the single-line cell stood four points
+    // high; and one whose line that cell drew lower, at the kit's own size.
+    for (family, size, id) in [("JetBrains Mono", 17.0, 50), ("Cascadia Code", 12.5, 51)] {
+        let mut settings = Settings::default();
+        settings.font.family = Some(family.to_owned());
+        settings.font.size = size;
+        let (pane, mut program) = open_hosted_pane(
+            mtm,
+            window,
+            frame_rect,
+            &dir.join(format!("field-{id}")),
+            PANE + id,
+            Rc::new(Quiet::default()),
+            settings,
+        );
+        pane.set_visibility(true);
+        program.say(&format!("{ESC}[?1049h"));
+        let token = program.hello_kind("lua");
+        program.open_script(&token, FIELDS_PAGE);
+        program.supply(&[("page.lua", "text/x-lua", FIELDS_PAGE.as_bytes())]);
+        let fields = || {
+            let mut found: Vec<Retained<NSTextField>> = pane
+                .subviews()
+                .iter()
+                .flat_map(descendants)
+                .filter_map(|view| view.downcast::<NSTextField>().ok())
+                .filter(|field| field.isEditable())
+                .collect();
+            found.sort_by(|a, b| a.frame().origin.y.total_cmp(&b.frame().origin.y));
+            found
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fields().len() < 2 && Instant::now() < deadline {
+            spin(0.05);
+        }
+        let found = fields();
+        if found.len() < 2 {
+            // As for the page's keyboard: a covered window, or a display asleep, draws no page.
+            eprintln!(
+                "pencere: the page was not drawn (window occlusion {:?}): its fields are not measured",
+                window.occlusionState()
+            );
+            program.bye(&token);
+            pane.close();
+            continue;
+        }
+        let (line, secret) = (&found[0], &found[1]);
+        let mut offs = Vec::new();
+        let mut look = |what: &str, field: &NSTextField| {
+            spin(0.2);
+            let off = caps_off(field)
+                .unwrap_or_else(|| panic!("{family} at {size}: the {what} drew nothing"));
+            eprintln!("pencere: {family} at {size}: the {what} is {off:+.2} pt off its middle");
+            offs.push(format!("{what} {off:+.2}"));
+            off
+        };
+        let mut worst: f64 = 0.0;
+        worst = worst.max(look("line's hint", line).abs());
+        window.makeFirstResponder(Some(line));
+        worst = worst.max(look("line's hint with the keyboard", line).abs());
+        let editor = line.currentEditor().expect("the line has an editor");
+        // What a paste puts in: through the editor, as the person's.
+        // SAFETY: a field's editor is an NSTextView, which takes `insertText:` with a string.
+        let _: () = unsafe { msg_send![&*editor, insertText: &*NSString::from_str("FX\nZ")] };
+        assert_eq!(
+            line.stringValue().to_string(),
+            "FX Z",
+            "a line takes no break"
+        );
+        worst = worst.max(look("line's text while typed", line).abs());
+        window.makeFirstResponder(None);
+        worst = worst.max(look("line's text", line).abs());
+        worst = worst.max(look("secret's hint", secret).abs());
+        // A secret takes the keyboard and an editor (a plain field with a secure cell made AppKit
+        // throw here, and the throw ended the application).
+        assert!(
+            window.makeFirstResponder(Some(secret)),
+            "the secret takes the keyboard"
+        );
+        assert!(secret.currentEditor().is_some(), "the secret has an editor");
+        worst = worst.max(look("secret's hint with the keyboard", secret).abs());
+        window.makeFirstResponder(None);
+        assert!(
+            worst <= 0.5,
+            "{family} at {size}: a field's capitals stand off their middle: {offs:?}"
+        );
+        program.bye(&token);
+        until("the view to go", || !covered(&pane));
+        pane.close();
+    }
     window.orderOut(None);
 }
 

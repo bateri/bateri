@@ -67,7 +67,7 @@ use bt_core::CommandLevel;
 use bt_core::PaneUuid;
 use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
-use bt_shell_common::agent::listing::{self, Card, Node, Pane, Scene, Tab, Window};
+use bt_shell_common::agent::listing::{self, Card, Marks, Node, Pane, Scene, Tab, Window};
 use bt_shell_common::agent::message::{
     self, Failure, Format, Kind, Place, Placed, Relayed, Reply, WindowHome,
 };
@@ -75,6 +75,7 @@ use bt_shell_common::agent::notes::Note;
 use bt_shell_common::agent::place::{Ask, Landed, Landing, Spot};
 use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell};
 use bt_shell_common::agent::summary;
+use bt_shell_common::agent::view as reading;
 use bt_shell_common::agent::wait::{Queue, Waiting};
 use bt_shell_common::agent::{Anchor, LOCAL_MACHINE, Terminal};
 use bt_shell_common::kablo::SessionId;
@@ -91,6 +92,7 @@ use crate::hold_service;
 use crate::ids::{Id, Kind as IdKind};
 use crate::launch::{Held, Resume};
 use crate::pane::TerminalPane;
+use crate::pencere_view::agent::WebRun;
 use crate::tab::TerminalTab;
 use crate::uploader;
 use crate::window::{Lodging, TerminalWindow, initial_rect};
@@ -108,6 +110,10 @@ struct State {
     /// terminal until the pane's pipe has reached it, and a second request for the same
     /// terminal in between must not make a second pane.
     made: Vec<(String, Terminal, Instant)>,
+    /// The `bateri view` requests that wait for their page to come to rest.
+    views: Vec<Pending>,
+    /// Whether the clock that looks at them again is set.
+    looking: bool,
 }
 
 /// How long a pane just made stands in for the service's word that it shows its terminal.
@@ -279,6 +285,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         Answer::Relay(relay) => reach::relay(app, letter, &server, from.as_deref(), relay),
         Answer::Package(package) => reach::package(letter, &server, package),
         Answer::Browser(request) => browser::browse(app, letter, &server, request),
+        Answer::View(request) => viewed(app, letter, &server, from.as_deref(), &request),
         Answer::Config(words) => {
             let ran = app.run_config(&words);
             let done = Relayed::of(ran.status, &ran.stderr, &ran.stdout);
@@ -704,20 +711,8 @@ fn find_address(
     server: &Server,
     address: &Anchor,
 ) -> Result<Option<Found>, Failure> {
-    let own_machine = match address.machine() {
-        None => true,
-        Some(machine) => {
-            if local::is_account(&server.account) {
-                machine == LOCAL_MACHINE
-            } else {
-                server
-                    .host_name()
-                    .is_some_and(|host| bt_core::bare_host(host) == machine)
-            }
-        }
-    };
     let machine = address.machine().unwrap_or_default();
-    if own_machine {
+    if serve::is_own_machine(server, address) {
         // A name with the machine written out is the machine's, not an account's: another account
         // on the same host may have a terminal of that name too, and which is meant is not told.
         if address.machine().is_some() && ambiguous(&panes_named(app, machine, address.name())) {
@@ -957,10 +952,29 @@ fn listed(
         return;
     };
     let (windows, typing) = windows_of(app, &server.account, server.level);
+    // The numbers the keyboard came to the panes by: the one with the largest has it now, and a
+    // pane's place in the order is how many of the listed panes came after it. A pane of another
+    // machine that has it now is not shown and takes no number, but then no listed pane has the
+    // keyboard and they count from 2.
+    let holder = app
+        .tabs()
+        .iter()
+        .flat_map(|tab| tab.panes())
+        .filter_map(|pane| pane.keyboard_order())
+        .max();
+    let orders: Vec<u64> = statuses
+        .iter()
+        .filter_map(|status| find_pane(app, &server.account, status.id.as_str()))
+        .filter_map(|(_, pane, _)| pane.keyboard_order())
+        .collect();
+    let holder_hidden = holder.is_some_and(|holder| !orders.contains(&holder));
     let rows = state(|state| {
-        listing::rows(statuses, &survey.records, &|terminal| {
-            state.waiting.waits(&server.account, terminal)
-        })
+        listing::rows(
+            statuses,
+            &survey.records,
+            &|terminal| state.waiting.waits(&server.account, terminal),
+            &|terminal| marks_of(app, &server.account, terminal, &orders, holder_hidden),
+        )
     });
     let scene = Scene {
         caller: from.map(str::to_owned),
@@ -979,6 +993,322 @@ fn listed(
         text.push('\n');
     }
     letter.answer(Reply::Text(text).encode().into_bytes());
+}
+
+/// What `ls` tells of the pane that shows `terminal` of the server `account` beside the server's
+/// own word: the view it shows, and where the keyboard has been in it among the listed panes whose
+/// numbers are `orders` (1 for the pane that has it now, 2 for the one before, and so on; none for a
+/// pane it has not been in since the app began). `holder_hidden` says the pane that has it now is
+/// not one of them: the listed panes then count from 2, and none is the one that has it.
+fn marks_of(
+    app: &AppDelegate,
+    account: &str,
+    terminal: Terminal,
+    orders: &[u64],
+    holder_hidden: bool,
+) -> Marks {
+    let Some((_, pane, _)) = find_pane(app, account, &terminal.to_string()) else {
+        return Marks::default();
+    };
+    Marks {
+        view: pane.view_kind(),
+        focus_rank: pane.keyboard_order().map(|order| {
+            let later = orders.iter().filter(|other| **other > order).count();
+            u32::try_from(later + 1 + usize::from(holder_hidden)).unwrap_or(u32::MAX)
+        }),
+    }
+}
+
+/// A `bateri view` request that has done what it asks and waits for the page to come to rest:
+/// the letter that is answered when it has.
+struct Pending {
+    letter: Letter,
+    pane: Retained<TerminalPane>,
+    name: String,
+    program: Option<String>,
+    runner: Runner,
+}
+
+/// What carries a request out: the kit's page of the pane ([`reading::Run`]) or the program's web
+/// view ([`WebRun`], whose calls into the page answer later).
+enum Runner {
+    Page(reading::Run),
+    /// Boxed: the web run holds the whole of its request and the view.
+    Web(Box<WebRun>),
+}
+
+/// How often the requests that wait are looked at again, by the app's clock alone: what the page is
+/// waited for to settle may be a frame or an image, which says nothing of itself.
+const VIEW_LOOK: Duration = Duration::from_millis(30);
+
+/// How long a menu an agent asked for is held, if it picks nothing and does nothing else.
+const MENU_HELD: Duration = Duration::from_secs(30);
+
+/// The fields of a pane's page as an agent's request has them: the system's controls laid over it.
+struct PaneFields(Option<std::rc::Rc<crate::native_page::PageFields>>);
+
+impl reading::Fields for PaneFields {
+    fn text(&self, id: bt_shell_common::native_view::Id) -> Option<String> {
+        self.0.as_ref()?.text_of(id)
+    }
+
+    fn put(&self, id: bt_shell_common::native_view::Id, text: &str) {
+        if let Some(fields) = &self.0 {
+            fields.put(id, text);
+        }
+    }
+
+    fn append(&self, id: bt_shell_common::native_view::Id, text: &str) -> Option<String> {
+        self.0.as_ref()?.append(id, text)
+    }
+
+    fn keyboard_in(&self) -> Option<bt_shell_common::native_view::Id> {
+        self.0.as_ref()?.keyboard_in()
+    }
+}
+
+/// `bateri view`: the pane is found, what the request asks is done to the page it shows, and the
+/// answer goes back once the page is at rest. The level has been judged ([`reading::allowed`]); a
+/// pane of another machine is found by [`find_address`] as for the verbs that work on panes. One
+/// request at a time is carried out on a pane.
+fn viewed(
+    app: &AppDelegate,
+    letter: Letter,
+    server: &Server,
+    from: Option<&str>,
+    request: &reading::View,
+) {
+    let (pane, shown) = match view_pane(app, server, from, request) {
+        Ok(found) => found,
+        Err(failure) => {
+            letter.answer(Reply::Failed(failure).encode().into_bytes());
+            return;
+        }
+    };
+    // The picture of a terminal is made now: there is no page to wait for.
+    if let reading::Action::Shot { full } = &request.action
+        && matches!(pane.view_shown(), reading::Shown::Terminal)
+    {
+        let reply = picture_reply(&pane, shown.terminal.as_str(), *full, true);
+        letter.answer(reply.encode().into_bytes());
+        return;
+    }
+    if state(|state| {
+        state
+            .views
+            .iter()
+            .any(|waiting| waiting.pane.uuid() == pane.uuid())
+    }) {
+        refuse(
+            letter,
+            Kind::Failed,
+            "another `bateri view` of this pane is still being carried out: ask again when it has answered",
+        );
+        return;
+    }
+    let name = shown.terminal.as_str().to_owned();
+    let program = shown.program.clone();
+    // A program's web view: the page is the web view's, read and driven through the script of the
+    // agent's own world, and the answers of its calls come later.
+    if matches!(pane.view_shown(), reading::Shown::Web)
+        && let Some(host) = pane.web_host()
+    {
+        match WebRun::begin(
+            host,
+            pane.agent_session(),
+            request,
+            &name,
+            program.as_deref(),
+        ) {
+            Err(failure) => letter.answer(Reply::Failed(failure).encode().into_bytes()),
+            Ok(run) => {
+                state(|state| {
+                    state.views.push(Pending {
+                        letter,
+                        pane: pane.clone(),
+                        name,
+                        program,
+                        runner: Runner::Web(Box::new(run)),
+                    });
+                });
+                look_at_views();
+            }
+        }
+        return;
+    }
+    let session = pane.agent_session();
+    let fields = PaneFields(pane.page_fields_up());
+    let drain = || pane.drain_page();
+    let env = reading::Env {
+        fields: &fields,
+        session: &session,
+        drain: &drain,
+    };
+    let info = reading::Pane {
+        name: &name,
+        program: program.as_deref(),
+    };
+    match reading::Run::begin(info, &pane.view_shown(), &env, request) {
+        Err(failure) => letter.answer(Reply::Failed(failure).encode().into_bytes()),
+        Ok(run) => {
+            state(|state| {
+                state.views.push(Pending {
+                    letter,
+                    pane: pane.clone(),
+                    name,
+                    program,
+                    runner: Runner::Page(run),
+                });
+            });
+            // Looked at once now: a page that is at rest answers without waiting for anything.
+            look_at_views();
+        }
+    }
+}
+
+/// Looks at every request that waits for its page once more: those whose page is at rest, whose wait
+/// has run out or whose view has gone are answered, the others are looked at again soon.
+fn look_at_views() {
+    let waiting = state(|state| std::mem::take(&mut state.views));
+    let mut still = Vec::new();
+    for mut pending in waiting {
+        let step = {
+            let session = pending.pane.agent_session();
+            let fields = PaneFields(pending.pane.page_fields_up());
+            let pane = &pending.pane;
+            let drain = || pane.drain_page();
+            let env = reading::Env {
+                fields: &fields,
+                session: &session,
+                drain: &drain,
+            };
+            let info = reading::Pane {
+                name: &pending.name,
+                program: pending.program.as_deref(),
+            };
+            if pending.pane.is_closed() {
+                session.borrow_mut().active = false;
+                reading::Step::Answer(Reply::Failed(Failure::new(
+                    Kind::Failed,
+                    format!(
+                        "{} was closed while the request was carried out",
+                        pending.name
+                    ),
+                )))
+            } else {
+                match &mut pending.runner {
+                    Runner::Page(run) => run.step(info, &pending.pane.view_shown(), &env),
+                    Runner::Web(run) if pending.pane.shows_web_view() => run.step(),
+                    Runner::Web(_) => reading::Step::Answer(Reply::Failed(Failure::new(
+                        Kind::Failed,
+                        format!(
+                            "the view of {} ended while the request was carried out",
+                            pending.name
+                        ),
+                    ))),
+                }
+            }
+        };
+        match step {
+            reading::Step::Answer(reply) => {
+                hold_menu_a_while(&pending.pane);
+                pending.letter.answer(reply.encode().into_bytes());
+            }
+            reading::Step::Shot { full, seen } => {
+                // A pane that is not seen has no frames: its page was laid out for this request, and
+                // the picture is of that.
+                let reply = picture_reply(&pending.pane, &pending.name, full, !seen);
+                hold_menu_a_while(&pending.pane);
+                pending.letter.answer(reply.encode().into_bytes());
+            }
+            reading::Step::Pending => still.push(pending),
+        }
+    }
+    let arm = state(|state| {
+        state.views.extend(still);
+        let wait = !state.views.is_empty() && !state.looking;
+        if wait {
+            state.looking = true;
+        }
+        wait
+    });
+    if arm {
+        crate::arrange::after(VIEW_LOOK, |_| {
+            state(|state| state.looking = false);
+            look_at_views();
+        });
+    }
+}
+
+/// What a `shot` of `pane` answers: its picture, as a PNG, or why there is none.
+fn picture_reply(pane: &TerminalPane, name: &str, full: bool, fresh: bool) -> Reply {
+    match pane.view_picture(full, fresh) {
+        Ok(png) => Reply::Picture(png),
+        Err(why) => Reply::Failed(Failure::new(
+            Kind::Failed,
+            format!("no picture of {name}: {why}"),
+        )),
+    }
+}
+
+/// A menu an agent asked for and has not picked from is let go of after a while, if nothing else
+/// the agent does lets go of it first: a menu that the page is waiting on is a page held.
+fn hold_menu_a_while(pane: &TerminalPane) {
+    let session = pane.agent_session();
+    let number = {
+        let session = session.borrow();
+        if session.menu.is_none() {
+            return;
+        }
+        session.menu_number
+    };
+    let uuid = pane.uuid().clone();
+    crate::arrange::after(MENU_HELD, move |app| {
+        for tab in app.tabs() {
+            for pane in tab.panes() {
+                if *pane.uuid() == uuid {
+                    let session = pane.agent_session();
+                    let mut session = session.borrow_mut();
+                    if session.menu_number == number {
+                        session.let_go_of_menu();
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The pane a `view` is about, and what the service says it shows: the one the request names, or the
+/// pane the program that asked runs in.
+fn view_pane(
+    app: &AppDelegate,
+    server: &Server,
+    from: Option<&str>,
+    request: &reading::View,
+) -> Result<(Retained<TerminalPane>, Shown), Failure> {
+    let found = match &request.terminal {
+        Some(address) => find_address(app, server, address)?.ok_or_else(|| {
+            let text = if address.machine().is_some() {
+                format!("{address} is no pane")
+            } else {
+                format!("{address} is no pane on this server")
+            };
+            Failure::new(Kind::Unknown, text)
+        })?,
+        None => {
+            let name = from.ok_or_else(|| {
+                Failure::new(
+                    Kind::Usage,
+                    "this was not asked from a terminal and names none",
+                )
+            })?;
+            find_pane(app, &server.account, name).ok_or_else(|| {
+                Failure::new(Kind::Unknown, format!("{name} is no pane on this server"))
+            })?
+        }
+    };
+    let (_, pane, shown) = found;
+    Ok((pane, shown))
 }
 
 /// Answers a request with a mistake or a refusal.
@@ -1269,6 +1599,125 @@ fn tell(mtm: MainThreadMarker, account: &str, host: &str, program: Option<&str>,
 
 #[cfg(test)]
 mod tests {
+    /// An agent's `bateri view` request reaches the page by the page's own inputs, which the
+    /// common layer drives: nothing of it goes through the paths a person's keys and clicks take
+    /// (`page_key`, `page_input`, `page_field_focused`: ⌃C to the program, the user's marked text
+    /// discarded, the order the keyboard came in changed), nothing moves the system's keyboard
+    /// or brings a pane forward, and every letter it takes is answered (the one that is turned
+    /// away, the one that fails at the start, the one that waits). A source scan: the panes are
+    /// AppKit's and need a window server.
+    #[test]
+    fn a_view_request_never_takes_the_paths_of_a_persons_keys_and_answers_every_letter() {
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let start = source.find("fn viewed(").expect("the view request");
+        let end = source[start..]
+            .find("fn hold_menu_a_while(")
+            .map_or(source.len(), |end| start + end);
+        let view = &source[start..end];
+        for person in [
+            "page_key(",
+            "page_input(",
+            "page_field_focused(",
+            "makeFirstResponder",
+            "focus()",
+            "select_tab",
+            "clipboard",
+            "NSPasteboard",
+            "module_link",
+            "module_message",
+        ] {
+            assert!(!view.contains(person), "{person} in the view request");
+        }
+        // Every way out of `viewed` and the look at the waiting requests answers the letter, or
+        // keeps it to answer: the busy refusal, the failure at the start, the answer.
+        assert!(view.contains("refuse(\n            letter,"), "{view}");
+        assert!(view.contains("Err(failure) => letter.answer("), "{view}");
+        assert!(
+            view.contains("pending.letter.answer(reply.encode().into_bytes())"),
+            "{view}"
+        );
+        // A pane that closes while a request waits answers it.
+        assert!(
+            view.contains("was closed while the request was carried out"),
+            "{view}"
+        );
+        // The wait is looked at again by a clock, and a menu is let go of by one.
+        assert!(view.contains("crate::arrange::after(VIEW_LOOK"), "{view}");
+        assert!(source.contains("crate::arrange::after(MENU_HELD"));
+    }
+
+    /// The picture of a pane for `shot` is made the way a card's is, and is no frame: it reads the
+    /// link through the still paths (`snapshot`, `snapshot_page`), fills a `Shot` of its own and gives
+    /// it back, never the card's (`ivars().shot`), and asks for no frame, no redraw, no page and no
+    /// clock. A terminal's picture is answered at once, the page's when it has come to rest. A
+    /// source scan: the panes are AppKit's and the GPU's.
+    #[test]
+    fn the_picture_of_a_pane_is_a_still_and_no_frame() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let start = pane
+            .find("    pub(crate) fn view_picture(")
+            .expect("the picture of a pane");
+        let end = start + pane[start..].find("\n    }\n").expect("its end");
+        let body = &pane[start..end];
+        for state in [
+            "ivars().shot",
+            "release_snapshot",
+            "request_frame",
+            "poke_page",
+            "rearm_page",
+            "set_page",
+            "setNeedsDisplay",
+            "redraw",
+            "wake",
+            "damage",
+            "present",
+        ] {
+            assert!(
+                !body.contains(state),
+                "the picture names `{state}`:\n{body}"
+            );
+        }
+        assert!(body.contains("Shot::default()"), "{body}");
+        assert!(body.contains("link.snapshot_page(&mut shot, tile, fresh, frames_clock())"));
+        assert!(body.contains("link.snapshot(&mut shot, tile)"));
+        assert!(body.contains("bt_core::encode_png("));
+        assert!(body.contains("picture_size(source, full)"));
+        // The pane that shows a terminal is pictured at once; the one that shows a page when it is
+        // at rest, by the step that says so.
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        assert!(source.contains("reading::Shown::Terminal"));
+        assert!(source.contains("reading::Step::Shot { full, seen }"));
+        assert!(source.contains("picture_reply(&pending.pane, &pending.name, full, !seen)"));
+    }
+
+    /// While a request is carried out the pane tells what its page says through `Held`, both where
+    /// a drain is told and where a frame's held words are: a copy and a link and a panel and a menu
+    /// are held back and the system's keyboard stays where it is. A source scan: the pane is
+    /// AppKit's.
+    #[test]
+    fn the_pane_tells_its_page_through_the_held_host_while_a_request_is_carried_out() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        for function in ["    fn deliver_held(", "    pub(crate) fn drain_page("] {
+            let start = pane.find(function).expect("the function");
+            let body = &pane[start..start + pane[start..].find("\n    }\n").unwrap_or(1500)];
+            assert!(body.contains("self.agent_active()"), "{function}: {body}");
+            assert!(
+                body.contains("Held::new(&mut host, &session, &handle)"),
+                "{function}: {body}"
+            );
+        }
+        // And the host's own methods stay the person's: they are not changed to look at the flag.
+        let host = &pane[pane
+            .find("impl PageDriveHost for PageHost")
+            .expect("the host")..];
+        let host = &host[..host.find("#[cfg(test)]").unwrap_or(host.len())];
+        assert!(!host.contains("agent_active"), "{host}");
+    }
+
     /// A place the request names is looked up and judged by the level before anything is made, a
     /// place that is not there is a refusal and not a pane in the wrong tab, and a window made for
     /// a pane takes the keyboard only where the rule gives it. A source scan: the windows are

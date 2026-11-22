@@ -21,13 +21,24 @@
 //! that writes to the pasteboard.
 
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG,
     NSPasteboardTypeString, NSPasteboardTypeTIFF,
 };
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSString};
+
+/// How many times bateri itself wrote the pasteboard ([`copy`] is its only way to): a count that
+/// says whether a change of the pasteboard was the person's own copy in bateri (a key, a menu
+/// line, a click on a link or a port) and not something a page did while an agent drove it
+/// ([`crate::pencere_view::agent`] puts the pasteboard back only where this did not move).
+static OWN_WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// The number of writes of [`copy`] so far.
+pub(crate) fn own_writes() -> u64 {
+    OWN_WRITES.load(Ordering::Relaxed)
+}
 
 /// Writes the selected text to the pasteboard. If there is no text to write the
 /// pasteboard is left **untouched** and `false` is returned.
@@ -50,6 +61,7 @@ pub(crate) fn copy(board: &NSPasteboard, text: Option<String>) -> bool {
     let Some(text) = text.filter(|t| !t.is_empty()) else {
         return false;
     };
+    OWN_WRITES.fetch_add(1, Ordering::Relaxed);
     // `clearContents` + `setString`: `setString` alone also writes, but then the old
     // types (RTF, TIFF) stay on the pasteboard and the pasting side may pick them up
     // instead of the text.

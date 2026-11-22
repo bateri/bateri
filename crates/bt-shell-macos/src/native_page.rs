@@ -32,7 +32,7 @@ use bt_shell_common::native_view::{
 };
 use objc2::rc::{Retained, Weak as WeakId};
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityCheckBoxRole,
     NSAccessibilityElement, NSAccessibilityGroupRole, NSAccessibilityImageRole,
@@ -44,7 +44,7 @@ use objc2_app_kit::{
     NSAccessibilityTabButtonSubrole, NSAccessibilityTextAreaRole,
     NSAccessibilityValueChangedNotification, NSApplication, NSAutoresizingMaskOptions, NSColor,
     NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont,
-    NSLineBreakMode, NSResponder, NSSecureTextFieldCell, NSTextField, NSTrackingArea,
+    NSLineBreakMode, NSResponder, NSSecureTextField, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindow,
 };
 use objc2_foundation::{
@@ -157,7 +157,7 @@ impl FieldsHost {
 pub(crate) struct PageField {
     pub id: Id,
     pub kind: FieldKind,
-    pub view: Retained<PageTextField>,
+    pub view: FieldView,
 }
 
 /// The page's fields and what a screen reader says of it, as its outline last said
@@ -364,11 +364,10 @@ impl PageFields {
             return editor_element(pane, item);
         }
         if let AccessibleRole::Field(_) = item.role {
-            let field = self.field(item.id?)?;
+            // The field itself, whichever class it is: NSTextField, then up to AnyObject.
+            let field: Retained<NSTextField> = self.field(item.id?)?.retain();
             return Some(Retained::into_super(Retained::into_super(
-                Retained::into_super(Retained::into_super(Retained::into_super(
-                    Retained::into_super(field),
-                ))),
+                Retained::into_super(Retained::into_super(Retained::into_super(field))),
             )));
         }
         let state = &item.state;
@@ -465,7 +464,7 @@ impl PageFields {
     }
 
     /// The field named `id`.
-    pub(crate) fn field(&self, id: Id) -> Option<Retained<PageTextField>> {
+    pub(crate) fn field(&self, id: Id) -> Option<FieldView> {
         self.fields
             .borrow()
             .iter()
@@ -485,6 +484,38 @@ impl PageFields {
                 )
             })
             .map(|field| (field.id, field.kind))
+    }
+
+    /// What the field `id` holds, for an agent that reads the page. A secret field gives none, and
+    /// none is asked of it: what a password holds is the person's and is not read from the screen.
+    pub(crate) fn text_of(&self, id: Id) -> Option<String> {
+        let fields = self.fields.borrow();
+        let field = fields.iter().find(|field| field.id == id)?;
+        if field.kind == FieldKind::Secret {
+            return None;
+        }
+        Some(field.view.stringValue().to_string())
+    }
+
+    /// Puts `text` in the field `id`, in place of what it holds, as the page's own reply does
+    /// ([`PageFields::fill`]), for an agent's `fill`.
+    pub(crate) fn put(&self, id: Id, text: &str) {
+        self.fill(id, &Fill::text(text));
+    }
+
+    /// Puts `text` after what the field `id` holds, and gives what it holds now: for the page to be
+    /// told, and for nobody else — the field may be a password's. `None` for a field that is not
+    /// on the screen.
+    pub(crate) fn append(&self, id: Id, text: &str) -> Option<String> {
+        let field = self.field(id)?;
+        let now = field.held(&format!("{}{text}", field.stringValue()));
+        field.setStringValue(&NSString::from_str(&now));
+        Some(now)
+    }
+
+    /// The field the keyboard is in, where it is in one of the page's.
+    pub(crate) fn keyboard_in(&self) -> Option<Id> {
+        self.focused.get()
     }
 
     /// Whether the keyboard is in one of the page's fields.
@@ -577,15 +608,18 @@ impl PageFields {
     /// not told of a text it put in itself (setting the value sends no change). Where a text is put
     /// in and none selected, the caret goes to its end, where AppKit's own rule would select it all
     /// once the keyboard comes. A field that does not have the keyboard has no editor to select in:
-    /// the selection waits for the keyboard the page sends it (`send_keyboard`).
+    /// the selection waits for the keyboard the page sends it (`send_keyboard`). A field of one line
+    /// holds a text's line breaks as spaces ([`one_line`]), one for one, so a selection counted in
+    /// the page's text selects the same characters.
     pub(crate) fn fill(&self, id: Id, fill: &Fill) {
         let Some(field) = self.field(id) else {
             return;
         };
         let text = match &fill.text {
             Some(text) => {
-                field.setStringValue(&NSString::from_str(text));
-                text.clone()
+                let text = field.held(text);
+                field.setStringValue(&NSString::from_str(&text));
+                text
             }
             None => field.stringValue().to_string(),
         };
@@ -608,11 +642,62 @@ pub(crate) fn utf16_range(text: &str, chars: std::ops::Range<usize>) -> (usize, 
     (from, to.saturating_sub(from))
 }
 
-impl PageTextField {
+/// `text` with each line and paragraph separator (`\n`, `\r`, U+2028, U+2029) as a space, one for
+/// one, as AppKit's single-line cells take a paste; `None` where it has none. What a field of one
+/// line holds, whoever puts it there: the person (its editor, [`one_line_words`]) or the page
+/// ([`PageFields::fill`]).
+fn one_line(text: &str) -> Option<String> {
+    let breaks = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+    text.contains(breaks).then(|| text.replace(breaks, " "))
+}
+
+/// A field of the page's as AppKit has it: a field of text, or a secret's, which is an
+/// `NSSecureTextField`. That is the one class AppKit gives the editor that hides what is typed: it
+/// refuses it to a plain field that only has a secure cell, and the refusal is an exception, which
+/// ended bateri when a page sent the keyboard into a password field. To the page and the pane the
+/// two are one field ([`page_field_class`]): what they keep and do is the same, only AppKit's class
+/// differs.
+#[derive(Clone)]
+pub(crate) enum FieldView {
+    Text(Retained<PageTextField>),
+    Secret(Retained<PageSecretField>),
+}
+
+impl std::ops::Deref for FieldView {
+    type Target = NSTextField;
+
+    fn deref(&self) -> &NSTextField {
+        match self {
+            Self::Text(field) => field,
+            Self::Secret(field) => field,
+        }
+    }
+}
+
+impl FieldView {
+    /// What the field keeps, whichever class it is.
+    fn ivars(&self) -> &PageTextFieldIvars {
+        match self {
+            Self::Text(field) => field.ivars(),
+            Self::Secret(field) => field.ivars(),
+        }
+    }
+
+    /// What the field holds of `text`: a field of one line its line breaks as spaces
+    /// ([`one_line`]), another the text itself.
+    fn held(&self, text: &str) -> String {
+        self.ivars()
+            .one_line
+            .get()
+            .then(|| one_line(text))
+            .flatten()
+            .unwrap_or_else(|| text.to_owned())
+    }
+
     /// Selects `(location, length)` (UTF-16 units) in the field: at once where the keyboard is in
     /// it (and kept as what the page asked, for a click still going on: see
-    /// [`PageTextField::keep_asked_selection`]), else when the page sends it the keyboard
-    /// ([`PageTextField::select_waiting`]).
+    /// [`keep_asked_selection`]), else when the page sends it the keyboard
+    /// ([`FieldView::select_waiting`]).
     fn select(&self, range: (usize, usize)) {
         match self.currentEditor() {
             Some(editor) => {
@@ -620,26 +705,6 @@ impl PageTextField {
                 self.ivars().asked.set(Some(range));
             }
             None => self.ivars().selection.set(Some(range)),
-        }
-    }
-
-    /// A click that gave the field the keyboard is over: what the page selected in it meanwhile (its
-    /// reply to the keyboard coming, which a display link brings in the middle of the click: the
-    /// tracking of the press runs until the button is up) is selected again, for the press's own
-    /// selection, made from where it began in the text the field held then, is made last. Not for
-    /// a press that went on to a drag (the dragged selection is the person's), nor for a click in
-    /// a field that had the keyboard already (its caret is where it was put).
-    fn keep_asked_selection(&self, down: NSPoint) {
-        let Some(range) = self.ivars().asked.take() else {
-            return;
-        };
-        let (Some(window), Some(editor)) = (self.window(), self.currentEditor()) else {
-            return;
-        };
-        let now = window.mouseLocationOutsideOfEventStream();
-        let dragged = (now.x - down.x).abs() > 4.0 || (now.y - down.y).abs() > 4.0;
-        if !dragged && range.0 + range.1 <= editor.string().length() {
-            editor.setSelectedRange(NSRange::new(range.0, range.1));
         }
     }
 
@@ -679,66 +744,170 @@ pub(crate) struct PageTextFieldIvars {
     /// event it was given the keyboard in, not by whether the field had an editor when it began.
     given_by_press: Cell<Option<f64>>,
     fields: RefCell<Weak<PageFields>>,
+    /// The field is one line (a line or a secret, not lines): it takes no line break.
+    one_line: Cell<bool>,
 }
 
-define_class!(
-    // SAFETY: NSTextField is designed for subclassing; PageTextField implements no `Drop` and is
-    // born with `initWithFrame:`.
-    #[unsafe(super(NSTextField, NSControl, NSView, NSResponder, NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "BateriPageTextField"]
-    #[ivars = PageTextFieldIvars]
-    pub(crate) struct PageTextField;
-
-    impl PageTextField {
-        /// The keyboard comes to the field (the person clicked into it, or the page sent it):
-        /// the page's fields are told which.
-        #[unsafe(method(becomeFirstResponder))]
-        fn become_first_responder(&self) -> bool {
-            // SAFETY: the superclass's own `becomeFirstResponder`, which takes nothing and
-            // answers whether the field took the keyboard.
-            let took: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
-            if took
-                && let (Some(id), Some(fields)) = (self.ivars().id.get(), self.ivars().fields.borrow().upgrade())
-            {
-                // What a fill selected waits for the page's own move of the keyboard
-                // (`PageFields::send_keyboard`); the person's click or Tab makes its own.
-                if !fields.moving.get() {
-                    self.ivars().selection.set(None);
-                }
-                // Taken by a press of the main button: that press's own end must not undo what the
-                // page selects in answer to the keyboard coming (`mouse_down`).
-                let press = NSApplication::sharedApplication(self.mtm())
-                    .currentEvent()
-                    .filter(|event| event.r#type() == NSEventType::LeftMouseDown)
-                    .map(|event| event.timestamp());
-                self.ivars().given_by_press.set(press);
-                self.ivars().asked.set(None);
-                fields.focused_by_person(id);
-            }
-            took
+/// The keyboard came to a field (the person clicked into it, or the page sent it) and AppKit's own
+/// `becomeFirstResponder` says whether it `took` it: the page's fields are told which.
+fn keyboard_came(ivars: &PageTextFieldIvars, took: bool) {
+    if took && let (Some(id), Some(fields)) = (ivars.id.get(), ivars.fields.borrow().upgrade()) {
+        // What a fill selected waits for the page's own move of the keyboard
+        // (`PageFields::send_keyboard`); the person's click or Tab makes its own.
+        if !fields.moving.get() {
+            ivars.selection.set(None);
         }
-
-        /// A press in the field. Where it gives the field the keyboard, the page is told (see
-        /// `becomeFirstResponder`) and answers with the whole address filled in and selected, which
-        /// arrives before the button is up; the press's own tracking would then end by selecting
-        /// from where it began, so what the page selected is put back when it is over.
-        #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &NSEvent) {
-            let gave_the_keyboard = self.ivars().given_by_press.take() == Some(event.timestamp());
-            let had_the_keyboard = self.currentEditor().is_some() && !gave_the_keyboard;
-            let down = event.locationInWindow();
-            if had_the_keyboard {
-                self.ivars().asked.set(None);
-            }
-            // SAFETY: the superclass's own `mouseDown:`, which takes the event and tracks the press
-            // until the button is up.
-            let _: () = unsafe { msg_send![super(self), mouseDown: event] };
-            if !had_the_keyboard {
-                self.keep_asked_selection(down);
-            }
-        }
+        fields.focused_by_person(id);
     }
+}
+
+/// A click that gave the field the keyboard is over: what the page selected in it meanwhile (its
+/// reply to the keyboard coming, which a display link brings in the middle of the click: the
+/// tracking of the press runs until the button is up) is selected again, for the press's own
+/// selection, made from where it began in the text the field held then, is made last. Not for
+/// a press that went on to a drag (the dragged selection is the person's), nor for a click in
+/// a field that had the keyboard already (its caret is where it was put).
+fn keep_asked_selection(field: &NSTextField, ivars: &PageTextFieldIvars, down: NSPoint) {
+    let Some(range) = ivars.asked.take() else {
+        return;
+    };
+    let (Some(window), Some(editor)) = (field.window(), field.currentEditor()) else {
+        return;
+    };
+    let now = window.mouseLocationOutsideOfEventStream();
+    let dragged = (now.x - down.x).abs() > 4.0 || (now.y - down.y).abs() > 4.0;
+    if !dragged && range.0 + range.1 <= editor.string().length() {
+        editor.setSelectedRange(NSRange::new(range.0, range.1));
+    }
+}
+
+/// What the editor of a field puts in place of `words`, where the field is one line and they hold
+/// a line break: the words with each break a space ([`one_line`]); `None` where AppKit's own
+/// answer stands.
+fn one_line_words(
+    ivars: &PageTextFieldIvars,
+    words: Option<&NSString>,
+) -> Option<Retained<NSString>> {
+    words
+        .filter(|_| ivars.one_line.get())
+        .and_then(|words| one_line(&words.to_string()))
+        .map(|flat| NSString::from_str(&flat))
+}
+
+/// A class of a page's field ([`FieldView`]): `$name`, named `$objc` to the runtime, under the
+/// superclasses `$super`. Both classes keep the same ivars and answer the same two messages, with
+/// the same functions ([`keyboard_came`], [`one_line_words`]); a second copy of either would drift.
+macro_rules! page_field_class {
+    ($name:ident, $objc:literal, $($super:ident),+) => {
+        define_class!(
+            // SAFETY: NSTextField and NSSecureTextField are designed for subclassing; the class
+            // implements no `Drop` and is born with `initWithFrame:`.
+            #[unsafe(super($($super),+))]
+            #[thread_kind = MainThreadOnly]
+            #[name = $objc]
+            #[ivars = PageTextFieldIvars]
+            pub(crate) struct $name;
+
+            impl $name {
+                /// The keyboard comes to the field: the page's fields are told which.
+                #[unsafe(method(becomeFirstResponder))]
+                fn become_first_responder(&self) -> bool {
+                    // SAFETY: the superclass's own `becomeFirstResponder`, which takes nothing and
+                    // answers whether the field took the keyboard.
+                    let took: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+                    if took {
+                        // Taken by a press of the main button: that press's own end must not undo
+                        // what the page selects in answer to the keyboard coming (`mouse_down`).
+                        let press = NSApplication::sharedApplication(self.mtm())
+                            .currentEvent()
+                            .filter(|event| event.r#type() == NSEventType::LeftMouseDown)
+                            .map(|event| event.timestamp());
+                        self.ivars().given_by_press.set(press);
+                        self.ivars().asked.set(None);
+                    }
+                    keyboard_came(self.ivars(), took);
+                    took
+                }
+
+                /// A press in the field. Where it gives the field the keyboard, the page is told
+                /// (see `becomeFirstResponder`) and answers with the whole address filled in and
+                /// selected, which arrives before the button is up; the press's own tracking would
+                /// then end by selecting from where it began, so what the page selected is put back
+                /// when it is over.
+                #[unsafe(method(mouseDown:))]
+                fn mouse_down(&self, event: &NSEvent) {
+                    let gave_the_keyboard =
+                        self.ivars().given_by_press.take() == Some(event.timestamp());
+                    let had_the_keyboard = self.currentEditor().is_some() && !gave_the_keyboard;
+                    let down = event.locationInWindow();
+                    if had_the_keyboard {
+                        self.ivars().asked.set(None);
+                    }
+                    // SAFETY: the superclass's own `mouseDown:`, which takes the event and tracks
+                    // the press until the button is up.
+                    let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+                    if !had_the_keyboard {
+                        keep_asked_selection(self, self.ivars(), down);
+                    }
+                }
+
+                /// What the person puts in a field of one line (a paste, a drop, what the keyboard
+                /// makes) takes no line break: each line or paragraph separator becomes a space
+                /// ([`one_line`]), as in AppKit's single-line cells. The field is not one of those
+                /// (see [`text_field`]), so it does it itself: the words go in through the editor in
+                /// place of the ones it was asked for, which leaves the caret after them and makes
+                /// one step of undo, and the editor asks again with words that now pass.
+                #[unsafe(method(textView:shouldChangeTextInRange:replacementString:))]
+                fn should_change_text(
+                    &self,
+                    editor: &AnyObject,
+                    range: NSRange,
+                    words: Option<&NSString>,
+                ) -> bool {
+                    if let Some(flat) = one_line_words(self.ivars(), words) {
+                        // SAFETY: a field's editor is an NSTextView, which takes
+                        // `insertText:replacementRange:` (NSTextInputClient) with a string and a
+                        // range of its own text: the range it asked this field about.
+                        let _: () = unsafe {
+                            msg_send![editor, insertText: &*flat, replacementRange: range]
+                        };
+                        false
+                    } else {
+                        // SAFETY: NSTextField's own answer to its editor (it implements the
+                        // method), asked with what the editor asked.
+                        unsafe {
+                            msg_send![
+                                super(self),
+                                textView: editor,
+                                shouldChangeTextInRange: range,
+                                replacementString: words
+                            ]
+                        }
+                    }
+                }
+            }
+        );
+    };
+}
+
+page_field_class!(
+    PageTextField,
+    "BateriPageTextField",
+    NSTextField,
+    NSControl,
+    NSView,
+    NSResponder,
+    NSObject
+);
+page_field_class!(
+    PageSecretField,
+    "BateriPageSecretField",
+    NSSecureTextField,
+    NSTextField,
+    NSControl,
+    NSView,
+    NSResponder,
+    NSObject
 );
 
 /// What an element a screen reader is given keeps: where a press on it lands (a button's middle,
@@ -986,23 +1155,27 @@ fn text_field(
     theme: &Theme,
     family: Option<&str>,
     fields: &Rc<PageFields>,
-) -> Retained<PageTextField> {
+) -> FieldView {
     let mtm = pane.mtm();
-    let this = PageTextField::alloc(mtm).set_ivars(PageTextFieldIvars {
+    let ivars = PageTextFieldIvars {
         id: Cell::new(None),
         selection: Cell::new(None),
         asked: Cell::new(None),
         given_by_press: Cell::new(None),
         fields: RefCell::new(Rc::downgrade(fields)),
-    });
-    // SAFETY: `initWithFrame:` is NSTextField's designated initializer and the ivars are set.
-    let field: Retained<PageTextField> =
-        unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
-    if kind == FieldKind::Secret {
-        // A secret's cell draws dots for the characters, and its field editor copies nothing.
-        let cell = NSSecureTextFieldCell::new(mtm);
-        field.setCell(Some(&cell));
-    }
+        one_line: Cell::new(kind != FieldKind::Lines),
+    };
+    // SAFETY: `initWithFrame:` is NSTextField's designated initializer (NSSecureTextField's too),
+    // and the ivars are set.
+    let view = if kind == FieldKind::Secret {
+        // A secret's field draws dots for the characters, and its editor copies nothing.
+        let this = PageSecretField::alloc(mtm).set_ivars(ivars);
+        FieldView::Secret(unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] })
+    } else {
+        let this = PageTextField::alloc(mtm).set_ivars(ivars);
+        FieldView::Text(unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] })
+    };
+    let field: &NSTextField = &view;
     field.setBordered(false);
     field.setBezeled(false);
     field.setDrawsBackground(false);
@@ -1011,15 +1184,22 @@ fn text_field(
     field.setFocusRingType(NSFocusRingType::None);
     field.setFont(Some(&face(family, FIELD_TEXT)));
     if let Some(cell) = field.cell() {
+        // Not AppKit's single-line mode, for any kind: its cell draws the text at a baseline set
+        // by the control's size whatever the face, and in most of the terminal's faces that stood
+        // a point or more above the room's middle (four at 17 points), and moved down once the
+        // field was typed into, where the editor draws it at the face's own baseline, the one
+        // `text_top` centres. The one other thing that mode does, turning a pasted line break
+        // into a space, the field does itself (`one_line`).
+        cell.setUsesSingleLineMode(false);
         match kind {
-            // One line: a hint that is too long for the room is cut, not wrapped onto a line
-            // below it that the room does not show (which leaves the first line high in the box).
+            // One line: it scrolls as it is typed, and a hint that is too long for the room is
+            // cut with "…" (the break mode below), not wrapped onto a line below it that the room
+            // does not show (which left the first line high in the box).
             FieldKind::Line | FieldKind::Secret => {
-                cell.setUsesSingleLineMode(true);
+                cell.setWraps(false);
                 cell.setScrollable(true);
             }
             FieldKind::Lines => {
-                cell.setUsesSingleLineMode(false);
                 cell.setWraps(true);
                 cell.setScrollable(false);
             }
@@ -1040,7 +1220,7 @@ fn text_field(
     // SAFETY: the pane implements the text field's delegate methods it is given (`impl
     // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
     unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };
-    field
+    view
 }
 
 /// The terminal's face (the system's monospaced one where it has none) at `size` points.
@@ -1056,7 +1236,7 @@ fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
 /// is centred in the room, not a taller frame with the text at its top; lines take the whole
 /// room. The text is as large as the page is drawn (`zoom`). The field stands in the host
 /// ([`FieldsHost`]), whose axis is the page's: its frame is its room, from the top.
-fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&str>) {
+fn place_field(field: &NSTextField, place: &Field, zoom: f32, family: Option<&str>) {
     // SAFETY: reading the superview; we are on the main thread.
     if unsafe { field.superview() }.is_none() {
         return;
@@ -1102,8 +1282,9 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
 /// (`firstBaselineOffsetFromTop`, not the font's ascent, which AppKit rounds up), and the frame goes
 /// where that baseline is half a capital below the middle. Centring the frame instead put the text a
 /// point and a half below the words beside the field in a face whose line AppKit draws lower.
-/// Rounded to the screen's pixels.
-fn text_top(field: &PageTextField, middle: f64, height: f64) -> f64 {
+/// Rounded to the screen's pixels. That offset is where the field draws its text, hint or value,
+/// typed into or not, because its cell is not in single-line mode ([`text_field`]).
+fn text_top(field: &NSTextField, middle: f64, height: f64) -> f64 {
     let Some(font) = field.font() else {
         return (middle - height / 2.0).round();
     };
@@ -1121,7 +1302,7 @@ fn text_top(field: &PageTextField, middle: f64, height: f64) -> f64 {
 /// margins. Asked of the cell, not of Auto Layout (`fittingSize`), which answers for a field out
 /// of its window with a height of nothing: a pane moved into a split (⌘D) is out of its window for
 /// a moment, and a field placed then stood half a line low until the page's outline changed.
-fn line_height(field: &PageTextField) -> f64 {
+fn line_height(field: &NSTextField) -> f64 {
     let font_line = || {
         field.font().map_or(0.0, |font| {
             (font.ascender() - font.descender() + font.leading()).ceil()
@@ -1553,14 +1734,24 @@ mod tests {
         // at its end.
         assert!(fill.find("setStringValue").unwrap() < fill.find("field.select(range)").unwrap());
         assert!(fill.contains("text.encode_utf16().count(), 0"), "{fill}");
+        let responder = body("                fn become_first_responder(&self) -> bool {");
+        assert!(
+            responder.contains("keyboard_came(self.ivars(), took)"),
+            "{responder}"
+        );
+        let came = body("fn keyboard_came(");
+        assert!(came.contains("if !fields.moving.get()"), "{came}");
+        assert!(came.contains("selection.set(None)"), "{came}");
         // A press that gives the field the keyboard ends with what the page selected meanwhile, unless
         // it was a drag; one in a field that had the keyboard is AppKit's.
-        let press = body("        fn mouse_down(&self, event: &NSEvent) {");
+        let press = body("                fn mouse_down(&self, event: &NSEvent) {");
         assert!(press.contains("self.currentEditor().is_some()"), "{press}");
         assert!(press.contains("self.ivars().asked.set(None)"), "{press}");
         assert!(
             press.find("mouseDown: event").expect(press)
-                < press.find("self.keep_asked_selection(down)").expect(press),
+                < press
+                    .find("keep_asked_selection(self, self.ivars(), down)")
+                    .expect(press),
             "{press}"
         );
         assert!(press.contains("if !had_the_keyboard {"), "{press}");
@@ -1570,12 +1761,9 @@ mod tests {
             press.contains("given_by_press.take() == Some(event.timestamp())"),
             "{press}"
         );
-        let kept = body("    fn keep_asked_selection(&self, down: NSPoint) {");
+        let kept = body("fn keep_asked_selection(");
         assert!(kept.contains("let dragged ="), "{kept}");
         assert!(kept.contains("if !dragged"), "{kept}");
-        let responder = body("        fn become_first_responder(&self) -> bool {");
-        assert!(responder.contains("if !fields.moving.get()"), "{responder}");
-        assert!(responder.contains("selection.set(None)"), "{responder}");
         assert!(
             responder.contains("NSEventType::LeftMouseDown"),
             "{responder}"
@@ -1596,6 +1784,79 @@ mod tests {
         assert!(command.contains("state.takes(key, mods)"), "{command}");
         assert!(command.contains("field_command_key("), "{command}");
         assert!(command.contains("field.state(kind)"), "{command}");
+    }
+
+    /// A field of one line takes no line break, as AppKit's single-line cells take a paste: each
+    /// separator a space, one for one (so a selection counted in the page's text still fits it).
+    #[test]
+    fn a_line_holds_its_breaks_as_spaces_one_for_one() {
+        assert_eq!(one_line("plain words"), None);
+        assert_eq!(one_line("one\ntwo").as_deref(), Some("one two"));
+        assert_eq!(one_line("a\r\nb").as_deref(), Some("a  b"));
+        assert_eq!(one_line("a\u{2028}b\u{2029}c").as_deref(), Some("a b c"));
+        assert_eq!(
+            one_line("\nlead and tail\n").as_deref(),
+            Some(" lead and tail ")
+        );
+        let text = "x\n😀\ny";
+        let flat = one_line(text).expect("it has breaks");
+        assert_eq!(flat.chars().count(), text.chars().count());
+    }
+
+    /// The text of a page's field is drawn where `text_top` puts its baseline only while its cell
+    /// is not in AppKit's single-line mode (that mode's cell draws at a baseline set by the
+    /// control's size: a point or more high in most of the terminal's faces, and lower once typed
+    /// into); a field of one line takes no break from the person's editor nor from the page. A
+    /// source scan: the field is AppKit's and needs a window server (the drawn text is measured in
+    /// `tests/pencere.rs`).
+    #[test]
+    fn a_fields_cell_is_never_appkits_single_line_cell() {
+        let source = include_str!("native_page.rs");
+        let code = &source[..source.find("#[cfg(test)]").expect("the tests follow")];
+        assert!(!code.contains("setUsesSingleLineMode(true)"));
+        assert!(code.contains("cell.setUsesSingleLineMode(false);"));
+        let body = |signature: &str| {
+            let at = code.find(signature).expect(signature);
+            &code[at..at + code[at..].find("\n    }\n").expect("its end")]
+        };
+        let changes = body("                fn should_change_text(");
+        assert!(
+            changes.contains("one_line_words(self.ivars(), words)"),
+            "{changes}"
+        );
+        assert!(changes.contains("insertText: &*flat"), "{changes}");
+        assert!(body("fn one_line_words(").contains("one_line("));
+        for setter in ["    pub(crate) fn fill(", "    pub(crate) fn append("] {
+            let body = body(setter);
+            assert!(body.contains("field.held("), "{body}");
+        }
+    }
+
+    /// A secret is an `NSSecureTextField` of its own class, not a plain field with a secure cell:
+    /// AppKit gives the editor that hides what is typed only to that class, and threw (ending
+    /// bateri) when a page sent the keyboard into a plain field with a secure cell. Both classes
+    /// come from the one definition. A source scan: the field is AppKit's and needs a window server
+    /// (the keyboard in a secret is tried in `tests/pencere.rs`).
+    #[test]
+    fn a_secret_is_appkits_secure_field_and_one_with_a_line() {
+        let source = include_str!("native_page.rs");
+        let code = &source[..source.find("#[cfg(test)]").expect("the tests follow")];
+        assert!(!code.contains("NSSecureTextFieldCell"));
+        assert!(!code.contains("setCell("));
+        assert_eq!(
+            code.matches("page_field_class!(\n").count(),
+            2,
+            "two classes, one definition"
+        );
+        let secret = &code[code
+            .find("    PageSecretField,\n")
+            .expect("the secret's class")..];
+        assert!(
+            secret.contains("    NSSecureTextField,\n    NSTextField,"),
+            "{secret}"
+        );
+        let made = &code[code.find("fn text_field(").expect("text_field")..];
+        assert!(made.contains("PageSecretField::alloc(mtm)"));
     }
 
     #[test]

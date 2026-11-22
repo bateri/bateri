@@ -44,7 +44,8 @@
 //! wants a frame, what it lays out), which is a frame's business, so a still reads what the
 //! frame left. It is therefore the page as it is *on screen*, an animation in flight at the
 //! step it was drawn at, and a page that has not drawn yet has no picture of its own: the
-//! terminal's is what the tile shows until it has. The image textures the list names are the
+//! terminal's is what the tile shows until it has. (The page as it is now, for a pane that no
+//! frames are drawn for, is [`super::page_shot`]'s.) The image textures the list names are the
 //! live ones, used where they stand ([`Renderer::snapshot_ui`](crate::Renderer)).
 //!
 //! **Known limit**: `Session::dock` also reads the window it last recorded to
@@ -91,6 +92,13 @@ pub struct Snapshot {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+impl Shot {
+    /// The reduction chain, for the picture of a page that no frame drew ([`super::page_shot`]).
+    pub(super) fn chain_mut(&mut self) -> &mut Option<Chain> {
+        &mut self.chain
+    }
 }
 
 impl DisplayLink {
@@ -173,7 +181,7 @@ impl PageStills {
 }
 
 impl Core {
-    fn snapshot(&self, shot: &mut Shot, tile: (u32, u32)) -> Option<Snapshot> {
+    pub(super) fn snapshot(&self, shot: &mut Shot, tile: (u32, u32)) -> Option<Snapshot> {
         if tile.0 == 0 || tile.1 == 0 {
             return None;
         }

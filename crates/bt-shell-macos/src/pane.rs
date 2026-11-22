@@ -37,7 +37,7 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,7 @@ use crate::environment::Wants;
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
+use bt_shell_common::agent::view::{Held, Shared as AgentSession, Shown as ViewShown};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{Answer, PaneLink, Shown};
 use bt_shell_common::native_view::{
@@ -412,6 +413,10 @@ impl KeptLogin for NoKeptLogin {
 /// context line; narrower makes the shell's own line wrapping meaningless.
 /// Tuned by eye.
 const MIN_PANE_COLS: u16 = 20;
+
+/// The number the keyboard last came to a pane by ([`TerminalPane::keyboard_order`]): counted up
+/// for each pane it comes to, in the whole app.
+static KEYBOARD_ORDER: AtomicU64 = AtomicU64::new(0);
 
 /// Row count of the smallest pane, grid rows **excluding** the
 /// dock's reserve. Design constant: one command and a few lines of its
@@ -2272,6 +2277,14 @@ pub struct PaneIvars {
     /// Whether the pane can be seen — [`TerminalPane::set_visible`]'s last
     /// word; a pane is born seen.
     seen: Cell<bool>,
+    /// What an agent holds of this pane's page between its `bateri view` requests (the menu it
+    /// asked for, the field the page's keyboard is in) and whether one is carried out now: while it
+    /// is, what the page asks of the pane is held back ([`Held`]).
+    agent: AgentSession,
+    /// Where this pane stands in the order the keyboard came to the panes of the app: the number
+    /// [`KEYBOARD_ORDER`] gave when it last came here, 0 while it has not. `bateri ls` tells the
+    /// order ([`TerminalPane::keyboard_order`]).
+    keyboard_order: Cell<u64>,
     /// The view a program in this pane shows, over the terminal, while it does
     /// ([`TerminalPane::drain_views`]); the terminal's frames stop for as long as
     /// it is there.
@@ -3051,6 +3064,8 @@ impl TerminalPane {
             driving: Cell::new(false),
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
+            agent: AgentSession::default(),
+            keyboard_order: Cell::new(0),
             pencere: RefCell::new(None),
             stage: RefCell::new(None),
             page_words: RefCell::new(None),
@@ -3454,6 +3469,35 @@ impl TerminalPane {
 
     pub(crate) fn link(&self) -> Option<&DisplayLink> {
         self.ivars().link.get()
+    }
+
+    /// The pane as a PNG, for an agent's `bateri view … shot`: its terminal or its page, brought
+    /// down to the size `bt_shell_common::agent::view::picture_size` says (the pane's own with
+    /// `full`). A page that is on the screen is the picture its last frame drew; `fresh` (a pane
+    /// that is not seen, whose page was laid out for the request) is the page as it is now, and a
+    /// page that has not drawn is that too. The terminal under a page is never its picture.
+    ///
+    /// Like a card's picture it is pulled and never pushed ([`TerminalPane::snapshot`]): no frame
+    /// is asked for or counted. The buffers it fills are its own (`Shot`) and are given back with
+    /// it, not kept as the card's are. The reason it cannot be made, when it cannot.
+    pub(crate) fn view_picture(&self, full: bool, fresh: bool) -> Result<Vec<u8>, &'static str> {
+        let link = self.link().ok_or("the pane is not up yet")?;
+        let source = self
+            .ivars()
+            .surface
+            .size()
+            .filter(|(width, height)| *width > 0 && *height > 0)
+            .ok_or("the pane has no room yet")?;
+        let tile = bt_shell_common::agent::view::picture_size(source, full);
+        let mut shot = Shot::default();
+        let still = if link.shows_page() {
+            link.snapshot_page(&mut shot, tile, fresh, frames_clock())
+        } else {
+            link.snapshot(&mut shot, tile)
+        };
+        let still = still.ok_or("the GPU could not draw it")?;
+        bt_core::encode_png(still.width, still.height, &still.rgba)
+            .ok_or("the picture could not be encoded")
     }
 
     /// The pane as it is now, as an image for a tile `size` points across at `scale` pixels to the
@@ -4402,6 +4446,16 @@ impl TerminalPane {
     /// (`PageFields::apply`, told before this). A page that went down meanwhile is not the pane's
     /// to do anything for ([`PageHost`] does each part only while the page is up).
     fn deliver_held(&self, painted: &mut bt_shell_common::native_view::Painted) {
+        // While an agent's request is carried out, what the frame holds for the fields (a copy, the
+        // keyboard) is told as the rest of what the page says is: held back from the person's pane.
+        if self.agent_active()
+            && let Some(handle) = self.page_handle()
+        {
+            let session = self.agent_session();
+            let mut host = PageHost(self);
+            painted.deliver_held(&mut Held::new(&mut host, &session, &handle));
+            return;
+        }
         painted.deliver_held(&mut PageHost(self));
     }
 
@@ -4538,11 +4592,14 @@ impl TerminalPane {
     /// The person clicked into the page's field named `field` (or the keyboard left the fields
     /// of itself): the page is told.
     pub(crate) fn page_field_focused(&self, field: Option<bt_shell_common::native_view::Id>) {
-        // A field of the page took the keyboard: it is not a browser's.
-        if field.is_some()
-            && let Some(browsers) = self.page_browsers()
-        {
-            browsers.give_keyboard(None);
+        if field.is_some() {
+            // A field of the page took the keyboard: it is not a browser's.
+            if let Some(browsers) = self.page_browsers() {
+                browsers.give_keyboard(None);
+            }
+            // A person's click into a field is the keyboard coming to the pane as much as its
+            // terminal taking it is.
+            self.note_keyboard_came();
         }
         if let Some(handle) = self.page_handle() {
             handle.page().focus(field);
@@ -5218,6 +5275,7 @@ impl TerminalPane {
         }
         self.report_focus(self.is_active(), here);
         if here {
+            self.note_keyboard_came();
             self.host().focused(self.ivars().id);
         }
         self.tell_page_active();
@@ -6195,6 +6253,32 @@ impl TerminalPane {
         self.ivars().pencere.borrow().clone()
     }
 
+    /// The web view the pane shows, for an agent's `bateri view` on it.
+    pub(crate) fn web_host(&self) -> Option<ViewHost> {
+        self.view_host()
+    }
+
+    /// An agent's request on the web view this pane shows, begun: `None` when the pane shows none,
+    /// the refusal when the action is not one a web view has. The app carries its requests out
+    /// through the same ([`crate::pencere_view::agent::WebRun`]); this is the way in for what is
+    /// not the app, an embedding test of the whole chain.
+    pub fn web_run(
+        &self,
+        view: &bt_shell_common::agent::view::View,
+        name: &str,
+        program: Option<&str>,
+    ) -> Option<Result<crate::pencere_view::agent::WebRun, bt_shell_common::agent::message::Failure>>
+    {
+        let host = self.web_host()?;
+        Some(crate::pencere_view::agent::WebRun::begin(
+            host,
+            self.agent_session(),
+            view,
+            name,
+            program,
+        ))
+    }
+
     /// Whether a page of the kit's own — the view a program opened as a module, or a debug
     /// build's gauge page and demos — is over the terminal.
     pub(crate) fn shows_page(&self) -> bool {
@@ -6511,6 +6595,80 @@ impl TerminalPane {
             Some(offered) => files.with_way(offered.way.clone()),
             None => files,
         })
+    }
+
+    /// What an agent holds of this pane's page ([`AgentSession`]).
+    pub(crate) fn agent_session(&self) -> AgentSession {
+        Rc::clone(&self.ivars().agent)
+    }
+
+    /// Whether an agent's request that drives the pane's page is carried out now.
+    pub(crate) fn agent_active(&self) -> bool {
+        self.ivars().agent.borrow().active
+    }
+
+    /// The keyboard came to this pane: it is the latest of the app's panes to have it. A number
+    /// that only grows, not a time: `bateri ls` tells the order and nothing of when.
+    fn note_keyboard_came(&self) {
+        let next = KEYBOARD_ORDER.fetch_add(1, Ordering::Relaxed) + 1;
+        self.ivars().keyboard_order.set(next);
+    }
+
+    /// Where the keyboard has been in this pane, among the app's panes: the number it had the
+    /// last time it came here; the larger, the later. `None` while it has not come since the app
+    /// began.
+    pub(crate) fn keyboard_order(&self) -> Option<u64> {
+        Some(self.ivars().keyboard_order.get()).filter(|order| *order > 0)
+    }
+
+    /// The view the pane shows over its terminal, for `bateri ls`: a page of the kit a program
+    /// drew, or a web view; `None` for a pane that shows its terminal.
+    pub(crate) fn view_kind(&self) -> Option<bt_shell_common::agent::listing::ViewKind> {
+        use bt_shell_common::agent::listing::ViewKind;
+        if self.shows_web_view() {
+            Some(ViewKind::Web)
+        } else if self.program_page_up() {
+            Some(ViewKind::Native)
+        } else {
+            None
+        }
+    }
+
+    /// What this pane shows an agent that reads its view ([`ViewShown`]): the page of the kit a
+    /// program drew with what `bateri view` needs to lay it out when no frame is built for it, a
+    /// web view, the terminal, or a view that has not been shown yet.
+    pub(crate) fn view_shown(&self) -> ViewShown {
+        if self.shows_web_view() {
+            return ViewShown::Web;
+        }
+        if self.program_page_up()
+            && let Some(handle) = self.page_handle()
+        {
+            let ivars = self.ivars();
+            return ViewShown::Page {
+                handle,
+                seen: ivars.seen.get(),
+                size: ivars.surface.size(),
+                scale: ivars.layer.contentsScale(),
+                reduce_motion: ivars.reduce_motion.get(),
+                now: frames_clock(),
+            };
+        }
+        if self.ivars().page_wait.get() {
+            ViewShown::NotUp
+        } else {
+            ViewShown::Terminal
+        }
+    }
+
+    /// The fields the page up has put on the screen, for what a reading needs of them (their texts,
+    /// where the keyboard is).
+    pub(crate) fn page_fields_up(&self) -> Option<Rc<crate::native_page::PageFields>> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .map(|page| Rc::clone(&page.fields))
     }
 
     /// The handle the page up is driven by, if a page is up.
@@ -6960,7 +7118,17 @@ impl TerminalPane {
         // Taken first, the page let go of: what is done with it calls back into the pane, which
         // may tell the page more (a menu picked from, the keyboard put in a field).
         let drained = handle.page().drain();
-        drained.deliver(&mut PageHost(self));
+        // While an agent's request is carried out, the page's replies are told through `Held`: a
+        // copy is not written to the pasteboard, a link is not opened, a panel is not shown, a menu
+        // is not popped up (it would hold the main thread until somebody picks) and the system's
+        // keyboard is not moved. Told to the pane's own host in every other case.
+        if self.agent_active() {
+            let session = self.agent_session();
+            let mut host = PageHost(self);
+            drained.deliver(&mut Held::new(&mut host, &session, &handle));
+        } else {
+            drained.deliver(&mut PageHost(self));
+        }
         // A pane that waited for this view's first page has it now, if the module handed it out.
         self.page_drew();
         self.wake_unseen_page();
@@ -8897,14 +9065,23 @@ impl PageDriveHost for PageHost<'_> {
                 _ => browsers.give_keyboard(None),
             }
         }
-        if let Some(fields) = self.fields() {
-            if !self.0.holds_keyboard() {
-                return;
-            }
-            match to {
-                Keyboard::Field(id) => fields.send_keyboard(Some(id)),
-                Keyboard::Page => fields.send_keyboard(None),
-            }
+        let Some(fields) = self.fields() else {
+            return;
+        };
+        if !self.0.holds_keyboard() {
+            return;
+        }
+        // Where the page's keyboard is, as an agent's reading goes by it, moves with the person's:
+        // a click of theirs on something that is no field takes the agent's field from the reading
+        // too. A program's own word, said where the person is not, is not theirs to follow: a
+        // program that draws again after an agent filled a field has not taken it away.
+        self.0.agent_session().borrow_mut().field = match to {
+            Keyboard::Field(id) => Some(id),
+            Keyboard::Page => None,
+        };
+        match to {
+            Keyboard::Field(id) => fields.send_keyboard(Some(id)),
+            Keyboard::Page => fields.send_keyboard(None),
         }
     }
 
@@ -10123,6 +10300,15 @@ mod tests {
             .expect("keyboard");
         let keyboard = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(keyboard.contains("self.0.holds_keyboard()"), "{keyboard}");
+        // An agent's reading goes by where the page's keyboard last was where the person is: the
+        // host tells the session only once it has found the pane holds the keyboard, and not for a
+        // program's word said where the person is not.
+        assert!(
+            keyboard
+                .find("agent_session()")
+                .is_some_and(|told| told > keyboard.find("holds_keyboard()").unwrap_or(usize::MAX)),
+            "{keyboard}"
+        );
         // The gate stands in `place`, before `put` makes the pane: the rule every keyboard-moving
         // command passes (the cursor is in the pane that asked, its web view's included, or bateri
         // is behind, or the pane goes to another window). `put` gives the keyboard to the new pane

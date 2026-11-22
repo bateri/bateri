@@ -532,6 +532,16 @@ impl PageHandle {
         self.surfaces.borrow().clone()
     }
 
+    /// The page laid out once, at `at`, for a pane that no frame is built for (on another tab, in a
+    /// capsule, in a window that is hidden): what an agent that reads or drives it needs. The
+    /// outline and what the drive held for the fields are told to the pane, as when a frame is
+    /// built; what the layout would draw is let go, never made into a list, presented or counted as
+    /// a frame. A pane that is seen has its frames and is not laid out by this.
+    pub fn lay_out_unseen(&self, at: FrameAt) {
+        let mut painted = self.page().frame(at);
+        self.tell_frame(&mut painted);
+    }
+
     /// A frame's outline if it changed, then what the drive held for its fields: the order a pane
     /// needs, for a field is the pane's only once the outline was told. The page is not borrowed.
     fn tell_frame(&self, painted: &mut Painted) {
@@ -1066,6 +1076,34 @@ pub(super) mod tests {
 
         pub(in crate::native_view) fn editors(&self) -> Option<PageEditors> {
             Some(self.handle.editors())
+        }
+
+        /// The pane's handle on the page, as `bateri view` is given it.
+        pub(in crate::native_view) fn handle(&self) -> &PageHandle {
+            &self.handle
+        }
+
+        /// What the page said, done as the pane does it while an agent's request is carried out:
+        /// told through [`Held`], so that what an agent holds back is held back. Whether a frame is
+        /// wanted.
+        pub(in crate::native_view) fn drain_for_agent(
+            &self,
+            session: &crate::agent::view::Shared,
+        ) -> bool {
+            let drained = self.handle.page().drain();
+            let redraw = drained.redraw && drained.ended.is_none();
+            let mut base = Written(Rc::clone(&self.log));
+            drained.deliver(&mut crate::agent::view::Held::new(
+                &mut base,
+                session,
+                &self.handle,
+            ));
+            redraw
+        }
+
+        /// Waits until the module has done what it was told.
+        pub(in crate::native_view) fn flush_module(&self) {
+            self.flush();
         }
 
         /// The line of what the page heard, as the last frame drew it.
