@@ -314,17 +314,24 @@ impl PageFields {
                 .zip(&nodes)
                 .map(|(item, node)| self.element_of(&pane, item, node, &before))
                 .collect();
+            // An id that two items of the outline carry (a ref that clashes) is kept for neither: the elements
+            // would be given to each other's item the next time, and the screen reader would be on the other.
+            let mut seen: HashMap<Id, usize> = HashMap::new();
+            for id in outline.accessible.iter().filter_map(|item| item.id) {
+                *seen.entry(id).or_default() += 1;
+            }
             self.by_id.replace(
                 made.iter()
                     .zip(&outline.accessible)
                     .filter_map(|(made, item)| match (made, item.id) {
-                        (Some(Made::Page(element)), Some(id)) => Some((id, element.clone())),
+                        (Some(Made::Page(element)), Some(id)) if seen.get(&id) == Some(&1) => {
+                            Some((id, element.clone()))
+                        }
                         _ => None,
                     })
                     .collect(),
             );
             relate(&pane, &outline.accessible, &nodes, &made);
-            self.hide_shut_out_fields(&outline.accessible);
             let seen = |at: usize| made.get(at).and_then(Option::as_ref).map(Made::object);
             // The page's own: what nothing that was made holds (a node whose group has no element
             // is not under it).
@@ -346,6 +353,11 @@ impl PageFields {
             for words in alerts {
                 announce(&pane, &words);
             }
+        }
+        // Whatever the outline changed: a field that came behind a modal that stays, or one that was made
+        // again, is shut out as well. (A host that gives no accessible items, an older one, shuts nothing out.)
+        if !outline.accessible.is_empty() {
+            self.hide_shut_out_fields(&outline.accessible);
         }
     }
 
@@ -473,7 +485,8 @@ impl PageFields {
             .expanded
             .filter(|_| matches!(item.role, AccessibleRole::TreeItem));
         // The element the last outline made for this id, if it is of the same shape (what is set only
-        // where it is said, and cannot be unset, is the same): the screen reader stays on it.
+        // where it is said, and is a number or a flag that cannot be unset, is the same): the screen reader
+        // stays on it. What can be set to nothing is set again each time, so it does not tell elements apart.
         let kept = item
             .id
             .and_then(|id| before.borrow_mut().remove(&id))
@@ -525,6 +538,9 @@ impl PageFields {
                 element.setAccessibilityValue(Some(&NSString::from_str(value)));
             } else if matches!(item.role, AccessibleRole::Text | AccessibleRole::Heading(_)) {
                 element.setAccessibilityValue(Some(&words));
+            } else {
+                // What a kept element showed before (a box that was checked, a value that went) is gone.
+                element.setAccessibilityValue(None);
             }
         }
         element.setAccessibilitySelected(state.selected);
@@ -1060,7 +1076,9 @@ pub(crate) struct PageElementIvars {
 }
 
 /// What an element was made as, of what cannot be undone by setting it again: its role, and which of
-/// the things that are set only where the page says them it has.
+/// the numbers, ranges and flags that are set only where the page says them it has. What can be set to
+/// nothing (the value, the children it selects, the rows it discloses, the actions, the headers) is
+/// set again each time, so that a row that opens or a box that is checked is the same element.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Shape {
     role: AccessibleRole,
@@ -1071,23 +1089,16 @@ fn shape_of(item: &Accessible, node: &AxNode) -> Shape {
     let state = &item.state;
     let said = [
         state.expanded.is_some(),
-        state.checked.is_some(),
-        state.mixed,
-        state.value.is_some(),
         node.role_description.is_some(),
         node.help.is_some(),
         node.index.is_some(),
         node.disclosure_level.is_some(),
         node.disclosed_by.is_some(),
-        !node.disclosed_rows.is_empty(),
-        node.header.is_some(),
-        !node.selected_children.is_empty(),
         node.row_count.is_some(),
         node.column_count.is_some(),
         node.row_range.is_some(),
         node.column_range.is_some(),
         node.sort.is_some(),
-        !node.actions.is_empty(),
     ]
     .iter()
     .enumerate()
@@ -1513,8 +1524,13 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
             if let Some(by) = node.disclosed_by.and_then(|by| made.get(by)?.as_ref()) {
                 element.setAccessibilityDisclosedByRow(Some(&*by.object()));
             }
-            if matches!(item.role, AccessibleRole::TreeItem) && !node.disclosed_rows.is_empty() {
-                element.setAccessibilityDisclosedRows(Some(&array_of(made, &node.disclosed_rows)));
+            if matches!(item.role, AccessibleRole::TreeItem) {
+                // Set to nothing where the row holds none now (it was closed).
+                let rows =
+                    (!node.disclosed_rows.is_empty()).then(|| array_of(made, &node.disclosed_rows));
+                element.setAccessibilityDisclosedRows(
+                    rows.as_deref().map(|rows| -> &AnyObject { rows }),
+                );
             }
             if matches!(item.role, AccessibleRole::Table | AccessibleRole::Tree) {
                 let rows = array_of(made, &node.rows);
@@ -1527,15 +1543,16 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                 if let Some(count) = node.column_count {
                     element.setAccessibilityColumnCount(count as NSInteger);
                 }
-                if !node.column_headers.is_empty() {
-                    element.setAccessibilityColumnHeaderUIElements(Some(&array_of(
-                        made,
-                        &node.column_headers,
-                    )));
-                }
-                if let Some(head) = node.header.and_then(|head| made.get(head)?.as_ref()) {
-                    element.setAccessibilityHeader(Some(&*head.object()));
-                }
+                element.setAccessibilityColumnHeaderUIElements(
+                    (!node.column_headers.is_empty())
+                        .then(|| array_of(made, &node.column_headers))
+                        .as_deref(),
+                );
+                let head = node
+                    .header
+                    .and_then(|head| made.get(head)?.as_ref())
+                    .map(Made::object);
+                element.setAccessibilityHeader(head.as_deref());
                 // The cells by their row's place among the rows and their own in the row.
                 let mut cells = Vec::new();
                 for (row_at, row) in node.rows.iter().enumerate() {
@@ -1560,12 +1577,11 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                 }
                 element.ivars().cells.replace(cells);
             }
-            if !node.selected_children.is_empty() {
-                element.setAccessibilitySelectedChildren(Some(&array_of(
-                    made,
-                    &node.selected_children,
-                )));
-            }
+            element.setAccessibilitySelectedChildren(
+                (!node.selected_children.is_empty())
+                    .then(|| array_of(made, &node.selected_children))
+                    .as_deref(),
+            );
             if let Some((first, many)) = node.row_range {
                 element.setAccessibilityRowIndexRange(NSRange::new(first as usize, many as usize));
             }
@@ -1587,6 +1603,8 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                 .map(|(title, command)| custom_action(pane, title, *command, target))
                 .collect();
             element.setAccessibilityCustomActions(Some(&NSArray::from_retained_slice(&actions)));
+        } else {
+            element.setAccessibilityCustomActions(None);
         }
     }
 }
@@ -2028,6 +2046,61 @@ mod tests {
     ) -> Option<(Key, Mods)> {
         let (key, mods) = field_command_key(command, event)?;
         (!state.takes(key, mods)).then_some((key, mods))
+    }
+
+    fn said_item(role: AccessibleRole, words: &str, parent: Option<usize>) -> Accessible {
+        Accessible {
+            role,
+            id: Some(Id::named(words)),
+            rect: bt_shell_common::native_view::Rect::new(0.0, 0.0, 10.0, 10.0),
+            words: words.to_owned(),
+            state: bt_shell_common::native_view::State::default(),
+            pressable: false,
+            parent,
+            detail: Default::default(),
+        }
+    }
+
+    /// The shape of the item at `at` of `items`, as the next outline would give it.
+    fn shape_at(items: &[Accessible], at: usize) -> Shape {
+        shape_of(&items[at], &ax::plan(items)[at])
+    }
+
+    #[test]
+    fn a_row_that_opens_and_a_box_that_turns_keep_the_element_a_screen_reader_is_on() {
+        // An outline's row closed, and open with a row under it: the same element (what it discloses is set again).
+        let row = |open: bool| {
+            let mut row = said_item(AccessibleRole::TreeItem, "src", Some(0));
+            row.state.level = Some(1);
+            row.state.expanded = Some(open);
+            row
+        };
+        let mut child = said_item(AccessibleRole::TreeItem, "main.rs", Some(0));
+        child.state.level = Some(2);
+        let tree = said_item(AccessibleRole::Tree, "files", None);
+        let closed = [tree.clone(), row(false)];
+        let open = [tree, row(true), child];
+        assert!(
+            shape_at(&closed, 1) == shape_at(&open, 1),
+            "a row that opens is the same element"
+        );
+        // A box that is mixed, then checked, then on its way to neither: the same element.
+        let boxed = |checked: Option<bool>, mixed: bool| {
+            let mut item = said_item(AccessibleRole::Checkbox, "all", None);
+            item.state.checked = checked;
+            item.state.mixed = mixed;
+            [item]
+        };
+        assert!(shape_at(&boxed(None, true), 0) == shape_at(&boxed(Some(true), false), 0));
+        assert!(shape_at(&boxed(Some(false), false), 0) == shape_at(&boxed(Some(true), false), 0));
+        // An open or closed mark cannot be taken back once it is set, and a role cannot be changed: a different
+        // element.
+        let mut placed = boxed(Some(false), false);
+        placed[0].state.expanded = Some(false);
+        assert!(shape_at(&placed, 0) != shape_at(&boxed(Some(false), false), 0));
+        let mut button = boxed(Some(false), false);
+        button[0].role = AccessibleRole::Button;
+        assert!(shape_at(&button, 0) != shape_at(&boxed(Some(false), false), 0));
     }
 
     fn state(kind: FieldKind, length: usize, selection: std::ops::Range<usize>) -> FieldState {
