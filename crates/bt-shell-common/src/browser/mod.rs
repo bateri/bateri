@@ -22,6 +22,7 @@
 //!
 //! Downloading, unpacking and the signature are the platform shell's (`bt-shell-macos`).
 
+pub mod depot;
 pub mod downloads;
 #[cfg(target_os = "macos")]
 pub mod helper;
@@ -32,4 +33,6 @@ pub mod proxy;
 #[cfg(target_os = "macos")]
 pub mod rooms;
 pub mod route;
+#[cfg(target_os = "macos")]
+pub mod sync;
 pub mod version;

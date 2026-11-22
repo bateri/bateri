@@ -105,6 +105,40 @@ impl Spawn for Fake {
                     Command::Close { browser } => {
                         let _ = client.events.send(&Event::Closed { browser });
                     }
+                    // The profile's sync asks the helper about its records: nothing is in the
+                    // stand-in's profile, and what is put in it is taken.
+                    Command::IndexedDbRead { req, .. } => {
+                        let _ = client.events.send(&Event::IndexedDbRecords {
+                            req,
+                            records: Vec::new(),
+                            stage: ".stage/fake".into(),
+                            error: None,
+                        });
+                    }
+                    Command::IndexedDbWrite { req, .. } => {
+                        let _ = client.events.send(&Event::IndexedDbWritten {
+                            req,
+                            written: 0,
+                            deferred: 0,
+                            error: None,
+                        });
+                    }
+                    Command::ProfileRead { browser, req } => {
+                        let _ = client.events.send(&Event::ProfileRecords {
+                            browser,
+                            req,
+                            records: Vec::new(),
+                            error: None,
+                        });
+                    }
+                    Command::ProfileWrite { browser, req, .. } => {
+                        let _ = client.events.send(&Event::ProfileWritten {
+                            browser,
+                            req,
+                            deferred: 0,
+                            error: None,
+                        });
+                    }
                     Command::Quit => break,
                     _ => {}
                 }
@@ -673,4 +707,157 @@ fn a_fixed_app_is_run_where_it_is_and_nothing_is_installed_around_it() {
     assert_eq!(w.spawned.load(Ordering::SeqCst), 1);
     std::fs::remove_dir_all(&root).unwrap();
     std::fs::remove_dir_all(&w.root).unwrap();
+}
+
+// ---- a profile kept at a server's depot ----
+
+#[cfg(test)]
+mod depot {
+    use super::*;
+    use crate::browser::sync::tests::{Bell, FakeHome, cookie, depot};
+
+    fn server_key(name: &str) -> ProfileKey {
+        ProfileKey::new("server:x", "browserpen", Some(name)).unwrap()
+    }
+
+    /// The names of the commands the helper got, up to the first that is `last`; the sync's
+    /// `StageDrop` is housekeeping the order does not hang on.
+    fn commands_until(world: &World, last: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        loop {
+            let command = world.commands.recv_timeout(WAIT).expect("a command");
+            let name = format!("{command:?}")
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            if name == "StageDrop" {
+                continue;
+            }
+            names.push(name.clone());
+            if name == last {
+                return names;
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_of_this_mac_keeps_its_profile_here_alone() {
+        let w = world(
+            "nosync",
+            Behaviour::default(),
+            Some("0.1.0"),
+            Duration::from_secs(60),
+        );
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        // A machine that is not this one has a depot; the Mac's does not.
+        w.manager.depots().set("server:x", depot(&home));
+        let (sink, _events, _lost) = log();
+        let browser = w.manager.open(&key(Some("work")), SIZE, 2.0, sink).unwrap();
+        drop(browser);
+        assert_eq!(commands_until(&w, "Close"), ["Open", "Close"]);
+        assert_eq!(home.opens(), 0, "the home was not asked");
+        std::fs::remove_dir_all(&w.root).unwrap();
+    }
+
+    #[test]
+    fn a_program_on_a_server_has_what_its_home_keeps_in_the_profile_before_the_page_goes_on() {
+        let w = world(
+            "synced",
+            Behaviour::default(),
+            Some("0.1.0"),
+            Duration::from_secs(60),
+        );
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        home.seed(&cookie("sid", Some("from the server")), &[], &[]);
+        w.manager.depots().set("server:x", depot(&home));
+        let (sink, _events, _lost) = log();
+        let started = Instant::now();
+        let browser = w
+            .manager
+            .open(&server_key("work"), SIZE, 2.0, sink.clone())
+            .unwrap();
+        assert!(
+            started.elapsed() < SYNC_WAIT,
+            "the home answered: no wait to the end"
+        );
+        // A second browser of the profile shares the sync: nothing is read again.
+        let second = w
+            .manager
+            .open(&server_key("work"), SIZE, 2.0, sink)
+            .unwrap();
+        drop(second);
+        drop(browser);
+        let names = commands_until(&w, "Close");
+        assert_eq!(
+            names[..5],
+            [
+                "IndexedDbRead",
+                "Open",
+                "ProfileRead",
+                "ProfileWrite",
+                "ProfileWatch"
+            ],
+            "the folders before the engine, the rest before the page: {names:?}"
+        );
+        assert_eq!(
+            names.iter().filter(|n| *n == "IndexedDbRead").count(),
+            1,
+            "{names:?}"
+        );
+        assert_eq!(home.opens(), 1);
+        // The last browser closed: the sync is over.
+        let run = lock(&w.manager.current).clone();
+        wait_until("the sync is over", || {
+            run.as_ref().is_none_or(|run| run.syncs.is_empty())
+        });
+        // The sync writes what it keeps as it ends: the folder goes when it is done.
+        wait_until("the folder is removed", || {
+            std::fs::remove_dir_all(&w.root).is_ok()
+        });
+    }
+
+    #[test]
+    fn a_home_that_does_not_answer_holds_the_first_page_for_the_wait_and_not_longer() {
+        let w = world(
+            "stalled",
+            Behaviour::default(),
+            Some("0.1.0"),
+            Duration::from_secs(60),
+        );
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        home.seed(&cookie("sid", Some("late")), &[], &[]);
+        home.stall(true);
+        w.manager.depots().set("server:x", depot(&home));
+        let (sink, _events, _lost) = log();
+        let started = Instant::now();
+        let browser = w
+            .manager
+            .open(&server_key("work"), SIZE, 2.0, sink)
+            .unwrap();
+        let waited = started.elapsed();
+        assert!(waited >= SYNC_WAIT, "it waited for the home: {waited:?}");
+        assert!(
+            waited < SYNC_WAIT + Duration::from_secs(3),
+            "and not much longer: {waited:?}"
+        );
+        // The browser is open; when the home answers the profile joins.
+        home.stall(false);
+        let mut seen = Vec::new();
+        loop {
+            let command = w.commands.recv_timeout(WAIT).expect("the join goes on");
+            if let Command::ProfileWrite { records, .. } = &command {
+                assert_eq!(records.len(), 1);
+                break;
+            }
+            seen.push(format!("{command:?}"));
+        }
+        drop(browser);
+        wait_until("the folder is removed", || {
+            std::fs::remove_dir_all(&w.root).is_ok()
+        });
+    }
 }

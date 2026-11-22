@@ -6435,6 +6435,16 @@ impl TerminalPane {
         Ok((machine, Arc::new(Through(self.served(&target)))))
     }
 
+    /// Where the profiles of the pane's browsers are kept besides this Mac, if they are: the home
+    /// a program's server keeps for them, over the connection bateri keeps to it. A program that
+    /// runs on this Mac (or whose server is not one bateri keeps a connection to) has none.
+    pub(crate) fn browser_depot(&self) -> Option<Arc<dyn bt_shell_common::browser::depot::Depot>> {
+        use bt_shell_common::browser::depot::ServedDepot;
+        let (_, target, _) = self.server_target()?;
+        self.host().kept_terminal(self.uuid())?;
+        Some(Arc::new(ServedDepot(self.served(&target))))
+    }
+
     /// The application's name for a file it quarantines.
     pub(crate) fn app_name(&self) -> String {
         self.ivars().identity.app_name.clone()

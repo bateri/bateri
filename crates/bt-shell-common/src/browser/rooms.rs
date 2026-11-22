@@ -26,6 +26,7 @@ use pencere_view::{
     Mods, Rect, Shortcut,
 };
 
+use super::depot::Depot;
 use super::helper::{Browser, Handle, Manager, Sink, StartError};
 use super::profile::ProfileKey;
 use super::route::Dialer;
@@ -448,6 +449,9 @@ enum Route {
 pub struct Rooms {
     manager: Arc<Manager>,
     route: Route,
+    /// Where the program's machine keeps the profiles of its browsers, if it is to: set when the
+    /// way is shown ([`Rooms::route`]).
+    depot: Option<Arc<dyn Depot>>,
     application: String,
     shared: Arc<Shared>,
     rooms: HashMap<Id, Room>,
@@ -467,6 +471,7 @@ impl Rooms {
         Self {
             manager,
             route: Route::Unknown,
+            depot: None,
             application: application.to_owned(),
             shared: Arc::new(Shared {
                 told: Mutex::new(VecDeque::new()),
@@ -591,6 +596,12 @@ impl Rooms {
         }
     }
 
+    /// Where the program's machine is to keep the profiles of its browsers (none: they are kept
+    /// here alone). Set before the way is shown and used when it is.
+    pub fn set_depot(&mut self, depot: Option<Arc<dyn Depot>>) {
+        self.depot = depot;
+    }
+
     /// The shell found where the way to the program's machine ends, or that it ends nowhere it
     /// could show: `Ok` is the machine's name and the way to it (it is set for the proxy here), the
     /// `Err` a line for the person. The rooms that waited start, or say there is no route.
@@ -602,6 +613,10 @@ impl Rooms {
         match proof {
             Ok((machine, way)) => {
                 self.manager.routes().set(&machine, way);
+                match self.depot.clone() {
+                    Some(depot) => self.manager.depots().set(&machine, depot),
+                    None => self.manager.depots().remove(&machine),
+                }
                 self.route = Route::Proven(machine);
                 let waiting: Vec<Id> = self
                     .rooms
@@ -1144,6 +1159,12 @@ impl Rooms {
             Event::CanScroll { req, can, .. } => shell.can_scroll(id, req, can),
             Event::Error { message, .. } => shell.diagnostic(id, message),
             Event::Hello { .. } | Event::Closed { .. } | Event::Popup { .. } => {}
+            // The profile's sync takes these before they get here (`helper`): nothing of a page.
+            Event::ProfileRecords { .. }
+            | Event::ProfileWritten { .. }
+            | Event::ProfileChanged { .. }
+            | Event::IndexedDbRecords { .. }
+            | Event::IndexedDbWritten { .. } => {}
         }
     }
 }

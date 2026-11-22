@@ -18,6 +18,11 @@
 //! **Not on the main thread.** `open` starts the helper when there is none, and that waits for
 //! its hello (seconds, in a cold start).
 //!
+//! A profile of a program that runs on a server is kept at the server too ([`super::sync`]): when
+//! its machine has a depot ([`Manager::depots`]) the first browser of the profile starts a sync,
+//! and `open` waits for what the server has to be put in the profile before the page may go on
+//! (bounded: a server that does not answer is left to catch up on its own).
+//!
 //! The helper hears of profiles through `Command::Open`. One context, one folder and one
 //! credential per profile for the helper's life (the helper answers an `Error` to a context it
 //! knows under another folder): a profile with a name is the same for every browser of the same
@@ -33,10 +38,15 @@ use std::time::{Duration, Instant};
 use browser_ipc::message::{Command, Event, Profile};
 use browser_ipc::{Frame, Launch, Receiver, Surface, Writer, channel};
 
+use super::depot::{Depots, SYNC_WAIT};
 use super::layout::{self, Hold, Layout};
 use super::profile::ProfileKey;
 use super::proxy::Proxy;
 use super::route::Routes;
+use super::sync::engine::{Config as SyncConfig, Helper as SyncHelper};
+use super::sync::gate::Stage;
+use super::sync::store::Cache;
+use super::sync::{ProfileSync, Syncs};
 
 /// How long the helper has to say hello.
 pub const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -143,6 +153,8 @@ pub struct Manager {
     next_run: AtomicU64,
     /// How each machine's requests are made, once a way to it has been shown ([`super::route`]).
     routes: Arc<Routes>,
+    /// Where each machine keeps its profiles, once the shell has given it a depot.
+    depots: Arc<Depots>,
 }
 
 /// One helper's life.
@@ -163,6 +175,8 @@ struct Run {
     epoch: AtomicU64,
     /// Over: the helper is gone or was told to go.
     over: AtomicBool,
+    /// The syncs of the profiles that are kept at a home, by folder.
+    syncs: Arc<Syncs>,
     _hold: Option<Hold>,
 }
 
@@ -183,7 +197,14 @@ impl Manager {
             next_browser: AtomicU32::new(1),
             next_run: AtomicU64::new(1),
             routes: Routes::new(),
+            depots: Depots::new(),
         })
+    }
+
+    /// Where each machine keeps the profiles of its programs' browsers: a machine with a depot has
+    /// its profiles kept there too, one with none keeps them here alone.
+    pub fn depots(&self) -> &Arc<Depots> {
+        &self.depots
     }
 
     /// The ways the proxy makes connections by, by machine: a way is set once it has been shown.
@@ -239,6 +260,14 @@ impl Manager {
             run.epoch.fetch_add(1, Ordering::AcqRel);
             (run, id, profile)
         };
+        // A profile kept at a server's depot is brought up to date before the page may go on: its
+        // folders before the engine opens the profile, the rest before the first address. Both
+        // waits end at the same moment, so a server that does not answer costs `SYNC_WAIT` once.
+        let sync = self.sync_of(&run, key, id);
+        let deadline = Instant::now() + SYNC_WAIT;
+        if let Some(sync) = &sync {
+            sync.gate().wait(Stage::BeforeOpen, deadline);
+        }
         let sent = run.commands.send(&Command::Open {
             browser: id,
             profile,
@@ -248,21 +277,56 @@ impl Manager {
         });
         if let Err(e) = sent {
             lock(&run.browsers).remove(&id);
+            run.syncs.leave(id);
             return Err(StartError::Io(e));
         }
         // The helper may have died between the lookup and the insert: nobody would say so.
         if run.over.load(Ordering::Acquire) {
             lock(&run.browsers).remove(&id);
+            run.syncs.leave(id);
             return Err(StartError::Io(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "the browser engine ended as the browser opened",
             )));
+        }
+        if let Some(sync) = &sync {
+            sync.attach(id);
+            sync.gate().wait(Stage::AfterOpen, deadline);
         }
         Ok(Browser {
             id,
             run,
             manager: self.clone(),
         })
+    }
+
+    /// The sync of the profile `key` names, started if there is none and the machine has a depot;
+    /// `browser` is one of its browsers. `None` for a profile that is kept here alone: one with no
+    /// name, one of a program that runs on this Mac, one of a machine that has no depot.
+    fn sync_of(&self, run: &Arc<Run>, key: &ProfileKey, browser: u32) -> Option<Arc<ProfileSync>> {
+        let dir = key.dir()?;
+        let depot = self.depots.get(key.machine())?;
+        let name = key.name()?.to_owned();
+        let data = self
+            .config
+            .profiles
+            .parent()
+            .unwrap_or(&self.config.profiles)
+            .to_path_buf();
+        let config = SyncConfig {
+            dir: dir.clone(),
+            app: key.application().to_owned(),
+            name,
+            root: self.config.profiles.clone(),
+            state: data.join("sync").join(&dir),
+            cache: Cache::new(data.join("blobs")),
+        };
+        let helper = Box::new(RunHelper(run.commands.clone()));
+        run.syncs
+            .join(&dir, browser, move |reqs| {
+                ProfileSync::start(config, helper, depot, reqs)
+            })
+            .ok()
     }
 
     /// The running helper, started first if there is none. The caller holds `starting`.
@@ -297,7 +361,8 @@ impl Manager {
         (self.config.trust)(&app).map_err(StartError::Untrusted)?;
         layout::make_private(&self.config.profiles)?;
 
-        let proxy = Proxy::bind(self.routes.clone())?;
+        let syncs = Syncs::new();
+        let proxy = Proxy::bind_with(self.routes.clone(), syncs.clone())?;
         let launch = Launch::prepare(&self.config.run)?;
         let receiver = Receiver::register(launch.mach_name())?;
         let args = launch.args(
@@ -326,6 +391,7 @@ impl Manager {
             downloads: Mutex::new(HashMap::new()),
             epoch: AtomicU64::new(0),
             over: AtomicBool::new(false),
+            syncs,
             _hold: hold,
         });
         {
@@ -353,6 +419,7 @@ impl Manager {
             run.dispatch(event);
         }
         let stopped = run.over.swap(true, Ordering::AcqRel);
+        run.syncs.stop_all();
         {
             let mut current = lock(&self.current);
             if current.as_ref().is_some_and(|c| c.id == run.id) {
@@ -438,6 +505,10 @@ impl Run {
     }
 
     fn dispatch(&self, event: Event) {
+        // What the helper says of a profile's records is the sync's, not a page's.
+        let Some(event) = self.syncs.route(event) else {
+            return;
+        };
         let browser = match &event {
             Event::Download { browser, req, .. } => {
                 lock(&self.downloads).insert(*req, *browser);
@@ -535,6 +606,7 @@ impl Drop for Browser {
         if lock(&run.browsers).remove(&self.id).is_none() {
             return;
         }
+        run.syncs.leave(self.id);
         let _ = run.commands.send(&Command::Close { browser: self.id });
         let epoch = run.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         if !lock(&run.browsers).is_empty() {
@@ -548,6 +620,16 @@ impl Drop for Browser {
                 std::thread::sleep(linger);
                 manager.stop_if_idle(&run, epoch);
             });
+    }
+}
+
+/// What a profile's sync says to the helper: on the helper's own connection.
+struct RunHelper(Writer<Command>);
+
+impl SyncHelper for RunHelper {
+    fn send(&mut self, command: Command) {
+        // A helper that is gone says so to its browsers; the sync ends with them.
+        let _ = self.0.send(&command);
     }
 }
 

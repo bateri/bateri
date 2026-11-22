@@ -59,10 +59,26 @@ struct Identity {
     profile: ProfileKey,
 }
 
+/// What a request waits for before it is carried: a profile that is being brought up to date with
+/// its home holds its requests until the difference is in (`sync`), so that a page does not go on
+/// with a token another computer has turned since.
+pub trait Holds: Send + Sync {
+    /// Returns when the profile's requests may go (or when waiting longer is of no use).
+    fn hold(&self, profile: &ProfileKey);
+}
+
+/// Nothing is held: a proxy that has no profile kept at a home.
+struct Free;
+
+impl Holds for Free {
+    fn hold(&self, _profile: &ProfileKey) {}
+}
+
 struct Registry {
     identities: Mutex<HashMap<String, Identity>>,
     /// The way each machine's connections are made by, once it has been shown.
     routes: Arc<Routes>,
+    holds: Arc<dyn Holds>,
 }
 
 impl Registry {
@@ -89,12 +105,19 @@ impl Proxy {
     /// Starts listening on a port of the loopback the system chooses. What a profile's
     /// connections go by is looked up in `routes`, by its machine, as they are made.
     pub fn bind(routes: Arc<Routes>) -> io::Result<Proxy> {
+        Proxy::bind_with(routes, Arc::new(Free))
+    }
+
+    /// As [`Proxy::bind`], with what holds the requests of a profile that is being brought up to
+    /// date.
+    pub fn bind_with(routes: Arc<Routes>, holds: Arc<dyn Holds>) -> io::Result<Proxy> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let registry = Arc::new(Registry {
             identities: Mutex::new(HashMap::new()),
             routes,
+            holds,
         });
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -260,6 +283,7 @@ impl Carrying<'_> {
             if !self.same_identity(&head) {
                 return self.say(&unauthorized());
             }
+            self.registry.holds.hold(&self.profile);
             let line = head.lines().next().unwrap_or_default().to_owned();
             let mut words = line.split(' ');
             let (Some(method), Some(target), Some(version)) =
@@ -765,6 +789,64 @@ mod tests {
             answer.contains("X-Bateri-Net-Error: -130\r\n"),
             "no way is the proxy's own failure: {answer}"
         );
+    }
+
+    #[test]
+    fn a_request_of_a_profile_that_is_held_waits_for_it_and_one_of_another_does_not() {
+        struct Gate(Mutex<bool>, std::sync::Condvar);
+        impl Holds for Gate {
+            fn hold(&self, profile: &ProfileKey) {
+                if profile.name() != Some("held") {
+                    return;
+                }
+                let mut open = self.0.lock().unwrap();
+                while !*open {
+                    open = self.1.wait(open).unwrap();
+                }
+            }
+        }
+        struct Refuses;
+        impl Dialer for Refuses {
+            fn dial(&self, _: &str, _: u16, _: Duration) -> Result<Link, String> {
+                Err("refused".into())
+            }
+        }
+        let gate = Arc::new(Gate(Mutex::new(false), std::sync::Condvar::new()));
+        let routes = Routes::new();
+        routes.set("srv", Arc::new(Refuses));
+        let proxy = Proxy::bind_with(routes, gate.clone()).unwrap();
+        proxy.allow(
+            "held",
+            "secret",
+            &ProfileKey::new("srv", "app", Some("held")).unwrap(),
+        );
+        proxy.allow(
+            "free",
+            "secret",
+            &ProfileKey::new("srv", "app", Some("free")).unwrap(),
+        );
+        let port = proxy.port();
+        let (told, hear) = std::sync::mpsc::channel();
+        let asking = told.clone();
+        std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream
+                .write_all(connect_with("held", "secret").as_bytes())
+                .unwrap();
+            let mut answer = String::new();
+            let _ = stream.read_to_string(&mut answer);
+            let _ = asking.send(answer);
+        });
+        // The one of another profile is answered at once (the way refuses: a 502).
+        assert!(ask(&proxy, &connect_with("free", "secret")).starts_with("HTTP/1.1 502 "));
+        assert!(
+            hear.recv_timeout(Duration::from_millis(150)).is_err(),
+            "the held profile's request is not answered"
+        );
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let answer = hear.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 502 "), "{answer}");
     }
 
     #[test]

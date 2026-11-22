@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bt_shell_common::browser::depot::Depot;
 use bt_shell_common::browser::route::{self, Dialer, PROOF_WAIT, no_way};
 
 use super::{PageBrowsers, on_main};
@@ -24,6 +25,8 @@ pub(super) struct Probing {
     id: u32,
     machine: String,
     way: Arc<dyn Dialer>,
+    /// Where the machine keeps the profiles of the pane's browsers, if it is to.
+    depot: Option<Arc<dyn Depot>>,
 }
 
 impl PageBrowsers {
@@ -41,7 +44,13 @@ impl PageBrowsers {
                 "the program does not offer a listener to show it where the way ends",
             )));
         };
-        *self.probing.borrow_mut() = Some(Probing { id, machine, way });
+        let depot = pane.browser_depot();
+        *self.probing.borrow_mut() = Some(Probing {
+            id,
+            machine,
+            way,
+            depot,
+        });
         // A program that says nothing leaves the rooms waiting for the way: it is not shown.
         let (pane_id, serial) = (pane.id(), self.serial);
         std::thread::spawn(move || {
@@ -83,11 +92,17 @@ impl PageBrowsers {
         };
         // The connection waits for the far end and so is not made on the main queue.
         let (pane_id, serial) = (pane.id(), self.serial);
-        let Probing { machine, way, .. } = probing;
+        let Probing {
+            machine,
+            way,
+            depot,
+            ..
+        } = probing;
         std::thread::spawn(move || {
             let proof = route::prove(&*way, port, &token, PROOF_WAIT).map(|()| (machine, way));
             on_main(pane_id, move |pane| {
                 if let Some(browsers) = pane.page_browsers().filter(|b| b.serial == serial) {
+                    browsers.rooms.borrow_mut().set_depot(depot);
                     browsers.routed(proof);
                 }
             });
