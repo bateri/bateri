@@ -877,14 +877,21 @@ install: kablo-rev bundle
 # first time). It never updates itself (no Sparkle) and does not answer `bateri://` links (the
 # installed bateri does). A copy that is open is not quit for you: ⌘Q ends its terminals unless
 # `keep_running = "quit"`, so quit it yourself and run this again.
+# `make dev DEV_NAME=dev2` makes a second copy beside the first, to be another computer of the
+# same person (a profile's roaming between two Macs is tried with it): its own name `bateri-dev2`,
+# bundle `dev2.bateri.dev`, `BateriProfile` `dev2`, `target/dev2/`, `~/.config/bateri-dev2/` and
+# `~/Library/Application Support/bateri-dev2/`, so that nothing of it is the first copy's. The
+# name is `dev` and what follows it, letters, digits and `-` (the copy's browser engine is run
+# where it is for a profile named so, `development_app`).
 # The browser element's engine is a release, which a copy with no team signature does
 # not trust: `make dev BROWSER_APP=<the helper's app>` makes the copy run that app where it is
 # (`BateriBrowserApp` in its `Info.plist`, read only by a copy that names a profile), with no
 # signature check and no keychain; without it the copy has no engine.
 BROWSER_APP ?=
-DEV_APP = $(TARGET_DIR)/dev/bateri-dev.app
-DEV_ID = dev.bateri.dev
-DEV_SETTINGS = $(HOME)/.config/bateri-dev
+DEV_NAME ?= dev
+DEV_APP = $(TARGET_DIR)/$(DEV_NAME)/bateri-$(DEV_NAME).app
+DEV_ID = $(DEV_NAME).bateri.dev
+DEV_SETTINGS = $(HOME)/.config/bateri-$(DEV_NAME)
 # What is packaged is the kablo this tree is built against: the pins of kablo's crates in
 # `Cargo.toml` are one commit, and the release in `$(KABLO_DIST)` belongs to it. A development
 # release says the commit it was built from (its version ends `+` and the first twelve digits of
@@ -932,17 +939,18 @@ kablo-published: kablo-rev
 	case "$$version" in *+*) echo "kablo: the kablo in $(KABLO_DIST) is $$version, a development release: publish kablo first — \`make release\` in its checkout writes it there."; exit 1;; esac
 
 dev: kablo-rev
+	@echo '$(DEV_NAME)' | grep -Eq '^dev[A-Za-z0-9-]*$$' || { echo "dev: DEV_NAME is dev, or dev and letters, digits and - (dev2): '$(DEV_NAME)'"; exit 1; }
 	@if pgrep -f '^$(DEV_APP)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
-		echo "dev: bateri-dev is open — quit it first (⌘Q), then retry"; exit 1; fi
+		echo "dev: bateri-$(DEV_NAME) is open — quit it first (⌘Q), then retry"; exit 1; fi
 	@lock=$$(mktemp); cp Cargo.lock $$lock; \
 	$(MAKE) --no-print-directory bundle APP=$(DEV_APP) SIGN_ID=-; built=$$?; \
 	if [ -n "$(KABLO_LOCAL)" ]; then cp $$lock Cargo.lock; fi; \
 	rm -f $$lock; exit $$built
 	@p=$(DEV_APP)/Contents/Info.plist; \
 	plutil -replace CFBundleIdentifier -string $(DEV_ID) $$p && \
-	plutil -replace CFBundleName -string bateri-dev $$p && \
-	plutil -replace CFBundleDisplayName -string bateri-dev $$p && \
-	plutil -insert BateriProfile -string dev $$p && \
+	plutil -replace CFBundleName -string bateri-$(DEV_NAME) $$p && \
+	plutil -replace CFBundleDisplayName -string bateri-$(DEV_NAME) $$p && \
+	plutil -insert BateriProfile -string $(DEV_NAME) $$p && \
 	{ test -z '$(BROWSER_APP)' || plutil -insert BateriBrowserApp -string '$(abspath $(BROWSER_APP))' $$p; } && \
 	for k in CFBundleURLTypes SUFeedURL SUPublicEDKey SUEnableAutomaticChecks; do plutil -remove $$k $$p || exit 1; done
 	rm -rf $(DEV_APP)/Contents/Frameworks/Sparkle.framework

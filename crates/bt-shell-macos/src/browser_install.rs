@@ -332,10 +332,18 @@ pub(crate) fn browser_path(home: &Path, profile: Option<&str>) -> PathBuf {
         .join("browser")
 }
 
+/// Whether `profile` is a development copy's (`make dev`; `make dev DEV_NAME=dev2` makes a second
+/// one beside it): `dev` and a plain name that begins with it.
+fn is_development(profile: Option<&str>) -> bool {
+    bt_shell_common::settings::plain_profile(profile).is_some_and(|name| name.starts_with("dev"))
+}
+
 /// The helper app a development copy runs where it is (`make dev BROWSER_APP=…` writes it into
 /// the copy's `Info.plist` as `BateriBrowserApp`); `None` for every other copy.
 fn development_app(profile: Option<&str>) -> Option<PathBuf> {
-    profile.filter(|profile| *profile == "dev")?;
+    if !is_development(profile) {
+        return None;
+    }
     let value = objc2_foundation::NSBundle::mainBundle()
         .objectForInfoDictionaryKey(objc2_foundation::ns_string!("BateriBrowserApp"))?;
     let path = value

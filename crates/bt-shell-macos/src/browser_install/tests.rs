@@ -630,6 +630,35 @@ fn the_browser_data_is_beside_the_apps_folder_and_a_development_copy_has_its_own
     );
 }
 
+#[test]
+fn a_development_copy_and_a_second_one_beside_it_run_the_engine_where_it_is_and_no_other_copy_does()
+{
+    for named in ["dev", "dev2", "dev-b"] {
+        assert!(is_development(Some(named)), "{named}");
+    }
+    // The application itself, a copy of another name and a name that is no plain word are not.
+    for other in [
+        None,
+        Some(""),
+        Some("work"),
+        Some("2dev"),
+        Some("dev 2"),
+        Some("dev/2"),
+    ] {
+        assert!(!is_development(other), "{other:?}");
+    }
+    // The second copy's data is its own, beside the first's.
+    let home = Path::new("/Users/x");
+    assert_eq!(
+        browser_path(home, Some("dev2")),
+        Path::new("/Users/x/Library/Application Support/bateri-dev2/browser")
+    );
+    assert_ne!(
+        browser_path(home, Some("dev2")),
+        browser_path(home, Some("dev"))
+    );
+}
+
 struct Titles(std::sync::mpsc::Sender<browser_ipc::message::Event>);
 
 impl bt_shell_common::browser::helper::Sink for Titles {
