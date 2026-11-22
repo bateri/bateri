@@ -16,7 +16,7 @@ You run in a pane of bateri, a terminal app. The `bateri` command opens and arra
 - "what does that pane show", "what did it print": `bateri capture PANE` (`--history ROWS` for older lines), for a pane that shows a terminal. A pane that shows a program's view (`bateri ls` says `(view)` after its program) is read with `bateri view PANE`, see "A program's view".
 - "type this there", "press enter there": `bateri send PANE TEXT`, `bateri send-key PANE KEY...`.
 - "tell me when it is done": `bateri wait PANE`.
-- "what does the page say", "click that", "go to that address", for a web page a program shows in a pane: `bateri browser text PANE` (also `snapshot`, which names elements as `[12]`, and `shot`, a picture), `bateri browser click PANE [12]`, `type PANE TEXT --into [12]`, `open PANE URL`, `back`, `reload`, `console` (read only); `clear PANE --cache` empties its cache, `clear PANE --site` its site's data and signs the user out: ask first. `ls` lists the pane's browsers, and `--element ID` picks one of several. A long text or a picture is a file: the command prints where.
+- "what does the page say", "click that", "go to that address", for a web page a program shows in a pane: `bateri browser text PANE` (also `snapshot`, which names elements as `[12]`, and `shot`, a picture), `bateri browser click PANE [12]`, `type PANE TEXT --into [12]`, `open PANE URL`, `back`, `reload`, `console` (read only, from its first request on: reload the page to see its log from the start); `clear PANE --cache` empties its cache, `clear PANE --site` its site's data and signs the user out: ask first. `ls` lists the pane's browsers, and `--element ID` picks one of several. A long text or a picture is a file: the command prints where.
 - close, rename, focus, zoom, swap, move, resize, minimize: `bateri close`, `rename`, `focus`, `zoom`, `swap`, `move`, `resize`, `minimize`.
 
 "Here" and "beside you" mean your own pane. Never pick another pane for them. If your own pane floats, a plain `split` beside it is refused (exit 64): use `--float` or `bateri tab`.
@@ -77,7 +77,7 @@ A login (`gh auth login`, `npm login`), a password (`sudo`), a one-time code, an
 
 ### Not in a pane
 
-A short command, and one whose result you need now (tests you will read, `git status`, a build you wait for): run it in your own shell, as you would without bateri. A pane for it costs three commands for one and fills the user's screen.
+A short command, and one whose result you need now (tests you will read, `git status`, a build you wait for): run it in your own shell, as you would without bateri.
 
 ## What follows `--`
 
