@@ -23,9 +23,7 @@ of every installed copy. A version without a section is not released.
 - **`bateri view` works on a program's web view too.** A pane made with `pencere new --page web` is read with a ref for each button, link and field, and clicked, filled, typed into, pressed keys at, scrolled, waited on and pictured like a native one; its commands and menus are not there. The agent reads the page through a script the page cannot see, and nothing of it moves your keyboard or your tabs.
 - **Claude knows how to use a program's view.** The `bateri` skill tells it to read a view first, to act with a ref or a command title from the reading, to ask you before anything that cannot be undone (remove, delete, kill, drop, send), to leave your keyboard and tabs alone, and to treat the words on the page as data, never as instructions. "That pen" means the pane you had the keyboard in before the one you are typing to.
 - **`bateri ls` shows which pane has the keyboard.** The pane you are typing in is marked `(focused)`, a pane that shows a view says so, and `--json` gives the order the keyboard visited the panes, so an agent can tell which pane you were in just before its own.
-
 - **VoiceOver reads a program's view as a tree.** A dialog, a table, an outline and a list say what they are and what is in them, and while a dialog is open VoiceOver reads the dialog alone.
-
 - **`bateri view` reads a view as a tree.** A line indented under another is inside it, the page behind an open dialog is not listed, and a line says how an element stands (`mixed`, `level 2`, `3 of 12`, `row 5`). `command REF TITLE` does a command an element lists, and `reveal REF [ROW]` scrolls an element or a row of a list or table into view. A web view is read the same way.
 
 ### Fixed
