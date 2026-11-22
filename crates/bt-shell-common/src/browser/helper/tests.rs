@@ -1015,4 +1015,154 @@ mod depot {
             std::fs::remove_dir_all(&w.root).is_ok()
         });
     }
+
+    // ---- the real engine ----
+
+    struct Running(std::process::Child);
+
+    impl Process for Running {
+        fn id(&self) -> u32 {
+            self.0.id()
+        }
+
+        fn exited(&mut self) -> io::Result<Option<String>> {
+            Ok(self.0.try_wait()?.map(|status| status.to_string()))
+        }
+
+        fn kill(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Starts the real app as bateri does: its own environment and no input.
+    struct Real;
+
+    impl Spawn for Real {
+        fn spawn(&self, executable: &Path, args: &[String]) -> io::Result<Box<dyn Process>> {
+            let mut command = std::process::Command::new(executable);
+            command
+                .args(args)
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            for name in ["HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL"] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+            command.env("PATH", "/usr/bin:/bin");
+            Ok(Box::new(Running(command.spawn()?)))
+        }
+    }
+
+    /// The cookies of the profile's folder as the engine keeps them on disk: `name|is_persistent`.
+    fn cookies_on_disk(root: &Path) -> String {
+        let found = std::process::Command::new("find")
+            .arg(root.join("profiles"))
+            .args(["-name", "Cookies", "-not", "-path", "*/Default/*"])
+            .output()
+            .unwrap();
+        let mut rows = Vec::new();
+        for path in String::from_utf8_lossy(&found.stdout).lines() {
+            let out = std::process::Command::new("sqlite3")
+                .arg(format!("file:{path}?mode=ro&immutable=1"))
+                .arg("select name||'|'||is_persistent from cookies order by name")
+                .output()
+                .unwrap();
+            rows.extend(
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(str::to_owned),
+            );
+        }
+        rows.join(",")
+    }
+
+    /// The real engine (`BATERI_BROWSER_APP` names its app) joins a home, ends and starts again,
+    /// as bateri does when it is quit and opened: the profile's folder on disk keeps a session
+    /// cookie that the home gave it, so that the home and the profile do not say different things.
+    #[test]
+    fn a_session_cookie_a_home_gave_is_in_the_real_engines_folder_after_every_restart() {
+        let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("bhr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        home.seed(
+            &browser_ipc::message::Record::Cookie {
+                domain: "localhost".into(),
+                path: "/".into(),
+                name: "sid".into(),
+                partition: None,
+                value: Some(browser_ipc::message::CookieValue {
+                    value: "from the home".into(),
+                    expires: None,
+                    secure: false,
+                    http_only: true,
+                    same_site: 2,
+                    priority: 1,
+                    source_scheme: 1,
+                    source_port: 8790,
+                }),
+            },
+            &[],
+            &[],
+        );
+        let mut seen = Vec::new();
+        for run in 0..3 {
+            // Another computer goes on meanwhile: a cookie of its that turns over (what the join
+            // writes is newer than what the profile took).
+            home.seed(
+                &browser_ipc::message::Record::Cookie {
+                    domain: "localhost".into(),
+                    path: "/".into(),
+                    name: "tok".into(),
+                    partition: None,
+                    value: Some(browser_ipc::message::CookieValue {
+                        value: format!("turn {run}"),
+                        expires: Some(4_000_000_000.0),
+                        secure: false,
+                        http_only: false,
+                        same_site: 0,
+                        priority: 1,
+                        source_scheme: 1,
+                        source_port: 8790,
+                    }),
+                },
+                &[],
+                &[],
+            );
+            let manager = Manager::new(
+                Config {
+                    source: Source::Fixed(app.clone()),
+                    profiles: root.join("profiles"),
+                    run: root.join("run"),
+                    mock_keychain: true,
+                    linger: Duration::from_millis(300),
+                    start_timeout: Duration::from_secs(30),
+                    trust: Arc::new(|_| Ok(())),
+                },
+                Arc::new(Real),
+            );
+            manager.depots().set("server:x", depot(&home));
+            let (sink, _events, _lost) = log();
+            let browser = manager.open(&server_key("work"), SIZE, 1.0, sink).unwrap();
+            drop(browser);
+            let end = Instant::now() + Duration::from_secs(30);
+            while manager.status().running {
+                assert!(Instant::now() < end, "the engine did not end");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            seen.push(format!("run {run}: {}", cookies_on_disk(&root)));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        for (run, line) in seen.iter().enumerate() {
+            assert!(line.contains("sid|0"), "{seen:?} (run {run})");
+        }
+    }
 }
