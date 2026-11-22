@@ -49,6 +49,11 @@ impl SettingsWindow {
         ) else {
             return vec!["the window was not built".to_owned()];
         };
+        // Shown, off the screen's edge, as the application shows it: a shown window grows to
+        // what its pages need and keeps that width from page to page, and a scroller that is
+        // not an overlay makes that wider than the design's on a page tall enough to scroll.
+        window.setFrameTopLeftPoint(NSPoint::new(-4000.0, -4000.0));
+        window.orderFront(None);
         let settings = Settings::default();
         let embedded = Theme::embedded_groups();
         let (light, _) = settings::load_theme(None, &settings.light_theme).or_embedded(false);
@@ -77,17 +82,21 @@ impl SettingsWindow {
                 &NSIndexSet::indexSetWithIndex(SideItem::row_of(category)),
                 false,
             );
-            self.show_selected();
             let Some(content) = window.contentView() else {
                 continue;
             };
-            content.layoutSubtreeIfNeeded();
+            window.layoutIfNeeded();
             let Some(document) = scroll.documentView() else {
                 problems.push("the pages have no document".to_owned());
                 continue;
             };
             let page = category.title();
             let mut say = |what: String| problems.push(format!("{page}: {what}"));
+            // Chosen in the sidebar as a click chooses it: the list's delegate opens the page.
+            if panes.get(grid).is_none_or(|pane| pane.isHidden()) {
+                say("the page did not open with its row chosen".to_owned());
+                continue;
+            }
 
             // The page's parts, top to bottom.
             if let Some(pane) = panes.get(grid) {
@@ -259,6 +268,25 @@ impl SettingsWindow {
                 picture(&column(sidebar), &dir.join(format!("{slug}-sidebar.png")));
             }
         }
+        // Every page has been open once, so the window is as wide as its pages make it, and
+        // opening them again leaves it so: a width that followed the scroller's lane would grow
+        // the window a little with each page that scrolls after one that does not.
+        let wide = window.frame().size.width;
+        for category in Category::ALL {
+            if category.grid().is_some() {
+                sidebar.selectRowIndexes_byExtendingSelection(
+                    &NSIndexSet::indexSetWithIndex(SideItem::row_of(category)),
+                    false,
+                );
+                window.layoutIfNeeded();
+            }
+        }
+        let again = window.frame().size.width;
+        if (again - wide).abs() > SLACK {
+            problems.push(format!(
+                "the window grew from {wide:.1} to {again:.1} wide with its pages opened again"
+            ));
+        }
         self.blink_problems(&themes, resolved, shots, &mut problems);
         self.drag_problems(shots, &mut problems);
         self.agents_problems(&themes, resolved, shots, &mut problems);
@@ -315,6 +343,7 @@ impl SettingsWindow {
         if let Some(dir) = shots {
             self.search_pictures(&themes, resolved, dir);
         }
+        window.orderOut(None);
         problems
     }
 
