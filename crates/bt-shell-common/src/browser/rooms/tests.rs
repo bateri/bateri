@@ -325,6 +325,33 @@ fn what_the_page_asked_before_the_engine_was_open_is_done_once_it_is() {
 }
 
 #[test]
+fn what_the_engine_says_while_a_profile_joins_its_home_is_told_to_the_page_once_the_room_is_open() {
+    use crate::browser::sync::tests::{Bell, FakeHome, cookie, depot};
+    // A profile that joins its home for the first time: the engine opens the browser and says so
+    // while the join goes on, and the room is not open until the join is done. The page is told
+    // the browser is ready all the same, and its first address is visited.
+    let mut rig = rig_with("joining", true, false);
+    let bell = Arc::new(Bell::default());
+    let home = FakeHome::new(&bell);
+    home.seed(&cookie("sid", Some("from the server")), &[], &[]);
+    rig.rooms.set_depot(Some(depot(&home)));
+    rig.prove("server:x");
+    rig.apply(&[room(1, Some("work"), (400.0, 300.0))], 2.0);
+    let mut told = Vec::new();
+    rig.rooms.ask(
+        Id::new(1),
+        BrowserAsk::Go("https://example.com/".into()),
+        &mut told,
+    );
+    rig.until("ready", |e| ready(e, 1));
+    rig.command(
+        "go",
+        |c| matches!(c, Command::Navigate { url, .. } if url == "https://example.com/"),
+    );
+    assert_eq!(home.opens(), 1, "the profile did join its home");
+}
+
+#[test]
 fn a_page_asks_become_the_engines_commands() {
     let mut find = None;
     let go = |ask: &BrowserAsk, find: &mut Option<(String, bool)>| command_of(7, ask, find);

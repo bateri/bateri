@@ -34,6 +34,9 @@ use super::route::Dialer;
 /// The most asks a room holds for its engine while the engine is being started.
 const HELD_ASKS: usize = 64;
 
+/// The most events of its engine a room holds while it is being opened.
+const HELD_EVENTS: usize = 64;
+
 /// Where the engine's frames go as they come, on the helper's thread.
 pub trait Frames: Send + Sync {
     /// A frame of the room's page (`popup`: of the list that goes over it).
@@ -429,6 +432,9 @@ struct Room {
     state: BrowserState,
     /// Whether the engine has said it is open.
     opened: bool,
+    /// What the engine said while the room was being opened (a profile that joins its home keeps
+    /// the open waiting, and the engine says it is up meanwhile): told to the page once it is open.
+    early: Vec<Event>,
 }
 
 /// Where the way of a page's browsers to its program's machine stands. One for the page: the
@@ -582,6 +588,7 @@ impl Rooms {
                 pressed: HashSet::new(),
                 state,
                 opened: false,
+                early: Vec::new(),
             },
         );
         match self.route {
@@ -701,6 +708,7 @@ impl Rooms {
         room.generation = self.generation;
         room.life = Life::Opening;
         room.opened = false;
+        room.early.clear();
         room.state = BrowserState::with_status(BrowserState::STARTING, Some(STARTING));
         shell.state(id, room.state.clone());
         let (generation, profile, size, scale) = (
@@ -891,6 +899,7 @@ impl Rooms {
         let Some(room) = self.rooms.get_mut(&id) else {
             return;
         };
+        let mut early = Vec::new();
         match result {
             Ok(engine) => {
                 // Where a link the menu opens goes decides the words of its row.
@@ -916,6 +925,7 @@ impl Rooms {
                         let _ = engine.send(command);
                     }
                 }
+                early = std::mem::take(&mut room.early);
                 room.life = Life::Open(engine);
             }
             Err(StartError::NotInstalled) => {
@@ -926,6 +936,12 @@ impl Rooms {
                 let why = e.to_string();
                 self.over(id, &why, shell);
             }
+        }
+        // What the engine said before the room was open comes first, in the order it was said:
+        // without it the page is never told the browser is ready, and does not ask for its
+        // first address.
+        for event in early {
+            self.event(id, event, shell);
         }
     }
 
@@ -949,6 +965,12 @@ impl Rooms {
         };
         let handle = match &room.life {
             Life::Open(engine) => engine.handle(),
+            Life::Opening => {
+                if room.early.len() < HELD_EVENTS {
+                    room.early.push(event);
+                }
+                return;
+            }
             _ => return,
         };
         match event {
