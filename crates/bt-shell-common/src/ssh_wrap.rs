@@ -2208,6 +2208,7 @@ mod tests {
                 mark: Some(HostMark::Production),
                 integration: None,
                 commands: None,
+                profiles: None,
             }],
             ..Settings::default()
         };

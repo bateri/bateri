@@ -155,6 +155,10 @@ impl PaneHost for TabHost {
         crate::hold_service::shown(pane)
     }
 
+    fn keeps_profiles(&self, host: &str) -> bool {
+        app::delegate(Self::mtm()).is_none_or(|app| app.settings().profiles_for(host))
+    }
+
     fn open_choice(&self, account: Option<&str>) -> Option<bt_shell_common::open_with::Choice> {
         app::delegate(Self::mtm())?.open_choice(account)
     }

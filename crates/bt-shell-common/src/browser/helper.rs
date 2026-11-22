@@ -28,7 +28,7 @@
 //! knows under another folder): a profile with a name is the same for every browser of the same
 //! key; one without a name is its browser's own.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use browser_ipc::message::{Command, Event, Profile};
 use browser_ipc::{Frame, Launch, Receiver, Surface, Writer, channel};
 
-use super::depot::{Depots, SYNC_WAIT};
+use super::depot::{Depot, Depots, Mark, OPEN_WAIT, SYNC_WAIT, Turn};
 use super::layout::{self, Hold, Layout};
 use super::profile::ProfileKey;
 use super::proxy::Proxy;
@@ -155,6 +155,9 @@ pub struct Manager {
     routes: Arc<Routes>,
     /// Where each machine keeps its profiles, once the shell has given it a depot.
     depots: Arc<Depots>,
+    /// The machines that were told, in this run, that the person keeps no profiles there (and
+    /// have not failed to be).
+    told_off: Arc<Mutex<HashSet<String>>>,
 }
 
 /// One helper's life.
@@ -198,6 +201,7 @@ impl Manager {
             next_run: AtomicU64::new(1),
             routes: Routes::new(),
             depots: Depots::new(),
+            told_off: Arc::default(),
         })
     }
 
@@ -313,6 +317,23 @@ impl Manager {
             .parent()
             .unwrap_or(&self.config.profiles)
             .to_path_buf();
+        // The person's switch for the machine, against what it was when the machine was last
+        // told: a turn of it is part of this profile's sync, and a machine that is switched off
+        // has no sync at all.
+        let mark = Mark::new(&data, key.machine());
+        let turn = match (depot.kept(), mark.recall()) {
+            (true, Some(false)) => Some(Turn::Lift(mark)),
+            (true, None) => {
+                mark.remember(true);
+                None
+            }
+            (true, Some(true)) => None,
+            (false, Some(true)) => Some(Turn::Close(mark)),
+            (false, _) => {
+                self.tell_off(key.machine(), depot, mark);
+                return None;
+            }
+        };
         let config = SyncConfig {
             dir: dir.clone(),
             app: key.application().to_owned(),
@@ -324,9 +345,35 @@ impl Manager {
         let helper = Box::new(RunHelper(run.commands.clone()));
         run.syncs
             .join(&dir, browser, move |reqs| {
-                ProfileSync::start(config, helper, depot, reqs)
+                ProfileSync::start(config, helper, depot, reqs, turn)
             })
             .ok()
+    }
+
+    /// Tells a machine whose profiles the person keeps to this Mac alone that none are kept
+    /// there: what the machine had is deleted and the mark is left, so that no Mac puts a profile
+    /// there again. Once for a machine in a run; a machine that could not be told is told again
+    /// at the next browser. It waits for the machine, and so is on a thread of its own.
+    fn tell_off(&self, machine: &str, depot: Arc<dyn Depot>, mark: Mark) {
+        if !lock(&self.told_off).insert(machine.to_owned()) {
+            return;
+        }
+        let (told, machine) = (self.told_off.clone(), machine.to_owned());
+        let spawned = std::thread::Builder::new()
+            .name("profile-switch".into())
+            .spawn({
+                let (told, machine) = (told.clone(), machine.clone());
+                move || {
+                    if depot.switch(false, OPEN_WAIT).is_ok() {
+                        mark.remember(false);
+                    } else {
+                        lock(&told).remove(&machine);
+                    }
+                }
+            });
+        if spawned.is_err() {
+            lock(&told).remove(&machine);
+        }
     }
 
     /// The running helper, started first if there is none. The caller holds `starting`.

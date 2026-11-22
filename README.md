@@ -53,6 +53,13 @@ brew install bateri/tap/bateri
   send a notification, with the `bateri` command bateri puts on that server (see
   [Agents on a server](#agents-on-a-server)). Turn on Settings ▸ Agents ▸ bateri
   command and Claude Code learns the command itself, for that session alone.
+- **Signed in on every Mac.** A page that a program on a server shows in its
+  pane keeps its sign-ins (cookies, local storage) at that server too, so your
+  other Macs open the program already signed in, and signing out on one signs
+  out on all. The copy lies there unencrypted, readable by the account bateri
+  connects as; for a server you do not trust, `profiles = false` in its
+  `[remote] hosts` entry keeps them on this Mac alone
+  ([`[remote]`](docs/SETTINGS.md#remote)).
 - **Modern text rendering.** Emoji sequences (flags, ZWJ families, skin tones),
   wide characters, and box-drawing, block and Braille characters drawn to fit
   the cell exactly.

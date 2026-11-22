@@ -21437,6 +21437,7 @@ mod tests {
             mark: Some(HostMark::Production),
             integration: None,
             commands: None,
+            profiles: None,
         }];
         assert!(
             !session.set_host_marks(&rules),
@@ -21524,6 +21525,7 @@ mod tests {
                 mark: Some(HostMark::Staging),
                 integration: None,
                 commands: None,
+                profiles: None,
             }]),
             "nothing visible changes locally"
         );
@@ -21546,6 +21548,7 @@ mod tests {
             mark: Some(HostMark::Production),
             integration: None,
             commands: None,
+            profiles: None,
         }];
         assert!(session.set_host_marks(&production));
         assert!(

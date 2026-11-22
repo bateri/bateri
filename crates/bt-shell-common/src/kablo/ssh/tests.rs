@@ -1034,6 +1034,7 @@ fn entry(pattern: &str, integration: bool) -> bt_core::HostRule {
         mark: None,
         integration: Some(integration),
         commands: None,
+        profiles: None,
     }
 }
 
@@ -1088,6 +1089,7 @@ fn a_server_bateri_has_been_to_the_setting_and_the_entry_settle_without_asking()
             mark: Some(bt_core::HostMark::Production),
             integration: None,
             commands: None,
+            profiles: None,
         }],
         ..Settings::default()
     });
@@ -1647,6 +1649,7 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
             mark: None,
             integration: None,
             commands: Some(CommandLevel::Off),
+            profiles: None,
         }],
         ..Settings::default()
     });
@@ -1686,6 +1689,7 @@ fn a_server_has_its_programs_watched_where_the_command_and_the_integration_are_w
             mark: None,
             integration: None,
             commands: Some(CommandLevel::Off),
+            profiles: None,
         }],
         ..Settings::default()
     });

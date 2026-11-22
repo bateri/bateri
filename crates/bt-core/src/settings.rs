@@ -1299,6 +1299,10 @@ pub struct HostRule {
     /// leaves it to the next entry that writes it, and then to `own`. Resolved by
     /// [`Settings::commands_for`], which reads a `full` on a pattern as `own`.
     pub commands: Option<CommandLevel>,
+    /// `profiles`: whether the browser profiles of a program that runs on this host are kept at
+    /// the host too, so that every Mac that connects to it shares them; `None` leaves it to
+    /// the next entry that writes it, and then to `true`. Resolved by [`Settings::profiles_for`].
+    pub profiles: Option<bool>,
 }
 
 /// The host's mark: that of `rules`'s **first** matching entry, or
@@ -2527,10 +2531,16 @@ claude_skill = false
 # An entry may also carry commands = "off" | "own" | "screen" | "full", the
 # level of the bateri command on that host (see [commands]), alone or with a
 # mark.
+# And profiles = false: a program that runs on a server has its browsers'
+# sign-ins (cookies, local storage) kept at the server too, so that your other
+# Macs open it signed in; the copy there is not encrypted and the account bateri
+# uses on the server can read it. profiles = false keeps them on this Mac alone:
+# the copy at that server is deleted and every Mac that connects leaves it be.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
 #   { host = "rasp", commands = "screen" },
+#   { host = "shared-box", profiles = false },
 # ]
 hosts = []
 # "auto" | "ask" | "off". Whether a plain ssh sets up shell integration on
@@ -3339,6 +3349,16 @@ open_with = "textpen"
             Some((_, false)) => RemoteIntegration::Off,
             None => self.remote_integration,
         }
+    }
+
+    /// Whether the browser profiles of a program that runs on the server `host` (as typed) are
+    /// kept at the server besides this Mac: the first `[remote] hosts` entry that matches and
+    /// writes `profiles`, else `true`. A pattern may say `false` (a profile kept at a server is
+    /// readable by the account bateri uses there, and a pattern that keeps fewer is safe).
+    pub fn profiles_for(&self, host: &str) -> bool {
+        matching(&self.remote_hosts, host, MarkSubject::Host)
+            .find_map(|(_, rule)| rule.profiles)
+            .unwrap_or(true)
     }
 
     /// What the `bateri` command may do on the server `host` (as typed): the first
@@ -4988,9 +5008,9 @@ fn host_rules(
         message: format!(
             "`{KEY}` must be a list of {{ host = \"pattern\", mark = \"production\", \
              \"staging\", \"development\", \"none\" or \"#rrggbb\", integration = true \
-             or false, commands = \"off\", \"own\", \"screen\" or \"full\" }} with a mark, an \
-             integration, a commands level or any of them, found {found}; keeping the \
-             previous list"
+             or false, commands = \"off\", \"own\", \"screen\" or \"full\", profiles = true \
+             or false }} with a mark, an integration, a commands level, profiles or any of \
+             them, found {found}; keeping the previous list"
         ),
     };
     let mut entries: Vec<(&dyn TableLike, Option<std::ops::Range<usize>>)> = Vec::new();
@@ -5066,11 +5086,27 @@ fn host_rules(
                 level
             }
         };
-        // `Some(None)`: an `integration`- or `commands`-only entry, without a mark.
+        // `profiles`: a boolean, alone or with the rest, as `integration` is.
+        let profiles = match table.get("profiles") {
+            None => None,
+            Some(item) => match item.as_bool() {
+                Some(on) => Some(on),
+                None => {
+                    let found = format!(
+                        "profiles {} for {:?}",
+                        kind(item),
+                        pattern.unwrap_or_default()
+                    );
+                    diagnostics.push(reject(span, found));
+                    return fallback.to_vec();
+                }
+            },
+        };
+        // `Some(None)`: an `integration`-, `commands`- or `profiles`-only entry, without a mark.
         let mark = match (
             mark,
             table.get("mark"),
-            integration.is_some() || commands.is_some(),
+            integration.is_some() || commands.is_some() || profiles.is_some(),
         ) {
             (None, None, true) => Some(None),
             (mark, _, _) => mark.map(Some),
@@ -5081,6 +5117,7 @@ fn host_rules(
                 mark,
                 integration,
                 commands,
+                profiles,
             }),
             (None, _) => {
                 diagnostics.push(reject(span, "an entry without a host".to_owned()));
@@ -6866,6 +6903,52 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn a_server_keeps_profiles_unless_the_first_entry_that_writes_the_key_says_not() {
+        let text = r#"
+[remote]
+hosts = [
+  { host = "shared", profiles = false },
+  { host = "prod-*", mark = "production" },
+  { host = "prod-ok", profiles = true },
+  { host = "prod-*", profiles = false },
+  { host = "ada@box", profiles = false },
+  { host = "*.lan", mark = "staging", profiles = false },
+]
+"#;
+        let settings = clean(text);
+        // No entry, no entry that writes the key: kept (the default is on).
+        assert!(Settings::default().profiles_for("anything"));
+        assert!(settings.profiles_for("elsewhere"));
+        // The host as typed: an alias, `user@host`, and the host after any `user@`.
+        assert!(!settings.profiles_for("shared"));
+        assert!(!settings.profiles_for("ada@shared"));
+        // The first entry that writes `profiles` decides, not the first that matches.
+        assert!(settings.profiles_for("prod-ok"));
+        assert!(!settings.profiles_for("prod-db"));
+        // A pattern with `@` matches the whole name, one without it the host after the user.
+        assert!(!settings.profiles_for("ada@box"));
+        assert!(settings.profiles_for("bob@box"));
+        assert!(!settings.profiles_for("nas.lan"));
+        assert!(!settings.profiles_for("ada@nas.lan"));
+        // The entry that carries only the key has no mark; the others keep theirs.
+        assert_eq!(host_mark(&settings.remote_hosts, "shared"), HostMark::None);
+        assert_eq!(
+            host_mark(&settings.remote_hosts, "prod-web"),
+            HostMark::Production
+        );
+        // The array of tables says the same.
+        let tables = clean("[[remote.hosts]]\nhost = \"rasp\"\nprofiles = false\n");
+        assert!(!tables.profiles_for("rasp"));
+        // A value that is not a boolean rejects the list, as a bad `integration` does.
+        for bad in ["\"no\"", "0", "[]"] {
+            let text = format!("[remote]\nhosts = [{{ host = \"a\", profiles = {bad} }}]\n");
+            let parsed = Settings::parse_keeping(&text, &Settings::default()).expect("a file");
+            assert!(parsed.settings.remote_hosts.is_empty(), "{bad}");
+            assert!(parsed.diagnostics[0].message.contains("profiles"), "{bad}");
+        }
+    }
+
+    #[test]
     fn a_server_has_the_level_its_first_entry_that_writes_one_says_and_own_otherwise() {
         let text = r#"
 [remote]
@@ -7495,18 +7578,21 @@ hosts = [
                     mark: None,
                     integration: Some(false),
                     commands: None,
+                    profiles: None,
                 },
                 HostRule {
                     pattern: "prod".to_owned(),
                     mark: Some(HostMark::Production),
                     integration: Some(true),
                     commands: None,
+                    profiles: None,
                 },
                 HostRule {
                     pattern: "db".to_owned(),
                     mark: Some(HostMark::Staging),
                     integration: None,
                     commands: None,
+                    profiles: None,
                 },
             ]
         );
@@ -7543,6 +7629,7 @@ hosts = [
             mark: Some(mark),
             integration,
             commands: None,
+            profiles: None,
         };
         let settings = Settings {
             remote_hosts: vec![
@@ -7619,6 +7706,39 @@ hosts = [
                 integration(&edited),
                 RemoteIntegration::Off,
                 "the integration stays off: {edited}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_menu_mark_never_drops_a_hosts_profiles_key() {
+        // A server that keeps no profiles must not keep them after its entry is moved or its
+        // mark taken away: the copy at the server is the thing the key protects.
+        for (text, host, mark) in [
+            (
+                "[remote]\nhosts = [{ host = \"rasp\", mark = \"production\", profiles = false }]\n",
+                "rasp",
+                HostMark::None,
+            ),
+            (
+                "[remote]\nhosts = [{ host = \"ra*\", mark = \"staging\" }, \
+                 { host = \"rasp\", mark = \"development\", profiles = false }]\n",
+                "rasp",
+                HostMark::Production,
+            ),
+            (
+                "[[remote.hosts]]\nhost = \"ra*\"\nmark = \"staging\"\n\n\
+                 [[remote.hosts]]\nhost = \"rasp\"\nprofiles = false\n",
+                "rasp",
+                HostMark::Production,
+            ),
+        ] {
+            let before = clean(text);
+            assert!(!before.profiles_for(host), "{text}");
+            let edited = with_host_mark(text, host, mark, MarkSubject::Host).expect("edit");
+            assert!(
+                !clean(&edited).profiles_for(host),
+                "the key stays: {edited}"
             );
         }
     }
@@ -7713,6 +7833,7 @@ hosts = [
                     mark: Some(HostMark::Production),
                     integration: Some(false),
                     commands: None,
+                    profiles: None,
                 }],
                 "{edited}"
             );
@@ -8304,6 +8425,7 @@ hosts = [
             mark: Some(mark),
             integration: None,
             commands: None,
+            profiles: None,
         }
     }
 
@@ -8983,6 +9105,7 @@ cursor = \"spring\"
                     mark: Some(mark),
                     integration: None,
                     commands: None,
+                    profiles: None,
                 },
             ),
             SettingsEdit::RemoteHostIntegration { host, on } => settings.remote_hosts.insert(
@@ -8992,6 +9115,7 @@ cursor = \"spring\"
                     mark: None,
                     integration: Some(on),
                     commands: None,
+                    profiles: None,
                 },
             ),
             SettingsEdit::RemoteIntegration(mode) => settings.remote_integration = mode,
@@ -9514,18 +9638,21 @@ cursor = \"spring\"
                     mark: Some(HostMark::Production),
                     integration: None,
                     commands: None,
+                    profiles: None,
                 },
                 HostRule {
                     pattern: "db".to_owned(),
                     mark: Some(HostMark::Staging),
                     integration: None,
                     commands: None,
+                    profiles: None,
                 },
                 HostRule {
                     pattern: "prod-*".to_owned(),
                     mark: Some(HostMark::Production),
                     integration: None,
                     commands: None,
+                    profiles: None,
                 },
             ],
             "{prepended}"

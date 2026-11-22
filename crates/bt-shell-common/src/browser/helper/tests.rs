@@ -714,7 +714,8 @@ fn a_fixed_app_is_run_where_it_is_and_nothing_is_installed_around_it() {
 #[cfg(test)]
 mod depot {
     use super::*;
-    use crate::browser::sync::tests::{Bell, FakeHome, cookie, depot};
+    use crate::browser::depot::Mark;
+    use crate::browser::sync::tests::{Bell, FakeHome, Told, cookie, depot};
 
     fn server_key(name: &str) -> ProfileKey {
         ProfileKey::new("server:x", "browserpen", Some(name)).unwrap()
@@ -814,6 +815,160 @@ mod depot {
             run.as_ref().is_none_or(|run| run.syncs.is_empty())
         });
         // The sync writes what it keeps as it ends: the folder goes when it is done.
+        wait_until("the folder is removed", || {
+            std::fs::remove_dir_all(&w.root).is_ok()
+        });
+    }
+
+    #[test]
+    fn a_server_the_person_keeps_no_profiles_at_is_never_connected_to_and_is_told_once() {
+        let w = world(
+            "swoff",
+            Behaviour::default(),
+            Some("0.1.0"),
+            Duration::from_secs(60),
+        );
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        home.seed(&cookie("sid", Some("from the server")), &[], &[]);
+        let fake = depot(&home);
+        fake.keep.store(false, Ordering::Relaxed);
+        w.manager.depots().set("server:x", fake.clone());
+        let (sink, _events, _lost) = log();
+        let browser = w
+            .manager
+            .open(&server_key("work"), SIZE, 2.0, sink.clone())
+            .unwrap();
+        // The profile stays on this Mac: the browser is opened and nothing is read or written.
+        let second = w
+            .manager
+            .open(&server_key("other"), SIZE, 2.0, sink)
+            .unwrap();
+        drop(second);
+        drop(browser);
+        assert_eq!(
+            commands_until(&w, "Close"),
+            ["Open", "Open", "Close"],
+            "no profile command: the sync does not start"
+        );
+        wait_until("the server is told", || !lock(&fake.told).is_empty());
+        assert_eq!(
+            *lock(&fake.told),
+            [Told {
+                on: false,
+                opens: 0
+            }]
+        );
+        assert_eq!(home.opens(), 0, "the home was not asked");
+        let mark = Mark::new(&w.root, "server:x");
+        wait_until("the note", || mark.recall() == Some(false));
+        assert_eq!(
+            lock(&w.manager.told_off).len(),
+            1,
+            "once for the server in a run"
+        );
+        assert_eq!(lock(&fake.told).len(), 1);
+        wait_until("the folder is removed", || {
+            std::fs::remove_dir_all(&w.root).is_ok()
+        });
+    }
+
+    #[test]
+    fn a_switch_turned_off_joins_once_more_and_then_the_server_is_told() {
+        let w = world(
+            "turnoff",
+            Behaviour::default(),
+            Some("0.1.0"),
+            Duration::from_secs(60),
+        );
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        home.seed(&cookie("sid", Some("from the server")), &[], &[]);
+        let fake = depot(&home);
+        fake.keep.store(false, Ordering::Relaxed);
+        // The server was told the switch was on, the last time.
+        let mark = Mark::new(&w.root, "server:x");
+        mark.remember(true);
+        w.manager.depots().set("server:x", fake.clone());
+        let (sink, _events, _lost) = log();
+        let browser = w
+            .manager
+            .open(&server_key("work"), SIZE, 2.0, sink)
+            .unwrap();
+        wait_until("the server is told", || !lock(&fake.told).is_empty());
+        // What the server had is in the profile before it was told to delete it.
+        assert_eq!(
+            *lock(&fake.told),
+            [Told {
+                on: false,
+                opens: 1
+            }]
+        );
+        drop(browser);
+        let names = commands_until(&w, "Close");
+        assert!(
+            names.iter().any(|n| n == "ProfileWrite"),
+            "taken into the profile: {names:?}"
+        );
+        wait_until("the note", || mark.recall() == Some(false));
+        wait_until("the folder is removed", || {
+            std::fs::remove_dir_all(&w.root).is_ok()
+        });
+    }
+
+    #[test]
+    fn a_switch_turned_on_again_takes_the_mark_away_and_then_the_profile_is_shared() {
+        let w = world(
+            "turnon",
+            Behaviour::default(),
+            Some("0.1.0"),
+            Duration::from_secs(60),
+        );
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        // The server has the mark that another Mac left.
+        let fake = depot(&home);
+        fake.switch(false, Duration::ZERO).unwrap();
+        lock(&fake.told).clear();
+        let mark = Mark::new(&w.root, "server:x");
+        mark.remember(false);
+        w.manager.depots().set("server:x", fake.clone());
+        let (sink, _events, _lost) = log();
+        let browser = w
+            .manager
+            .open(&server_key("work"), SIZE, 2.0, sink)
+            .unwrap();
+        wait_until("the mark is taken away", || !lock(&fake.told).is_empty());
+        // Before the home was asked: it would have turned this Mac away.
+        assert_eq!(*lock(&fake.told), [Told { on: true, opens: 0 }]);
+        wait_until("the home is asked", || home.opens() == 1);
+        wait_until("the note", || mark.recall() == Some(true));
+        drop(browser);
+        wait_until("the folder is removed", || {
+            std::fs::remove_dir_all(&w.root).is_ok()
+        });
+    }
+
+    #[test]
+    fn a_server_that_was_never_told_is_noted_as_kept_and_not_told() {
+        let w = world(
+            "noted",
+            Behaviour::default(),
+            Some("0.1.0"),
+            Duration::from_secs(60),
+        );
+        let bell = Arc::new(Bell::default());
+        let home = FakeHome::new(&bell);
+        let fake = depot(&home);
+        w.manager.depots().set("server:x", fake.clone());
+        let (sink, _events, _lost) = log();
+        let browser = w
+            .manager
+            .open(&server_key("work"), SIZE, 2.0, sink)
+            .unwrap();
+        assert_eq!(Mark::new(&w.root, "server:x").recall(), Some(true));
+        assert!(lock(&fake.told).is_empty());
+        drop(browser);
         wait_until("the folder is removed", || {
             std::fs::remove_dir_all(&w.root).is_ok()
         });

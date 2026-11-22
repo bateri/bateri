@@ -24,7 +24,7 @@ use super::engine::{Config, Engine, Helper, Home, Input};
 use super::gate::{Gate, Stage};
 use super::records::{Id, id_of, record_digest, wire_of};
 use super::store::Cache;
-use crate::browser::depot::Depot;
+use crate::browser::depot::{Depot, Mark, Turn};
 use crate::browser::route::Link;
 
 // ---- waiting ----
@@ -389,9 +389,55 @@ pub(crate) struct FakeDepot {
     refuse: AtomicBool,
     /// The first this many openings fail.
     failures: AtomicU32,
+    /// The person's switch for the machine (a depot of a machine that keeps none is not opened).
+    pub(crate) keep: AtomicBool,
+    /// The first this many tellings of the switch fail.
+    pub(crate) switch_failures: AtomicU32,
+    /// What the machine was told, in order: the switch, and how many times the home had been
+    /// opened and had a live record when it was.
+    pub(crate) told: Mutex<Vec<Told>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Told {
+    pub(crate) on: bool,
+    pub(crate) opens: usize,
 }
 
 impl Depot for FakeDepot {
+    fn kept(&self) -> bool {
+        self.keep.load(Ordering::Relaxed)
+    }
+
+    /// What the server's kablo does: off deletes what it keeps and leaves the mark (the home
+    /// turns every open away), on takes the mark away.
+    fn switch(&self, on: bool, _wait: Duration) -> Result<(), String> {
+        let mut told = lock(&self.told);
+        if self
+            .switch_failures
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err("not yet".into());
+        }
+        {
+            let mut store = lock(&self.home.store);
+            told.push(Told {
+                on,
+                opens: store.opens.len(),
+            });
+            if on {
+                store.refuse = None;
+            } else {
+                store.entries.clear();
+                store.refuse = Some(wire::code::OFF);
+            }
+        }
+        drop(told);
+        self.home.bell.ring();
+        Ok(())
+    }
+
     fn open(&self, _wait: Duration) -> Result<Link, String> {
         if self.refuse.load(Ordering::Relaxed) {
             return Err("no home".into());
@@ -422,6 +468,9 @@ pub(crate) fn depot(home: &FakeHome) -> Arc<FakeDepot> {
         home: home.clone(),
         refuse: AtomicBool::new(false),
         failures: AtomicU32::new(0),
+        keep: AtomicBool::new(true),
+        switch_failures: AtomicU32::new(0),
+        told: Mutex::new(Vec::new()),
     })
 }
 
@@ -484,18 +533,48 @@ impl Mac {
 
     /// A Mac whose profile has this from before.
     fn with(tag: &str, depot: Arc<dyn Depot>, bell: &Arc<Bell>, table: Table) -> Mac {
+        Mac::turned(tag, depot, bell, table, |_| None)
+    }
+
+    /// A Mac whose person has turned the switch of the machine: `turn` is told where the Mac's
+    /// note of the switch is.
+    fn turned(
+        tag: &str,
+        depot: Arc<dyn Depot>,
+        bell: &Arc<Bell>,
+        table: Table,
+        turn: impl FnOnce(&Mark) -> Option<Turn>,
+    ) -> Mac {
         let root = std::env::temp_dir().join(format!("bt-sync-mac-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("profiles")).unwrap();
-        Mac::start(root, depot, bell, table)
+        let turn = turn(&Mark::new(&root, "server:test"));
+        Mac::start(root, depot, bell, table, turn)
     }
 
-    fn start(root: PathBuf, depot: Arc<dyn Depot>, bell: &Arc<Bell>, table: Table) -> Mac {
+    /// The note of the switch this Mac keeps for its machine.
+    fn mark(&self) -> Mark {
+        Mark::new(&self.root, "server:test")
+    }
+
+    fn start(
+        root: PathBuf,
+        depot: Arc<dyn Depot>,
+        bell: &Arc<Bell>,
+        table: Table,
+        turn: Option<Turn>,
+    ) -> Mac {
         let table = Arc::new(Mutex::new(table));
         let (commands, received) = channel();
         let reqs = Arc::new(AtomicU32::new(1));
-        let sync =
-            ProfileSync::start(config(&root), Box::new(Fake { commands }), depot, reqs).unwrap();
+        let sync = ProfileSync::start(
+            config(&root),
+            Box::new(Fake { commands }),
+            depot,
+            reqs,
+            turn,
+        )
+        .unwrap();
         let (hand, handed) = channel::<Arc<ProfileSync>>();
         let (state, bell_for_thread, table_for_thread, root_for_thread) = (
             root.join("sync").join("main"),
@@ -913,6 +992,146 @@ fn a_home_that_turns_the_machine_away_is_not_asked_again() {
 }
 
 #[test]
+fn a_switch_turned_on_again_takes_the_mark_away_before_the_first_connection_and_then_shares() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    // The mark is there: another Mac turned the switch off, and this one has just turned it on.
+    lock(&home.store).refuse = Some(wire::code::OFF);
+    let mac = Mac::turned(
+        "lift",
+        depot.clone(),
+        &bell,
+        table(&[cookie("sid", Some("mine"))], &[]),
+        |mark| {
+            mark.remember(false);
+            Some(Turn::Lift(mark.clone()))
+        },
+    );
+    mac.attach();
+    bell.until("the mark is taken away and the profile shared", || {
+        home.live(&cookie("sid", None))
+    });
+    // The mark went before the home was asked, or it would have turned the Mac away for good.
+    assert_eq!(*lock(&depot.told), vec![Told { on: true, opens: 0 }]);
+    assert_eq!(mac.mark().recall(), Some(true));
+}
+
+#[test]
+fn a_mark_that_cannot_be_taken_away_is_tried_again_and_the_home_is_not_asked_meanwhile() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    lock(&home.store).refuse = Some(wire::code::OFF);
+    depot.switch_failures.store(2, Ordering::Relaxed);
+    let mac = Mac::turned(
+        "lift-retry",
+        depot.clone(),
+        &bell,
+        table(&[cookie("sid", Some("mine"))], &[]),
+        |mark| {
+            mark.remember(false);
+            Some(Turn::Lift(mark.clone()))
+        },
+    );
+    mac.attach();
+    // A browser does not wait for it.
+    assert!(
+        mac.sync
+            .gate()
+            .wait(Stage::AfterOpen, Instant::now() + Duration::from_secs(5)),
+        "the browser goes on with what the Mac has"
+    );
+    bell.until("shared after the third try", || {
+        home.live(&cookie("sid", None))
+    });
+    assert!(
+        lock(&home.store).opens.len() == 1,
+        "asked once, after the mark was gone"
+    );
+    assert_eq!(lock(&depot.told).len(), 1);
+}
+
+#[test]
+fn a_switch_turned_off_takes_what_the_home_has_first_and_then_tells_the_machine() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    home.seed(&cookie("sid", Some("home")), &[], &[]);
+    let mac = Mac::turned("close", depot.clone(), &bell, Table::default(), |mark| {
+        mark.remember(true);
+        Some(Turn::Close(mark.clone()))
+    });
+    mac.attach();
+    bell.until("the machine is told", || !lock(&depot.told).is_empty());
+    // The Mac had the home's state before the home was deleted, and the home was joined to be so.
+    assert_eq!(
+        mac.value(&cookie("sid", None)).as_deref(),
+        Some("home"),
+        "taken before it was deleted"
+    );
+    let told = lock(&depot.told).clone();
+    assert_eq!(
+        told,
+        vec![Told {
+            on: false,
+            opens: 1
+        }]
+    );
+    // The sync is over once the note is written: nothing keeps asking.
+    assert!(mac.sync.ended(Duration::from_secs(5)), "the sync ended");
+    assert_eq!(mac.mark().recall(), Some(false));
+    assert!(
+        lock(&home.store).entries.is_empty(),
+        "the server's copy is gone"
+    );
+}
+
+#[test]
+fn a_close_that_fails_is_tried_again_and_one_the_home_already_made_is_not_told() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    home.seed(&cookie("sid", Some("home")), &[], &[]);
+    depot.switch_failures.store(2, Ordering::Relaxed);
+    let mac = Mac::turned(
+        "close-retry",
+        depot.clone(),
+        &bell,
+        Table::default(),
+        |mark| {
+            mark.remember(true);
+            Some(Turn::Close(mark.clone()))
+        },
+    );
+    mac.attach();
+    bell.until("told at last", || !lock(&depot.told).is_empty());
+    assert!(mac.sync.ended(Duration::from_secs(5)), "the sync ended");
+    assert_eq!(mac.mark().recall(), Some(false));
+    assert_eq!(lock(&depot.told).len(), 1);
+    // Another Mac turned it off first: the home says no, and there is nothing to tell it.
+    let (home2, depot2) = started(&bell);
+    lock(&home2.store).refuse = Some(wire::code::OFF);
+    let other = Mac::turned(
+        "close-off",
+        depot2.clone(),
+        &bell,
+        Table::default(),
+        |mark| {
+            mark.remember(true);
+            Some(Turn::Close(mark.clone()))
+        },
+    );
+    other.attach();
+    assert!(
+        other
+            .sync
+            .gate()
+            .wait(Stage::AfterOpen, Instant::now() + Duration::from_secs(5)),
+        "the home said no"
+    );
+    other.end();
+    assert_eq!(other.mark().recall(), Some(false));
+    assert!(lock(&depot2.told).is_empty());
+}
+
+#[test]
 fn an_indexeddb_goes_both_ways_by_its_files_and_a_large_value_as_a_blob() {
     let bell = Arc::new(Bell::default());
     let (home, depot) = started(&bell);
@@ -1032,7 +1251,7 @@ fn what_is_known_is_kept_for_the_next_run() {
         records: [(id_of(&cookie("sid", None)), cookie("sid", Some("home")))].into(),
         ..Table::default()
     };
-    let again = Mac::start(root, depot, &bell, table);
+    let again = Mac::start(root, depot, &bell, table, None);
     again.attach();
     bell.until("the second join", || joined(&again));
     // Asked from where the first run stopped, and nothing written or said.

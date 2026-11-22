@@ -14,6 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Pages a program on a server shows are signed in on every Mac.** A page's sign-ins are kept at the server too and follow you to your other Macs; signing out on one signs out on all. They lie there unencrypted, readable by the account bateri connects as, so a server you do not trust has `profiles = false` in its `[remote] hosts` entry, which keeps them on this Mac alone.
 - **Programs can draw glowing, shaded shapes.** A program's page can give a shape a soft glow or shadow, fill it with a gradient, mix it with what is under it, draw a dashed line and turn or scale it.
 
 ## [0.32.0] - 2026-11-20

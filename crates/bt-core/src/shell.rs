@@ -11074,6 +11074,7 @@ mod tests {
             mark: Some(mark),
             integration: None,
             commands: None,
+            profiles: None,
         }
     }
 
@@ -11456,6 +11457,7 @@ mod tests {
             mark: Some(mark),
             integration: None,
             commands: None,
+            profiles: None,
         }
     }
 

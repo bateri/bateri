@@ -208,6 +208,12 @@ pub trait PaneHost {
     fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
         None
     }
+    /// Whether the person keeps the browser profiles of a program that runs on the server `host`
+    /// (as typed) at that server too (`[remote] hosts`, `profiles`). The default is an owner that
+    /// has no such switch: they are.
+    fn keeps_profiles(&self, _host: &str) -> bool {
+        true
+    }
     /// The program a ⌘-click on a path opens in, for the machine the path is on: this Mac
     /// (`None`) or the server of `account` ([`bt_shell_common::open_with::choose`], and for a
     /// server what it said it has). The default is an owner that opens nothing: no path is a link.
@@ -6442,7 +6448,13 @@ impl TerminalPane {
         use bt_shell_common::browser::depot::ServedDepot;
         let (_, target, _) = self.server_target()?;
         self.host().kept_terminal(self.uuid())?;
-        Some(Arc::new(ServedDepot(self.served(&target))))
+        // The person's switch for the server, by the host as typed (the key of its mark and its
+        // shell integration too): a server that is switched off keeps no profile of its own.
+        let keep = self.host().keeps_profiles(&target.host);
+        Some(Arc::new(ServedDepot {
+            served: self.served(&target),
+            keep,
+        }))
     }
 
     /// The application's name for a file it quarantines.

@@ -599,10 +599,16 @@ claude_skill = false
 # An entry may also carry commands = "off" | "own" | "screen" | "full", the
 # level of the bateri command on that host (see [commands]), alone or with a
 # mark.
+# And profiles = false: a program that runs on a server has its browsers'
+# sign-ins (cookies, local storage) kept at the server too, so that your other
+# Macs open it signed in; the copy there is not encrypted and the account bateri
+# uses on the server can read it. profiles = false keeps them on this Mac alone:
+# the copy at that server is deleted and every Mac that connects leaves it be.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
 #   { host = "rasp", commands = "screen" },
+#   { host = "shared-box", profiles = false },
 # ]
 hosts = []
 # "auto" | "ask" | "off". Whether a plain ssh sets up shell integration on
@@ -2410,7 +2416,7 @@ integration = "ask"
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `hosts` | array of `{ host, mark, integration, commands }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, a database client is connected to it, or kubectl works in that Kubernetes context; `commands` (`"off"` \| `"own"` \| `"screen"` \| `"full"`) is the level of the `bateri` command on that server ([`[commands]`](#commands)), and an entry may carry it without a mark |
+| `hosts` | array of `{ host, mark, integration, commands, profiles }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, a database client is connected to it, or kubectl works in that Kubernetes context; `commands` (`"off"` \| `"own"` \| `"screen"` \| `"full"`) is the level of the `bateri` command on that server ([`[commands]`](#commands)), `profiles` (`true` \| `false`) whether the server keeps a copy of the browser profiles of the programs that run on it, and an entry may carry either without a mark |
 | `download_dir` | folder | `"~/Downloads"` | the target of "Download to Downloads" |
 | `download_conflict` | `"ask"` \| `"keep_both"` \| `"replace"` | `"ask"` | if the same name exists at the target: ask, keep both (the new one gets a number) or overwrite |
 | `download_notify` | `true` \| `false` | `true` | a transfer that ends while bateri is in the background sends a notification |
@@ -2546,9 +2552,25 @@ command line of a program running as root, so a script run with `sudo`
   entry given a mark from the menu gets its `mark` in place; when the menu
   deletes an entry or moves it to the beginning, it carries `integration` over
   to the new entry.
+- **`profiles`** (`true` \| `false`, optional, `true` when no entry says): whether
+  the server keeps a copy of the browser profiles (cookies, local storage,
+  IndexedDB) of a program that runs on it, so that every Mac you show the program
+  on is signed in to the same pages. **The copy lies on the server unencrypted,
+  readable by the account bateri connects as**, as `~/.ssh` and a `gh` token do:
+  keep it only on a server you trust. `profiles = false` keeps a program's
+  profiles on this Mac alone (`{ host = "shared-box", profiles = false }`; a
+  pattern may say it too). **Turning it off** gives this Mac the server's last
+  state of the profile it opens next, then deletes every profile copy at the
+  server (`kablo profile off`) and leaves a mark there that it keeps none: every Mac
+  that connects after this keeps its profiles to itself, one with the key on
+  included. **The mark wins**: a Mac whose key is still `false` writes
+  it again when it connects, and only a Mac whose key was turned from `false` to
+  `true` takes the mark away (`kablo profile on`) and then gives the server its
+  profile. Like `integration` it may stand alone, takes the first entry that says it,
+  and takes effect the moment you save.
 - **A broken entry** (an unknown `mark`, an entry without `host`, an entry
-  carrying neither `mark` nor `integration`, an `integration` that is not
-  `true`/`false`, an item that is not a table) rejects the **whole** list: at
+  carrying none of `mark`, `integration`, `commands` and `profiles`, an `integration`
+  or `profiles` that is not `true`/`false`, an item that is not a table) rejects the **whole** list: at
   launch the list is empty, when saving the list on screen stays, and a
   warning appears; remote shell integration also **turns off**, because the
   prod marks and the `integration = false` entries have gone along with the

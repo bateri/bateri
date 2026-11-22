@@ -34,7 +34,7 @@ use kablo_proto::profile::{self as wire, Client, Server};
 
 use self::engine::{Config, Engine, Helper, Home, Input};
 use self::gate::Gate;
-use super::depot::{Depot, OPEN_WAIT, SYNC_WAIT};
+use super::depot::{Depot, OPEN_WAIT, SYNC_WAIT, Turn};
 use super::profile::ProfileKey;
 use super::proxy::Holds;
 
@@ -91,12 +91,14 @@ fn backoff(failures: u32) -> Duration {
 
 impl ProfileSync {
     /// Starts the sync of the profile `cfg` names, with the home `depot` opens connections to,
-    /// speaking to the helper through `helper`.
+    /// speaking to the helper through `helper`. `turn` is a turn of the person's switch for the
+    /// machine that is yet to be told to it ([`Turn`]).
     pub fn start(
         cfg: Config,
         helper: Box<dyn Helper>,
         depot: Arc<dyn Depot>,
         reqs: Arc<AtomicU32>,
+        turn: Option<Turn>,
     ) -> io::Result<Arc<ProfileSync>> {
         let gate = Arc::new(Gate::new());
         let engine = Engine::new(cfg, helper, gate.clone(), reqs);
@@ -106,7 +108,7 @@ impl ProfileSync {
         std::thread::Builder::new()
             .name("profile-sync".into())
             .spawn(move || {
-                drive(engine, depot.as_ref(), &rx, &sender);
+                drive(engine, depot.as_ref(), turn, &rx, &sender);
                 let _ = end.send(());
             })?;
         Ok(Arc::new(ProfileSync {
@@ -203,6 +205,7 @@ fn connect(depot: &dyn Depot, id: u64, tx: &Sender<Msg>) -> Result<Connection, S
 fn drive(
     mut engine: Engine,
     depot: &dyn Depot,
+    mut turn: Option<Turn>,
     rx: &std::sync::mpsc::Receiver<Msg>,
     tx: &Sender<Msg>,
 ) {
@@ -211,14 +214,32 @@ fn drive(
     let mut failures = 0u32;
     let mut retry_at = Instant::now();
     let mut saved_at = Instant::now();
+    let mut told_at = Instant::now();
+    let mut told_failures = 0u32;
     loop {
         if conn.is_none()
             && engine.is_down()
             && engine.refused().is_none()
             && Instant::now() >= retry_at
         {
+            // A switch turned on again: the mark that none is kept is taken away before the
+            // home is asked, or the home would turn the Mac away for good.
+            let mut lifted = true;
+            if let Some(Turn::Lift(mark)) = turn.clone() {
+                if depot.switch(true, OPEN_WAIT).is_ok() {
+                    mark.remember(true);
+                    turn = None;
+                } else {
+                    lifted = false;
+                }
+            }
             next_id += 1;
-            match connect(depot, next_id, tx) {
+            let made = if lifted {
+                connect(depot, next_id, tx)
+            } else {
+                Err("the mark is still there".to_owned())
+            };
+            match made {
                 Ok(made) => conn = Some(made),
                 Err(_) => {
                     failures += 1;
@@ -290,6 +311,31 @@ fn drive(
             && let Some(c) = conn.as_ref().filter(|c| !c.greeting)
         {
             (c.end)();
+        }
+        // A switch turned off: what the home had is taken first (the join is over), then the
+        // machine is told to keep none and the sync ends. A home that turned the Mac away for
+        // that reason has been told already.
+        if let Some(Turn::Close(mark)) = turn.clone() {
+            match engine.refused() {
+                Some(wire::code::OFF) => {
+                    mark.remember(false);
+                    turn = None;
+                }
+                Some(_) => turn = None,
+                None if engine.is_live() && Instant::now() >= told_at => {
+                    if depot.switch(false, OPEN_WAIT).is_ok() {
+                        mark.remember(false);
+                        if let Some(c) = conn.take() {
+                            (c.end)();
+                        }
+                        engine.stop();
+                        return;
+                    }
+                    told_failures += 1;
+                    told_at = Instant::now() + backoff(told_failures);
+                }
+                None => {}
+            }
         }
         if saved_at.elapsed() >= SAVE_EVERY {
             engine.tick();
