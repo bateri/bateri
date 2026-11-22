@@ -1610,7 +1610,10 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                     .and_then(|head| made.get(head)?.as_ref())
                     .map(Made::object);
                 element.setAccessibilityHeader(head.as_deref());
-                // The cells by their row's place among the rows and their own in the row.
+                // The cells by their row and their column, counted as the table counts them, which is
+                // how a cell's own row and column ranges say them and so how a screen reader asks for
+                // the next: a row the page built past the top of a scrolled table is not the first.
+                // Where the page gives no number, the place among the rows and the cells built.
                 let mut cells = Vec::new();
                 for (row_at, row) in node.rows.iter().enumerate() {
                     let Some(row_node) = nodes.get(*row) else {
@@ -1627,8 +1630,13 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                         let Some(cell) = made.get(*child).and_then(Option::as_ref) else {
                             continue;
                         };
-                        let place = nodes[*child].index.unwrap_or(column);
-                        cells.push((row_at as i64, place, cell.object()));
+                        let place = nodes[*child]
+                            .column_range
+                            .map(|(first, _)| first)
+                            .or(nodes[*child].index)
+                            .unwrap_or(column);
+                        let line = row_node.index.unwrap_or(row_at as i64);
+                        cells.push((line, place, cell.object()));
                         column += 1;
                     }
                 }
