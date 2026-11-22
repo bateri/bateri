@@ -2639,6 +2639,58 @@ define_class!(
             }
         }
 
+        /// While a page of the kit is up the pane is an element of its own: the group a screen
+        /// reader enters to read the page, which the page's elements name as their parent. Left
+        /// out of the tree, as a view is, its elements' parent would be something the window does
+        /// not list, and VoiceOver, inside a dialog or a table of the page, could not move from
+        /// the first thing in it. A pane with no page is what AppKit makes of a view.
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_accessibility_element(&self) -> bool {
+            if self.ivars().page_up.borrow().is_some() {
+                true
+            } else {
+                // SAFETY: NSView's own answer, which takes nothing.
+                unsafe { msg_send![super(self), isAccessibilityElement] }
+            }
+        }
+
+        /// A group while a page is up (see `isAccessibilityElement`).
+        #[unsafe(method_id(accessibilityRole))]
+        fn accessibility_role(&self) -> Option<Retained<NSString>> {
+            if self.ivars().page_up.borrow().is_some() {
+                // SAFETY: AppKit's own constant.
+                Some(objc2::Message::retain(unsafe {
+                    objc2_app_kit::NSAccessibilityGroupRole
+                }))
+            } else {
+                // SAFETY: NSView's own answer, which takes nothing.
+                unsafe { msg_send![super(self), accessibilityRole] }
+            }
+        }
+
+        /// What the group of a page is called: the program, and the view's title where it has
+        /// one, as the pane's header says them.
+        #[unsafe(method_id(accessibilityLabel))]
+        fn accessibility_label(&self) -> Option<Retained<NSString>> {
+            match self.page_accessibility_name() {
+                Some(name) => Some(NSString::from_str(&name)),
+                // SAFETY: NSView's own answer, which takes nothing.
+                None => unsafe { msg_send![super(self), accessibilityLabel] },
+            }
+        }
+
+        /// What stands at `point` (on the screen) while a page is up: the innermost of the page's
+        /// elements there, which is what a screen reader's pointer and its check of what it moved
+        /// to find. AppKit's own search sees views only, and found none of the page's.
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+            match self.page_element_at(point) {
+                Some(element) => Some(element),
+                // SAFETY: NSView's own answer, with the same point.
+                None => unsafe { msg_send![super(self), accessibilityHitTest: point] },
+            }
+        }
+
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, notification: &NSNotification) {
             self.page_field_changed(notification);
@@ -4621,6 +4673,25 @@ impl TerminalPane {
         Some(NSArray::from_retained_slice(&children))
     }
 
+    /// The innermost of the page's elements at `point` (on the screen) while a page is up: what a
+    /// screen reader's hit test finds there, asked of the pane or of the terminal's view under it.
+    pub(crate) fn page_element_at(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+        let page = self.ivars().page_up.borrow();
+        crate::native_page::element_at(&page.as_ref()?.fields.elements(), point)
+    }
+
+    /// What the group a screen reader is given of the pane is called while a page is up: the
+    /// program and the view's title, as the header shows them. `None` with no page up, or a page
+    /// whose program is not known.
+    pub(crate) fn page_accessibility_name(&self) -> Option<String> {
+        self.ivars().page_up.borrow().as_ref()?;
+        self.ivars()
+            .page_words
+            .borrow()
+            .as_ref()
+            .and_then(pencere_view::Words::spoken)
+    }
+
     /// The person clicked into the page's field named `field` (or the keyboard left the fields
     /// of itself): the page is told.
     pub(crate) fn page_field_focused(&self, field: Option<bt_shell_common::native_view::Id>) {
@@ -6433,6 +6504,18 @@ impl TerminalPane {
             page.fields.clear();
             if typing && let Some(window) = self.window() {
                 window.makeFirstResponder(Some(self.view()));
+            }
+            // The pane is no element of the accessibility tree now and the page's elements are
+            // gone: a screen reader reads what the window holds again.
+            if let Some(window) = self.window() {
+                // SAFETY: the window is an element of the accessibility tree, and the name is
+                // one of AppKit's own.
+                unsafe {
+                    objc2_app_kit::NSAccessibilityPostNotification(
+                        &window,
+                        objc2_app_kit::NSAccessibilityLayoutChangedNotification,
+                    );
+                }
             }
         }
     }

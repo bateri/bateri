@@ -295,6 +295,17 @@ impl Words {
         }
     }
 
+    /// What a screen reader calls the view: the program, and the view's title where it has one
+    /// (`textpen, Editor`). `None` when neither is known.
+    pub(crate) fn spoken(&self) -> Option<String> {
+        let said: Vec<&str> = [self.words.program.as_deref(), self.words.title.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|words| !words.trim().is_empty())
+            .collect();
+        (!said.is_empty()).then(|| said.join(", "))
+    }
+
     /// What the header shows, for a ground that is dark or not.
     pub(crate) fn head(&self, dark: bool) -> ViewHead {
         ViewHead {

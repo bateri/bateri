@@ -173,6 +173,7 @@ fn default_description(role: AccessibleRole) -> Option<&'static str> {
         AccessibleRole::ColumnHeader => Some("column header"),
         AccessibleRole::Alert => Some("alert"),
         AccessibleRole::Status => Some("status"),
+        AccessibleRole::Dialog => Some("dialog"),
         AccessibleRole::AlertDialog => Some("alert dialog"),
         _ => None,
     }

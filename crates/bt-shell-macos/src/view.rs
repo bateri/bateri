@@ -884,6 +884,18 @@ define_class!(
     unsafe impl NSObjectProtocol for BateriView {}
 
     impl BateriView {
+        /// A screen reader's hit test lands on this view, the deepest under a page of the kit
+        /// (the page is drawn on it): the page's element at `point`, where one is, rather than
+        /// the pane, which is all AppKit's own answer climbs to.
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+            match self.pane().and_then(|pane| pane.page_element_at(point)) {
+                Some(element) => Some(element),
+                // SAFETY: NSView's own answer, with the same point.
+                None => unsafe { msg_send![super(self), accessibilityHitTest: point] },
+            }
+        }
+
         /// The condition for keystrokes to arrive here. `NSView`'s default is
         /// `false`; `makeFirstResponder` is silently refused without this.
         #[unsafe(method(acceptsFirstResponder))]

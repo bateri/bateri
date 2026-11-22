@@ -61,7 +61,7 @@ use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
@@ -1331,6 +1331,13 @@ fn run(dir: &Path) {
     section("a field's text on its baseline", &mut failures, || {
         field_text_on_its_baseline(mtm, &window, frame_rect, dir);
     });
+    section(
+        "a screen reader reads a page as the pane's group",
+        &mut failures,
+        || {
+            a_screen_reader_reads_a_page_as_the_panes_group(mtm, &window, frame_rect, dir);
+        },
+    );
 
     pane.close();
     assert!(failures.is_empty(), "failed: {failures:?}");
@@ -2833,6 +2840,164 @@ fn field_text_on_its_baseline(
         until("the view to go", || !covered(&pane));
         pane.close();
     }
+    window.orderOut(None);
+}
+
+/// A page with a button, and a dialog that holds a button and a field.
+const GROUPS_PAGE: &str = r#"return {
+    render = function()
+        return pencere.div():col():gap(12):p(20):w(420):h(260)
+            :child(pencere.div():press("outside"):role("button"):label("Outside"):w(120):h(24))
+            :child(pencere.div():role("dialog"):label("Settings"):col():gap(12):p(10):w(320):h(140)
+                :child(pencere.div():press("ok"):role("button"):label("OK"):w(80):h(24))
+                :child(pencere.div():text_field("name"):w(240):h(20):child(pencere.text("NAME"))))
+    end,
+}"#;
+
+/// What AppKit's `name` of `object` is, as a string, where it has one (`accessibilityRole`, …).
+fn ax_words(object: &AnyObject, name: Sel) -> Option<String> {
+    // SAFETY: an NSAccessibility getter that takes nothing and gives a string or nil.
+    let words: Option<Retained<NSString>> = unsafe { msg_send![object, performSelector: name] };
+    words.map(|words| words.to_string())
+}
+
+/// What `object` holds, to a screen reader.
+fn held(object: &AnyObject) -> Vec<Retained<AnyObject>> {
+    // SAFETY: NSAccessibility's `accessibilityChildren`, which takes nothing.
+    let children: Option<Retained<NSArray>> = unsafe { msg_send![object, accessibilityChildren] };
+    children
+        .map(|children| children.to_vec())
+        .unwrap_or_default()
+}
+
+/// What `object` says holds it, to a screen reader.
+fn holder(object: &AnyObject) -> Option<Retained<AnyObject>> {
+    // SAFETY: NSAccessibility's `accessibilityParent`, which takes nothing.
+    unsafe { msg_send![object, accessibilityParent] }
+}
+
+/// The middle of `object`'s frame on the screen.
+fn middle(object: &AnyObject) -> NSPoint {
+    // SAFETY: NSAccessibility's `accessibilityFrame`, which takes nothing.
+    let frame: NSRect = unsafe { msg_send![object, accessibilityFrame] };
+    NSPoint::new(
+        frame.origin.x + frame.size.width / 2.0,
+        frame.origin.y + frame.size.height / 2.0,
+    )
+}
+
+/// While a page of the kit is up, VoiceOver is given the pane as a group named for the program,
+/// and each element of the page says the element that lists it is its parent: the pane for what
+/// stands on the page, a dialog for what is in it. (A pane left out of the tree, as a view is,
+/// was named as the parent of elements the window listed as its own, and VoiceOver, inside a
+/// dialog or a table, could not move from the first thing in it.) A field is read by its cell, a
+/// text field; a hit test finds the element at a point, asked of the pane or of the terminal's view
+/// under it; and with the page down the pane is no element again.
+fn a_screen_reader_reads_a_page_as_the_panes_group(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    window.orderFrontRegardless();
+    let (pane, mut program) = open_hosted_pane(
+        mtm,
+        window,
+        frame_rect,
+        &dir.join("groups"),
+        PANE + 60,
+        Rc::new(Quiet::default()),
+        Settings::default(),
+    );
+    pane.set_visibility(true);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello_kind("lua");
+    program.open_script(&token, GROUPS_PAGE);
+    program.supply(&[("page.lua", "text/x-lua", GROUPS_PAGE.as_bytes())]);
+    let pane_object: &AnyObject = &pane;
+    let dialog = || {
+        held(pane_object).into_iter().find(|child| {
+            ax_words(child, sel!(accessibilitySubrole)).as_deref() == Some("AXApplicationDialog")
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dialog().is_none_or(|dialog| held(&dialog).len() < 2) && Instant::now() < deadline {
+        spin(0.05);
+    }
+    let Some(dialog) = dialog() else {
+        // As for the fields' baseline: a covered window, or a display asleep, draws no page.
+        eprintln!(
+            "pencere: the page was not drawn (window occlusion {:?}): its tree is not read",
+            window.occlusionState()
+        );
+        program.bye(&token);
+        pane.close();
+        window.orderOut(None);
+        return;
+    };
+    // SAFETY: NSAccessibility's `isAccessibilityElement`, which takes nothing.
+    let element: bool = unsafe { msg_send![pane_object, isAccessibilityElement] };
+    assert!(element, "the pane is an element while a page is up");
+    assert_eq!(
+        ax_words(pane_object, sel!(accessibilityRole)).as_deref(),
+        Some("AXGroup")
+    );
+    assert_eq!(
+        ax_words(&dialog, sel!(accessibilityLabel)).as_deref(),
+        Some("Settings")
+    );
+    assert_eq!(
+        ax_words(&dialog, sel!(accessibilityRoleDescription)).as_deref(),
+        Some("dialog")
+    );
+    // Each holder lists what names it as its parent.
+    for (outer, inner) in [(pane_object, held(pane_object)), (&*dialog, held(&dialog))] {
+        for child in inner {
+            let up = holder(&child).expect("an element has a parent");
+            assert!(
+                std::ptr::eq::<AnyObject>(&*up, outer),
+                "{:?} names another parent than what lists it",
+                ax_words(&child, sel!(accessibilityLabel))
+            );
+        }
+    }
+    let inside = held(&dialog);
+    let ok = inside
+        .iter()
+        .find(|child| ax_words(child, sel!(accessibilityLabel)).as_deref() == Some("OK"))
+        .expect("the dialog holds its button");
+    let field = inside
+        .iter()
+        .find(|child| ax_words(child, sel!(accessibilityRole)).as_deref() == Some("AXTextField"))
+        .expect("the dialog holds its field, read as a text field");
+    assert!(
+        field.downcast_ref::<objc2_app_kit::NSCell>().is_some(),
+        "a field is read by its cell"
+    );
+    // The element at the button's middle, asked of the pane and of the terminal's view.
+    let point = middle(ok);
+    // SAFETY: NSAccessibility's `accessibilityHitTest:`, with a point on the screen.
+    let found: Option<Retained<AnyObject>> =
+        unsafe { msg_send![pane_object, accessibilityHitTest: point] };
+    assert!(
+        found.is_some_and(|found| std::ptr::eq::<AnyObject>(&*found, &**ok)),
+        "the pane's hit test finds the button"
+    );
+    let terminal = terminal_view(&pane).expect("the pane has its terminal's view");
+    // SAFETY: as above.
+    let found: Option<Retained<AnyObject>> =
+        unsafe { msg_send![&*terminal, accessibilityHitTest: point] };
+    assert!(
+        found.is_some_and(|found| std::ptr::eq::<AnyObject>(&*found, &**ok)),
+        "the terminal's view's hit test finds the button"
+    );
+    program.bye(&token);
+    until("the page to go", || {
+        // SAFETY: as above.
+        let element: bool = unsafe { msg_send![pane_object, isAccessibilityElement] };
+        !element
+    });
+    pane.close();
     window.orderOut(None);
 }
 

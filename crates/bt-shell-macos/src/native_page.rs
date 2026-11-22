@@ -40,11 +40,11 @@ use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
     NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
     NSAccessibilityCellRole, NSAccessibilityCheckBoxRole, NSAccessibilityCustomAction,
-    NSAccessibilityDialogSubrole, NSAccessibilityElement, NSAccessibilityGroupRole,
-    NSAccessibilityImageRole, NSAccessibilityLayoutChangedNotification, NSAccessibilityLinkRole,
-    NSAccessibilityListRole, NSAccessibilityMenuItemRole, NSAccessibilityOutlineRole,
-    NSAccessibilityPostNotification, NSAccessibilityPostNotificationWithUserInfo,
-    NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel, NSAccessibilityProgressIndicatorRole,
+    NSAccessibilityElement, NSAccessibilityGroupRole, NSAccessibilityImageRole,
+    NSAccessibilityLayoutChangedNotification, NSAccessibilityLinkRole, NSAccessibilityListRole,
+    NSAccessibilityMenuItemRole, NSAccessibilityOutlineRole, NSAccessibilityPostNotification,
+    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
+    NSAccessibilityPriorityLevel, NSAccessibilityProgressIndicatorRole,
     NSAccessibilityRadioButtonRole, NSAccessibilityRole, NSAccessibilityRowRole,
     NSAccessibilitySelectedTextChangedNotification, NSAccessibilitySliderRole,
     NSAccessibilitySortDirection, NSAccessibilityStaticTextRole, NSAccessibilitySubrole,
@@ -56,7 +56,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange,
-    NSRect, NSSize, NSString,
+    NSRect, NSSize, NSString, ns_string,
 };
 
 use crate::pane::TerminalPane;
@@ -369,7 +369,10 @@ impl PageFields {
             .filter_map(|item| item.id)
             .collect();
         for field in self.fields.borrow().iter() {
-            field.view.setAccessibilityElement(read.contains(&field.id));
+            // The cell is what is read of the field; the view stays what AppKit makes it (none).
+            if let Some(cell) = field.view.cell() {
+                cell.setAccessibilityElement(read.contains(&field.id));
+            }
         }
     }
 
@@ -454,11 +457,9 @@ impl PageFields {
             return editor_element(pane, item).map(Made::Other);
         }
         if let AccessibleRole::Field(_) = item.role {
-            // The field itself, whichever class it is: NSTextField, then up to AnyObject.
+            // What AppKit reads of the field, whichever class it is: its cell ([`read_of`]).
             let field: Retained<NSTextField> = self.field(item.id?)?.retain();
-            return Some(Made::Other(Retained::into_super(Retained::into_super(
-                Retained::into_super(Retained::into_super(Retained::into_super(field))),
-            ))));
+            return Some(Made::Other(read_of(&field)));
         }
         let state = &item.state;
         let shape = shape_of(item, node);
@@ -537,6 +538,10 @@ impl PageFields {
                 element.setAccessibilityValue(Some(&NSString::from_str(value)));
             } else if matches!(item.role, AccessibleRole::Text | AccessibleRole::Heading(_)) {
                 element.setAccessibilityValue(Some(&words));
+            } else if matches!(item.role, AccessibleRole::Tab | AccessibleRole::Radio) {
+                // A tab or a radio button is on or off by its value, as AppKit's own are: what a
+                // screen reader reads as "selected".
+                element.setAccessibilityValue(Some(&NSNumber::new_i32(i32::from(state.selected))));
             } else {
                 // What a kept element showed before (a box that was checked, a value that went) is gone.
                 element.setAccessibilityValue(None);
@@ -573,16 +578,17 @@ impl PageFields {
     }
 
     /// Every object that stands for the page to a screen reader, those inside a group too, and the
-    /// views of all its fields: what the pane's own answer is cleared of, so that a field a modal in
-    /// front shuts out is not given back as the pane's.
+    /// views and cells of all its fields: what the pane's own answer is cleared of, so that a field a
+    /// modal in front shuts out is not given back as the pane's.
     pub(crate) fn owned(&self) -> Vec<Retained<AnyObject>> {
         let mut all = self.owned.borrow().clone();
-        all.extend(self.fields.borrow().iter().map(|field| {
+        all.extend(self.fields.borrow().iter().flat_map(|field| {
             let view: Retained<NSTextField> = field.view.retain();
+            let read = read_of(&view);
             let object: Retained<AnyObject> = Retained::into_super(Retained::into_super(
                 Retained::into_super(Retained::into_super(Retained::into_super(view))),
             ));
-            object
+            [object, read]
         }));
         all
     }
@@ -1357,11 +1363,18 @@ fn accessibility_role(
             AccessibleRole::None | AccessibleRole::Group | AccessibleRole::ListItem => {
                 (NSAccessibilityGroupRole, None)
             }
-            // A dialog is a group that says it is one; an alert dialog says so in its words
-            // (`ax::plan` gives them as its role description).
-            AccessibleRole::Dialog | AccessibleRole::AlertDialog => {
-                (NSAccessibilityGroupRole, Some(NSAccessibilityDialogSubrole))
-            }
+            // A dialog inside a window is a group with the subrole Safari and Chrome give a web
+            // page's: AppKit's own dialog subrole is a window's, and a screen reader takes what
+            // carries it for a window. Its kind is said in words (`ax::plan` gives them as its role
+            // description).
+            AccessibleRole::Dialog => (
+                NSAccessibilityGroupRole,
+                Some(ns_string!("AXApplicationDialog")),
+            ),
+            AccessibleRole::AlertDialog => (
+                NSAccessibilityGroupRole,
+                Some(ns_string!("AXApplicationAlertDialog")),
+            ),
             AccessibleRole::List | AccessibleRole::ListBox => (NSAccessibilityListRole, None),
             // An option is chosen and pressed as a row of a list is.
             AccessibleRole::ListOption | AccessibleRole::Row | AccessibleRole::TreeItem => {
@@ -1431,6 +1444,51 @@ fn frame_in_pane(pane: &TerminalPane, item: &Accessible) -> NSRect {
         NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
         NSSize::new(f64::from(rect.w), f64::from(rect.h)),
     )
+}
+
+/// What a screen reader is given of the page's field `field`: its cell, which is what AppKit reads of
+/// a text field (a text field, a secure one for a password, with its value and selection), as the
+/// view itself is no element and has no role. The view where it has no cell.
+fn read_of(field: &NSTextField) -> Retained<AnyObject> {
+    match field.cell() {
+        Some(cell) => Retained::into_super(Retained::into_super(cell)),
+        None => {
+            let view: Retained<NSTextField> = field.retain();
+            Retained::into_super(Retained::into_super(Retained::into_super(
+                Retained::into_super(Retained::into_super(view)),
+            )))
+        }
+    }
+}
+
+/// The innermost of `objects` and what they hold (an element, a field) whose frame on the screen
+/// holds `point`: of two that overlap, the later in the reading, which is drawn over the other.
+pub(crate) fn element_at(
+    objects: &[Retained<AnyObject>],
+    point: NSPoint,
+) -> Option<Retained<AnyObject>> {
+    objects.iter().rev().find_map(|object| {
+        // SAFETY: each is an element of the page's tree or an AppKit view, and both answer
+        // NSAccessibility's `accessibilityFrame` and `accessibilityChildren`; what is asked first
+        // is whether this one does.
+        unsafe {
+            let answers: bool = msg_send![&**object, respondsToSelector: sel!(accessibilityFrame)];
+            if !answers {
+                return None;
+            }
+            let frame: NSRect = msg_send![&**object, accessibilityFrame];
+            let inside = point.x >= frame.origin.x
+                && point.y >= frame.origin.y
+                && point.x < frame.origin.x + frame.size.width
+                && point.y < frame.origin.y + frame.size.height;
+            if !inside {
+                return None;
+            }
+            let held: Option<Retained<NSArray>> = msg_send![&**object, accessibilityChildren];
+            let inner = held.and_then(|held| element_at(&held.to_vec(), point));
+            Some(inner.unwrap_or_else(|| object.clone()))
+        }
+    })
 }
 
 /// An array of the elements made for `places`.
@@ -1789,7 +1847,10 @@ fn place_field(field: &NSTextField, place: &Field, zoom: f32, family: Option<&st
         .as_deref()
         .or(place.hint.as_deref())
         .unwrap_or_default();
-    field.setAccessibilityLabel(Some(&NSString::from_str(said)));
+    // On the cell, which is what a screen reader reads of the field ([`read_of`]).
+    if let Some(cell) = field.cell() {
+        cell.setAccessibilityLabel(Some(&NSString::from_str(said)));
+    }
     let room = place.rect;
     let (top, height) = if place.kind == FieldKind::Lines {
         (f64::from(room.y), f64::from(room.h))
