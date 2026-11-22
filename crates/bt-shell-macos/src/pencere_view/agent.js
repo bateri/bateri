@@ -238,6 +238,15 @@
     }
     return rows;
   };
+  // The place of a row in what it is a row of, from 1: what the page says (`aria-rowindex`), a table
+  // row's own place in the table, or its place among the rows.
+  const rowIndexOf = (row) => {
+    const said = whole(row.getAttribute("aria-rowindex"));
+    if (said) return said;
+    if (row.tagName === "TR" && row.rowIndex >= 0) return row.rowIndex + 1;
+    const table = row.parentElement && row.parentElement.closest(TABLES);
+    return table ? rowsOf(table).indexOf(row) + 1 : 0;
+  };
   const cellsOf = (row) => [...row.querySelectorAll(CELLS)].filter((cell) => cell.parentElement && cell.parentElement.closest("tr,[role=row]") === row);
   const SET_ROLES = new Set(["listitem", "option", "tab", "treeitem"]);
   const peers = (el, role) => {
@@ -297,8 +306,7 @@
       flags.push("colcount=" + (columns > 0 ? columns : all.length ? cellsOf(all[0]).length : 0));
     }
     if (role === "row") {
-      const table = el.parentElement && el.parentElement.closest(TABLES);
-      const at = whole(aria("aria-rowindex")) || (el.rowIndex >= 0 && el.tagName === "TR" ? el.rowIndex + 1 : table ? rowsOf(table).indexOf(el) + 1 : 0);
+      const at = rowIndexOf(el);
       if (at) flags.push("rowindex=" + at);
     }
     if (role === "cell" || role === "columnheader") {
@@ -698,9 +706,10 @@
     return ok();
   };
 
-  // Brings an element, or the `index`th row (from 1) of the list, the table or the outline it is, into
-  // view: the page scrolls to it. A row the page has not built (a list that builds what is in view) is
-  // no row; the detail says how many there are.
+  // Brings an element, or the row of the list, the table or the outline it is that the reading says is
+  // row `index` (from 1: what the page says its place is, as the reading prints it), into view: the page
+  // scrolls to it. A row the page has not built (a list that builds what is in view) is no row; the
+  // detail says how many it has built.
   const reveal = (n, index) => {
     const el = find(n);
     if (!el) return err("gone");
@@ -708,7 +717,7 @@
     if (index) {
       rowsets = new Map();
       const rows = rowsOf(el);
-      target = rows[index - 1];
+      target = rows.find((row) => rowIndexOf(row) === index);
       if (!target) return err("norow", String(rows.length));
     }
     if (!shown(target)) return err("hidden");

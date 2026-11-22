@@ -2245,6 +2245,8 @@ const TREE_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>t
 <tbody><tr aria-rowindex=\"5\"><td>12</td><td>node</td></tr><tr><td>3</td><td>bash</td></tr></tbody></table>\
 <div role=tablist aria-label=\"Views\"><button role=tab aria-selected=true>One</button><button role=tab>Two</button></div>\
 <div role=checkbox aria-checked=mixed aria-label=\"All\" tabindex=0></div>\
+<div role=grid aria-label=\"Board\"><div role=row><span role=columnheader>Lane</span><span role=columnheader>Cards</span></div>\
+<div role=row aria-rowindex=7><span role=gridcell>Todo</span><span role=gridcell>nine</span></div></div>\
 <div id=scrim style=\"display:none;position:fixed;left:0;top:0;right:0;bottom:0\">\
 <div id=dlg role=dialog aria-modal=true aria-label=\"Settings\" style=\"margin:40px;padding:10px;background:#eee\">\
 <h2>Settings</h2><button id=ok>OK</button></div></div><script src=app.js></script></body></html>";
@@ -2306,6 +2308,13 @@ fn agent_reads_a_web_page_as_a_tree(
         "tab \"One\"",
         "1 of 2",
         "mixed",
+        // ARIA's own grid, row and cells (no `<table>`): a table, with a row at the place it says and
+        // cells at their places in it.
+        "table \"Board\"",
+        "columnheader \"Lane\"",
+        "cell \"nine\"",
+        "row 7",
+        "column 2",
     ] {
         assert!(read.contains(needle), "{needle:?} is not in:\n{read}");
     }
@@ -2330,7 +2339,33 @@ fn agent_reads_a_web_page_as_a_tree(
     // **Bringing a row into view** goes to the page: the second row of the table, and a row it has
     // not built is no row.
     let table = ref_of(&read, "table \"Processes\"");
+    // The row is the one the reading calls row 5 (the page's own `aria-rowindex`), not the second.
     let brought = said(
+        &pane,
+        Action::Reveal {
+            target: table.clone(),
+            index: Some(5),
+        },
+    );
+    assert!(
+        brought.starts_with(&format!(
+            "brought row 5 of table \"Processes\" ({table}) into view\n"
+        )),
+        "{brought}"
+    );
+    let board = ref_of(&read, "table \"Board\"");
+    let seven = said(
+        &pane,
+        Action::Reveal {
+            target: board.clone(),
+            index: Some(7),
+        },
+    );
+    assert!(
+        seven.starts_with("brought row 7 of table \"Board\""),
+        "{seven}"
+    );
+    let second = refused(
         &pane,
         Action::Reveal {
             target: table.clone(),
@@ -2338,10 +2373,8 @@ fn agent_reads_a_web_page_as_a_tree(
         },
     );
     assert!(
-        brought.starts_with(&format!(
-            "brought row 2 of table \"Processes\" ({table}) into view\n"
-        )),
-        "{brought}"
+        second.contains("no such row"),
+        "row 2 is not a row the reading has: {second}"
     );
     let far = refused(
         &pane,

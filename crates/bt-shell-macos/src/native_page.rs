@@ -421,7 +421,17 @@ impl PageFields {
                 }),
             ),
             pane: WeakId::new(pane),
-            target: item.id,
+            // Only what stands partly outside what the pane shows is asked for to be brought in: an
+            // element that is wholly in view is not (a screen reader that lands on each of them would
+            // make the page draw again for nothing).
+            target: item.id.filter(|_| {
+                let (width, height) = {
+                    let size = pane.bounds().size;
+                    (size.width as f32, size.height as f32)
+                };
+                let rect = item.rect;
+                rect.x < 0.0 || rect.y < 0.0 || rect.x + rect.w > width || rect.y + rect.h > height
+            }),
         });
         // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
         let element: Retained<PageElement> = unsafe { msg_send![super(element), init] };
@@ -971,8 +981,8 @@ page_field_class!(
 pub(crate) struct PageElementIvars {
     press: Cell<Option<(f32, f32)>>,
     pane: WeakId<TerminalPane>,
-    /// The page's name for the element, which the page is asked to show when the screen reader moves
-    /// to it (`reveal`).
+    /// The page's name for an element that is partly out of view, which the page is asked to show when
+    /// the screen reader moves to it (`reveal`).
     target: Option<Id>,
 }
 
