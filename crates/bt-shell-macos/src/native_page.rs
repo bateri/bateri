@@ -22,6 +22,7 @@
 //! screen reader reads each editor as a text area ([`PageEditorElement`]).
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
@@ -189,6 +190,10 @@ pub(crate) struct PageFields {
     /// the field itself for a field, those that nothing holds (a dialog, a table, a button on the
     /// page); what a group holds is under it ([`ax::plan`]).
     elements: RefCell<Vec<Retained<AnyObject>>>,
+    /// The elements made for the items that have an id, by that id: the next outline that has the
+    /// item gives it the same element again, so that a screen reader that is on it stays on it while
+    /// the page changes around it.
+    by_id: RefCell<HashMap<Id, Retained<PageElement>>>,
     /// Every element made for `accessible`, those inside a group too, for what asks which of the
     /// pane's accessibility children are the page's.
     owned: RefCell<Vec<Retained<AnyObject>>>,
@@ -222,6 +227,7 @@ impl PageFields {
             outline: RefCell::new(None),
             accessible: RefCell::new(Vec::new()),
             elements: RefCell::new(Vec::new()),
+            by_id: RefCell::new(HashMap::new()),
             owned: RefCell::new(Vec::new()),
             tips: RefCell::new(Vec::new()),
             tip_tags: RefCell::new(Vec::new()),
@@ -299,12 +305,26 @@ impl PageFields {
                 .collect();
             self.accessible.replace(outline.accessible.clone());
             let nodes = ax::plan(&outline.accessible);
+            // What the last outline made is given again to what is still there (by id), and what
+            // is left of it goes with the outline.
+            let before = RefCell::new(self.by_id.take());
             let made: Vec<Option<Made>> = outline
                 .accessible
                 .iter()
-                .map(|item| self.element_of(&pane, item))
+                .zip(&nodes)
+                .map(|(item, node)| self.element_of(&pane, item, node, &before))
                 .collect();
+            self.by_id.replace(
+                made.iter()
+                    .zip(&outline.accessible)
+                    .filter_map(|(made, item)| match (made, item.id) {
+                        (Some(Made::Page(element)), Some(id)) => Some((id, element.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+            );
             relate(&pane, &outline.accessible, &nodes, &made);
+            self.hide_shut_out_fields(&outline.accessible);
             let seen = |at: usize| made.get(at).and_then(Option::as_ref).map(Made::object);
             // The page's own: what nothing that was made holds (a node whose group has no element
             // is not under it).
@@ -326,6 +346,19 @@ impl PageFields {
             for words in alerts {
                 announce(&pane, &words);
             }
+        }
+    }
+
+    /// A field the page's outline does not read (the page shut it out: it is behind a modal in front)
+    /// is not an element of the accessibility tree at all, and one it reads again is.
+    fn hide_shut_out_fields(&self, accessible: &[Accessible]) {
+        let read: Vec<Id> = accessible
+            .iter()
+            .filter(|item| matches!(item.role, AccessibleRole::Field(_)))
+            .filter_map(|item| item.id)
+            .collect();
+        for field in self.fields.borrow().iter() {
+            field.view.setAccessibilityElement(read.contains(&field.id));
         }
     }
 
@@ -399,7 +432,13 @@ impl PageFields {
     /// it as AppKit's), an element of the pane for the rest, where it stands in the pane, as what
     /// the page says it is ([`accessibility_role`]) and with its state: checked, chosen, open, of
     /// no use now, the value it shows.
-    fn element_of(&self, pane: &TerminalPane, item: &Accessible) -> Option<Made> {
+    fn element_of(
+        &self,
+        pane: &TerminalPane,
+        item: &Accessible,
+        node: &AxNode,
+        before: &RefCell<HashMap<Id, Retained<PageElement>>>,
+    ) -> Option<Made> {
         if item.role == AccessibleRole::Editor {
             return editor_element(pane, item).map(Made::Other);
         }
@@ -411,36 +450,52 @@ impl PageFields {
             ))));
         }
         let state = &item.state;
-        let element = PageElement::alloc(pane.mtm()).set_ivars(PageElementIvars {
-            // What answers the pointer is pressed whatever it says it is (an option, a tree's row, a
-            // header that sorts), and what a role has always meant pressed is, with no word of the page.
-            press: Cell::new(
-                ((item.pressable || pressed_by_role(item.role)) && !state.disabled).then(|| {
-                    let rect = item.rect;
-                    (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
-                }),
-            ),
-            pane: WeakId::new(pane),
-            // Only what stands partly outside what the pane shows is asked for to be brought in: an
-            // element that is wholly in view is not (a screen reader that lands on each of them would
-            // make the page draw again for nothing).
-            target: item.id.filter(|_| {
-                let (width, height) = {
-                    let size = pane.bounds().size;
-                    (size.width as f32, size.height as f32)
-                };
+        let shape = shape_of(item, node);
+        // What answers the pointer is pressed whatever it says it is (an option, a tree's row, a
+        // header that sorts), and what a role has always meant pressed is, with no word of the page.
+        let press =
+            ((item.pressable || pressed_by_role(item.role)) && !state.disabled).then(|| {
                 let rect = item.rect;
-                rect.x < 0.0 || rect.y < 0.0 || rect.x + rect.w > width || rect.y + rect.h > height
-            }),
-            disclosed: Cell::new(
-                state
-                    .expanded
-                    .filter(|_| matches!(item.role, AccessibleRole::TreeItem)),
-            ),
-            cells: RefCell::new(Vec::new()),
+                (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+            });
+        // Only what stands partly outside what the pane shows is asked for to be brought in: an
+        // element that is wholly in view is not (a screen reader that lands on each of them would
+        // make the page draw again for nothing).
+        let target = item.id.filter(|_| {
+            let (width, height) = {
+                let size = pane.bounds().size;
+                (size.width as f32, size.height as f32)
+            };
+            let rect = item.rect;
+            rect.x < 0.0 || rect.y < 0.0 || rect.x + rect.w > width || rect.y + rect.h > height
         });
-        // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
-        let element: Retained<PageElement> = unsafe { msg_send![super(element), init] };
+        let disclosed = state
+            .expanded
+            .filter(|_| matches!(item.role, AccessibleRole::TreeItem));
+        // The element the last outline made for this id, if it is of the same shape (what is set only
+        // where it is said, and cannot be unset, is the same): the screen reader stays on it.
+        let kept = item
+            .id
+            .and_then(|id| before.borrow_mut().remove(&id))
+            .filter(|element| element.ivars().shape == shape);
+        let element = if let Some(element) = kept {
+            let ivars = element.ivars();
+            ivars.press.set(press);
+            ivars.target.set(target);
+            ivars.disclosed.set(disclosed);
+            element
+        } else {
+            let element = PageElement::alloc(pane.mtm()).set_ivars(PageElementIvars {
+                press: Cell::new(press),
+                pane: WeakId::new(pane),
+                target: Cell::new(target),
+                disclosed: Cell::new(disclosed),
+                cells: RefCell::new(Vec::new()),
+                shape,
+            });
+            // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
+            unsafe { msg_send![super(element), init] }
+        };
         let words = NSString::from_str(&item.words);
         let (role, subrole) = accessibility_role(item.role);
         // SAFETY: the roles are AppKit's own constants; the parent is the pane, a view that
@@ -472,9 +527,7 @@ impl PageFields {
                 element.setAccessibilityValue(Some(&words));
             }
         }
-        if state.selected {
-            element.setAccessibilitySelected(true);
-        }
+        element.setAccessibilitySelected(state.selected);
         if let Some(open) = state.expanded {
             element.setAccessibilityExpanded(open);
             // An outline's row is open or closed as AXDisclosing says (set after the element knows
@@ -994,13 +1047,55 @@ pub(crate) struct PageElementIvars {
     pane: WeakId<TerminalPane>,
     /// The page's name for an element that is partly out of view, which the page is asked to show when
     /// the screen reader moves to it (`reveal`).
-    target: Option<Id>,
+    target: Cell<Option<Id>>,
+    /// What the element was made as: an element is given again to the same item of the next outline only
+    /// while it is ([`shape_of`]).
+    shape: Shape,
     /// Whether the row of an outline is open now, where it can be opened (a tree's row that holds
     /// others): what a screen reader's request to open or close it is measured against.
     disclosed: Cell<Option<bool>>,
     /// A table's cells, by the place of their row among its rows and of the cell in its row (from 0),
     /// which `accessibilityCellForColumn:row:` answers from.
     cells: RefCell<Vec<(i64, i64, Retained<AnyObject>)>>,
+}
+
+/// What an element was made as, of what cannot be undone by setting it again: its role, and which of
+/// the things that are set only where the page says them it has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Shape {
+    role: AccessibleRole,
+    said: u32,
+}
+
+fn shape_of(item: &Accessible, node: &AxNode) -> Shape {
+    let state = &item.state;
+    let said = [
+        state.expanded.is_some(),
+        state.checked.is_some(),
+        state.mixed,
+        state.value.is_some(),
+        node.role_description.is_some(),
+        node.help.is_some(),
+        node.index.is_some(),
+        node.disclosure_level.is_some(),
+        node.disclosed_by.is_some(),
+        !node.disclosed_rows.is_empty(),
+        node.header.is_some(),
+        !node.selected_children.is_empty(),
+        node.row_count.is_some(),
+        node.column_count.is_some(),
+        node.row_range.is_some(),
+        node.column_range.is_some(),
+        node.sort.is_some(),
+        !node.actions.is_empty(),
+    ]
+    .iter()
+    .enumerate()
+    .fold(0, |said, (at, has)| said | (u32::from(*has) << at));
+    Shape {
+        role: item.role,
+        said,
+    }
 }
 
 define_class!(
@@ -1064,7 +1159,7 @@ define_class!(
             // SAFETY: NSAccessibilityElement's own setter, with the same argument.
             let _: () = unsafe { msg_send![super(self), setAccessibilityFocused: focused] };
             if let (true, Some(target), Some(pane)) =
-                (focused, self.ivars().target, self.ivars().pane.load())
+                (focused, self.ivars().target.get(), self.ivars().pane.load())
             {
                 pane.page_reveal(target, None);
             }
@@ -1292,6 +1387,20 @@ impl Made {
     }
 }
 
+/// What `at` holds that was made, in its order; of what it holds that was not made (a group that has no
+/// element), what that holds is taken as held by `at`.
+fn built_under(nodes: &[AxNode], made: &[Option<Made>], at: usize) -> Vec<usize> {
+    let mut found = Vec::new();
+    for child in &nodes[at].children {
+        if made.get(*child).is_some_and(Option::is_some) {
+            found.push(*child);
+        } else {
+            found.extend(built_under(nodes, made, *child));
+        }
+    }
+    found
+}
+
 /// The element of the nearest of what holds `at`, at any depth, that was made.
 fn nearest(nodes: &[AxNode], made: &[Option<Made>], at: usize) -> Option<usize> {
     let mut outer = nodes.get(at)?.parent;
@@ -1345,6 +1454,16 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                         let _: () = msg_send![&**object, setAccessibilityParent: &*parent];
                     }
                 }
+            } else {
+                // Held by nothing made now: the pane's, as it was before something held it.
+                // SAFETY: as above, with the pane for the parent.
+                unsafe {
+                    let answers: bool =
+                        msg_send![&**object, respondsToSelector: sel!(setAccessibilityParent:)];
+                    if answers {
+                        let _: () = msg_send![&**object, setAccessibilityParent: pane];
+                    }
+                }
             }
             continue;
         }
@@ -1372,15 +1491,13 @@ fn relate(pane: &TerminalPane, items: &[Accessible], nodes: &[AxNode], made: &[O
                     mine.size,
                 ));
             }
-            let children: Vec<usize> = node
-                .children
-                .iter()
-                .copied()
-                .filter(|child| made.get(*child).is_some_and(Option::is_some))
-                .collect();
-            if !children.is_empty() {
-                element.setAccessibilityChildren(Some(&array_of(made, &children)));
-            }
+            // What it holds that was made; what a node held that was not made holds stands under it.
+            let children = built_under(nodes, made, at);
+            element.setAccessibilityChildren(
+                (!children.is_empty())
+                    .then(|| array_of(made, &children))
+                    .as_deref(),
+            );
             if let Some(words) = &node.role_description {
                 element.setAccessibilityRoleDescription(Some(&NSString::from_str(words)));
             }
