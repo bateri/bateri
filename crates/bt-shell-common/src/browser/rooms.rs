@@ -462,7 +462,14 @@ pub struct Rooms {
     shared: Arc<Shared>,
     rooms: HashMap<Id, Room>,
     generation: u64,
+    /// The number of the next clearing a page asked for. They are numbered from [`PAGE_REQS`] up,
+    /// where an agent's jobs (counted from 1 by the shell) do not reach, so that an answer is
+    /// never taken for another's.
+    clears: u32,
 }
+
+/// Where the numbers of the clearings a page asked for begin.
+const PAGE_REQS: u32 = 1 << 19;
 
 impl Rooms {
     /// `application` is what the profiles of this page's browsers are kept under, with the
@@ -487,6 +494,7 @@ impl Rooms {
             }),
             rooms: HashMap::new(),
             generation: 0,
+            clears: PAGE_REQS,
         }
     }
 
@@ -727,7 +735,23 @@ impl Rooms {
         };
         match &room.life {
             Life::Open(engine) => {
-                let command = command_of(engine.id(), &ask, &mut room.find);
+                let command = match ask {
+                    BrowserAsk::ClearCache | BrowserAsk::ClearSiteData => {
+                        let clearing = if matches!(ask, BrowserAsk::ClearCache) {
+                            Clearing::Cache
+                        } else {
+                            Clearing::Site
+                        };
+                        // Below the shell's own numbers: [`Rooms::clears`].
+                        self.clears = if self.clears >= (PAGE_REQS << 1) - 1 {
+                            PAGE_REQS
+                        } else {
+                            self.clears + 1
+                        };
+                        site_command(engine.id(), self.clears, clearing, &room.state)
+                    }
+                    ask => command_of(engine.id(), &ask, &mut room.find),
+                };
                 if let Some(command) = command {
                     let _ = engine.send(command);
                 }
@@ -797,6 +821,21 @@ impl Rooms {
             Some(Life::Open(engine)) => engine.send(command(engine.id())).is_ok(),
             _ => false,
         }
+    }
+
+    /// Empties what `clearing` says of the site the browser of `id` is at, as the job `req` (the
+    /// shell's number: the answer comes to [`Shell::agent`] with it). For a profile that is kept
+    /// at a home the home is told of the deletion too ([`super::sync`]).
+    pub fn clear(&self, id: Id, clearing: Clearing, req: u32) -> Result<(), Unclear> {
+        let Some(room) = self.rooms.get(&id) else {
+            return Err(Unclear::NotOpen);
+        };
+        let Life::Open(engine) = &room.life else {
+            return Err(Unclear::NotOpen);
+        };
+        let command =
+            site_command(engine.id(), req, clearing, &room.state).ok_or(Unclear::NoSite)?;
+        engine.send(command).map_err(|_| Unclear::NotOpen)
     }
 
     /// Whether `key` with `mods` is one the page asked to have itself (the room's
@@ -920,6 +959,7 @@ impl Rooms {
                         on: true,
                     });
                 }
+                // (An ask that is of the site the browser is at has none yet: it is let go.)
                 for ask in std::mem::take(&mut room.asks) {
                     if let Some(command) = command_of(engine.id(), &ask, &mut room.find) {
                         let _ = engine.send(command);
@@ -1003,6 +1043,7 @@ impl Rooms {
                         url: e.url,
                         code: e.code,
                         message: e.message,
+                        certificate: e.certificate,
                     }),
                     found: found.map(|f| BrowserFound {
                         count: f.count,
@@ -1032,6 +1073,7 @@ impl Rooms {
                     } else {
                         "This kind of address is not opened here.".to_owned()
                     },
+                    certificate: None,
                 });
                 shell.state(id, state);
             }
@@ -1178,6 +1220,11 @@ impl Rooms {
                 }
             }
             Event::AgentResult { req, output, .. } => shell.agent(id, req, output),
+            // How a clearing ended: whoever asked for it as a job (an agent) is told, a page that
+            // asked is not (it is told nothing of what a browser keeps).
+            Event::CacheCleared { req, error, .. } | Event::SiteCleared { req, error, .. } => {
+                shell.agent(id, req, cleared(error));
+            }
             Event::CanScroll { req, can, .. } => shell.can_scroll(id, req, can),
             Event::Error { message, .. } => shell.diagnostic(id, message),
             Event::Hello { .. } | Event::Closed { .. } | Event::Popup { .. } => {}
@@ -1264,8 +1311,95 @@ pub fn command_of(
             ratio: f64::from(*ratio),
         },
         BrowserAsk::Devtools => Command::DevTools { browser },
-        BrowserAsk::Unknown => return None,
+        BrowserAsk::Proceed => Command::Proceed { browser },
+        // These two mean the site the browser is at: [`site_command`].
+        BrowserAsk::ClearCache | BrowserAsk::ClearSiteData | BrowserAsk::Unknown => return None,
     })
+}
+
+/// What a clearing's answer is as a job's: it ended, or why it did not.
+fn cleared(error: Option<String>) -> AgentOutput {
+    match error {
+        None => AgentOutput::Done,
+        Some(message) => AgentOutput::Failed { message },
+    }
+}
+
+/// What a browser keeps that a person may empty ([`Rooms::clear`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clearing {
+    /// The files kept to load pages faster (of every site), and the service workers and Cache
+    /// Storage of the site the browser is at.
+    Cache,
+    /// What the sites of the name the browser is at keep, at every port: it signs out.
+    Site,
+}
+
+/// Why a clearing was not asked of the engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unclear {
+    /// The browser is not open (it is starting, ended or has no route).
+    NotOpen,
+    /// The browser is at no site (`about:blank`, a `data:` page, no page yet), so there is no name
+    /// whose data to delete.
+    NoSite,
+}
+
+/// The site a browser is at: the origin (scheme, name and port) and the name, in lower case.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Site {
+    pub origin: String,
+    pub host: String,
+}
+
+/// Where a browser is, for what is done to "this site": the address of its page, or, where the
+/// page is none (a load that failed leaves `about:blank`: the engine shows no address it did not
+/// load), the address that failed. Only `http` and `https` are a site. The page's own words for
+/// "this site" are the same rule, so that what a person is asked about is what is deleted.
+pub fn site_of(state: &BrowserState) -> Option<Site> {
+    let at = |address: &str| {
+        let lower = address.to_ascii_lowercase();
+        let scheme = ["http", "https"]
+            .into_iter()
+            .find(|scheme| lower.starts_with(&format!("{scheme}://")))?;
+        let rest = lower.get(scheme.len() + 3..)?;
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let authority = authority.rsplit('@').next()?;
+        let host = if authority.starts_with('[') {
+            authority.get(..=authority.find(']')?)?
+        } else {
+            authority.split(':').next()?
+        };
+        (!host.is_empty()).then(|| Site {
+            origin: format!("{scheme}://{authority}"),
+            host: host.to_owned(),
+        })
+    };
+    at(&state.url).or_else(|| state.error.as_ref().and_then(|error| at(&error.url)))
+}
+
+/// The command that empties what `clearing` says of the site the browser `browser` is at, as
+/// request `req`; none for a site's data where the browser is at no site.
+pub fn site_command(
+    browser: u32,
+    req: u32,
+    clearing: Clearing,
+    state: &BrowserState,
+) -> Option<Command> {
+    let site = site_of(state);
+    match clearing {
+        // The cache is the engine's, of every site: with no site there is only that to empty.
+        Clearing::Cache => Some(Command::ClearCache {
+            browser,
+            req,
+            origin: site.map(|site| site.origin).unwrap_or_default(),
+        }),
+        Clearing::Site => site.map(|site| Command::ClearSiteData {
+            browser,
+            req,
+            host: site.host,
+        }),
+    }
 }
 
 /// The modifiers the engine reports, as the page reads them.

@@ -381,6 +381,14 @@ fn a_page_asks_become_the_engines_commands() {
         Some(Command::DevTools { browser: 7 })
     );
     assert_eq!(go(&BrowserAsk::Unknown, &mut find), None);
+    assert_eq!(
+        go(&BrowserAsk::Proceed, &mut find),
+        Some(Command::Proceed { browser: 7 })
+    );
+    // What empties a cache or a site's data means the site the browser is at, which the room says
+    // ([`site_command`]): there is no command for it from the ask alone.
+    assert_eq!(go(&BrowserAsk::ClearCache, &mut find), None);
+    assert_eq!(go(&BrowserAsk::ClearSiteData, &mut find), None);
     // The next and the previous go on with the search that was asked.
     assert_eq!(go(&BrowserAsk::FindNext, &mut find), None);
     assert_eq!(
@@ -1292,4 +1300,204 @@ fn a_way_that_was_not_shown_says_why_and_a_reload_looks_again() {
     rig.until("ready", |e| ready(e, 1));
     // Both rooms start: the other waited for the same answer.
     rig.until("the other", |e| ready(e, 2));
+}
+
+fn at(url: &str) -> BrowserState {
+    BrowserState {
+        url: url.to_owned(),
+        ..BrowserState::default()
+    }
+}
+
+#[test]
+fn the_site_a_browser_is_at_is_its_page_or_where_a_load_that_failed_was_going() {
+    let site = |state: &BrowserState| site_of(state).map(|s| (s.origin, s.host));
+    let pair = |origin: &str, host: &str| Some((origin.to_owned(), host.to_owned()));
+    assert_eq!(
+        site(&at("https://App.Test:8443/a?b=1#c")),
+        pair("https://app.test:8443", "app.test")
+    );
+    assert_eq!(
+        site(&at("http://user:pw@localhost:3000/")),
+        pair("http://localhost:3000", "localhost")
+    );
+    assert_eq!(
+        site(&at("http://[::1]:8080/")),
+        pair("http://[::1]:8080", "[::1]")
+    );
+    // No page, or one that is no site: no name.
+    for none in [
+        "",
+        "about:blank",
+        "data:text/html,hi",
+        "file:///etc/hosts",
+        "https://",
+    ] {
+        assert_eq!(site(&at(none)), None, "{none}");
+    }
+    // A failed load leaves the engine's own page blank: the address that failed is the site.
+    let failed = BrowserState {
+        url: "about:blank".to_owned(),
+        error: Some(BrowserError {
+            url: "https://localhost:8443/".to_owned(),
+            code: -202,
+            message: "ERR_CERT_AUTHORITY_INVALID".to_owned(),
+            certificate: Some("self-signed".to_owned()),
+        }),
+        ..BrowserState::default()
+    };
+    assert_eq!(site(&failed), pair("https://localhost:8443", "localhost"));
+    // A page that is up is the site, whatever failed after it.
+    let mut up = failed.clone();
+    up.url = "https://other.test/".to_owned();
+    assert_eq!(site(&up), pair("https://other.test", "other.test"));
+    // The commands: the cache is the engine's whole, so it goes with no site too; a site's data does not.
+    assert_eq!(
+        site_command(3, 9, Clearing::Cache, &at("https://a.test:8443/")),
+        Some(Command::ClearCache {
+            browser: 3,
+            req: 9,
+            origin: "https://a.test:8443".to_owned()
+        })
+    );
+    assert_eq!(
+        site_command(3, 9, Clearing::Cache, &at("")),
+        Some(Command::ClearCache {
+            browser: 3,
+            req: 9,
+            origin: String::new()
+        })
+    );
+    assert_eq!(
+        site_command(3, 9, Clearing::Site, &failed),
+        Some(Command::ClearSiteData {
+            browser: 3,
+            req: 9,
+            host: "localhost".to_owned()
+        })
+    );
+    assert_eq!(site_command(3, 9, Clearing::Site, &at("about:blank")), None);
+}
+
+#[test]
+fn a_page_that_clears_the_cache_or_a_sites_data_or_goes_on_past_a_certificate_is_the_engines_to_do()
+{
+    let mut rig = rig("clearing", true);
+    rig.open(1);
+    // A load that failed on a certificate: the page is blank and the error says which.
+    rig.say(&Event::State {
+        browser: 1,
+        url: "about:blank".into(),
+        title: "Privacy error".into(),
+        loading: false,
+        can_back: false,
+        can_forward: false,
+        status: String::new(),
+        zoom: 1.0,
+        error: Some(browser_ipc::message::LoadError {
+            url: "https://localhost:8443/".into(),
+            code: -202,
+            message: "ERR_CERT_AUTHORITY_INVALID".into(),
+            certificate: Some("self-signed".into()),
+        }),
+        found: None,
+    });
+    rig.until("the error", |e| {
+        states(e, 1).iter().any(|s| s.error.is_some())
+    });
+    let all = states(&rig.effects, 1);
+    let error = all
+        .iter()
+        .find_map(|s| s.error.clone())
+        .expect("the error reaches the page");
+    assert_eq!(error.certificate.as_deref(), Some("self-signed"));
+    assert_eq!(error.url, "https://localhost:8443/");
+    let mut told = Vec::new();
+    rig.rooms.ask(Id::new(1), BrowserAsk::Proceed, &mut told);
+    rig.command("proceed", |c| matches!(c, Command::Proceed { browser: 1 }));
+    // The site is the address that failed. Numbered where the shell's own jobs are not.
+    rig.rooms
+        .ask(Id::new(1), BrowserAsk::ClearSiteData, &mut told);
+    let Command::ClearSiteData { browser, req, host } =
+        rig.command("the site", |c| matches!(c, Command::ClearSiteData { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!((browser, host.as_str()), (1, "localhost"));
+    assert!(req >= PAGE_REQS, "{req}");
+    rig.rooms.ask(Id::new(1), BrowserAsk::ClearCache, &mut told);
+    let Command::ClearCache {
+        req: cache_req,
+        origin,
+        ..
+    } = rig.command("the cache", |c| matches!(c, Command::ClearCache { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(origin, "https://localhost:8443");
+    assert_ne!(cache_req, req);
+    // A job of the shell's own: numbered as it says, answered as a job is, with why when it failed.
+    rig.rooms
+        .clear(Id::new(1), Clearing::Site, 7)
+        .expect("the browser is at a site");
+    let Command::ClearSiteData { req, .. } = rig.command("the job", |c| {
+        matches!(c, Command::ClearSiteData { req: 7, .. })
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(req, 7);
+    rig.say(&Event::SiteCleared {
+        browser: 1,
+        req: 7,
+        records: Vec::new(),
+        error: None,
+    });
+    rig.say(&Event::CacheCleared {
+        browser: 1,
+        req: 8,
+        error: Some("the cache is in use".into()),
+    });
+    rig.until("both answers", |e| {
+        let has = |req: u32| {
+            e.iter()
+                .any(|e| matches!(e, Effect::Agent(room, r, _) if *room == Id::new(1) && *r == req))
+        };
+        has(7) && has(8)
+    });
+    assert!(rig.effects.iter().any(|e| matches!(
+        e,
+        Effect::Agent(_, 7, browser_ipc::message::AgentOutput::Done)
+    )));
+    assert!(rig.effects.iter().any(|e| matches!(
+        e,
+        Effect::Agent(_, 8, browser_ipc::message::AgentOutput::Failed { message })
+            if message == "the cache is in use"
+    )));
+    // A browser that is at no site has no data of one to clear, and one that is not open cannot.
+    rig.say(&Event::State {
+        browser: 1,
+        url: "about:blank".into(),
+        title: String::new(),
+        loading: false,
+        can_back: false,
+        can_forward: false,
+        status: String::new(),
+        zoom: 1.0,
+        error: None,
+        found: None,
+    });
+    rig.until("the page is blank", |e| {
+        states(e, 1)
+            .last()
+            .is_some_and(|s| s.url == "about:blank" && s.error.is_none())
+    });
+    assert_eq!(
+        rig.rooms.clear(Id::new(1), Clearing::Site, 9),
+        Err(Unclear::NoSite)
+    );
+    assert_eq!(rig.rooms.clear(Id::new(1), Clearing::Cache, 10), Ok(()));
+    assert_eq!(
+        rig.rooms.clear(Id::new(9), Clearing::Cache, 11),
+        Err(Unclear::NotOpen)
+    );
 }

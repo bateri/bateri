@@ -4,7 +4,8 @@
 //! word of the request means, and how an answer is put into a reply or into a file.
 //!
 //! **Who may.** A browser is an element of a pane's page, and it belongs to the machine of the
-//! terminal the pane shows. `ls`, `text`, `snapshot` and `shot` see it, the other verbs change it:
+//! terminal the pane shows. `ls`, `text`, `snapshot`, `shot` and `console` see it, the other verbs
+//! (`clear` among them: it empties what the browser keeps, and signs the person out of a site) change it:
 //! the same two acts as the rest of the commands ([`level::Act`]), judged over a layer of that one
 //! pane ([`judge`]). On a pane of the asker's own machine that is the table as it stands: `own`,
 //! `screen` and `full` may, `off` may not. A pane of **another machine** is read or driven only by
@@ -18,7 +19,7 @@
 //! program on a server cannot open a path of this computer.
 
 use bt_core::CommandLevel;
-pub use kablo_bateri::browser::{Action, Browser, FileKind, Filed, TEXT_MAX};
+pub use kablo_bateri::browser::{Action, Browser, Clearing, FileKind, Filed, TEXT_MAX};
 use kablo_bateri::message::{Failure, Kind};
 use kablo_bateri::paths::{BROWSER, DIR};
 
@@ -29,17 +30,20 @@ fn usage(text: impl Into<String>) -> Failure {
     Failure::new(Kind::Usage, text)
 }
 
-/// What a verb does to a browser: the four that read see it, the others change it.
+/// What a verb does to a browser: the five that read see it, the others change it.
 pub fn act_of(action: &Action) -> Act {
     match action {
-        Action::Ls | Action::Text { .. } | Action::Snapshot { .. } | Action::Shot { .. } => {
-            Act::See
-        }
+        Action::Ls
+        | Action::Text { .. }
+        | Action::Snapshot { .. }
+        | Action::Shot { .. }
+        | Action::Console { .. } => Act::See,
         Action::Click { .. }
         | Action::Type { .. }
         | Action::Open { .. }
         | Action::Back
-        | Action::Reload => Act::Change,
+        | Action::Reload
+        | Action::Clear { .. } => Act::Change,
     }
 }
 

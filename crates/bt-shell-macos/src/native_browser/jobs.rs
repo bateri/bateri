@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver};
 use browser_ipc::message::{AgentOp, AgentOutput, Command};
 use bt_shell_common::agent::browser::{Listed, element_name, element_number};
 use bt_shell_common::agent::message::{Failure, Kind};
+use bt_shell_common::browser::rooms::{Clearing, Unclear};
 
 use super::{Id, PageBrowsers};
 
@@ -80,26 +81,58 @@ impl PageBrowsers {
             .borrow()
             .send(id, |browser| Command::Agent { browser, req, op });
         if !sent {
-            let why = self
-                .rooms
-                .borrow()
-                .seen()
-                .into_iter()
-                .find(|seen| seen.id == id)
-                .map(|seen| seen.status)
-                .unwrap_or_default();
-            return Err(Failure::new(
-                Kind::Failed,
-                format!(
-                    "the browser is not open ({}): a reload makes it again",
-                    if why.is_empty() { "gone" } else { &why }
-                ),
-            ));
+            return Err(self.not_open(id));
         }
+        Ok(self.expect(req))
+    }
+
+    /// Empties what `clearing` says of the site the browser `id` is at, as a job: the answer comes
+    /// as a job's, once the helper has done it (and, for a profile kept at a home, once the home
+    /// is told: [`bt_shell_common::browser::rooms::Rooms::clear`]).
+    pub(crate) fn clear(
+        &self,
+        id: Id,
+        clearing: Clearing,
+    ) -> Result<(u32, Receiver<AgentOutput>), Failure> {
+        let req = self.next_job.get().wrapping_add(1).max(1);
+        match self.rooms.borrow().clear(id, clearing, req) {
+            Ok(()) => {}
+            Err(Unclear::NotOpen) => return Err(self.not_open(id)),
+            Err(Unclear::NoSite) => {
+                return Err(Failure::new(
+                    Kind::Failed,
+                    "the browser is at no site (an http:// or https:// address): open one first",
+                ));
+            }
+        }
+        Ok(self.expect(req))
+    }
+
+    /// What a browser that is not open says to a request.
+    fn not_open(&self, id: Id) -> Failure {
+        let why = self
+            .rooms
+            .borrow()
+            .seen()
+            .into_iter()
+            .find(|seen| seen.id == id)
+            .map(|seen| seen.status)
+            .unwrap_or_default();
+        Failure::new(
+            Kind::Failed,
+            format!(
+                "the browser is not open ({}): a reload makes it again",
+                if why.is_empty() { "gone" } else { &why }
+            ),
+        )
+    }
+
+    /// Job `req` was given to the helper: where its answer comes.
+    fn expect(&self, req: u32) -> (u32, Receiver<AgentOutput>) {
         self.next_job.set(req);
         let (answer, wait) = mpsc::channel();
         self.jobs.borrow_mut().insert(req, answer);
-        Ok((req, wait))
+        (req, wait)
     }
 
     /// The helper says how job `req` ended. A job nobody waits for any more (it timed out) is let go.

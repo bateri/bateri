@@ -17,6 +17,7 @@ pub mod engine;
 pub mod gate;
 pub mod plan;
 pub mod records;
+pub mod site;
 pub mod store;
 
 #[cfg(test)]
@@ -133,6 +134,15 @@ impl ProfileSync {
 
     pub fn detach(&self, browser: u32) {
         let _ = self.tx.send(Msg::Input(Input::Detach(browser)));
+    }
+
+    /// The person cleared the data of site `host` (a name) in `browser`: the sync says the
+    /// deletion of what it knows of the site to the home, and asks the helper to delete it too,
+    /// as request `req` ([`Event::SiteCleared`] answers it).
+    pub fn clear_site(&self, browser: u32, req: u32, host: String) {
+        let _ = self
+            .tx
+            .send(Msg::Input(Input::ClearSite { browser, req, host }));
     }
 
     /// The helper's news of the profile; given back when the sync is over and nobody reads it.
@@ -487,14 +497,38 @@ impl Syncs {
         }
     }
 
-    /// What the helper says of a profile goes to its sync; anything else is given back.
+    /// Clears the data of site `host` in `browser` through the profile's sync, so that the home
+    /// is told too. `false` for a browser whose profile has no sync (one kept on this Mac alone,
+    /// one with no name): its caller asks the helper itself, and the deletion is local.
+    pub fn clear_site(&self, browser: u32, req: u32, host: &str) -> bool {
+        let sync = {
+            let slots = self.slots();
+            slots
+                .by_browser
+                .get(&browser)
+                .and_then(|dir| slots.by_dir.get(dir))
+                .map(|slot| slot.sync.clone())
+        };
+        match sync {
+            Some(sync) => {
+                sync.clear_site(browser, req, host.to_owned());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What the helper says of a profile goes to its sync; anything else is given back. The
+    /// answer to a site's clearing goes to its sync *and* is given back: the sync writes the
+    /// deletions to the home, and whoever asked (a page's room, an agent's job) hears how it ended.
     pub fn route(&self, event: Event) -> Option<Event> {
         let target = {
             let slots = self.slots();
             let dir = match &event {
                 Event::ProfileRecords { browser, .. }
                 | Event::ProfileWritten { browser, .. }
-                | Event::ProfileChanged { browser, .. } => slots.by_browser.get(browser),
+                | Event::ProfileChanged { browser, .. }
+                | Event::SiteCleared { browser, .. } => slots.by_browser.get(browser),
                 Event::IndexedDbRecords { req, .. } | Event::IndexedDbWritten { req, .. } => {
                     slots.by_id.get(&(req >> REQ_BITS))
                 }
@@ -505,9 +539,18 @@ impl Syncs {
         };
         let Some(sync) = target else {
             // A folder answer with nobody to read it is given back: its stage is the caller's to
-            // drop. The rest is news of a profile that is gone.
-            return matches!(event, Event::IndexedDbRecords { .. }).then_some(event);
+            // drop; so is a site's clearing, which a browser of no sync asked for. The rest is news
+            // of a profile that is gone.
+            return matches!(
+                event,
+                Event::IndexedDbRecords { .. } | Event::SiteCleared { .. }
+            )
+            .then_some(event);
         };
+        if matches!(event, Event::SiteCleared { .. }) {
+            sync.event(event.clone());
+            return Some(event);
+        }
         sync.event(event)
             .filter(|event| matches!(event, Event::IndexedDbRecords { .. }))
     }

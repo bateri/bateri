@@ -30,11 +30,15 @@ fn every_action() -> Vec<Action> {
         },
         Action::Back,
         Action::Reload,
+        Action::Clear {
+            what: kablo_bateri::browser::Clearing::Site,
+        },
+        Action::Console { part: part() },
     ]
 }
 
 #[test]
-fn the_four_that_read_see_and_the_five_that_do_something_change() {
+fn the_five_that_read_see_and_the_six_that_do_something_change() {
     let seen: Vec<_> = every_action()
         .iter()
         .map(|action| (action.word(), act_of(action)))
@@ -51,6 +55,10 @@ fn the_four_that_read_see_and_the_five_that_do_something_change() {
             ("open", Act::Change),
             ("back", Act::Change),
             ("reload", Act::Change),
+            // Emptying what a browser keeps is a change, and signs the person out of a site.
+            ("clear", Act::Change),
+            // The console is read, and nothing is run in the page.
+            ("console", Act::See),
         ]
     );
     // A verb the command lists has a row here: none is judged by default.

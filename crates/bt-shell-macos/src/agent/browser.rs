@@ -6,8 +6,10 @@
 //!
 //! What a verb does: `ls` is told from the page's rooms and answered at once; `open`, `back` and
 //! `reload` are asks of the page's browser, as the page itself makes, and answered `ok`; `text`,
-//! `snapshot`, `shot`, `click` and `type` are jobs of the helper, which a thread of the app waits
-//! for ([`WAIT`]) and answers, so that the main thread never does. A text or a picture that does
+//! `snapshot`, `shot`, `console`, `click` and `type` are jobs of the helper, and so is `clear`
+//! (the same the page's own ask for it is, which also tells a profile's home), which a thread of
+//! the app waits for ([`WAIT`]) and answers, so that the main thread never does: an `ok` for a
+//! `clear` is a cache or a site that was emptied, not asked to be. A text or a picture that does
 //! not fit a reply is written as a file on the machine that asked ([`browser::file_on`]).
 
 use std::sync::mpsc::RecvTimeoutError;
@@ -15,9 +17,10 @@ use std::thread;
 use std::time::Duration;
 
 use browser_ipc::message::{AgentOp, AgentOutput, Target};
-use bt_shell_common::agent::browser::{self, Action, Aim, Browser, FileKind, Said};
+use bt_shell_common::agent::browser::{self, Action, Aim, Browser, Clearing, FileKind, Said};
 use bt_shell_common::agent::message::{Failure, Kind, Reply};
 use bt_shell_common::agent::serve::Server;
+use bt_shell_common::browser::rooms::Clearing as Emptied;
 use bt_shell_common::kablo::install::Channel;
 use bt_shell_common::kablo::service::Letter;
 use bt_shell_common::native_view::{BrowserAsk, go_refusal};
@@ -51,6 +54,7 @@ fn job_of(action: &Action) -> Result<Option<AgentOp>, Failure> {
         Action::Text { .. } => AgentOp::Text,
         Action::Snapshot { .. } => AgentOp::Snapshot,
         Action::Shot { .. } => AgentOp::Shot,
+        Action::Console { .. } => AgentOp::Console,
         Action::Click { target } => AgentOp::Click {
             target: aim_of(target)?,
         },
@@ -66,7 +70,9 @@ fn job_of(action: &Action) -> Result<Option<AgentOp>, Failure> {
                 enter,
             }
         }
-        Action::Ls | Action::Open { .. } | Action::Back | Action::Reload => return Ok(None),
+        Action::Ls | Action::Open { .. } | Action::Back | Action::Reload | Action::Clear { .. } => {
+            return Ok(None);
+        }
     }))
 }
 
@@ -133,12 +139,24 @@ pub(super) fn browse(app: &AppDelegate, letter: Letter, server: &Server, request
         browsers.ask_of(id, ask);
         return said(letter, Reply::Done);
     }
-    let op = match job_of(&request.action) {
-        Ok(Some(op)) => op,
-        Ok(None) => return failed(letter, Failure::new(Kind::Failed, "nothing to do")),
-        Err(failure) => return failed(letter, failure),
+    // What is emptied is one of the site the browser is at: not a job of the engine's protocol, but
+    // the page's own ask, which also tells a profile's home, and waits for the answer as a job does.
+    let job = if let Action::Clear { what } = &request.action {
+        browsers.clear(
+            id,
+            match what {
+                Clearing::Cache => Emptied::Cache,
+                Clearing::Site => Emptied::Site,
+            },
+        )
+    } else {
+        match job_of(&request.action) {
+            Ok(Some(op)) => browsers.job(id, op),
+            Ok(None) => return failed(letter, Failure::new(Kind::Failed, "nothing to do")),
+            Err(failure) => return failed(letter, failure),
+        }
     };
-    let (req, wait) = match browsers.job(id, op) {
+    let (req, wait) = match job {
         Ok(job) => job,
         Err(failure) => return failed(letter, failure),
     };
@@ -184,9 +202,11 @@ fn finish(machine: &dyn Channel, action: &Action, output: AgentOutput) -> Reply 
     };
     match (action, output) {
         (_, AgentOutput::Failed { message }) => Reply::Failed(Failure::new(Kind::Failed, message)),
-        (Action::Click { .. } | Action::Type { .. }, AgentOutput::Done) => Reply::Done,
+        (Action::Click { .. } | Action::Type { .. } | Action::Clear { .. }, AgentOutput::Done) => {
+            Reply::Done
+        }
         (
-            Action::Text { part } | Action::Snapshot { part },
+            Action::Text { part } | Action::Snapshot { part } | Action::Console { part },
             AgentOutput::Text { text, truncated },
         ) => match browser::said(text, truncated) {
             Said::Reply(text) => Reply::Text(text),
@@ -244,6 +264,10 @@ mod tests {
             "click" => Action::Click {
                 target: "[7]".to_owned(),
             },
+            "console" => Action::Console { part },
+            "clear" => Action::Clear {
+                what: Clearing::Site,
+            },
             _ => panic!("{word}"),
         }
     }
@@ -256,6 +280,7 @@ mod tests {
             Some(AgentOp::Snapshot)
         );
         assert_eq!(job_of(&action("shot")).unwrap(), Some(AgentOp::Shot));
+        assert_eq!(job_of(&action("console")).unwrap(), Some(AgentOp::Console));
         assert_eq!(
             job_of(&action("click")).unwrap(),
             Some(AgentOp::Click {
@@ -271,11 +296,13 @@ mod tests {
                 target: Target::Point { x: 412.0, y: 88.0 }
             })
         );
-        // What is no job of the helper's is the page's own ask, or the page's list.
+        // What is no job of the helper's is the page's own ask, or the page's list, or the clearing
+        // that the rooms make of the site the browser is at (`PageBrowsers::clear`).
         for none in [
             Action::Ls,
             Action::Back,
             Action::Reload,
+            action("clear"),
             Action::Open {
                 url: "https://a/".to_owned(),
             },
@@ -330,6 +357,26 @@ mod tests {
         assert_eq!(
             finish(&machine, &action("click"), AgentOutput::Done),
             Reply::Done
+        );
+        // A clearing that was done is `ok`; one that was not says why, as every job does.
+        assert_eq!(
+            finish(&machine, &action("clear"), AgentOutput::Done),
+            Reply::Done
+        );
+        assert_eq!(
+            finish(
+                &machine,
+                &action("clear"),
+                AgentOutput::Failed {
+                    message: "the cache is in use".to_owned()
+                }
+            ),
+            Reply::Failed(Failure::new(Kind::Failed, "the cache is in use"))
+        );
+        // The console is a text, as a page's is.
+        assert_eq!(
+            finish(&machine, &action("console"), text("[error] boom\n")),
+            Reply::Text("[error] boom\n".to_owned())
         );
         assert!(
             machine.kept.borrow().is_empty(),

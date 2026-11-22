@@ -47,6 +47,7 @@ use super::plan::{LocalRec, plan};
 use super::records::{
     Folder, Id, digest_of, folder_value, id_of, record_digest, record_of, wire_of, without_value,
 };
+use super::site;
 use super::store::{Cache, Known, Saved};
 
 /// What the engine says to the helper.
@@ -84,6 +85,13 @@ pub enum Input {
     /// A browser of the profile is open: the engine asks the helper through the first.
     Attach(u32),
     Detach(u32),
+    /// The person cleared the data of site `host` in `browser`: the deletion of what the Mac knows
+    /// of the site goes to the home before the helper is asked to delete it, as request `req`.
+    ClearSite {
+        browser: u32,
+        req: u32,
+        host: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +144,8 @@ enum Pending {
         removed: Vec<Id>,
         join: bool,
     },
+    /// A site's data is being deleted: what the helper says it deleted goes to the home.
+    ClearSite,
 }
 
 enum Source {
@@ -152,6 +162,12 @@ struct Change {
     stage: Option<String>,
     /// The home said the record was not there: written again as new.
     as_new: bool,
+    /// A deletion the person asked for (a site's data cleared): it is the last word on the record,
+    /// so a newer one at the home does not stand against it ([`Engine::put_done`]).
+    force: bool,
+    /// The number to write on, when the home has said which it is (a forced deletion that met a
+    /// newer record).
+    base: Option<u64>,
     tries: u8,
 }
 
@@ -220,6 +236,9 @@ pub struct Engine {
     stages: HashMap<String, usize>,
     /// The code the home turned the Mac away with: it is not asked again.
     refused: Option<u16>,
+    /// Records whose deletion a person asked for and the home has not yet been told: what a peer
+    /// wrote of them meanwhile is not put in the profile, the deletion comes after it.
+    clearing: HashSet<Id>,
 }
 
 fn hash_file(path: &Path) -> io::Result<Digest> {
@@ -276,6 +295,7 @@ impl Engine {
             missing: HashSet::new(),
             stages: HashMap::new(),
             refused: None,
+            clearing: HashSet::new(),
         }
     }
 
@@ -408,6 +428,7 @@ impl Engine {
             Input::Helper(event) => self.on_helper(event),
             Input::Attach(browser) => self.attach(browser),
             Input::Detach(browser) => self.detach(browser),
+            Input::ClearSite { browser, req, host } => self.clear_site(browser, req, &host),
         }
     }
 
@@ -670,6 +691,17 @@ impl Engine {
                     }
                 }
             }
+            Event::SiteCleared { req, records, .. } => {
+                // What the helper found and deleted: each is a deletion for the home, the ones the
+                // Mac knows of already included (the home is told once: the newest of a record is
+                // the one to say).
+                if let Some(Pending::ClearSite) = self.pending.remove(&req) {
+                    for record in records {
+                        self.tombstone(&record);
+                    }
+                    self.pump();
+                }
+            }
             Event::ProfileChanged {
                 browser,
                 records,
@@ -768,8 +800,66 @@ impl Engine {
             sources,
             stage: stage.map(str::to_owned),
             as_new: false,
+            force: false,
+            base: None,
             tries: 0,
         }
+    }
+
+    // ---- a site's data is cleared ----
+
+    /// The person cleared the data of site `host`: the deletion of every record the Mac knows of
+    /// it is queued for the home (so that a Mac that never had the site open, or an origin the
+    /// helper never saw, loses it all the same), and then the helper is asked to delete it from
+    /// the engine, whose answer adds what the profile held ([`Engine::on_helper`]).
+    fn clear_site(&mut self, browser: u32, req: u32, host: &str) {
+        let host = host.to_ascii_lowercase();
+        let known: Vec<Id> = self.saved.known.keys().cloned().collect();
+        for (kind, key) in known {
+            let body = Body {
+                kind,
+                key,
+                deleted: true,
+                ..Body::default()
+            };
+            if let Ok(record) = record_of(&body, None)
+                && site::is_the_hosts(&record, &host)
+            {
+                self.tombstone(&record);
+            }
+        }
+        self.pending.insert(req, Pending::ClearSite);
+        self.ask(Command::ClearSiteData { browser, req, host });
+        self.pump();
+    }
+
+    /// Whether the deletion of record `id` is on its way to the home: queued, or being put.
+    fn says_gone(&self, id: &Id) -> bool {
+        let putting = match &self.job {
+            Some(Job::Have(change))
+            | Some(Job::Uploading { change, .. })
+            | Some(Job::Putting { change, .. }) => Some(change),
+            _ => None,
+        };
+        putting.is_some_and(|change| change.id == *id && change.body.deleted)
+            || self.queue.iter().any(|work| match work {
+                Work::Put(change) => change.id == *id && change.body.deleted,
+                Work::Fetch(_) => false,
+            })
+    }
+
+    /// Queues the deletion of `record` (it has no value) as the person's last word on it. A record
+    /// the home has as deleted already is not said again.
+    fn tombstone(&mut self, record: &Record) {
+        let id = id_of(record);
+        let gone = record_digest(record, &[]);
+        if self.saved.known.get(&id).is_some_and(|k| k.digest == gone) || self.says_gone(&id) {
+            return;
+        }
+        let mut change = self.change_of(record, &[], None);
+        change.force = true;
+        self.clearing.insert(id);
+        self.enqueue(change);
     }
 
     fn enqueue(&mut self, change: Change) {
@@ -1155,6 +1245,14 @@ impl Engine {
             self.advance();
             return;
         }
+        if !entry.body.deleted && self.clearing.contains(&id) {
+            // A record of a peer that the person has just deleted here: the home has it as the
+            // peer's until the deletion is written over it, and it does not go into the profile
+            // in between (it would be there when the deletion came back as this Mac's own word).
+            self.note_entry(&entry);
+            self.advance();
+            return;
+        }
         let lacking: Vec<Digest> = if entry.body.deleted {
             Vec::new()
         } else {
@@ -1285,6 +1383,8 @@ impl Engine {
     fn base_of(&self, change: &Change) -> u64 {
         if change.as_new {
             0
+        } else if let Some(base) = change.base {
+            base
         } else {
             self.saved.known.get(&change.id).map_or(0, |k| k.applied)
         }
@@ -1435,6 +1535,7 @@ impl Engine {
     fn put_done(&mut self, mut change: Change, result: PutResult, seq: u64) {
         match result {
             PutResult::Done => {
+                self.clearing.remove(&change.id);
                 self.note(change.id.clone(), seq, digest_of(&change.body));
                 self.release_stage(change.stage.take());
             }
@@ -1444,12 +1545,23 @@ impl Engine {
                 change.tries += 1;
                 self.queue.push_front(Work::Put(Box::new(change)));
             }
+            PutResult::Conflict if change.force && change.tries < 3 => {
+                // A deletion the person asked for meets a newer record: it is written on that
+                // number, as the last word on the record. The newer one is not put in the profile
+                // meanwhile ([`Engine::live`]).
+                change.base = Some(seq);
+                change.tries += 1;
+                self.queue.push_front(Work::Put(Box::new(change)));
+            }
             PutResult::MissingBlob if change.tries < 3 => {
                 change.tries += 1;
                 self.queue.push_front(Work::Put(Box::new(change)));
             }
             // A newer one is at the home and comes from its stream; the rest cannot be said.
-            _ => self.release_stage(change.stage.take()),
+            _ => {
+                self.clearing.remove(&change.id);
+                self.release_stage(change.stage.take());
+            }
         }
     }
 }

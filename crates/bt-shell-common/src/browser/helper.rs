@@ -629,6 +629,13 @@ fn send_to(run: &Run, id: u32, command: Command) -> io::Result<()> {
             "a command for another browser",
         ));
     }
+    // A site's data cleared in a profile that is kept at a home is the profile's sync's to do: it
+    // tells the home of every record it knows of the site, and asks the helper itself.
+    if let Command::ClearSiteData { req, host, .. } = &command
+        && run.syncs.clear_site(id, *req, host)
+    {
+        return Ok(());
+    }
     run.commands.send(&command)
 }
 

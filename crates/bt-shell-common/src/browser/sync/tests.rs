@@ -496,6 +496,8 @@ struct Table {
     running: bool,
     watching: Option<u32>,
     stages_dropped: Vec<String>,
+    /// The hosts whose data the helper was told to delete.
+    site_clears: Vec<String>,
     commands: Vec<String>,
     stage_seq: u32,
 }
@@ -636,6 +638,11 @@ impl Mac {
             stage: None,
         });
         self.bell.ring();
+    }
+
+    /// The person cleared the data of `host` in the browser.
+    fn clears(&self, host: &str) {
+        self.sync.clear_site(BROWSER, 77, host.to_owned());
     }
 
     fn value(&self, record: &Record) -> Option<String> {
@@ -792,6 +799,27 @@ fn answer(
         Command::ProfileWatch { browser, on } => {
             t.watching = on.then_some(browser);
         }
+        Command::ClearSiteData { browser, req, host } => {
+            // The engine's own: it deletes the cookies and the storage it has of the host and says
+            // what it found, each as a record with no value.
+            let gone: Vec<Record> = t
+                .records
+                .values()
+                .filter(|record| super::site::is_the_hosts(record, &host))
+                .map(super::records::without_value)
+                .collect();
+            for record in &gone {
+                t.records.remove(&id_of(record));
+            }
+            t.site_clears.push(host);
+            drop(t);
+            sync.event(Event::SiteCleared {
+                browser,
+                req,
+                records: gone,
+                error: None,
+            });
+        }
         Command::StageDrop { stage } => {
             let _ = fs::remove_dir_all(root.join("profiles").join(&stage));
             t.stages_dropped.push(stage);
@@ -899,6 +927,143 @@ fn what_one_machine_does_the_other_sees_and_a_deletion_too() {
     a.changes(cookie("sid", None));
     bell.until("b loses it", || b.value(&cookie("sid", None)).is_none());
     assert!(home.deleted(&cookie("sid", None)));
+}
+
+fn cookie_of(domain: &str, name: &str, value: &str) -> Record {
+    let Record::Cookie {
+        path,
+        partition,
+        value: kept,
+        ..
+    } = cookie(name, Some(value))
+    else {
+        unreachable!()
+    };
+    Record::Cookie {
+        domain: domain.into(),
+        path,
+        name: name.into(),
+        partition,
+        value: kept,
+    }
+}
+
+#[test]
+fn a_site_that_is_cleared_is_deleted_at_the_home_and_at_the_other_mac_and_the_others_stay() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    let a = Mac::with(
+        "site-a",
+        depot.clone(),
+        &bell,
+        table(
+            &[
+                cookie("sid", Some("one")),
+                storage("seen", Some("here")),
+                cookie_of("other.test", "keep", "me"),
+            ],
+            &[],
+        ),
+    );
+    let b = Mac::new("site-b", depot, &bell);
+    a.attach();
+    bell.until("a joined", || joined(&a));
+    bell.until("the home has them", || {
+        home.live(&cookie("sid", None))
+            && home.live(&storage("seen", None))
+            && home.live(&cookie_of("other.test", "keep", "x"))
+    });
+    // A port of the site that the helper never saw: the home has it and the Mac took it, and the
+    // engine of this Mac does not list it.
+    a.changes(storage("ghost", Some("on a port nobody opened")));
+    bell.until("the home has the ghost", || {
+        home.live(&storage("ghost", None))
+    });
+    lock(&a.table)
+        .records
+        .remove(&id_of(&storage("ghost", None)));
+    b.attach();
+    bell.until("b has all of it", || {
+        b.value(&cookie("sid", None)).is_some()
+            && b.value(&storage("ghost", None)).is_some()
+            && b.value(&cookie_of("other.test", "keep", "x")).is_some()
+    });
+
+    a.clears("site.test");
+    bell.until("the home has them deleted", || {
+        home.deleted(&cookie("sid", None))
+            && home.deleted(&storage("seen", None))
+            && home.deleted(&storage("ghost", None))
+    });
+    // The other Mac loses the site (it need not have had it open) and keeps the rest.
+    bell.until("b loses the site", || {
+        b.value(&cookie("sid", None)).is_none()
+            && b.value(&storage("seen", None)).is_none()
+            && b.value(&storage("ghost", None)).is_none()
+    });
+    assert_eq!(
+        b.value(&cookie_of("other.test", "keep", "x")).as_deref(),
+        Some("me")
+    );
+    assert!(home.live(&cookie_of("other.test", "keep", "x")));
+    assert!(!home.deleted(&cookie_of("other.test", "keep", "x")));
+    // The helper was asked once, after the home was told: it said what it deleted, and that
+    // did not make a second deletion of it at the home.
+    assert_eq!(lock(&a.table).site_clears, vec!["site.test".to_owned()]);
+    assert_eq!(a.value(&cookie("sid", None)), None);
+}
+
+#[test]
+fn a_site_that_was_cleared_does_not_come_back_when_the_mac_starts_again() {
+    let bell = Arc::new(Bell::default());
+    let (home, depot) = started(&bell);
+    let root;
+    {
+        let a = Mac::with(
+            "site-again",
+            depot.clone(),
+            &bell,
+            table(&[cookie("sid", Some("one"))], &[]),
+        );
+        a.attach();
+        bell.until("a joined", || joined(&a));
+        bell.until("the home has it", || home.live(&cookie("sid", None)));
+        a.clears("site.test");
+        bell.until("the home has it deleted", || {
+            home.deleted(&cookie("sid", None))
+        });
+        a.end();
+        a.keep.store(true, Ordering::Relaxed);
+        root = a.root.clone();
+    }
+    // Started again with a profile that has nothing of the site (what the engine deleted).
+    let again = Mac::start(root, depot, &bell, Table::default(), None);
+    again.attach();
+    bell.until("the second join", || joined(&again));
+    assert_eq!(again.value(&cookie("sid", None)), None);
+    assert!(home.deleted(&cookie("sid", None)));
+    assert!(lock(&again.table).writes.iter().all(|batch| {
+        batch.is_empty()
+            || batch
+                .iter()
+                .all(|record| !super::site::is_the_hosts(record, "site.test"))
+    }));
+}
+
+#[test]
+fn a_profile_with_no_sync_is_cleared_by_the_helper_alone() {
+    // The shell's `Syncs` has no sync for a browser of a profile that is kept on this Mac alone:
+    // `false` says so and the command goes to the helper directly.
+    let syncs = super::Syncs::new();
+    assert!(!syncs.clear_site(5, 1, "site.test"));
+    // The answer of a clearing nobody's sync asked for is given back to whoever asked.
+    let said = Event::SiteCleared {
+        browser: 5,
+        req: 1,
+        records: Vec::new(),
+        error: None,
+    };
+    assert_eq!(syncs.route(said.clone()), Some(said));
 }
 
 #[test]
@@ -1555,6 +1720,163 @@ fn a_conflict_that_says_there_was_no_such_record_is_written_again_as_new() {
         seq: 9,
     })));
     assert_eq!(put(&said).len(), 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The `Put`s the engine has said so far: their numbers and the numbers they are written on.
+fn puts_of(said: &Said) -> Vec<(u32, u64, bool)> {
+    lock(&said.0)
+        .iter()
+        .filter_map(|m| match m {
+            Client::Put(p) => Some((p.req, p.base, p.body.deleted)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_deletion_the_person_asked_for_is_written_over_a_newer_record_and_that_one_is_not_put_in_the_profile()
+ {
+    let (mut engine, said, asked, _gate, root) = rig("forced");
+    engine.handle(Input::Attach(BROWSER));
+    engine.connected(Box::new(said.clone()));
+    engine.handle(Input::Home(opened(Mode::Full, 0)));
+    engine.handle(Input::Home(Server::CaughtUp { head: 0 }));
+    let mut seen = reply(&mut engine, &asked, 0);
+    seen = reply(&mut engine, &asked, seen);
+    // The Mac took the record at number 4, and the site is cleared.
+    let record = cookie("sid", Some("zero"));
+    engine.handle(Input::Home(Server::Record(entry_of(4, &record))));
+    seen = reply(&mut engine, &asked, seen);
+    engine.handle(Input::ClearSite {
+        browser: BROWSER,
+        req: 500,
+        host: "site.test".into(),
+    });
+    // The deletion is said to the home before anything else is, on the number the Mac took, and the
+    // helper is asked to delete it too.
+    let first = puts_of(&said);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!((first[0].1, first[0].2), (4, true));
+    assert!(lock(&asked.0).iter().any(|c| matches!(
+        c,
+        Command::ClearSiteData { req: 500, host, .. } if host == "site.test"
+    )));
+    // Before the home answers, another computer's newer value comes down its stream: it is not put
+    // in the profile (the deletion is the last word).
+    let writes = |asked: &Asked| {
+        lock(&asked.0)
+            .iter()
+            .filter(|c| matches!(c, Command::ProfileWrite { .. }))
+            .count()
+    };
+    let before = writes(&asked);
+    engine.handle(Input::Home(Server::Record(entry_of(
+        6,
+        &cookie("sid", Some("theirs")),
+    ))));
+    let _ = reply(&mut engine, &asked, seen);
+    assert_eq!(
+        writes(&asked),
+        before,
+        "nothing was written into the profile"
+    );
+    // The home says the record has changed (it is at 6): the deletion is written on that number.
+    engine.handle(Input::Home(Server::PutReply(PutReply {
+        req: first[0].0,
+        result: PutResult::Conflict,
+        seq: 6,
+    })));
+    let all = puts_of(&said);
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!((all[1].1, all[1].2), (6, true));
+    engine.handle(Input::Home(Server::PutReply(PutReply {
+        req: all[1].0,
+        result: PutResult::Done,
+        seq: 7,
+    })));
+    assert_eq!(engine.known(&id_of(&record)).map(|k| k.applied), Some(7));
+    assert_eq!(
+        engine.known(&id_of(&record)).map(|k| k.digest),
+        Some(record_digest(&cookie("sid", None), &[]))
+    );
+    // Its own deletion comes back from the stream as the Mac's own word and changes nothing.
+    // Once it is said, a peer's record is the profile's again.
+    engine.handle(Input::Home(Server::Record(entry_of(
+        8,
+        &cookie("sid", Some("later")),
+    ))));
+    let _ = reply(&mut engine, &asked, seen);
+    assert_eq!(writes(&asked), before + 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn what_the_helper_deleted_and_the_mac_did_not_know_is_said_to_the_home_once_and_other_sites_are_left()
+ {
+    let (mut engine, said, asked, _gate, root) = rig("helper-list");
+    engine.handle(Input::Attach(BROWSER));
+    engine.connected(Box::new(said.clone()));
+    engine.handle(Input::Home(opened(Mode::Full, 0)));
+    engine.handle(Input::Home(Server::CaughtUp { head: 0 }));
+    let seen = reply(&mut engine, &asked, 0);
+    let seen = reply(&mut engine, &asked, seen);
+    // Two cookies the Mac took, of the site and of another.
+    engine.handle(Input::Home(Server::Record(entry_of(
+        4,
+        &cookie("old", Some("v")),
+    ))));
+    engine.handle(Input::Home(Server::Record(entry_of(
+        5,
+        &cookie_of("other.test", "keep", "x"),
+    ))));
+    let _ = reply(&mut engine, &asked, seen);
+    engine.handle(Input::ClearSite {
+        browser: BROWSER,
+        req: 501,
+        host: "site.test".into(),
+    });
+    let first = puts_of(&said);
+    assert_eq!(
+        first.len(),
+        1,
+        "only the site's cookie the Mac knew: {first:?}"
+    );
+    assert_eq!((first[0].1, first[0].2), (4, true));
+    // The helper says what it deleted: the cookie that is on its way already, and one the Mac did
+    // not know (made a moment ago). The first is not said again.
+    engine.handle(Input::Helper(Event::SiteCleared {
+        browser: BROWSER,
+        req: 501,
+        records: vec![cookie("old", None), cookie("new", None)],
+        error: None,
+    }));
+    engine.handle(Input::Home(Server::PutReply(PutReply {
+        req: first[0].0,
+        result: PutResult::Done,
+        seq: 6,
+    })));
+    let all = puts_of(&said);
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!(
+        (all[1].1, all[1].2),
+        (0, true),
+        "the new one, written as new"
+    );
+    engine.handle(Input::Home(Server::PutReply(PutReply {
+        req: all[1].0,
+        result: PutResult::Done,
+        seq: 7,
+    })));
+    assert_eq!(puts_of(&said).len(), 2, "nothing more is said");
+    // An answer nobody asked for (another request's number) is nothing of the profile's.
+    engine.handle(Input::Helper(Event::SiteCleared {
+        browser: BROWSER,
+        req: 999,
+        records: vec![cookie("stranger", None)],
+        error: None,
+    }));
+    assert_eq!(puts_of(&said).len(), 2);
     let _ = fs::remove_dir_all(root);
 }
 
