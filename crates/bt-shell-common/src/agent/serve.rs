@@ -252,6 +252,12 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
         Ok(Request::Config(words)) if crate::kablo::local::is_account(&server.account) => {
             Answer::Config(words)
         }
+        // The kablo this bateri is built against has the `browser` verb, and this bateri does not drive a
+        // browser yet: it is told so, as an older bateri tells a verb it does not know.
+        Ok(Request::Browser(_)) => Answer::Reply(Reply::Failed(Failure::new(
+            Kind::Failed,
+            "this bateri does not drive a browser yet; update bateri",
+        ))),
         Ok(Request::Config(_)) => Answer::Reply(Reply::Failed(Failure::new(
             Kind::Refused,
             format!(

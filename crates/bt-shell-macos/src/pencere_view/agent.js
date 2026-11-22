@@ -12,6 +12,11 @@
 // or `ok` / `err` and a code for an action. An element is told by a number this script gives it
 // the first time it sees it and keeps for as long as the document lives; the page cannot see it.
 //
+// What is read is what a screen reader reads, by the same rules as a native page's: an element
+// that holds others (a dialog, a list, a table, a row that has buttons in it) is one item with
+// what is in it read under it (`parent`), a page behind an open modal (`aria-modal`, a `<dialog>`
+// shown as a modal) is not read, and what is `inert` is not read at all.
+//
 // Nothing here moves the window or the app's keyboard: the events are the page's own, dispatched
 // to its elements, and the reading is of the document as it is. (The app, not this script, keeps
 // the pasteboard: a page's Copy button runs as a person's gesture.)
@@ -117,9 +122,45 @@
     return null;
   };
 
-  const roleOf = (el) => {
+  // ARIA's words that the reading says in another: its grids are tables, its cells of a grid are
+  // cells. What is only for the page's own markup says nothing.
+  const ALIAS = { grid: "table", treegrid: "table", gridcell: "cell", rowheader: "cell", menuitemcheckbox: "menuitem", menuitemradio: "menuitem", img: "image" };
+  const SILENT = new Set(["none", "presentation", "generic", "separator", "rowgroup"]);
+  // The roles of ARIA that hold other elements and which the reading has no word for: a group that
+  // says what the page called it.
+  const GROUPS = new Set([
+    "application", "article", "banner", "complementary", "contentinfo", "directory", "document", "feed",
+    "figure", "form", "main", "menu", "menubar", "navigation", "radiogroup", "region", "search",
+    "tabpanel", "toolbar", "tooltip",
+  ]);
+  // Named by the label alone, and what is in them is read under them.
+  const HOLDERS = new Set(["dialog", "alertdialog", "group", "list", "listbox", "table", "tree", "tablist"]);
+  // Named by what is in them, unless controls of their own are, and then they are as a holder is.
+  const MIXED = new Set(["listitem", "row", "cell", "columnheader", "treeitem", "tab", "option", "status", "alert"]);
+  const HOLDS = "a[href],button,input,select,textarea,summary,td,th,tr,li,[role],[onclick],[tabindex],[contenteditable]";
+  const holdsMore = (el) => {
+    for (const child of el.children) if (child.matches(HOLDS) || child.querySelector(HOLDS)) return true;
+    return false;
+  };
+  const plainMarkup = (el, tag) => {
+    const holder = el.closest(tag);
+    const given = holder && holder.getAttribute("role");
+    return !!given && SILENT.has(given.trim().split(/\s+/)[0].toLowerCase());
+  };
+
+  const givenRole = (el) => {
     const given = el.getAttribute("role");
-    if (given) return given.split(/\s+/)[0];
+    return given ? given.trim().split(/\s+/)[0].toLowerCase() : "";
+  };
+
+  const roleOf = (el) => {
+    const given = givenRole(el);
+    if (given) {
+      if (given === "heading") return "heading" + Math.min(6, Math.max(1, parseInt(el.getAttribute("aria-level"), 10) || 2));
+      if (SILENT.has(given)) return null;
+      if (GROUPS.has(given)) return "group";
+      return ALIAS[given] || given;
+    }
     const t = el.tagName.toLowerCase();
     if (t === "a") return el.hasAttribute("href") ? "link" : null;
     if (t === "button" || t === "summary") return "button";
@@ -133,8 +174,38 @@
     if (/^h[1-6]$/.test(t)) return "heading" + t[1];
     if (t === "img") return el.alt ? "image" : null;
     if (t === "progress") return "progress";
-    if (t === "option") return null;
+    if (t === "dialog") return "dialog";
+    if (t === "ul" || t === "ol") return plainMarkup(el, "ul,ol") ? null : "list";
+    if (t === "li") return el.parentElement && plainMarkup(el, "ul,ol") ? null : "listitem";
+    if (t === "table") return plainMarkup(el, "table") ? null : "table";
+    if (t === "tr" || t === "td" || t === "th") {
+      if (plainMarkup(el, "table")) return null;
+      if (t === "tr") return "row";
+      return t === "th" && el.getAttribute("scope") !== "row" ? "columnheader" : "cell";
+    }
     return null;
+  };
+
+  // What the page calls a kind of element the reading has no word for: its own, or the ARIA name of
+  // the group it was.
+  const roleDescriptionOf = (el, role) => {
+    const own = clean(el.getAttribute("aria-roledescription") || "");
+    if (own) return own;
+    const given = givenRole(el);
+    return role === "group" && GROUPS.has(given) ? given : "";
+  };
+
+  const describedBy = (el) => {
+    const own = clean(el.getAttribute("aria-description") || "");
+    if (own) return own;
+    const by = el.getAttribute("aria-describedby");
+    if (!by) return "";
+    return clean(
+      by
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent || "")
+        .join(" "),
+    );
   };
 
   const nameOf = (el) => {
@@ -149,12 +220,52 @@
     return clean(el.innerText || el.textContent || "");
   };
 
+  // The rows of a table and the peers of an element: asked once for a look, and let go of for the next.
+  let rowsets = new Map();
+  let peersets = new Map();
+  const TABLES = "[role=table],[role=grid],[role=treegrid],table,[role=list],ul,ol,[role=listbox],[role=tree]";
+  const ROWS = "[role=row],tr,[role=listitem],li,[role=option],[role=treeitem]";
+  const CELLS = "td,th,[role=cell],[role=gridcell],[role=columnheader],[role=rowheader]";
+  const whole = (n) => {
+    const number = parseInt(n, 10);
+    return Number.isFinite(number) && number >= 1 ? number : null;
+  };
+  const rowsOf = (table) => {
+    let rows = rowsets.get(table);
+    if (!rows) {
+      rows = [...table.querySelectorAll(ROWS)].filter((row) => row.parentElement && row.parentElement.closest(TABLES) === table);
+      rowsets.set(table, rows);
+    }
+    return rows;
+  };
+  const cellsOf = (row) => [...row.querySelectorAll(CELLS)].filter((cell) => cell.parentElement && cell.parentElement.closest("tr,[role=row]") === row);
+  const SET_ROLES = new Set(["listitem", "option", "tab", "treeitem"]);
+  const peers = (el, role) => {
+    const parent = el.parentElement;
+    if (!parent) return [];
+    let byRole = peersets.get(parent);
+    if (!byRole) {
+      byRole = {};
+      peersets.set(parent, byRole);
+    }
+    return byRole[role] || (byRole[role] = [...parent.children].filter((child) => roleOf(child) === role));
+  };
+  const treeLevel = (el) => {
+    let level = 1;
+    for (let up = el.parentElement; up && givenRole(up) !== "tree"; up = up.parentElement) if (givenRole(up) === "treeitem") level++;
+    return level;
+  };
+
+  // How an element stands: a comma list of words, some of them `name=number`.
   const stateOf = (el, role) => {
     const flags = [];
     const aria = (name) => el.getAttribute(name);
     if (role === "checkbox" || role === "radio" || role === "switch" || aria("aria-checked") !== null || aria("aria-pressed") !== null) {
-      const on = el.checked !== undefined ? el.checked : aria("aria-checked") === "true" || aria("aria-pressed") === "true";
-      flags.push(on ? "checked" : "unchecked");
+      if (aria("aria-checked") === "mixed" || aria("aria-pressed") === "mixed" || el.indeterminate === true) flags.push("mixed");
+      else {
+        const on = el.checked !== undefined ? el.checked : aria("aria-checked") === "true" || aria("aria-pressed") === "true";
+        flags.push(on ? "checked" : "unchecked");
+      }
     }
     if (aria("aria-selected") === "true" || el.selected === true) flags.push("selected");
     if (aria("aria-expanded") !== null) flags.push(aria("aria-expanded") === "true" ? "expanded" : "collapsed");
@@ -163,6 +274,40 @@
       if (details.tagName === "DETAILS") flags.push(details.open ? "expanded" : "collapsed");
     }
     if (el.disabled === true || aria("aria-disabled") === "true") flags.push("disabled");
+    const level = whole(aria("aria-level")) || (role === "treeitem" ? treeLevel(el) : 0);
+    if (level && !role.startsWith("heading")) flags.push("level=" + level);
+    if (SET_ROLES.has(role)) {
+      let size = whole(aria("aria-setsize"));
+      let at = whole(aria("aria-posinset"));
+      if (!size || !at) {
+        const all = peers(el, role);
+        if (all.length > 1) {
+          size = size || all.length;
+          at = at || all.indexOf(el) + 1;
+        }
+      }
+      if (size) flags.push("setsize=" + size);
+      if (at) flags.push("posinset=" + at);
+    }
+    if (role === "table") {
+      const rows = aria("aria-rowcount") === null ? null : parseInt(aria("aria-rowcount"), 10);
+      const columns = aria("aria-colcount") === null ? null : parseInt(aria("aria-colcount"), 10);
+      const all = rows > 0 && columns > 0 ? [] : rowsOf(el);
+      flags.push("rowcount=" + (rows > 0 ? rows : all.length));
+      flags.push("colcount=" + (columns > 0 ? columns : all.length ? cellsOf(all[0]).length : 0));
+    }
+    if (role === "row") {
+      const table = el.parentElement && el.parentElement.closest(TABLES);
+      const at = whole(aria("aria-rowindex")) || (el.rowIndex >= 0 && el.tagName === "TR" ? el.rowIndex + 1 : table ? rowsOf(table).indexOf(el) + 1 : 0);
+      if (at) flags.push("rowindex=" + at);
+    }
+    if (role === "cell" || role === "columnheader") {
+      const row = el.parentElement && el.parentElement.closest("tr,[role=row]");
+      const at = whole(aria("aria-colindex")) || (el.tagName === "TD" || el.tagName === "TH" ? el.cellIndex + 1 : row ? cellsOf(row).indexOf(el) + 1 : 0);
+      if (at) flags.push("colindex=" + at);
+    }
+    const sort = aria("aria-sort");
+    if (sort === "ascending" || sort === "descending") flags.push("sort=" + sort);
     let value = "-";
     if (role === "slider" || role === "progress") value = "+" + enc(clean(String(el.value ?? aria("aria-valuenow") ?? "")));
     return [flags.join(","), value];
@@ -202,6 +347,29 @@
     return !!top && !(el.contains(top) || top.contains(el));
   };
 
+  // ─── The modal ────────────────────────────────────────────────────────────────────────────────
+  // The element that shuts the rest of the page out, if one is open: a dialog that says it is modal,
+  // or a `<dialog>` shown as one. Of several, the last in the document is the one in front.
+  const modalOf = () => {
+    let found = null;
+    for (const el of document.querySelectorAll('[aria-modal="true"], dialog[open]')) {
+      if (el.inert || !shown(el)) continue;
+      if (el.tagName === "DIALOG") {
+        let modal = true;
+        try {
+          modal = el.matches(":modal");
+        } catch (_) {
+          // A web view that does not know `:modal` takes an open `<dialog>` for one.
+        }
+        if (!modal) continue;
+      } else if (roleOf(el) !== "dialog" && roleOf(el) !== "alertdialog") {
+        continue;
+      }
+      found = el;
+    }
+    return found;
+  };
+
   // ─── The look ─────────────────────────────────────────────────────────────────────────────────
   const snapshot = () => {
     const items = [];
@@ -209,13 +377,38 @@
     const scrolls = [];
     let more = false;
     let visited = 0;
+    rowsets = new Map();
+    peersets = new Map();
+    const modal = modalOf();
+    // How many things the page behind the modal would have said: not in the record.
+    let behind = 0;
     const spent = () => {
       if (++visited <= WALK_MOST) return false;
       more = true;
       return true;
     };
+    // Whether the element is of what the modal shows (the page behind is not).
+    const inFront = (el) => !modal || modal.contains(el);
+    const optional = (words) => (words ? "+" + enc(words) : "-");
+
+    // An item is told, under the item that holds it where one does (`parent`, the place of that in the
+    // record's items, or -1); what is behind the modal is only counted. The place of the item, or -1.
+    const tell = (el, role, words, flags, value, parent) => {
+      if (!inFront(el)) {
+        behind++;
+        return -1;
+      }
+      const about = role === "text" ? "" : describedBy(el);
+      const keys = role === "text" ? "" : clean(el.getAttribute("aria-keyshortcuts") || "");
+      const kind = role === "text" ? "" : roleDescriptionOf(el, role);
+      items.push(
+        ["item", numberOf(el), enc(role), enc(words), flags, value, box(el), parent < 0 ? "-" : parent, optional(kind), optional(about), optional(keys)].join("\t"),
+      );
+      return items.length - 1;
+    };
 
     const pushField = (el, kind) => {
+      if (!inFront(el)) return;
       if (fields.length >= FIELDS_MOST) {
         more = true;
         return;
@@ -228,7 +421,15 @@
       fields.push(["field", numberOf(el), kind, enc(labelOf(el)), enc(clean(el.getAttribute("placeholder") || "")), value, flag(covered(el)), box(el)].join("\t"));
     };
 
-    const walk = (el) => {
+    // Words of the element's own, which none of its children say.
+    const ownText = (el, parent) => {
+      let own = "";
+      for (const node of el.childNodes) if (node.nodeType === 3) own += " " + node.nodeValue;
+      own = clean(own);
+      if (own) tell(el, "text", own, "", "-", parent);
+    };
+
+    const walk = (el, parent) => {
       // Past the most there are no more words, but the fields and the boxes that scroll are still
       // what an agent acts on: they are told of to the end.
       if (items.length >= ITEMS_MOST) {
@@ -239,48 +440,59 @@
       if (spent() || el.nodeType !== 1) return;
       const t = el.tagName;
       if (t === "SCRIPT" || t === "STYLE" || t === "NOSCRIPT" || t === "TEMPLATE") return;
-      if (!shown(el)) return;
+      if (!shown(el) || el.inert) return;
 
       const kind = fieldKind(el);
       if (kind) {
         pushField(el, kind);
         return;
       }
-      if (scrolls.length < SCROLLS_MOST && scrollable(el)) scrolls.push(scrollRecord(el));
-      let role = roleOf(el);
-      if (!role && clickable(el) && clean(el.innerText || el.getAttribute("aria-label") || "")) role = "clickable";
-      if (role) {
-        const [flags, value] = stateOf(el, role);
-        items.push(["item", numberOf(el), enc(role), enc(nameOf(el)), flags, value, box(el)].join("\t"));
-        // What is inside it is its name: only the boxes and fields that scroll or type are its own.
-        if (!role.startsWith("heading") && role !== "image") for (const child of el.children) walkInside(child);
+      // What holds the modal is of the page behind it: it says nothing, and what is in it is read.
+      if (modal && el !== modal && el.contains(modal)) {
+        ownText(el, parent);
+        for (const child of el.children) walk(child, parent);
         return;
       }
-      // Words of the element's own, which none of its children say.
-      let own = "";
-      for (const node of el.childNodes) if (node.nodeType === 3) own += " " + node.nodeValue;
-      own = clean(own);
-      if (own) items.push(["item", numberOf(el), "text", enc(own), "", "-", box(el)].join("\t"));
-      for (const child of el.children) walk(child);
+      if (scrolls.length < SCROLLS_MOST && inFront(el) && scrollable(el)) scrolls.push(scrollRecord(el));
+      let role = roleOf(el);
+      // A box that answers a click and holds a dialog (a scrim) is not a thing to press: what is in
+      // it is read.
+      if (!role && clickable(el) && !el.querySelector('dialog,[role="dialog"],[role="alertdialog"]') && clean(el.innerText || el.getAttribute("aria-label") || "")) role = "clickable";
+      if (role) {
+        const holder = HOLDERS.has(role) || (MIXED.has(role) && holdsMore(el));
+        const [flags, value] = stateOf(el, role);
+        const at = tell(el, role, holder ? labelOf(el) : nameOf(el), flags, value, parent);
+        if (!holder) {
+          // What is inside it is its name: only the boxes and fields that scroll or type are its own.
+          if (!role.startsWith("heading") && role !== "image") for (const child of el.children) walkInside(child);
+          return;
+        }
+        const under = at >= 0 ? at : parent;
+        ownText(el, under);
+        for (const child of el.children) walk(child, under);
+        return;
+      }
+      ownText(el, parent);
+      for (const child of el.children) walk(child, parent);
     };
 
     // The fields and the boxes that scroll inside what is already named: no more words of it.
     const walkInside = (el) => {
-      if (spent() || el.nodeType !== 1 || !shown(el)) return;
+      if (spent() || el.nodeType !== 1 || !shown(el) || el.inert) return;
       const kind = fieldKind(el);
       if (kind) {
         pushField(el, kind);
         return;
       }
-      if (scrolls.length < SCROLLS_MOST && scrollable(el)) scrolls.push(scrollRecord(el));
+      if (scrolls.length < SCROLLS_MOST && inFront(el) && scrollable(el)) scrolls.push(scrollRecord(el));
       for (const child of el.children) walkInside(child);
     };
 
     const root = document.body || document.documentElement;
-    if (root) walk(root);
+    if (root) walk(root, -1);
     prune();
     const page = document.scrollingElement;
-    if (page && page.scrollHeight > page.clientHeight + 1) {
+    if (!modal && page && page.scrollHeight > page.clientHeight + 1) {
       const most = page.scrollHeight - page.clientHeight;
       scrolls.unshift(
         [
@@ -295,12 +507,13 @@
     }
 
     const active = document.activeElement;
-    const focus = active && active !== document.body ? numbers.get(active) || 0 : 0;
+    const focus = active && active !== document.body && inFront(active) ? numbers.get(active) || 0 : 0;
     const images = [...document.images].filter((img) => !img.complete && img.loading !== "lazy").length;
     const out = [
-      "v1",
+      "v2",
       ["rest", Math.round(performance.now() - changed), flag(images > 0), flag(document.readyState !== "complete")].join("\t"),
       "focus\t" + focus,
+      ...(modal ? ["behind\t" + behind] : []),
       ...items,
       ...fields,
       ...scrolls,
@@ -485,7 +698,25 @@
     return ok();
   };
 
-  window.__bateriAgent = Object.freeze({ snapshot, click, fill, type, press, scroll });
+  // Brings an element, or the `index`th row (from 1) of the list, the table or the outline it is, into
+  // view: the page scrolls to it. A row the page has not built (a list that builds what is in view) is
+  // no row; the detail says how many there are.
+  const reveal = (n, index) => {
+    const el = find(n);
+    if (!el) return err("gone");
+    let target = el;
+    if (index) {
+      rowsets = new Map();
+      const rows = rowsOf(el);
+      target = rows[index - 1];
+      if (!target) return err("norow", String(rows.length));
+    }
+    if (!shown(target)) return err("hidden");
+    target.scrollIntoView({ block: "center", inline: "nearest" });
+    return ok();
+  };
+
+  window.__bateriAgent = Object.freeze({ snapshot, click, fill, type, press, scroll, reveal });
 
   // Tell the app the frame is here, once the document can be read.
   const ready = () => {

@@ -54,6 +54,8 @@ pub fn perform(
         // A picture is a reading that ends in pixels: nothing is done to the page for it.
         Action::Read | Action::Wait { .. } | Action::Shot { .. } => Ok(Done::default()),
         Action::Command(title) => command(ctx, reading, title),
+        Action::CommandOn { target, title } => command_on(ctx, reading, target, title),
+        Action::Reveal { target, index } => reveal(ctx, reading, target, *index),
         Action::Click(word) => click(ctx, env, reading, word, 1),
         Action::DoubleClick(word) => click(ctx, env, reading, word, 2),
         Action::Fill { target, text } => fill(ctx, env, reading, target, text),
@@ -260,6 +262,76 @@ fn command(ctx: &Ctx<'_>, reading: &Reading, title: &str) -> Result<Done, Failur
             words(title, 40)
         ))),
     }
+}
+
+/// The command of `title` that the element `word` lists (`action "…"` in its reading), done on it.
+fn command_on(ctx: &Ctx<'_>, reading: &Reading, word: &str, title: &str) -> Result<Done, Failure> {
+    let id = target(reading, word)?;
+    let what = describe(reading, id);
+    let Some(item) = reading.items.iter().find(|item| item.id == Some(id)) else {
+        return Err(mistake(format!(
+            "{what} lists no commands: name an element whose line has `action`"
+        )));
+    };
+    let wanted = title.trim().to_lowercase();
+    let named: Vec<&pencere_view::Action> = item
+        .detail
+        .actions
+        .iter()
+        .filter(|action| action.title.trim().to_lowercase() == wanted)
+        .collect();
+    match named.as_slice() {
+        [] => {
+            let titles: Vec<String> = item
+                .detail
+                .actions
+                .iter()
+                .take(12)
+                .map(|action| format!("\"{}\"", words(&action.title, 40)))
+                .collect();
+            Err(mistake(format!(
+                "{what} has no command titled \"{}\"; it has: {}",
+                words(title, 40),
+                if titles.is_empty() {
+                    "none".to_owned()
+                } else {
+                    titles.join(", ")
+                }
+            )))
+        }
+        [one] if !one.enabled => Err(mistake(format!(
+            "the command \"{}\" of {what} is turned off now",
+            words(&one.title, 40)
+        ))),
+        [one] => {
+            ctx.handle.page().command_on(one.id, id);
+            Done::said(format!(
+                "ran the command \"{}\" on {what}",
+                words(&one.title, 40)
+            ))
+        }
+        _ => Err(mistake(format!(
+            "{what} has more than one command titled \"{}\": none is meant",
+            words(title, 40)
+        ))),
+    }
+}
+
+/// Brings the element `word` into view, or its `index`th row (from 1) where it is a list, a table or
+/// an outline: the page scrolls, loads what it has not built and moves its cursor there.
+fn reveal(
+    ctx: &Ctx<'_>,
+    reading: &Reading,
+    word: &str,
+    index: Option<u32>,
+) -> Result<Done, Failure> {
+    let id = target(reading, word)?;
+    let what = describe(reading, id);
+    ctx.handle.page().reveal(id, index);
+    Done::said(match index {
+        Some(row) => format!("brought row {row} of {what} into view"),
+        None => format!("brought {what} into view"),
+    })
 }
 
 fn pick(ctx: &Ctx<'_>, env: &Env<'_>, entry: &str) -> Result<Done, Failure> {

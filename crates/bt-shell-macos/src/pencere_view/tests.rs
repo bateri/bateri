@@ -1751,12 +1751,21 @@ fn the_agents_script_encodes_what_the_page_says_and_runs_nothing_of_it() {
     // Where the page's words go into a record they go through the encoder.
     for words in [
         "enc(role)",
-        "enc(nameOf(el))",
-        "enc(own)",
+        "enc(words)",
         "enc(labelOf(el))",
+        // What the page calls a kind, what it says it is for, and its keys: `+` and the encoded text.
+        "\"+\" + enc(words)",
     ] {
         assert!(source.contains(words), "{words}");
     }
+    // The item line is told in one place, and every word of the page in it is encoded there.
+    let tell = &source[source.find("const tell = ").expect("tell")..];
+    let tell = &tell[..tell.find("return items.length - 1;").expect("tell's end")];
+    assert!(
+        tell.contains("enc(role), enc(words)")
+            && tell.contains("optional(kind), optional(about), optional(keys)"),
+        "{tell}"
+    );
     // Only the program's frame answers: a child of the top, never the top and never a frame of the
     // page's own.
     assert!(source.contains("window === window.top || window.parent !== window.top"));

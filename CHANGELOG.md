@@ -26,6 +26,8 @@ of every installed copy. A version without a section is not released.
 
 - **VoiceOver reads a program's view as a tree.** A dialog, a row or a tab that holds buttons is one element with them inside it. A table is a table, with its header, its sorted column and "row 5 of 200"; a tree is an outline with levels and open or closed rows; lists, tabs and a half-checked box say what they are. While a dialog is open VoiceOver sees the dialog and nothing behind it, and an alert the program raises is read out as it comes up. What a program lists for an element ("Kill", "Restart") is in VoiceOver's actions menu, and moving VoiceOver to a row that is partly or wholly out of view scrolls the row into view.
 
+- **`bateri view` reads a view as a tree, and does more with it.** A line indented under another is inside it (a button under a dialog, a cell under a row of a table), the page behind an open dialog is not listed (one line says how many items it has), and a line says how an element stands: `mixed`, `level 2`, `3 of 12`, `row 5`, `rows 200, columns 4`, `sorted ascending`. `command REF TITLE` does a command that an element lists (`action "Kill"` on its line), `reveal REF [ROW]` scrolls an element, or a row of a list or a table the page has not drawn yet, into view. `--json` has a `format` field (2 now; a reading without it is the earlier shape), and an item's `parent` is its place in `items`. A web view is read by the same rules: ARIA roles, a dialog that says it is modal (`aria-modal`, a `<dialog>` shown as a modal) and `inert`, and tables, lists and trees.
+
 ### Fixed
 
 - **A password box no longer closes bateri.** Opening linearpen without an API key, or any program screen that asks for a password, quit bateri as soon as the box was ready for typing.

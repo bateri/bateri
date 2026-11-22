@@ -1312,6 +1312,9 @@ fn run(dir: &Path) {
     section("an agent in a web view", &mut failures, || {
         agent_in_a_web_view(mtm, &window, frame_rect, dir);
     });
+    section("an agent reads a web page as a tree", &mut failures, || {
+        agent_reads_a_web_page_as_a_tree(mtm, &window, frame_rect, dir);
+    });
     // Last: it registers the app's fonts for this process, and with them the default font of
     // every pane opened after it.
     section("the app's fonts in the page", &mut failures, || {
@@ -2175,6 +2178,13 @@ fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSR
     // What a web view does not have is told.
     for (action, word) in [
         (Action::Command("x".into()), "commands"),
+        (
+            Action::CommandOn {
+                target: button.clone(),
+                title: "x".into(),
+            },
+            "commands",
+        ),
         (Action::Menu(button.clone()), "menu"),
         (Action::Text(name.clone()), "`text`"),
     ] {
@@ -2219,6 +2229,165 @@ fn agent_in_a_web_view(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSR
         pointer
     });
     assert_eq!(keyboard, now, "an agent moved the window's keyboard");
+
+    program.bye(&token);
+    until("the view to go", || !covered(&pane));
+    pane.close();
+}
+
+/// A page of what a screen reader reads as a tree: a list with a link, a table with a sorted header and
+/// two rows of a long one, tabs, a box that is half checked, and a dialog that says it is modal, held
+/// by a scrim that answers a click, shown by a button. Its script is the page's own.
+const TREE_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>tree</title></head>\
+<body><h1>Tree page</h1><button id=open>Open settings</button>\
+<ul aria-label=\"Files\"><li><a href=\"#a\">alpha</a></li><li>beta</li></ul>\
+<table aria-label=\"Processes\" aria-rowcount=\"200\"><thead><tr><th aria-sort=\"ascending\">CPU</th><th>Name</th></tr></thead>\
+<tbody><tr aria-rowindex=\"5\"><td>12</td><td>node</td></tr><tr><td>3</td><td>bash</td></tr></tbody></table>\
+<div role=tablist aria-label=\"Views\"><button role=tab aria-selected=true>One</button><button role=tab>Two</button></div>\
+<div role=checkbox aria-checked=mixed aria-label=\"All\" tabindex=0></div>\
+<div id=scrim style=\"display:none;position:fixed;left:0;top:0;right:0;bottom:0\">\
+<div id=dlg role=dialog aria-modal=true aria-label=\"Settings\" style=\"margin:40px;padding:10px;background:#eee\">\
+<h2>Settings</h2><button id=ok>OK</button></div></div><script src=app.js></script></body></html>";
+
+const TREE_SCRIPT: &str = "var $=function(id){return document.getElementById(id)},started=false;\
+$('open').addEventListener('click',function(){$('scrim').style.display='block'});\
+$('scrim').addEventListener('click',function(){});\
+$('ok').addEventListener('click',function(){$('scrim').style.display='none'});\
+window.addEventListener('message',function(e){if(e.source!==window.parent)return;var m=e.data;\
+if(m.context){if(started)return;started=true;\
+window.parent.postMessage({call:{id:1,method:'hello',params:{}}},'*')}});";
+
+/// How deep the line that has `words` is in a reading: its name and two spaces, then two for each group
+/// it is under.
+fn depth_of(reading: &str, words: &str) -> usize {
+    let line = reading
+        .lines()
+        .find(|line| line.contains(words))
+        .unwrap_or_else(|| panic!("no line with {words} in\n{reading}"));
+    let rest = &line[6..];
+    (rest.len() - rest.trim_start().len() - 2) / 2
+}
+
+/// A web page is read by the rules of a native one: what holds others is one item with them under it,
+/// a table is a table (its rows counted for the whole, its sorted header, its places), and with a
+/// dialog that says it is modal the page behind is not read, though a scrim that answers a click holds
+/// the dialog. Bringing a row into view goes to the page; a command of an element is a native page's.
+fn agent_reads_a_web_page_as_a_tree(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    let files = [
+        ("index.html", "text/html", TREE_PAGE.as_bytes()),
+        ("app.js", "text/javascript", TREE_SCRIPT.as_bytes()),
+    ];
+    let (pane, mut program) = open_pane(mtm, window, frame_rect, &dir.join("tree"), PANE + 8);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello();
+    program.open(&token, &files, None);
+    program.supply(&files);
+    watch_it_start(&pane, &mut program);
+
+    // **The tree.** A list is a list with its items under it and a link under its item; a table has
+    // its whole count, its header under it, its sorted column and the place of its row.
+    let read = said(&pane, Action::Read);
+    for needle in [
+        "list \"Files\"",
+        "listitem \"beta\"",
+        "link \"alpha\"",
+        "table \"Processes\"",
+        "rows 200, columns 2",
+        "columnheader \"CPU\"",
+        "sorted ascending",
+        "cell \"node\"",
+        "row 5",
+        "tablist \"Views\"",
+        "tab \"One\"",
+        "1 of 2",
+        "mixed",
+    ] {
+        assert!(read.contains(needle), "{needle:?} is not in:\n{read}");
+    }
+    assert!(!read.contains("behind the modal"), "{read}");
+    assert_eq!(depth_of(&read, "list \"Files\""), 0, "{read}");
+    assert_eq!(depth_of(&read, "listitem \"beta\""), 1, "{read}");
+    assert_eq!(depth_of(&read, "link \"alpha\""), 2, "{read}");
+    assert_eq!(depth_of(&read, "table \"Processes\""), 0, "{read}");
+    assert!(
+        depth_of(&read, "columnheader \"CPU\"") > depth_of(&read, "table \"Processes\""),
+        "{read}"
+    );
+    // The JSON has the shape's number and where each item is held.
+    let json = match view_of(&pane, Action::Read, Format::Json) {
+        Reply::Text(text) => text,
+        other => panic!("{other:?}"),
+    };
+    assert!(json.contains("\"format\":2"), "{json}");
+    // The listitems are held by the list, which is the third item of the reading.
+    assert!(json.contains("\"parent\":2"), "{json}");
+
+    // **Bringing a row into view** goes to the page: the second row of the table, and a row it has
+    // not built is no row.
+    let table = ref_of(&read, "table \"Processes\"");
+    let brought = said(
+        &pane,
+        Action::Reveal {
+            target: table.clone(),
+            index: Some(2),
+        },
+    );
+    assert!(
+        brought.starts_with(&format!(
+            "brought row 2 of table \"Processes\" ({table}) into view\n"
+        )),
+        "{brought}"
+    );
+    let far = refused(
+        &pane,
+        Action::Reveal {
+            target: table.clone(),
+            index: Some(99),
+        },
+    );
+    assert!(far.contains("no such row"), "{far}");
+
+    // **A dialog that says it is modal** shuts the page behind it out; a scrim that answers a click and
+    // holds the dialog does not swallow what is in it.
+    let open = ref_of(&read, "button \"Open settings\"");
+    let opened = said(&pane, Action::Click(open));
+    assert!(opened.contains("dialog \"Settings\""), "{opened}");
+    assert!(
+        opened.contains("button \"OK\""),
+        "the scrim swallowed the dialog: {opened}"
+    );
+    assert!(
+        depth_of(&opened, "button \"OK\"") > depth_of(&opened, "dialog \"Settings\""),
+        "{opened}"
+    );
+    assert!(
+        opened.contains("note: behind the modal in front,")
+            && opened.contains("of the page, not read"),
+        "{opened}"
+    );
+    // (The line that says what was clicked names the button, which is not an item of the reading.)
+    let items = &opened[opened.find("items:").expect("items")..];
+    for gone in [
+        "table \"Processes\"",
+        "list \"Files\"",
+        "Open settings",
+        "tab \"One\"",
+    ] {
+        assert!(
+            !items.contains(gone),
+            "{gone} is read behind the modal:\n{opened}"
+        );
+    }
+    // Closed, the page is read again, whole.
+    let ok = ref_of(&opened, "button \"OK\"");
+    let closed = said(&pane, Action::Click(ok));
+    assert!(closed.contains("table \"Processes\""), "{closed}");
+    assert!(!closed.contains("behind the modal"), "{closed}");
 
     program.bye(&token);
     until("the view to go", || !covered(&pane));

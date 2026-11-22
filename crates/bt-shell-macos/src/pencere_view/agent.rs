@@ -428,6 +428,10 @@ impl WebRun {
                 };
                 format!("return {agent}.scroll({number}, \"{way}\", {screens});")
             }
+            Act::Reveal { number, index } => match index {
+                Some(row) => format!("return {agent}.reveal({number}, {row});"),
+                None => format!("return {agent}.reveal({number}, 0);"),
+            },
         })
     }
 

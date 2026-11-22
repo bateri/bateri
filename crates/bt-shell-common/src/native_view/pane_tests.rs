@@ -2566,3 +2566,124 @@ fn a_screen_reader_is_given_the_table_and_the_outline_and_with_a_dialog_in_front
         "the page behind is not in the tree: {items:?}"
     );
 }
+
+/// A list of processes: each row lists the commands it can be given (`Stop`, `Restart` that is off now),
+/// and the page says which row a command was done on.
+const PROCESSES: &str = r#"
+local said = {}
+return {
+    render = function()
+        local list = pencere.div():id("procs"):role("list"):label("Processes"):h(100):w(300):scroll()
+        for n = 1, 3 do
+            list:child(pencere.div():id("p" .. n):role("listitem"):label("proc " .. n):press("p" .. n):h(20)
+                :command("stop", "Stop", {})
+                :command("restart", "Restart", {}, n ~= 2)
+                :child(pencere.text("proc " .. n)))
+        end
+        return pencere.div():size_full():child(list):child(pencere.text("said: " .. table.concat(said, "|")))
+    end,
+    handle = function(event)
+        if event.type == "command" then
+            said[#said + 1] = event.id .. " on " .. tostring(event.target)
+            return { redraw = true }
+        end
+        return true
+    end,
+}
+"#;
+
+/// `command REF TITLE` does the command an element lists, on that element, found by its title in any
+/// case; one that is off, one the element does not list and an element that lists none say so; `reveal`
+/// goes to the page as it was asked.
+#[test]
+fn a_command_an_element_lists_is_done_on_it_by_its_title_and_the_ones_it_does_not_have_say_so() {
+    let mut rig = PaneRig::open(PROCESSES);
+    rig.frame(0.0);
+    rig.settle(0.1);
+    let fields = HostFields::holding(&[]);
+    let read = answered(ask(&mut rig, true, Action::Read, &fields));
+    assert!(
+        read.contains("action \"Stop\"") && read.contains("action \"Restart\""),
+        "{read}"
+    );
+    let second = name_of(&read, "listitem \"proc 2\"");
+    let done = answered(ask(
+        &mut rig,
+        true,
+        Action::CommandOn {
+            target: second.clone(),
+            title: "sTOP".into(),
+        },
+        &fields,
+    ));
+    assert!(
+        done.starts_with(&format!(
+            "ran the command \"Stop\" on listitem \"proc 2\" ({second})\n"
+        )),
+        "{done}"
+    );
+    assert!(done.contains("said: stop on"), "{done}");
+    let off = refused(ask(
+        &mut rig,
+        true,
+        Action::CommandOn {
+            target: second.clone(),
+            title: "Restart".into(),
+        },
+        &fields,
+    ));
+    assert!(off.contains("turned off"), "{off}");
+    let none = refused(ask(
+        &mut rig,
+        true,
+        Action::CommandOn {
+            target: second.clone(),
+            title: "Kill".into(),
+        },
+        &fields,
+    ));
+    assert!(
+        none.contains("has no command titled \"Kill\"")
+            && none.contains("\"Stop\"")
+            && none.contains("\"Restart\""),
+        "{none}"
+    );
+    let list = name_of(&read, "list \"Processes\"");
+    let plain = refused(ask(
+        &mut rig,
+        true,
+        Action::CommandOn {
+            target: list,
+            title: "Stop".into(),
+        },
+        &fields,
+    ));
+    assert!(plain.contains("has no command titled"), "{plain}");
+    // An element that is gone, or never was, is not found.
+    let unknown = refused(ask(
+        &mut rig,
+        true,
+        Action::CommandOn {
+            target: "zzzzzz".into(),
+            title: "Stop".into(),
+        },
+        &fields,
+    ));
+    assert!(unknown.contains("no element"), "{unknown}");
+
+    let revealed = answered(ask(
+        &mut rig,
+        true,
+        Action::Reveal {
+            target: second.clone(),
+            index: None,
+        },
+        &fields,
+    ));
+    assert!(
+        revealed.starts_with(&format!(
+            "brought listitem \"proc 2\" ({second}) into view\n"
+        )),
+        "{revealed}"
+    );
+}

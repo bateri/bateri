@@ -11,7 +11,10 @@
 //! writer ([`super::written`]): its elements are numbered by the script, a number is an [`Id`], and
 //! the ref an agent types is derived from it as for a native page's. A web view has no commands, no
 //! menu and no editor of the kit's: `command`, `menu`, `pick` and `text` say so; its text fields and
-//! its editable boxes are fields, which `fill` and `type` reach.
+//! its editable boxes are fields, which `fill` and `type` reach. What a screen reader reads is what is
+//! read (`format` 2): an element that holds others is one item with them under it (`parent`), the page
+//! behind an open modal is not read (`behind` counts it), and `reveal` scrolls an element, or a row of a
+//! list or a table, into view.
 //!
 //! A web page is the program's, and what it says is untrusted words: they are cleaned where the
 //! reading is written ([`pencere_drive::reading::clean`]), and a password field's value is never
@@ -24,7 +27,7 @@ use pencere_drive::{Reading, Rest};
 use super::act::{describe, target};
 use super::words;
 use crate::agent::message::{Failure, Kind};
-use crate::native_view::{FieldKind, Id, Key, KeyConvention, Rect, Shortcut, State};
+use crate::native_view::{FieldKind, Id, Key, KeyConvention, Rect, Shortcut, Sort, State};
 use kablo_bateri::view::{Action, Way};
 use pencere_view::Detail;
 
@@ -35,8 +38,10 @@ pub const QUIET_MS: u32 = 300;
 /// listed it, and no further than this.
 const LINES_MOST: usize = 4000;
 
-/// The first line of a record: its version.
-pub const RECORD: &str = "v1";
+/// The first line of a record: its version. `v1` (a flat list of items, no `behind`) is no longer
+/// read: the script and this reader are one build's, so that a record of the other is a view that was
+/// not reloaded after an update.
+pub const RECORD: &str = "v2";
 
 fn mistake(text: impl Into<String>) -> Failure {
     Failure::new(Kind::Failed, text)
@@ -51,25 +56,37 @@ fn mistake(text: impl Into<String>) -> Failure {
 /// (`encodeURIComponent`), so no tab, newline or control character of the page can end one early:
 ///
 /// ```text
-/// v1
+/// v2
 /// rest <quiet milliseconds> <images 0|1> <loading 0|1>
 /// focus <number or 0>
+/// behind <how many items the page has behind the modal that is open>
 /// note <words>
-/// item <number> <role> <words> <flags> <value> <x> <y> <width> <height>
+/// item <number> <role> <words> <flags> <value> <x> <y> <width> <height> <parent> <role description> <description> <keys>
 /// field <number> <line|lines|secret> <label> <hint> <value> <covered 0|1> <x> <y> <width> <height>
 /// scroll <number> <percent> <above 0|1> <below 0|1> <x> <y> <width> <height>
 /// ```
 ///
-/// An item's flags are a comma list of `checked`, `unchecked`, `selected`, `expanded`, `collapsed`
-/// and `disabled`; its value and a field's are `-` for none and `+` and the text otherwise.
+/// An item's flags are a comma list of `checked`, `unchecked`, `mixed`, `selected`, `expanded`,
+/// `collapsed` and `disabled`, and of `level=`, `setsize=`, `posinset=`, `rowcount=`, `colcount=`,
+/// `rowindex=`, `colindex=` and `sort=ascending|descending` with their numbers; its `parent` is `-`
+/// or the place of the item that holds it among the record's items (from 0); its value, a field's,
+/// its role description, its description and its keys are `-` for none and `+` and the text
+/// otherwise.
 ///
 /// # Errors
 ///
 /// The text is not a record: the script answered something else.
 pub fn parse(record: &str) -> Result<Reading, String> {
     let mut lines = record.lines();
-    if lines.next() != Some(RECORD) {
-        return Err("the view's script gave an answer that is not a record".to_owned());
+    match lines.next() {
+        Some(RECORD) => {}
+        Some("v1") => {
+            return Err(
+                "the view's script answered in an older record (v1): reload the pane, or update bateri"
+                    .to_owned(),
+            );
+        }
+        _ => return Err("the view's script gave an answer that is not a record".to_owned()),
     }
     let mut reading = Reading::default();
     let mut focus = 0u64;
@@ -84,18 +101,45 @@ pub fn parse(record: &str) -> Result<Reading, String> {
             }
             ["focus", n] => focus = n.parse().unwrap_or(0),
             ["note", text] => reading.notes.push(decode(text)),
-            ["item", n, role, words, flags, value, x, y, w, h] => {
+            ["behind", count] => reading.behind = count.parse().unwrap_or(0),
+            [
+                "item",
+                n,
+                role,
+                words,
+                flags,
+                value,
+                x,
+                y,
+                w,
+                h,
+                parent,
+                kind,
+                description,
+                keys,
+            ] => {
                 let Ok(n) = n.parse::<u64>() else { continue };
+                let role = decode(role);
                 reading.items.push(Item {
-                    role: decode(role),
+                    // What a click answers, though it says nothing of it.
+                    pressable: role == "clickable",
+                    role,
                     id: Some(Id::new(n)),
                     words: decode(words),
                     state: state_of(flags, optional(value)),
                     rect: rect_of(x, y, w, h),
-                    pressable: false,
-                    parent: None,
+                    // Only what is already listed can hold it: a place that is not is none.
+                    parent: parent
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|place| *place < reading.items.len()),
                     behind: false,
-                    detail: Detail::default(),
+                    detail: Detail {
+                        description: optional(description),
+                        keys: optional(keys),
+                        role_description: optional(kind),
+                        actions: Vec::new(),
+                    },
                 });
             }
             ["field", n, kind, label, hint, value, covered, x, y, w, h] => {
@@ -161,7 +205,31 @@ fn optional(word: &str) -> Option<String> {
 
 fn state_of(flags: &str, value: Option<String>) -> State {
     let has = |flag: &str| flags.split(',').any(|word| word == flag);
+    // `name=number`: a whole number from 1.
+    let number = |name: &str| {
+        flags.split(',').find_map(|word| {
+            word.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix('='))
+                .and_then(|digits| digits.parse::<u32>().ok())
+                .filter(|number| *number >= 1)
+        })
+    };
     State {
+        mixed: has("mixed"),
+        level: number("level"),
+        setsize: number("setsize"),
+        posinset: number("posinset"),
+        rowcount: number("rowcount"),
+        colcount: number("colcount"),
+        rowindex: number("rowindex"),
+        colindex: number("colindex"),
+        sort: if has("sort=ascending") {
+            Some(Sort::Ascending)
+        } else if has("sort=descending") {
+            Some(Sort::Descending)
+        } else {
+            None
+        },
         checked: if has("checked") {
             Some(true)
         } else if has("unchecked") {
@@ -179,7 +247,6 @@ fn state_of(flags: &str, value: Option<String>) -> State {
         },
         disabled: has("disabled"),
         value,
-        ..State::default()
     }
 }
 
@@ -335,6 +402,11 @@ pub enum Act {
         way: Way,
         screens: u32,
     },
+    /// Scroll an element, or the `index`th row (from 1) of the list or table it is, into view.
+    Reveal {
+        number: u64,
+        index: Option<u32>,
+    },
 }
 
 /// An action made into what the script is asked and what the answer says was done.
@@ -357,7 +429,7 @@ fn not_there(verb: &str) -> Failure {
 #[must_use]
 pub fn unsupported(action: &Action) -> Option<Failure> {
     match action {
-        Action::Command(_) => Some(not_there("commands")),
+        Action::Command(_) | Action::CommandOn { .. } => Some(not_there("commands")),
         Action::Menu(_) | Action::Pick(_) => Some(not_there("menu")),
         Action::Text(_) => Some(not_there("`text`: the reading has the value of each field")),
         _ => None,
@@ -379,8 +451,28 @@ pub fn plan(action: &Action, reading: &Reading) -> Result<Planned, Failure> {
     let number = |id: Id| id.number();
     match action {
         Action::Read | Action::Wait { .. } | Action::Shot { .. } => Ok(nothing()),
-        Action::Command(_) | Action::Menu(_) | Action::Pick(_) | Action::Text(_) => {
-            Err(unsupported(action).unwrap_or_else(|| not_there("action")))
+        Action::Command(_)
+        | Action::CommandOn { .. }
+        | Action::Menu(_)
+        | Action::Pick(_)
+        | Action::Text(_) => Err(unsupported(action).unwrap_or_else(|| not_there("action"))),
+        Action::Reveal {
+            target: word,
+            index,
+        } => {
+            let id = target(reading, word)?;
+            let what = describe(reading, id);
+            let said = match index {
+                Some(row) => format!("brought row {row} of {what} into view"),
+                None => format!("brought {what} into view"),
+            };
+            Ok(Planned {
+                act: Act::Reveal {
+                    number: number(id),
+                    index: *index,
+                },
+                said: Some(said),
+            })
         }
         Action::Click(word) | Action::DoubleClick(word) => {
             let id = target(reading, word)?;
@@ -496,6 +588,10 @@ pub fn failure(code: &str, detail: &str, what: &str) -> Failure {
         ),
         "notfield" => format!("{what} is neither a text field nor an editable box"),
         "nooption" => format!("{what} has no such option; it has: {}", words(&detail, 200)),
+        "norow" => format!(
+            "{what} has no such row; the page has built {} of them: scroll to bring more into the page, then reveal again",
+            words(&detail, 20)
+        ),
         "nofocus" => "the keyboard is in no field of the page: click or fill one first".to_owned(),
         other => format!("the view's script could not do it ({})", words(other, 40)),
     })
@@ -507,7 +603,9 @@ pub fn failure(code: &str, detail: &str, what: &str) -> Failure {
 pub fn named(action: &Action, reading: &Reading) -> Option<String> {
     let word = match action {
         Action::Click(word) | Action::DoubleClick(word) => word,
-        Action::Fill { target, .. } | Action::Scroll { target, .. } => target,
+        Action::Fill { target, .. }
+        | Action::Scroll { target, .. }
+        | Action::Reveal { target, .. } => target,
         _ => return None,
     };
     target(reading, word).ok().map(|id| describe(reading, id))
@@ -537,15 +635,15 @@ mod tests {
             "rest\t450\t0\t0".to_owned(),
             "focus\t7".to_owned(),
             format!(
-                "item\t3\tbutton\t{}\tdisabled\t-\t10\t20\t80\t24",
+                "item\t3\tbutton\t{}\tdisabled\t-\t10\t20\t80\t24\t-\t-\t-\t-",
                 t("Save it")
             ),
             format!(
-                "item\t4\ttext\t{}\t\t-\t0\t0\t100\t12",
+                "item\t4\ttext\t{}\t\t-\t0\t0\t100\t12\t-\t-\t-\t-",
                 t("Line one\nLine\ttwo")
             ),
             format!(
-                "item\t5\tcheckbox\t{}\tchecked\t-\t0\t0\t10\t10",
+                "item\t5\tcheckbox\t{}\tchecked\t-\t0\t0\t10\t10\t-\t-\t-\t-",
                 t("Agree")
             ),
             format!(
@@ -601,6 +699,97 @@ mod tests {
         );
     }
 
+    /// A page of a dialog over a page: the dialog holds a heading and a row of a table with a sorted
+    /// header, the page behind it is counted and not read.
+    fn structured() -> String {
+        let t = enc;
+        [
+            RECORD.to_owned(),
+            "rest\t450\t0\t0".to_owned(),
+            "focus\t0".to_owned(),
+            "behind\t12".to_owned(),
+            format!(
+                "item\t1\tdialog\t{}\t\t-\t0\t0\t300\t200\t-\t-\t+{}\t-",
+                t("Settings"),
+                t("Changes are saved when it closes")
+            ),
+            format!(
+                "item\t2\ttable\t{}\trowcount=200,colcount=2\t-\t0\t0\t300\t100\t0\t-\t-\t-",
+                t("Processes")
+            ),
+            format!(
+                "item\t3\tcolumnheader\t{}\tsort=ascending,colindex=1\t-\t0\t0\t150\t20\t1\t-\t-\t-",
+                t("CPU")
+            ),
+            format!(
+                "item\t4\tcell\t{}\trowindex=5,colindex=2,level=3,setsize=9,posinset=4\t-\t0\t0\t150\t20\t1\t+{}\t-\t+{}",
+                t("node"),
+                t("process"),
+                t("cmd+k")
+            ),
+            format!(
+                "item\t5\tcheckbox\t{}\tmixed\t-\t0\t0\t10\t10\t99\t-\t-\t-",
+                t("All")
+            ),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn a_record_of_the_second_version_says_what_holds_what_and_what_is_behind_the_modal() {
+        let reading = parse(&structured()).expect("a record");
+        assert_eq!(reading.behind, 12);
+        assert_eq!(reading.items.len(), 5);
+        assert_eq!(reading.items[0].parent, None);
+        assert_eq!(reading.items[0].role, "dialog");
+        assert_eq!(
+            reading.items[0].detail.description.as_deref(),
+            Some("Changes are saved when it closes")
+        );
+        assert_eq!(reading.items[1].parent, Some(0));
+        assert_eq!(reading.items[1].state.rowcount, Some(200));
+        assert_eq!(reading.items[1].state.colcount, Some(2));
+        assert_eq!(reading.items[2].parent, Some(1));
+        assert_eq!(reading.items[2].state.sort, Some(Sort::Ascending));
+        assert_eq!(reading.items[2].state.colindex, Some(1));
+        let cell = &reading.items[3];
+        assert_eq!(cell.state.rowindex, Some(5));
+        assert_eq!(cell.state.level, Some(3));
+        assert_eq!(
+            (cell.state.setsize, cell.state.posinset),
+            (Some(9), Some(4))
+        );
+        assert_eq!(cell.detail.role_description.as_deref(), Some("process"));
+        assert_eq!(cell.detail.keys.as_deref(), Some("cmd+k"));
+        // A place that is not of an item listed before it holds nothing.
+        assert!(reading.items[4].state.mixed);
+        assert_eq!(reading.items[4].state.checked, None);
+        assert_eq!(reading.items[4].parent, None);
+        // The reading is written as a native page's: indented under what holds it, and the page behind
+        // is one line.
+        let written = reading.text();
+        assert!(
+            written.contains("note: behind the modal in front, 12 items of the page, not read"),
+            "{written}"
+        );
+        // The depth of a line: its ref and two spaces, then two more for each group it is under.
+        let depth = |words: &str| {
+            let line = written
+                .lines()
+                .find(|line| line.contains(words))
+                .unwrap_or_else(|| panic!("{words}: {written}"));
+            let rest = &line[6..];
+            (rest.len() - rest.trim_start().len() - 2) / 2
+        };
+        assert_eq!(depth("dialog \"Settings\""), 0, "{written}");
+        assert_eq!(depth("table \"Processes\""), 1, "{written}");
+        assert_eq!(depth("columnheader \"CPU\""), 2, "{written}");
+        assert!(written.contains("sorted ascending"), "{written}");
+        assert!(written.contains("rows 200, columns 2"), "{written}");
+        let json = reading.json();
+        assert!(json.contains("\"format\":2"), "{json}");
+    }
+
     #[test]
     fn a_page_is_at_rest_when_its_document_has_been_quiet_for_the_time_and_nothing_loads() {
         let rest = |quiet: u32, images: u32, loading: u32| {
@@ -622,8 +811,12 @@ mod tests {
     #[test]
     fn what_is_not_a_record_is_refused_and_a_focus_that_is_no_field_is_the_page() {
         assert!(parse("").is_err());
-        assert!(parse("v2\nrest\t1\t0\t0").is_err());
+        assert!(parse("v3\nrest\t1\t0\t0").is_err());
         assert!(parse("<html>").is_err());
+        // The first record had a flat list and no `behind`: it is said so, not read as a page with no
+        // items.
+        let old = parse("v1\nrest\t1\t0\t0").expect_err("an older record");
+        assert!(old.contains("older record (v1)"), "{old}");
         let reading = parse(&format!("{RECORD}\nfocus\t99")).expect("a record");
         assert_eq!(reading.focus, Focus::Page);
     }

@@ -362,6 +362,15 @@ mod tests {
         assert!(drives(&Action::Click("k3f9qa".into())));
         assert!(drives(&Action::Menu("k3f9qa".into())));
         assert!(drives(&Action::Type("a".into())));
+        // A command an element lists is judged as a click is; bringing a row into view is a scroll.
+        assert!(drives(&Action::CommandOn {
+            target: "k3f9qa".into(),
+            title: "Kill".into()
+        }));
+        assert!(drives(&Action::Reveal {
+            target: "k3f9qa".into(),
+            index: Some(3)
+        }));
     }
 
     #[test]
