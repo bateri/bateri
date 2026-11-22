@@ -2410,7 +2410,7 @@ fn caps_off(field: &NSTextField) -> Option<f64> {
 /// hint at rest and with the keyboard in its field, a text while it is typed and after. (AppKit's
 /// single-line cell drew the text at rest at a baseline of its own, set by the control's size: a
 /// point or more above in most of the terminal's faces, four at 17 points, and lower once typed
-/// into.) A line takes a line break put in it as a space; a secret's hint stands as a line's.
+/// into.) A line takes a line break put in it as a space, and a secret takes the keyboard.
 fn field_text_on_its_baseline(
     mtm: MainThreadMarker,
     window: &NSWindow,
@@ -2498,9 +2498,16 @@ fn field_text_on_its_baseline(
         worst = worst.max(look("line's text while typed", line).abs());
         window.makeFirstResponder(None);
         worst = worst.max(look("line's text", line).abs());
-        // At rest only: the keyboard in a secret is a question of its own (its cell is a secure
-        // one in a plain field, which AppKit may refuse an editor).
         worst = worst.max(look("secret's hint", secret).abs());
+        // A secret takes the keyboard and an editor (a plain field with a secure cell made AppKit
+        // throw here, and the throw ended the application).
+        assert!(
+            window.makeFirstResponder(Some(secret)),
+            "the secret takes the keyboard"
+        );
+        assert!(secret.currentEditor().is_some(), "the secret has an editor");
+        worst = worst.max(look("secret's hint with the keyboard", secret).abs());
+        window.makeFirstResponder(None);
         assert!(
             worst <= 0.5,
             "{family} at {size}: a field's capitals stand off their middle: {offs:?}"
