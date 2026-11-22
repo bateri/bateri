@@ -1881,6 +1881,48 @@ fn what_the_helper_deleted_and_the_mac_did_not_know_is_said_to_the_home_once_and
 }
 
 #[test]
+fn two_panes_that_number_their_clearings_alike_are_each_told_what_the_helper_deleted() {
+    // Every pane numbers the clearings of its page from the same start, and a profile is shared by
+    // panes: the request alone is not one clearing, the browser with it is.
+    let (mut engine, said, asked, _gate, root) = rig("two-panes");
+    engine.handle(Input::Attach(BROWSER));
+    engine.connected(Box::new(said.clone()));
+    engine.handle(Input::Home(opened(Mode::Full, 0)));
+    engine.handle(Input::Home(Server::CaughtUp { head: 0 }));
+    let seen = reply(&mut engine, &asked, 0);
+    let _ = reply(&mut engine, &asked, seen);
+    for browser in [BROWSER, BROWSER + 1] {
+        engine.handle(Input::ClearSite {
+            browser,
+            req: 501,
+            host: "site.test".into(),
+        });
+    }
+    for (browser, name) in [(BROWSER + 1, "second"), (BROWSER, "first")] {
+        engine.handle(Input::Helper(Event::SiteCleared {
+            browser,
+            req: 501,
+            records: vec![cookie(name, None)],
+            error: None,
+        }));
+    }
+    let first = puts_of(&said);
+    assert_eq!(first.len(), 1, "one is in flight: {first:?}");
+    engine.handle(Input::Home(Server::PutReply(PutReply {
+        req: first[0].0,
+        result: PutResult::Done,
+        seq: 6,
+    })));
+    let all = puts_of(&said);
+    assert_eq!(
+        all.len(),
+        2,
+        "both panes' deletions are told to the home: {all:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn the_requests_of_a_held_profile_wait_in_the_proxy_and_the_others_go() {
     use crate::browser::profile::ProfileKey;
     use crate::browser::proxy::Holds;

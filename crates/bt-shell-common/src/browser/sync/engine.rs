@@ -144,8 +144,6 @@ enum Pending {
         removed: Vec<Id>,
         join: bool,
     },
-    /// A site's data is being deleted: what the helper says it deleted goes to the home.
-    ClearSite,
 }
 
 enum Source {
@@ -239,6 +237,9 @@ pub struct Engine {
     /// Records whose deletion a person asked for and the home has not yet been told: what a peer
     /// wrote of them meanwhile is not put in the profile, the deletion comes after it.
     clearing: HashSet<Id>,
+    /// The clearings of a site's data that the helper has not answered, by browser and request: every
+    /// pane numbers its requests from the same start, so the request alone is not one clearing.
+    site_clears: HashSet<(u32, u32)>,
 }
 
 fn hash_file(path: &Path) -> io::Result<Digest> {
@@ -296,6 +297,7 @@ impl Engine {
             stages: HashMap::new(),
             refused: None,
             clearing: HashSet::new(),
+            site_clears: HashSet::new(),
         }
     }
 
@@ -477,6 +479,19 @@ impl Engine {
     fn note(&mut self, id: Id, applied: u64, digest: Digest) {
         self.saved.known.insert(id, Known { applied, digest });
         self.dirty = true;
+    }
+
+    /// A record of a peer that the person has just deleted here: the home has it as the peer's until the
+    /// deletion is written over it, and it does not go into the profile in between (it would be there when
+    /// the deletion came back as this Mac's own word). Noted as seen, so that it is not asked for again; if the
+    /// deletion is given up, the note is taken back ([`Engine::put_done`]).
+    fn is_being_cleared(&mut self, entry: &Entry) -> bool {
+        let id = (entry.body.kind, entry.body.key.clone());
+        if entry.body.deleted || !self.clearing.contains(&id) {
+            return false;
+        }
+        self.note_entry(entry);
+        true
     }
 
     fn note_entry(&mut self, entry: &Entry) {
@@ -691,11 +706,16 @@ impl Engine {
                     }
                 }
             }
-            Event::SiteCleared { req, records, .. } => {
+            Event::SiteCleared {
+                browser,
+                req,
+                records,
+                ..
+            } => {
                 // What the helper found and deleted: each is a deletion for the home, the ones the
                 // Mac knows of already included (the home is told once: the newest of a record is
                 // the one to say).
-                if let Some(Pending::ClearSite) = self.pending.remove(&req) {
+                if self.site_clears.remove(&(browser, req)) {
                     for record in records {
                         self.tombstone(&record);
                     }
@@ -828,7 +848,7 @@ impl Engine {
                 self.tombstone(&record);
             }
         }
-        self.pending.insert(req, Pending::ClearSite);
+        self.site_clears.insert((browser, req));
         self.ask(Command::ClearSiteData { browser, req, host });
         self.pump();
     }
@@ -937,6 +957,9 @@ impl Engine {
         let mut batch: Vec<(Record, Option<Folder>)> = Vec::new();
         let mut applied: Vec<Entry> = Vec::new();
         for entry in plan.apply {
+            if self.is_being_cleared(&entry) {
+                continue;
+            }
             match self.folder_of(&entry) {
                 Ok(Some(item)) => {
                     batch.push(item);
@@ -1131,6 +1154,9 @@ impl Engine {
         let mut batch: Vec<Record> = Vec::new();
         let mut applied: Vec<Entry> = Vec::new();
         for entry in plan.apply {
+            if self.is_being_cleared(&entry) {
+                continue;
+            }
             match self.record_of_entry(&entry) {
                 Ok(Some(record)) => {
                     batch.push(record);
@@ -1245,11 +1271,7 @@ impl Engine {
             self.advance();
             return;
         }
-        if !entry.body.deleted && self.clearing.contains(&id) {
-            // A record of a peer that the person has just deleted here: the home has it as the
-            // peer's until the deletion is written over it, and it does not go into the profile
-            // in between (it would be there when the deletion came back as this Mac's own word).
-            self.note_entry(&entry);
+        if self.is_being_cleared(&entry) {
             self.advance();
             return;
         }
@@ -1560,6 +1582,13 @@ impl Engine {
             // A newer one is at the home and comes from its stream; the rest cannot be said.
             _ => {
                 self.clearing.remove(&change.id);
+                if change.force {
+                    // The newer record of a peer was kept out of the profile for this deletion, and the
+                    // deletion is given up: what is known of it is not what the profile has, so the
+                    // next time the profile is joined it is taken from the home.
+                    self.saved.known.remove(&change.id);
+                    self.dirty = true;
+                }
                 self.release_stage(change.stage.take());
             }
         }

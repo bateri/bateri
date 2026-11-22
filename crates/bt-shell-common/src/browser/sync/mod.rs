@@ -139,10 +139,10 @@ impl ProfileSync {
     /// The person cleared the data of site `host` (a name) in `browser`: the sync says the
     /// deletion of what it knows of the site to the home, and asks the helper to delete it too,
     /// as request `req` ([`Event::SiteCleared`] answers it).
-    pub fn clear_site(&self, browser: u32, req: u32, host: String) {
-        let _ = self
-            .tx
-            .send(Msg::Input(Input::ClearSite { browser, req, host }));
+    pub fn clear_site(&self, browser: u32, req: u32, host: String) -> bool {
+        self.tx
+            .send(Msg::Input(Input::ClearSite { browser, req, host }))
+            .is_ok()
     }
 
     /// The helper's news of the profile; given back when the sync is over and nobody reads it.
@@ -510,10 +510,8 @@ impl Syncs {
                 .map(|slot| slot.sync.clone())
         };
         match sync {
-            Some(sync) => {
-                sync.clear_site(browser, req, host.to_owned());
-                true
-            }
+            // A sync that has ended takes nothing: the helper is asked directly, as for a profile with none.
+            Some(sync) => sync.clear_site(browser, req, host.to_owned()),
             None => false,
         }
     }
