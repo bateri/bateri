@@ -14,7 +14,8 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
-- **Pages a program on a server shows are signed in on every Mac.** A page's sign-ins are kept at the server too and follow you to your other Macs; signing out on one signs out on all. They lie there unencrypted, readable by the account bateri connects as, so a server you do not trust has `profiles = false` in its `[remote] hosts` entry, which keeps them on this Mac alone.
+- **Programs can show a real web browser.** A program such as browserpen opens web pages inside its pane, with tabs, an address bar, find and zoom; a two-finger swipe and a mouse's side buttons go back and forward.
+- **Your sign-ins follow you to every Mac.** Pages a program on a server shows stay signed in on any Mac that connects to that server; signing out on one signs out on all. To keep a server's sign-ins on this Mac only, set `profiles = false` for it.
 - **Programs can draw glowing, shaded shapes.** A program's page can give a shape a soft glow or shadow, fill it with a gradient, mix it with what is under it, draw a dashed line and turn or scale it.
 - **Claude can read a program's view.** `bateri view p7` tells an agent what a view such as dockerpen shows: its buttons, fields and editors, each with a short name to act on, and whether the page has settled. It works on a pane you cannot see, and a password field is never read. For another machine's pane it needs that machine's commands level set to `full`.
 - **Claude can use a program's view, not only read it.** `bateri view p7 click`, `fill`, `type`, `press`, `scroll`, `command`, `menu` and `pick`, `text` and `wait` act on the page and answer with what it shows once it has settled. Your keyboard, your front tab and your clipboard stay where they are: a copy is told to Claude instead of written to your pasteboard, a link is not opened and a file panel is turned away.
