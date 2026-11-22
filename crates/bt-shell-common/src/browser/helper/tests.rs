@@ -1080,8 +1080,63 @@ mod depot {
         rows.join(",")
     }
 
+    fn session_cookie() -> browser_ipc::message::Record {
+        browser_ipc::message::Record::Cookie {
+            domain: "localhost".into(),
+            path: "/".into(),
+            name: "sid".into(),
+            partition: None,
+            value: Some(browser_ipc::message::CookieValue {
+                value: "from the home".into(),
+                expires: None,
+                secure: false,
+                http_only: true,
+                same_site: 2,
+                priority: 1,
+                source_scheme: 1,
+                source_port: 8790,
+            }),
+        }
+    }
+
+    /// A cookie of another computer's that turns over between the runs, so that what a join
+    /// writes is newer than what the profile took.
+    fn turning_cookie(run: usize) -> browser_ipc::message::Record {
+        browser_ipc::message::Record::Cookie {
+            domain: "localhost".into(),
+            path: "/".into(),
+            name: "tok".into(),
+            partition: None,
+            value: Some(browser_ipc::message::CookieValue {
+                value: format!("turn {run}"),
+                expires: Some(4_000_000_000.0),
+                secure: false,
+                http_only: false,
+                same_site: 0,
+                priority: 1,
+                source_scheme: 1,
+                source_port: 8790,
+            }),
+        }
+    }
+
+    fn real_manager(root: &Path, app: &Path) -> Arc<Manager> {
+        Manager::new(
+            Config {
+                source: Source::Fixed(app.to_owned()),
+                profiles: root.join("profiles"),
+                run: root.join("run"),
+                mock_keychain: true,
+                linger: Duration::from_millis(300),
+                start_timeout: Duration::from_secs(30),
+                trust: Arc::new(|_| Ok(())),
+            },
+            Arc::new(Real),
+        )
+    }
+
     /// The real engine (`BATERI_BROWSER_APP` names its app) joins a home, ends and starts again,
-    /// as bateri does when it is quit and opened: the profile's folder on disk keeps a session
+    /// as bateri does when it is closed and opened: the profile's folder on disk keeps a session
     /// cookie that the home gave it, so that the home and the profile do not say different things.
     #[test]
     fn a_session_cookie_a_home_gave_is_in_the_real_engines_folder_after_every_restart() {
@@ -1092,69 +1147,96 @@ mod depot {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let bell = Arc::new(Bell::default());
-        let home = FakeHome::new(&bell);
-        home.seed(
-            &browser_ipc::message::Record::Cookie {
-                domain: "localhost".into(),
-                path: "/".into(),
-                name: "sid".into(),
-                partition: None,
-                value: Some(browser_ipc::message::CookieValue {
-                    value: "from the home".into(),
-                    expires: None,
-                    secure: false,
-                    http_only: true,
-                    same_site: 2,
-                    priority: 1,
-                    source_scheme: 1,
-                    source_port: 8790,
-                }),
-            },
-            &[],
-            &[],
-        );
         let mut seen = Vec::new();
         for run in 0..3 {
-            // Another computer goes on meanwhile: a cookie of its that turns over (what the join
-            // writes is newer than what the profile took).
-            home.seed(
-                &browser_ipc::message::Record::Cookie {
-                    domain: "localhost".into(),
-                    path: "/".into(),
-                    name: "tok".into(),
-                    partition: None,
-                    value: Some(browser_ipc::message::CookieValue {
-                        value: format!("turn {run}"),
-                        expires: Some(4_000_000_000.0),
-                        secure: false,
-                        http_only: false,
-                        same_site: 0,
-                        priority: 1,
-                        source_scheme: 1,
-                        source_port: 8790,
-                    }),
-                },
-                &[],
-                &[],
-            );
-            let manager = Manager::new(
-                Config {
-                    source: Source::Fixed(app.clone()),
-                    profiles: root.join("profiles"),
-                    run: root.join("run"),
-                    mock_keychain: true,
-                    linger: Duration::from_millis(300),
-                    start_timeout: Duration::from_secs(30),
-                    trust: Arc::new(|_| Ok(())),
-                },
-                Arc::new(Real),
-            );
+            // The home gives the session cookie once: what the profile has of it after that is
+            // what the profile kept, not what a join put again.
+            let home = FakeHome::new(&bell);
+            if run == 0 {
+                home.seed(&session_cookie(), &[], &[]);
+            }
+            home.seed(&turning_cookie(run), &[], &[]);
+            let manager = real_manager(&root, &app);
             manager.depots().set("server:x", depot(&home));
             let (sink, _events, _lost) = log();
             let browser = manager.open(&server_key("work"), SIZE, 1.0, sink).unwrap();
             drop(browser);
             let end = Instant::now() + Duration::from_secs(30);
             while manager.status().running {
+                assert!(Instant::now() < end, "the engine did not end");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            seen.push(format!("run {run}: {}", cookies_on_disk(&root)));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        for (run, line) in seen.iter().enumerate() {
+            assert!(line.contains("sid|0"), "{seen:?} (run {run})");
+        }
+    }
+
+    /// The same, with the end that bateri's own is: the process that holds the manager exits at
+    /// once, with the engine running and nothing said to it, and the engine ends by itself.
+    #[test]
+    fn a_session_cookie_a_home_gave_is_in_the_real_engines_folder_after_bateri_is_quit() {
+        let Some(app) = std::env::var_os("BATERI_BROWSER_APP").map(PathBuf::from) else {
+            return;
+        };
+        let name = "browser::helper::tests::depot::a_session_cookie_a_home_gave_is_in_the_real_engines_folder_after_bateri_is_quit";
+        // The child: bateri, which joins and is gone.
+        if let Some(spec) = std::env::var_os("BATERI_QUIT_CHILD") {
+            let spec = spec.to_string_lossy().into_owned();
+            let (root, run) = spec.rsplit_once(':').unwrap();
+            let root = PathBuf::from(root);
+            let bell = Arc::new(Bell::default());
+            let home = FakeHome::new(&bell);
+            let run: usize = run.parse().unwrap();
+            if run == 0 {
+                home.seed(&session_cookie(), &[], &[]);
+            }
+            home.seed(&turning_cookie(run), &[], &[]);
+            let manager = real_manager(&root, &app);
+            manager.depots().set("server:x", depot(&home));
+            let (sink, _events, _lost) = log();
+            let browser = manager.open(&server_key("work"), SIZE, 1.0, sink).unwrap();
+            let pid = lock(&manager.current)
+                .clone()
+                .map(|engine| lock(&engine.process).id())
+                .unwrap();
+            println!("HELPER {pid}");
+            let _ = std::io::stdout().flush();
+            std::mem::forget(browser);
+            std::process::exit(0);
+        }
+        let root = std::env::temp_dir().join(format!("bhq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut seen = Vec::new();
+        for run in 0..3 {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture", "--test-threads=1"])
+                .env("BATERI_QUIT_CHILD", format!("{}:{run}", root.display()))
+                .env("BATERI_BROWSER_APP", &app)
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let pid = text
+                .lines()
+                .find_map(|l| l.split_once("HELPER ").map(|(_, rest)| rest.trim()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the child did not open: {text} {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                })
+                .to_owned();
+            // The engine ends by itself once bateri is gone.
+            let end = Instant::now() + Duration::from_secs(30);
+            while std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+            {
                 assert!(Instant::now() < end, "the engine did not end");
                 std::thread::sleep(Duration::from_millis(50));
             }
