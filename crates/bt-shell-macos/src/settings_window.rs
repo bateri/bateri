@@ -3850,6 +3850,12 @@ impl SettingsWindow {
         document.setTranslatesAutoresizingMaskIntoConstraints(false);
         scroll.setDocumentView(Some(&document));
         let clip = scroll.contentView();
+        // The document is the design's width, whatever scroller the system shows. A scroller
+        // that is not an overlay (System Settings' "Show scroll bars" set to always, or to
+        // automatic with a mouse plugged in) takes its lane beside the document, and the window
+        // grows by it; on a page too short to scroll the lane is left empty. A document that
+        // followed the clip view's width would be narrower on a page that scrolls than on one
+        // that does not, and so would the example above it.
         activate(&[
             scroll
                 .leadingAnchor()
@@ -3867,8 +3873,10 @@ impl SettingsWindow {
                 .leadingAnchor()
                 .constraintEqualToAnchor(&clip.leadingAnchor()),
             document
-                .trailingAnchor()
-                .constraintEqualToAnchor(&clip.trailingAnchor()),
+                .widthAnchor()
+                .constraintEqualToConstant(DETAIL_WIDTH),
+            clip.trailingAnchor()
+                .constraintGreaterThanOrEqualToAnchor(&document.trailingAnchor()),
         ]);
         let mut pane_bottoms = Vec::new();
         for pane in &panes {
@@ -3889,7 +3897,9 @@ impl SettingsWindow {
         }
         // The open page's example stands still above its rows: the rows scroll under it, so a
         // change made far down the page shows in the example as it is made. It is as wide as the
-        // page's groups, and a hairline under it marks the edge the rows scroll under.
+        // page's groups (the document's width less their margins, not the scroll view's, which
+        // holds a scroller's lane too), and a hairline under it marks the edge the rows scroll
+        // under.
         let sticky = stack(
             mtm,
             &[],
@@ -3915,8 +3925,8 @@ impl SettingsWindow {
                 .leadingAnchor()
                 .constraintEqualToAnchor_constant(&detail.leadingAnchor(), PAGE_MARGIN),
             sticky
-                .trailingAnchor()
-                .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -PAGE_MARGIN),
+                .widthAnchor()
+                .constraintEqualToAnchor_constant(&document.widthAnchor(), -2.0 * PAGE_MARGIN),
             sticky_gap.clone(),
         ]);
         let rule = surface(mtm, Ink::Line);
