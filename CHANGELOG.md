@@ -31,6 +31,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A new pane no longer closes bateri on a busy Mac.** When the graphics card was too busy to get a new pane ready, bateri quit; the pane now draws a moment later.
 - **A password box no longer closes bateri.** Opening linearpen without an API key, or any program screen that asks for a password, quit bateri as soon as the box was ready for typing.
 - **Text in a program's search boxes sits in the middle.** In boxes like toppen's filter, the grey hint and what you typed sat a little high, more so with a large font, and jumped down when you clicked in. They now stay centred.
 - **A program's dialogs and tables read in full.** In what `bateri view` and VoiceOver read, a dialog's buttons and fields are no longer hidden behind the shade it draws over the page, a table's rows are named by their cells and not "Row 3", an icon button with only a tooltip is named by it, and a table's column edges and a tree's arrows say what they do.

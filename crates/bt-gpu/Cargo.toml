@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Test support: [`Surface::acquires`], what a frame would get from the surface, for the platform
+# shells' tests, which own the layer this crate cannot make (`bt-shell-common`'s `test-support`
+# precedent — a `cfg(test)` item is invisible to another crate's tests).
+test-support = []
+
 [dependencies]
 bt-core = { workspace = true }
 bt-atlas = { workspace = true }
