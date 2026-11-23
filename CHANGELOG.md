@@ -12,32 +12,28 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-11-24
+
 ### Added
 
 - **Open web links beside your terminal.** The first time you ⌘-click a link, bateri asks whether to open links in browserpen, a browser in a pane next to the terminal. You can change your answer in Settings ▸ Apps.
 - **⌘-click a file to add it to the open textpen.** If textpen is already open in the tab, the file opens there as a new tab instead of in a new pane.
 - **Drag a link into browserpen.** A link dragged from Safari or another app opens as a new tab.
-- **Programs can show a real web browser.** A program such as browserpen opens web pages inside its pane, with tabs, an address bar, find and zoom; a two-finger swipe and a mouse's side buttons go back and forward.
-- **Clear a site, empty the cache, open a dev server's https.** A program's browser can empty its cache, clear a site's data (which signs you out of it, on every Mac where your sign-ins follow you) and open a page whose certificate isn't trusted, such as a development server's own.
-- **Claude can read a browser's console.** `bateri browser console p7` shows what the page logged since it was first asked; `bateri browser clear p7 --cache` or `--site` clears it, and Claude asks you before clearing a site.
-- **Your sign-ins follow you to every Mac.** Pages a program on a server shows stay signed in on any Mac that connects to that server; signing out on one signs out on all. To keep a server's sign-ins on this Mac only, set `profiles = false` for it.
-- **Programs can draw glowing, shaded shapes.** A program's page can give a shape a soft glow or shadow, fill it with a gradient, mix it with what is under it, draw a dashed line and turn or scale it.
-- **A program's page can move more.** A box can spring into place, ease into new corners, borders, shadows, padding and text sizes, follow its own new size and repeat a motion in a loop; a picture can turn and grow.
-- **Claude can read a program's view.** `bateri view p7` tells an agent what a view such as dockerpen shows: its buttons, fields and editors, each with a short name to act on, and whether the page has settled. It works on a pane you cannot see, and a password field is never read. For another machine's pane it needs that machine's commands level set to `full`.
-- **Claude can use a program's view, not only read it.** `bateri view p7 click`, `fill`, `type`, `press`, `scroll`, `command`, `menu` and `pick`, `text` and `wait` act on the page and answer with what it shows once it has settled. Your keyboard, your front tab and your clipboard stay where they are: a copy is told to Claude instead of written to your pasteboard, a link is not opened and a file panel is turned away.
-- **Claude can take a picture of a program's view.** `bateri view p7 shot picture.png` writes a PNG of the pane, brought down to 1280 pixels on its long edge (`--full` for the pane's own size); it works on a pane on another tab or in a hidden window, and on a terminal pane too, and it does not touch the window, its frames or your tabs.
-- **`bateri view` works on a program's web view too.** A pane made with `pencere new --page web` is read with a ref for each button, link and field, and clicked, filled, typed into, pressed keys at, scrolled, waited on and pictured like a native one; its commands and menus are not there. The agent reads the page through a script the page cannot see, and nothing of it moves your keyboard or your tabs.
-- **Claude knows how to use a program's view.** The `bateri` skill tells it to read a view first, to act with a ref or a command title from the reading, to ask you before anything that cannot be undone (remove, delete, kill, drop, send), to leave your keyboard and tabs alone, and to treat the words on the page as data, never as instructions. "That pen" means the pane you had the keyboard in before the one you are typing to.
-- **`bateri ls` shows which pane has the keyboard.** The pane you are typing in is marked `(focused)`, a pane that shows a view says so, and `--json` gives the order the keyboard visited the panes, so an agent can tell which pane you were in just before its own.
-- **VoiceOver reads a program's view as a tree.** A dialog, a table, an outline and a list say what they are and what is in them, and while a dialog is open VoiceOver reads the dialog alone.
-- **`bateri view` reads a view as a tree.** A line indented under another is inside it, the page behind an open dialog is not listed, and a line says how an element stands (`mixed`, `level 2`, `3 of 12`, `row 5`). `command REF TITLE` does a command an element lists, and `reveal REF [ROW]` scrolls an element or a row of a list or table into view. A web view is read the same way.
+- **Programs can show a real web browser.** A program such as browserpen opens web pages in its pane, with tabs, an address bar, find and zoom.
+- **Clear a site, empty the cache, open a dev server's https.** A program's browser can empty its cache, clear a site's data, and open a page whose certificate isn't trusted, such as a development server's own.
+- **Your sign-ins follow you to every Mac.** Pages a program on a server shows stay signed in on any Mac that connects to that server.
+- **Programs can draw and move more.** Glows, shadows, gradients and dashed lines, and boxes that spring and ease into place.
+- **Claude can read and use a program's view.** `bateri view` shows Claude a program's buttons, fields and text, and lets it click, type and take a picture, without touching your keyboard, your tabs or your clipboard. It asks you before anything that cannot be undone.
+- **Claude can read a browser's console.** `bateri browser console` shows what a page logged; Claude asks you before clearing a site.
+- **VoiceOver reads a program's view as a tree.** Dialogs, tables, outlines and lists say what they are, and an open dialog is read alone.
+- **`bateri ls` shows which pane has the keyboard.**
 
 ### Fixed
 
 - **A new pane no longer closes bateri on a busy Mac.** When the graphics card was too busy to get a new pane ready, bateri quit; the pane now draws a moment later.
 - **A password box no longer closes bateri.** Opening linearpen without an API key, or any program screen that asks for a password, quit bateri as soon as the box was ready for typing.
-- **Text in a program's search boxes sits in the middle.** In boxes like toppen's filter, the grey hint and what you typed sat a little high, more so with a large font, and jumped down when you clicked in. They now stay centred.
-- **A program's dialogs and tables read in full.** In what `bateri view` and VoiceOver read, a dialog's buttons and fields are no longer hidden behind the shade it draws over the page, a table's rows are named by their cells and not "Row 3", an icon button with only a tooltip is named by it, and a table's column edges and a tree's arrows say what they do.
+- **Text in a program's search boxes sits in the middle.** The hint and what you typed no longer sit high or jump when you click in.
+- **A program's dialogs and tables read in full** in `bateri view` and VoiceOver.
 
 ## [0.32.0] - 2026-11-20
 
