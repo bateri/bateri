@@ -418,7 +418,7 @@ impl AppDelegate {
                     .apps
                     .get()
                     .is_none()
-                    .then(|| "bateri is not following programs on this Mac.".to_owned())
+                    .then(|| "bateri can\u{2019}t install programs right now.".to_owned())
             });
             trouble.map_or(Coming::Busy(None), Coming::Failed)
         };

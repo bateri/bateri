@@ -543,7 +543,7 @@ fn in_place_problems(mtm: MainThreadMarker) -> Vec<String> {
         return problems;
     }
     let size = built.frame().size;
-    if !view::refresh_notes(&built, &before, &after, PANE.0) {
+    if !view::refresh_notes(&built, &before, &after, room, room) {
         problems.push("a percent that moved was not written in place".to_owned());
     }
     let again = ring_of(&built);
@@ -570,20 +570,67 @@ fn in_place_problems(mtm: MainThreadMarker) -> Vec<String> {
     // card made again.
     let none = at(Coming::Busy(None));
     let bare = view::build(mtm, &none, &target, room);
-    if view::refresh_notes(&bare, &none, &before, PANE.0) {
+    if view::refresh_notes(&bare, &none, &before, room, room) {
         problems
             .push("a percent that came was written in place, where the row is taller".to_owned());
     }
     // A pane that was resized is another width: the card is made again though nothing else changed.
-    if view::refresh_notes(&built, &after, &after, NARROW) {
+    if view::refresh_notes(&built, &after, &after, room, NSSize::new(NARROW, PANE.1)) {
         problems.push("a card was kept at its width in a pane of another width".to_owned());
     }
-    if !view::refresh_notes(&built, &after, &after, PANE.0) {
+    if !view::refresh_notes(&built, &after, &after, room, room) {
         problems.push("a card that nothing changed in was made again".to_owned());
     }
     let failed = at(Coming::Failed("The server answered 503.".to_owned()));
-    if view::refresh_notes(&built, &after, &failed, PANE.0) {
+    if view::refresh_notes(&built, &after, &failed, room, room) {
         problems.push("a row that failed was written in place".to_owned());
+    }
+    problems.extend(height_problems(mtm));
+    problems
+}
+
+/// A pane that becomes lower or higher than the card was made for: the room of its list is the
+/// pane's height, so the card is made again (a card kept at its height in a lower pane has its
+/// buttons below the pane), and the one made again for the lower pane is the lower card.
+fn height_problems(mtm: MainThreadMarker) -> Vec<String> {
+    let mut problems = Vec::new();
+    let target = Target::new(mtm, "layout-check");
+    let Some((_, card, _)) = scenes()
+        .into_iter()
+        .find(|(name, ..)| *name == "failed-low")
+    else {
+        return vec!["the scene whose list is cut by a low pane is gone".to_owned()];
+    };
+    let (tall, low) = (NSSize::new(PANE.0, PANE.1), NSSize::new(PANE.0, LOW));
+    let (made_tall, made_low) = (
+        view::build(mtm, &card, &target, tall),
+        view::build(mtm, &card, &target, low),
+    );
+    if made_low.frame().size.height > low.height - 2.0 * crate::pane::CORNER_INSET.0 + SLACK {
+        problems.push(format!(
+            "the card made for a pane {} high is {} high",
+            low.height,
+            made_low.frame().size.height
+        ));
+    }
+    if made_low.frame().size.height >= made_tall.frame().size.height - SLACK {
+        problems.push(
+            "the card made for a low pane is no lower than the one made for a tall pane: the \
+             scene does not show what the height of the pane changes"
+                .to_owned(),
+        );
+    }
+    if view::made_for(tall, low) || view::made_for(low, tall) {
+        problems.push("a card was taken for the right one in a pane of another height".to_owned());
+    }
+    if !view::made_for(tall, tall) {
+        problems.push("a card was made again in a pane that kept its size".to_owned());
+    }
+    if view::refresh_notes(&made_tall, &card, &card, tall, low) {
+        problems.push("a card was kept at its height in a pane that became lower".to_owned());
+    }
+    if view::refresh_notes(&made_low, &card, &card, low, tall) {
+        problems.push("a card was kept at its height in a pane that became higher".to_owned());
     }
     problems
 }

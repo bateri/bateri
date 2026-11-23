@@ -141,6 +141,23 @@ impl PaneHost for TabHost {
         }
     }
 
+    fn card_put(&self, pane: u64) {
+        // The card is a view of the container, on top of it until the container puts it in order:
+        // under the grips and the capsules, over the floating panes. On the next turn of the loop,
+        // before anything is drawn: the container's lists are not touched from inside whatever
+        // raised the card (a layout, a close), which may hold them.
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = objc2::MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = app::delegate(mtm)
+                && let Some(pane) = app.all_panes().into_iter().find(|p| p.id() == pane)
+                && let Some(container) = container_of(&pane)
+            {
+                container.restack();
+            }
+        });
+    }
+
     fn resized(&self, pane: u64) {
         // On the next turn of the loop: the card is made again outside of the layout this is
         // told in.

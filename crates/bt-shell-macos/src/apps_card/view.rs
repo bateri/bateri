@@ -48,6 +48,15 @@ const MIN_WIDTH: f64 = 140.0;
 pub(crate) fn width_for(pane_width: f64) -> f64 {
     (pane_width - 2.0 * crate::pane::CORNER_INSET.1).clamp(MIN_WIDTH, WIDTH)
 }
+/// Whether a card made for a pane of the size `built` is right for one of the size `now`: as wide
+/// as the pane lets it be ([`width_for`]), and with its list as high as the pane's height leaves
+/// room for ([`ROOM_SHARE`]). A pane that became lower (a split across it) or higher is another
+/// card's room, and the card is made again, so that its buttons are not pushed below the pane.
+pub(crate) fn made_for(built: NSSize, now: NSSize) -> bool {
+    (width_for(built.width) - width_for(now.width)).abs() <= 0.5
+        && (built.height - now.height).abs() <= 0.5
+}
+
 /// The room at its sides, and above its title and under its buttons.
 const PAD_X: f64 = 12.0;
 const PAD_Y: f64 = 11.0;
@@ -1063,11 +1072,17 @@ fn specs(card: &Card) -> Vec<Spec> {
 /// Brings the view of a card up to date with the model where only how far a download has come
 /// changed: the number under the name of a row is written in its label, and nothing is made
 /// again, so that the ring beside it goes on turning. `false` when something else changed (or the
-/// number comes or goes, which changes the row's height, or the pane's width is not the one the
-/// card was made for): the card is to be made again.
-pub(crate) fn refresh_notes(view: &NSView, before: &Card, after: &Card, pane_width: f64) -> bool {
-    // The pane's width is what the card's was made for: a card of another width is made again.
-    if (view.frame().size.width - width_for(pane_width)).abs() > 0.5 {
+/// number comes or goes, which changes the row's height, or the pane is not the size the card was
+/// made for, `built`, but `now` ([`made_for`])): the card is to be made again.
+pub(crate) fn refresh_notes(
+    view: &NSView,
+    before: &Card,
+    after: &Card,
+    built: NSSize,
+    now: NSSize,
+) -> bool {
+    // The pane's size is what the card was made for: a card of another room is made again.
+    if !made_for(built, now) {
         return false;
     }
     if before.stage() != after.stage()

@@ -1676,7 +1676,7 @@ impl SplitView {
     /// views of the card it is round (and under the cards in front of that one) when it is round a
     /// floating pane, and under every card otherwise. Only the views that are out of place are
     /// moved: taking a pane out of its superview puts the keyboard down.
-    fn restack(&self) {
+    pub(crate) fn restack(&self) {
         let iv = self.ivars();
         // The cards the application holds over its panes (the first click's, a server's) stand in
         // this container where their panes are now, and over the floating panes (placed first:
@@ -4459,6 +4459,18 @@ mod tests {
         let set = &placed[placed.find("pub(crate) fn set_corner_card(").expect("set")..];
         let set = &set[..set.find("pub(crate) fn corner_card_view(").expect("end")];
         assert!(!set.contains("self.addSubview"), "{set}");
+        // A card put in is on top of the container's views until the container puts it in order:
+        // setting one asks for that at once, not at the next layout (it stood over a grip or a
+        // capsule at the corner until then).
+        let put = set.find("self.place_corner_card()").expect("placed");
+        let ordered = set
+            .find("host().card_put(")
+            .expect("the container puts it in order");
+        assert!(put < ordered, "{set}");
+        let tab = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tab.rs"))
+            .expect("tab.rs");
+        let host = &tab[tab.find("fn card_put(").expect("the host's answer")..];
+        assert!(host[..host.find("fn resized(").expect("next")].contains(".restack()"));
         // And a pane that leaves takes its card out of the container with it.
         assert!(body_of("pub(crate) fn detach(").contains("leave_container()"));
         assert!(body_of("pub(crate) fn drain(").contains("leave_container()"));

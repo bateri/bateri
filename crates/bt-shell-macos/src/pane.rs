@@ -175,9 +175,14 @@ pub trait PaneHost {
     /// screen's.
     fn program_changed(&self, _pane: u64) {}
     /// The pane's size changed while a card hangs in its corner ([`TerminalPane::set_corner_card`]):
-    /// the card is as wide as the pane lets it be, so the owner that made it makes it again. Told
-    /// from inside the pane's layout; nothing for an owner with no such card (the tests').
+    /// the card is as wide as the pane lets it be and its list as high as the pane's height leaves
+    /// room for, so the owner that made it makes it again. Told from inside the pane's layout;
+    /// nothing for an owner with no such card (the tests').
     fn resized(&self, _pane: u64) {}
+    /// A card was put in the pane's corner ([`TerminalPane::set_corner_card`]): the owner that
+    /// keeps the stacking of the views the pane stands among puts it in its place at once. Nothing
+    /// for an owner with no such stacking (the tests').
+    fn card_put(&self, _pane: u64) {}
     /// The pane's transfer queue ended, as `finish` says: what the tab's chip plays out and
     /// leaves on the tab while the user is elsewhere. Called **before** the pane tells its
     /// title the transfer is gone, so the tab reads the end together with that news. Nothing for
@@ -2535,8 +2540,8 @@ define_class!(
         #[unsafe(method(viewFrameDidChange:))]
         fn view_frame_did_change(&self, _n: &NSNotification) {
             self.refresh_geometry();
-            // A card in the corner is as wide as the pane lets it be: it is told of the new size
-            // on the next turn of the loop, outside of the layout this runs in.
+            // A card in the corner is made for the pane's size, width and height: it is told of
+            // the new size on the next turn of the loop, outside of the layout this runs in.
             if self.ivars().corner_card.borrow().is_some() {
                 self.host().resized(self.id());
             }
@@ -8976,6 +8981,9 @@ impl TerminalPane {
         };
         *slot.borrow_mut() = Some(objc2::Message::retain(card));
         self.place_corner_card();
+        // A view put in is on top: the container puts it where it belongs now (under the grips
+        // and the capsules at its corner), not at the next layout.
+        self.host().card_put(self.id());
     }
 
     /// Stands the card in the corner again: the pane or the card changed its size or place, or
