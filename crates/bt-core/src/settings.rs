@@ -1702,7 +1702,7 @@ pub struct Settings {
     pub remote_integration: RemoteIntegration,
     /// `[apps] sources`: where the programs bateri keeps up to date publish their releases, as
     /// written (`user/repo`, an `https://` address or a `file:///` one — [`app_source_address`]
-    /// reads them), in the file's order. `["bateri/textpen", "bateri/browserpen"]` unless the file writes the key;
+    /// reads them), in the file's order. `["bateri/textpen"]` unless the file writes the key;
     /// written, even empty, the file's list is the list.
     pub apps_sources: Vec<String>,
     /// Whether `apps_sources` is **all** that the file wrote: `false` when an entry was dropped
@@ -2592,7 +2592,7 @@ stats_interval = 3
 # once; the servers keep their copies (bateri package remove takes one off).
 # An entry taken out of this file by hand only leaves the list: the copy that
 # runs here stays until bateri package remove.
-sources = ["bateri/textpen", "bateri/browserpen"]
+sources = ["bateri/textpen"]
 # The program that opens a file or a folder you Command-click in a terminal,
 # in a floating pane, on the computer the path is on: the name of a program
 # from the list above that opens files, or "" for none. Where the program is
@@ -4885,7 +4885,7 @@ fn folder(
 }
 
 /// `[apps] sources` when the file does not write the key.
-pub const DEFAULT_APP_SOURCES: &[&str] = &["bateri/textpen", "bateri/browserpen"];
+pub const DEFAULT_APP_SOURCES: &[&str] = &["bateri/textpen"];
 
 /// `[apps] open_with` when the file does not write the key.
 pub const DEFAULT_APP_OPEN_WITH: &str = "textpen";
@@ -8651,19 +8651,10 @@ hosts = [
 
     #[test]
     fn app_sources_are_the_default_until_the_file_writes_them() {
-        assert_eq!(
-            Settings::default().apps_sources,
-            ["bateri/textpen", "bateri/browserpen"]
-        );
-        assert_eq!(
-            clean("").apps_sources,
-            ["bateri/textpen", "bateri/browserpen"]
-        );
+        assert_eq!(Settings::default().apps_sources, ["bateri/textpen"]);
+        assert_eq!(clean("").apps_sources, ["bateri/textpen"]);
         // The section alone says nothing about the list.
-        assert_eq!(
-            clean("[apps]\n").apps_sources,
-            ["bateri/textpen", "bateri/browserpen"]
-        );
+        assert_eq!(clean("[apps]\n").apps_sources, ["bateri/textpen"]);
         // Written, even empty, the file's list is the list.
         assert_eq!(
             clean("[apps]\nsources = []\n").apps_sources,
@@ -8774,10 +8765,7 @@ hosts = [
         assert_eq!(parsed.settings.apps_sources, current.apps_sources);
         assert!(!parsed.settings.apps_sources_whole);
         let (settings, _) = rejected("[apps]\nsources = \"acme/tool\"\n");
-        assert_eq!(
-            settings.apps_sources,
-            ["bateri/textpen", "bateri/browserpen"]
-        );
+        assert_eq!(settings.apps_sources, ["bateri/textpen"]);
     }
 
     #[test]

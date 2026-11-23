@@ -648,7 +648,7 @@ stats_interval = 3
 # once; the servers keep their copies (bateri package remove takes one off).
 # An entry taken out of this file by hand only leaves the list: the copy that
 # runs here stays until bateri package remove.
-sources = ["bateri/textpen", "bateri/browserpen"]
+sources = ["bateri/textpen"]
 # The program that opens a file or a folder you Command-click in a terminal,
 # in a floating pane, on the computer the path is on: the name of a program
 # from the list above that opens files, or "" for none. Where the program is
@@ -2927,14 +2927,14 @@ _bt_osc7() { printf '\033]7;file://%s%s\007' "$HOST" "$PWD"; }; precmd_functions
 
 ```toml
 [apps]
-sources = ["bateri/textpen", "bateri/browserpen"]
+sources = ["bateri/textpen"]
 open_with = "textpen"
 # open_links_with = "browserpen"
 ```
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `sources` | array of strings | `["bateri/textpen", "bateri/browserpen"]` | where the programs bateri keeps up to date publish their releases; written, even as `[]`, the file's list is the list |
+| `sources` | array of strings | `["bateri/textpen"]` | where the programs bateri keeps up to date publish their releases; written, even as `[]`, the file's list is the list |
 | `open_with` | string | `"textpen"` | the program that opens a file or a folder you Command-click in a terminal; `""` for none |
 | `open_links_with` | string | not written | the program that opens a web address you Command-click in a terminal, beside it; `""` for your own browser. Not written, the first click asks |
 
