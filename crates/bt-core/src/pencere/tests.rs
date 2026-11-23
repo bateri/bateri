@@ -594,6 +594,73 @@ fn the_full_opening_ends_with_a_view_for_the_shell_and_two_events() {
     );
 }
 
+/// What a terminal hands a program that is running for it (specification §10.9): the program is
+/// found by the name it gave and by what its `open` said it takes, an address is written to it as a
+/// `take`, and a kind it did not say is not written at all. Both end with the view.
+#[test]
+fn a_program_that_says_what_it_takes_is_found_and_handed_only_that() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let token = token_of(&pane.rig.written()[0]);
+    pane.feed(
+        &[
+            ALTERNATE_SCREEN,
+            &open_of_bundle(&token, r#","takes":["url"]"#),
+        ]
+        .concat(),
+    );
+    pane.rig.written();
+    pane.feed(&page_file());
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    assert_eq!(
+        desk.hosted(),
+        Some(Hosted {
+            program: Some("containers".to_owned()),
+            takes: vec![TakeKind::Url],
+        })
+    );
+    let address = Take::Url("https://example.org/a?b=1".to_owned());
+    assert!(desk.hand_over(&address, |bytes| pane.rig.reply(bytes)));
+    let written = pane.rig.written();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0].kind, "take");
+    assert!(
+        written[0].payload.contains("https://example.org/a?b=1"),
+        "{}",
+        written[0].payload
+    );
+    // A file is a kind the program did not say it takes: nothing is written.
+    let file = Take::File {
+        path: "/tmp/a.txt".to_owned(),
+        line: None,
+        column: None,
+    };
+    assert!(!desk.hand_over(&file, |bytes| pane.rig.reply(bytes)));
+    assert!(pane.rig.written().is_empty());
+    // The view ends: nothing runs, nothing is handed.
+    desk.apply(|_| {}, |conversation| conversation.close_view());
+    desk.take_views();
+    assert_eq!(desk.hosted(), None);
+    assert!(!desk.hand_over(&address, |bytes| pane.rig.reply(bytes)));
+}
+
+/// A program that says nothing of what it takes is not sent anything, and is not offered as a
+/// program that takes (the terminal opens an address in the system's browser instead).
+#[test]
+fn a_program_that_says_nothing_of_what_it_takes_is_handed_nothing() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    assert_eq!(desk.hosted(), None);
+    let address = Take::Url("https://example.org/".to_owned());
+    assert!(!desk.hand_over(&address, |bytes| pane.rig.reply(bytes)));
+    assert!(pane.rig.written().is_empty());
+}
+
 #[test]
 fn a_burst_for_the_shell_is_one_event() {
     let (rig, _, wake) = Rig::new(true);

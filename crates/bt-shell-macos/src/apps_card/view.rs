@@ -648,6 +648,10 @@ pub(crate) fn build(
 ) -> Retained<CardView> {
     let inner = WIDTH - 2.0 * PAD_X;
     let asking = card.stage() == Stage::Ask;
+    // The card of a click says its one program in its title, and asks nothing about it: a list
+    // would say it twice, and a box would offer what the click did not.
+    let link_ask = asking && card.link().is_some();
+    let lines: &[Line] = if link_ask { &[] } else { card.lines() };
     let view = CardView::new(mtm, NSSize::new(WIDTH, 40.0), target);
     let mut y = PAD_Y;
 
@@ -673,7 +677,7 @@ pub(crate) fn build(
     };
     let scrolls = {
         let mut at = 0.0;
-        for (i, line) in card.lines().iter().enumerate() {
+        for (i, line) in lines.iter().enumerate() {
             if i > 0 {
                 at += ROW_GAP;
             }
@@ -683,10 +687,13 @@ pub(crate) fn build(
     };
     // What is around the list: the title above (`y` so far), the gap, the buttons and the padding.
     let buttons_wanted = matches!(card.stage(), Stage::Ask | Stage::Failed);
+    // The two answers of a click's card are too wide for one line of a card this wide: one under
+    // the other, the one that installs first.
+    let button_lines = if link_ask { 2.0 } else { 1.0 };
     let around = y
         + 8.0
         + if buttons_wanted {
-            BUTTONS_TOP + BUTTON_H
+            BUTTONS_TOP + button_lines * BUTTON_H + (button_lines - 1.0) * BUTTON_GAP
         } else {
             0.0
         }
@@ -721,6 +728,26 @@ pub(crate) fn build(
     y += shown;
 
     let buttons: Vec<Retained<NSButton>> = match card.stage() {
+        Stage::Ask if card.link().is_some() => vec![
+            button(
+                mtm,
+                "Install and Open",
+                Some("\u{2318}Enter"),
+                true,
+                card.can_install(),
+                target,
+                sel!(install:),
+            ),
+            button(
+                mtm,
+                "Open in Your Browser",
+                Some("\u{2318}Esc"),
+                false,
+                true,
+                target,
+                sel!(notHere:),
+            ),
+        ],
         Stage::Ask => vec![
             button(
                 mtm,
@@ -749,14 +776,26 @@ pub(crate) fn build(
     };
     if !buttons.is_empty() {
         y += BUTTONS_TOP;
-        let mut right = WIDTH - PAD_X;
-        for button in buttons.iter().rev() {
-            let size = button.frame().size;
-            button.setFrameOrigin(NSPoint::new(right - size.width, y));
-            view.addSubview(button);
-            right -= size.width + BUTTON_GAP;
+        if link_ask {
+            for (at, button) in buttons.iter().enumerate() {
+                let size = button.frame().size;
+                button.setFrameOrigin(NSPoint::new(WIDTH - PAD_X - size.width, y));
+                view.addSubview(button);
+                y += BUTTON_H;
+                if at + 1 < buttons.len() {
+                    y += BUTTON_GAP;
+                }
+            }
+        } else {
+            let mut right = WIDTH - PAD_X;
+            for button in buttons.iter().rev() {
+                let size = button.frame().size;
+                button.setFrameOrigin(NSPoint::new(right - size.width, y));
+                view.addSubview(button);
+                right -= size.width + BUTTON_GAP;
+            }
+            y += BUTTON_H;
         }
-        y += BUTTON_H;
     }
     y += PAD_Y;
     view.setFrameSize(NSSize::new(WIDTH, y));

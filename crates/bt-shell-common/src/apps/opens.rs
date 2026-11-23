@@ -23,6 +23,21 @@ pub struct Opener {
     pub opens: Vec<Opens>,
 }
 
+impl Opener {
+    /// Whether the program opens a file or a folder, the paths a click opens: a program that opens
+    /// web addresses only (browserpen) is not one a path is offered to.
+    pub fn opens_paths(&self) -> bool {
+        self.opens
+            .iter()
+            .any(|kind| matches!(kind, Opens::File | Opens::Folder))
+    }
+
+    /// Whether the program opens web addresses.
+    pub fn opens_addresses(&self) -> bool {
+        self.opens.contains(&Opens::Url)
+    }
+}
+
 /// The followed programs of `root` that say they open a file, a folder or both, in the order of
 /// their names.
 pub fn openers(root: &Path) -> Vec<Opener> {
@@ -55,4 +70,28 @@ fn opens_of(root: &Path, name: &str) -> Option<Vec<Opens>> {
     let signature = fs::read(folder.join("app.json.sig")).ok()?;
     let manifest = apps::verify(&bytes, &signature).ok()?;
     (manifest.name == name && !manifest.opens.is_empty()).then_some(manifest.opens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opener(opens: &[Opens]) -> Opener {
+        Opener {
+            name: "p".to_owned(),
+            opens: opens.to_vec(),
+        }
+    }
+
+    /// A program that opens addresses only is not offered paths (Settings ▸ Apps ▸ Files lists the
+    /// ones that are), and one that opens paths is not an address's.
+    #[test]
+    fn a_program_that_opens_addresses_only_is_not_one_a_path_is_offered_to() {
+        let browser = opener(&[Opens::Url]);
+        assert!(!browser.opens_paths() && browser.opens_addresses());
+        let editor = opener(&[Opens::File, Opens::Folder]);
+        assert!(editor.opens_paths() && !editor.opens_addresses());
+        let both = opener(&[Opens::File, Opens::Url]);
+        assert!(both.opens_paths() && both.opens_addresses());
+    }
 }

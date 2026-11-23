@@ -60,6 +60,22 @@ pub struct Resolved {
     pub target: PathBuf,
 }
 
+/// The longest web address a program is handed (the pencere protocol's own bound for the address
+/// of a `take`).
+pub const MAX_WEB_ADDRESS: usize = 8192;
+
+/// Whether `target` is a web address a program may be handed: `http` or `https`, with no space and
+/// no control character in it, and no longer than [`MAX_WEB_ADDRESS`]. A program is started with
+/// it as one word and a page is given it as it stands, so what is not one is left to the system.
+pub fn is_web_address(target: &str) -> bool {
+    scheme(target).is_some_and(|name| {
+        (name.eq_ignore_ascii_case("http") || name.eq_ignore_ascii_case("https"))
+            && target[name.len()..].starts_with("://")
+            && target.len() > name.len() + 3
+    }) && target.len() <= MAX_WEB_ADDRESS
+        && !target.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 /// What a ⌘-click does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkAction {
@@ -622,6 +638,42 @@ mod tests {
         assert_eq!(stat(&dir), Some((Entry::Dir, real)));
         assert_eq!(stat(&dir.join("dangling")), None);
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// A program is handed `http` and `https` addresses that are one word, and nothing else: a
+    /// scheme with nothing after it, a space, a control character and a long address are not
+    /// theirs, nor is any scheme the policy opens or asks about.
+    #[test]
+    fn only_a_single_word_web_address_is_one_a_program_may_be_handed() {
+        for good in [
+            "http://localhost:8790",
+            "https://example.com/a?b=c#d",
+            "HTTPS://Example.com",
+            "http://[::1]:3000/",
+        ] {
+            assert!(is_web_address(good), "{good}");
+        }
+        let long = format!("https://example.com/{}", "a".repeat(MAX_WEB_ADDRESS));
+        for bad in [
+            "",
+            "https://",
+            "http:/x",
+            "http:x",
+            "ftp://example.com",
+            "mailto:a@b.c",
+            "file:///etc/passwd",
+            "bateri://x",
+            "javascript:alert(1)",
+            "https://a b",
+            "https://a\tb",
+            "https://a\nb",
+            "https://a\u{7f}b",
+            "https://a\u{a0}b",
+            "example.com",
+            long.as_str(),
+        ] {
+            assert!(!is_web_address(bad), "{bad:?}");
+        }
     }
 
     #[test]

@@ -74,6 +74,7 @@ pub use ::pencere_host::session::{
     MAX_FILE_PIECE, MAX_OPEN_TRANSFERS, MAX_VIEW_MESSAGE, Offer, Size, StageDir, StageError, State,
     ViewKind, ViewStart, WEB_BRIDGE_VERSION, has_files,
 };
+pub use ::pencere_host::take::{Kind as TakeKind, Take};
 
 use crate::color::{Theme, srgb_bytes};
 use crate::flow::Flow;
@@ -823,6 +824,20 @@ struct Inner {
     theme: Theme,
     /// What was said of the end of the program, and what the person asked ([`Ends`]).
     ends: Ends,
+    /// What the program of the view that runs calls itself (`ViewStart::program`), as the
+    /// session cleaned it: the name a link is handed to a program by ([`Desk::hosted`]). `None`
+    /// while no view runs.
+    program: Option<String>,
+}
+
+/// The program of the view that runs, as a terminal looks for the one to hand something to
+/// ([`Desk::hosted`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hosted {
+    /// What the program calls itself.
+    pub program: Option<String>,
+    /// What it said it takes while it runs, each kind once (`takes` of its `open`).
+    pub takes: Vec<TakeKind>,
 }
 
 struct Slots {
@@ -896,6 +911,7 @@ impl Desk {
                 font_mono,
                 theme,
                 ends: Ends::default(),
+                program: None,
             }),
             slots: Mutex::new(Slots {
                 parked: VecDeque::new(),
@@ -1053,6 +1069,31 @@ impl Desk {
     /// ([`Conversing::page_context`]).
     pub(crate) fn page_context(&self) -> Option<String> {
         lock(&self.inner).conversation.page_context()
+    }
+
+    /// The program of the view that runs and what it takes while it runs; `None` while no view
+    /// runs or the program takes nothing (a program that does not say is not sent anything).
+    pub(crate) fn hosted(&self) -> Option<Hosted> {
+        let inner = lock(&self.inner);
+        let takes = inner.conversation.takes();
+        (!takes.is_empty()).then(|| Hosted {
+            program: inner.program.clone(),
+            takes: takes.to_vec(),
+        })
+    }
+
+    /// Hands the program `take` ([`Conversing::hand_over`]): the bytes go to the program through
+    /// `write`, as every message the host sends does. Whether anything was written: `false` for a
+    /// program that did not say it takes that kind, and for a view that does not run.
+    pub(crate) fn hand_over(&self, take: &Take, write: impl Fn(Vec<u8>)) -> bool {
+        let (writes, notify, sent) = {
+            let mut inner = lock(&self.inner);
+            let sent = inner.conversation.hand_over(take).is_some();
+            let (writes, notify) = self.drain(&mut inner);
+            (writes, notify, sent)
+        };
+        self.deliver(writes, notify, write);
+        sent
     }
 
     /// The table of the files the views of the conversation have attached
@@ -1393,7 +1434,8 @@ impl Desk {
                 // A view starts: its module's bytes are written, and nothing counted before is
                 // owed. A view ends, whatever ended it: nothing counted is waiting for anyone, and
                 // the module's frames that wait are dropped (the one under way is finished).
-                Action::StartView(_) => {
+                Action::StartView(ref start) => {
+                    inner.program = start.program.clone();
                     self.flow.begin();
                     // Where the program is **now**: the discard that follows its end is told
                     // this, whatever the shell has forgotten of the session by then. The shell's
@@ -1404,6 +1446,7 @@ impl Desk {
                 }
                 Action::DestroyView => {
                     self.flow.end();
+                    inner.program = None;
                     kept.push(action);
                 }
                 other => kept.push(other),
@@ -1415,6 +1458,7 @@ impl Desk {
         // view opened has the person's ⌃C to end the view that does.)
         if !lives(state) {
             inner.ends = Ends::default();
+            inner.program = None;
         }
         let waiting = waits(state);
         let mut slots = lock(&self.slots);

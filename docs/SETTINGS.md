@@ -648,12 +648,17 @@ stats_interval = 3
 # once; the servers keep their copies (bateri package remove takes one off).
 # An entry taken out of this file by hand only leaves the list: the copy that
 # runs here stays until bateri package remove.
-sources = ["bateri/textpen"]
+sources = ["bateri/textpen", "bateri/browserpen"]
 # The program that opens a file or a folder you Command-click in a terminal,
 # in a floating pane, on the computer the path is on: the name of a program
 # from the list above that opens files, or "" for none. Where the program is
 # not installed, or with "", a path is not a link.
 open_with = "textpen"
+# The program that opens a web address you Command-click in a terminal, beside
+# the terminal and on the computer the terminal is on: "browserpen", or "" for
+# your own browser. Left out, the first click asks. Where browserpen is not
+# installed, the address opens in your own browser.
+# open_links_with = "browserpen"
 
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
@@ -2922,14 +2927,16 @@ _bt_osc7() { printf '\033]7;file://%s%s\007' "$HOST" "$PWD"; }; precmd_functions
 
 ```toml
 [apps]
-sources = ["bateri/textpen"]
+sources = ["bateri/textpen", "bateri/browserpen"]
 open_with = "textpen"
+# open_links_with = "browserpen"
 ```
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `sources` | array of strings | `["bateri/textpen"]` | where the programs bateri keeps up to date publish their releases; written, even as `[]`, the file's list is the list |
+| `sources` | array of strings | `["bateri/textpen", "bateri/browserpen"]` | where the programs bateri keeps up to date publish their releases; written, even as `[]`, the file's list is the list |
 | `open_with` | string | `"textpen"` | the program that opens a file or a folder you Command-click in a terminal; `""` for none |
+| `open_links_with` | string | not written | the program that opens a web address you Command-click in a terminal, beside it; `""` for your own browser. Not written, the first click asks |
 
 An entry is `user/repo`, a GitHub project (bateri reads the `app.json` of its latest release), or a full
 `https://…` or `file:///…` address of an `app.json`. An entry that is none of these is dropped with a warning and the
@@ -2947,8 +2954,23 @@ pane of its own. `open_with` is the name of a program bateri follows that says i
 not underlined and a click does nothing. A server whose `[commands] level` is `"off"` never says what it has installed,
 so no path there is a link; that is the server's silence, and the click itself is the person's own act that the level does
 not rule. A value that is not a program's name keeps the value in use, with a warning;
-`http`, `https`, `ftp` and `mailto` addresses and the links a program writes (OSC 8) are links as ever, and
-nothing is handed to another application.
+`ftp` and `mailto` addresses and the links a program writes (OSC 8) are links as ever, and nothing is handed to
+another application on a click of a path; a web address is the next paragraph's.
+
+**Links.** Command-click on a web address (`http`, `https`) in a terminal opens it in the program `open_links_with`
+names, which is `"browserpen"`, beside the terminal and on the computer the terminal is on: a server's terminal opens it
+in the browserpen of that server, shown in the pane here. If a browserpen of that machine is already open in a pane of the
+same tab, the address becomes a new tab of it and that pane comes forward; if not, a floating pane starts a browserpen
+with the address. With `""`, or where browserpen is not installed or the browser engine it shows pages with has not been
+downloaded yet, the address opens in your own browser, as it did before; nothing waits for a check on the network. Where
+the terminal is on a server that has no browserpen, a card over the pane asks whether to install it there and open the
+address (Install and Open, ⌘Return) or to open it in your own browser (⌘Escape). Not written, `open_links_with` is not
+decided: the first click opens the address in your own browser and asks once, in a note, whether to open links beside the
+terminal with browserpen, which downloads browserpen and the browser engine (the note says how large); Yes follows
+`bateri/browserpen` and writes `"browserpen"`, No writes `""` and the note does not come again. Settings ▸ Apps ▸ Links
+shows the same choice and what a click does now. The context menu of a web address has Open in Your Browser besides
+Open Link, whatever this says. A value that is not a program's name keeps the value in use, with a warning. A file
+Command-clicked while a textpen of that machine is open in a pane of the same tab opens as a new tab of that textpen.
 
 The program is started by itself, in the place of a shell: no shell reads the path, and the program reads none of
 your shell's startup files. On this computer it is given what your shell has all the same, so that it finds the tools and

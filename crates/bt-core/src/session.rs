@@ -12174,6 +12174,23 @@ impl Session {
 
     // ---- views: what a program in the pane shows (`crate::pencere`) ----
 
+    /// The program whose view runs in this pane, and what it takes while it runs
+    /// ([`crate::pencere::Hosted`]); `None` for a pane without a view, and for a program that
+    /// takes nothing.
+    pub fn hosted(&self) -> Option<crate::pencere::Hosted> {
+        self.adapter.0.desk.as_ref()?.hosted()
+    }
+
+    /// Hands the program of the view that runs here `take`: an address or a file the person
+    /// opened, which the program said it takes. Whether it was sent.
+    pub fn hand_over(&self, take: &crate::pencere::Take) -> bool {
+        self.adapter
+            .0
+            .desk
+            .as_ref()
+            .is_some_and(|desk| desk.hand_over(take, |bytes| self.adapter.input(bytes)))
+    }
+
     /// Whether this pane hears the view protocol: it was opened with
     /// [`SessionOptions::views`].
     pub fn hosts_views(&self) -> bool {

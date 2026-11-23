@@ -668,6 +668,131 @@ impl SettingsWindow {
                     );
                 }
             }
+            // The Links row in each of its states: not installed (Your Browser, and the offer),
+            // installed (browserpen, and the engine under it), the engine on its way and failed,
+            // and answered no. The row stands in its box with its text clear of its control, and
+            // says what the state calls for.
+            let engine = bt_shell_common::web_links::Engine::Here {
+                version: Some("0.1.0".to_owned()),
+                bytes: Some(181_000_000),
+            };
+            // The page as it is with nothing the matter: the Files row with its program in the
+            // list, and the list of what is followed unchecked, so that the pictures below show
+            // the Links row alone.
+            self.apply_open_with("textpen", &opening, &followed);
+            self.set_open_with_note("textpen");
+            if let Some((_, sources, statuses)) =
+                scenes.iter().find(|(name, ..)| *name == "unchecked")
+            {
+                apps.show(self, sources, statuses.as_ref(), false);
+            }
+            for (name, setting, here, state, chosen, says) in [
+                (
+                    "links-not-installed",
+                    None,
+                    false,
+                    bt_shell_common::web_links::Engine::Missing,
+                    1,
+                    "browserpen can open links",
+                ),
+                (
+                    "links-installed",
+                    Some("browserpen"),
+                    true,
+                    engine.clone(),
+                    0,
+                    "Browser engine \u{b7} 0.1.0 \u{b7} 181 MB",
+                ),
+                (
+                    "links-downloading",
+                    Some("browserpen"),
+                    true,
+                    bt_shell_common::web_links::Engine::Downloading(Some(42)),
+                    0,
+                    "Downloading the browser engine\u{2026} 42%",
+                ),
+                (
+                    "links-failed",
+                    Some("browserpen"),
+                    true,
+                    bt_shell_common::web_links::Engine::Failed(
+                        "the release could not be reached".to_owned(),
+                    ),
+                    0,
+                    "The browser engine did not come",
+                ),
+                (
+                    "links-no",
+                    Some(""),
+                    true,
+                    engine.clone(),
+                    1,
+                    "Links open in your browser.",
+                ),
+            ] {
+                ivars.links_sample.replace(Some((here, state)));
+                self.sync_links(setting);
+                self.set_links_note(setting);
+                let (Some(content), Some(controls)) = (window.contentView(), ivars.controls.get())
+                else {
+                    continue;
+                };
+                content.layoutSubtreeIfNeeded();
+                let Some(row) = controls
+                    .rows
+                    .iter()
+                    .find(|row| row.key == Some(Key::OpenLinksWith))
+                else {
+                    problems.push(format!("Apps ({name}): the Links row is not built"));
+                    continue;
+                };
+                let note = row.note.stringValue().to_string();
+                if row.note.isHidden() || !note.starts_with(says) {
+                    problems.push(format!(
+                        "Apps ({name}): the note says {note:?}, not {says:?}"
+                    ));
+                }
+                if controls.open_links.indexOfSelectedItem() != chosen {
+                    problems.push(format!(
+                        "Apps ({name}): the popup shows {:?}",
+                        controls.open_links.titleOfSelectedItem()
+                    ));
+                }
+                let boxed = controls
+                    .groups
+                    .iter()
+                    .find(|group| group.spec.title == Some("Links"))
+                    .and_then(|group| group.view.arrangedSubviews().lastObject());
+                let frame = in_window(&row.view);
+                match boxed.map(|boxed| in_window(&boxed)) {
+                    Some(boxed) if contains(boxed, frame) => {}
+                    _ => problems.push(format!("Apps ({name}): the Links row leaves its box")),
+                }
+                let inner: Vec<NSRect> = row
+                    .view
+                    .subviews()
+                    .iter()
+                    .filter(|view| !view.isHidden())
+                    .map(|view| view.alignmentRectForFrame(view.frame()))
+                    .collect();
+                for (i, part) in inner.iter().enumerate() {
+                    if !contains(row.view.bounds(), *part) {
+                        problems.push(format!("Apps ({name}): part {i} of the row spills out"));
+                    }
+                }
+                if let [_, text, control] = inner[..]
+                    && overlap(text, control)
+                {
+                    problems.push(format!("Apps ({name}): the text runs under the control"));
+                }
+                if let Some(dir) = shots {
+                    picture(
+                        &content,
+                        &dir.join(format!("apps-{name}{suffix}-window.png")),
+                    );
+                }
+            }
+            ivars.links_sample.replace(None);
             // The Add field typed in, refused, and looking.
             let first = scenes[0].2.as_ref().map(|all| Tracked {
                 statuses: all.statuses[..1].to_vec(),

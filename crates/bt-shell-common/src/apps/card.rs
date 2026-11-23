@@ -66,6 +66,20 @@ fn has_file_for(root: &Path, name: &str, target: &str) -> bool {
         .is_ok_and(|manifest| manifest.name == name && manifest.files.contains_key(target))
 }
 
+/// The row for the program `name` on the server `machine` said it has, for a person who just
+/// asked for it by clicking a link ([`Card::for_link`]): the program is followed, its release
+/// landed and lists a file for the server's kind of computer, and its source can be reached from
+/// the server. What the server was told it need not have (`not-here`) does not keep it from this:
+/// the person is asking now. `None` when any of that is missing, and the link opens in the
+/// system's browser.
+pub fn row_for(root: &Path, machine: &MachineState, name: &str) -> Option<Row> {
+    let address = store::followed(root, name)?;
+    (public(&address) && has_file_for(root, name, &machine.target)).then(|| Row {
+        words: followed::install_words(root, name, &address),
+        name: name.to_owned(),
+    })
+}
+
 /// What decides whether a server is asked now, besides what it lacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ground {
@@ -146,6 +160,9 @@ pub struct Card {
     host: String,
     stage: Stage,
     lines: Vec<Line>,
+    /// The web address a person clicked that the program is being brought to open: set for the
+    /// card [`Card::for_link`] makes, and opened when the program is there ([`Card::link`]).
+    link: Option<String>,
 }
 
 impl Card {
@@ -167,7 +184,31 @@ impl Card {
                     why: String::new(),
                 })
                 .collect(),
+            link: None,
         })
+    }
+
+    /// The card of a click on the web address `url` in a pane of `host`, which lacks the program
+    /// `row` names: *Install and Open* brings the program and then the address opens in it; the
+    /// other answer opens the address in the system's browser.
+    pub fn for_link(host: &str, row: Row, url: &str) -> Self {
+        Self {
+            host: host.to_owned(),
+            stage: Stage::Ask,
+            lines: vec![Line {
+                row,
+                on: true,
+                mark: Mark::Idle,
+                why: String::new(),
+            }],
+            link: Some(url.to_owned()),
+        }
+    }
+
+    /// The address to open when the program is there; `None` for a card that asks about the
+    /// programs the person follows.
+    pub fn link(&self) -> Option<&str> {
+        self.link.as_deref()
     }
 
     pub fn host(&self) -> &str {
@@ -185,6 +226,10 @@ impl Card {
     /// The card's title.
     pub fn title(&self) -> String {
         match self.stage {
+            Stage::Ask if self.link.is_some() => {
+                let name = self.lines.first().map_or("", |line| line.row.name.as_str());
+                format!("{name} isn\u{2019}t on {}", self.host)
+            }
             Stage::Ask => format!("Programs you follow aren\u{2019}t on {}", self.host),
             Stage::Installing | Stage::Failed => format!("Installing on {}", self.host),
             Stage::Done => format!("Ready on {}", self.host),
@@ -334,6 +379,27 @@ mod tests {
         assert_eq!(card.title(), "Programs you follow aren\u{2019}t on dev-1");
         assert!(card.lines().iter().all(|line| line.on));
         assert!(card.can_install());
+    }
+
+    /// A click on a web address asks about the one program that opens it, by its name and the
+    /// server's, brings it, and keeps the address for when it is there.
+    #[test]
+    fn a_link_card_asks_about_its_program_brings_it_and_keeps_the_address() {
+        let [row] = <[Row; 1]>::try_from(rows(&["browserpen"])).expect("one row");
+        let mut link_card = Card::for_link("rasp", row, "http://localhost:8790");
+        assert_eq!(link_card.title(), "browserpen isn\u{2019}t on rasp");
+        assert_eq!(link_card.link(), Some("http://localhost:8790"));
+        assert_eq!(link_card.stage(), Stage::Ask);
+        assert!(link_card.can_install());
+        assert_eq!(link_card.begin(), Some(0));
+        assert_eq!(link_card.title(), "Installing on rasp");
+        assert_eq!(link_card.settle(0, Ok(())), None);
+        assert_eq!(link_card.stage(), Stage::Done);
+        assert_eq!(link_card.title(), "Ready on rasp");
+        // The address is still the card's: what opens it is the shell's to do once.
+        assert_eq!(link_card.link(), Some("http://localhost:8790"));
+        // A card of the programs the person follows has none.
+        assert_eq!(card(&["textpen"]).link(), None);
     }
 
     #[test]

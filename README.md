@@ -99,6 +99,8 @@ curl -fsSL https://raw.githubusercontent.com/bateri/sqlpen/main/install.sh | sh
 curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
 ```
 
+⌘-click a web address in a terminal and it opens in browserpen, a tab beside the terminal on the machine it is on (the first time, bateri asks whether to use it and downloads it with its browser engine); a file opens as a tab of a textpen that is already open. [`[apps] open_with` and `open_links_with`](docs/SETTINGS.md#apps) choose the programs.
+
 ## Keyboard shortcuts
 
 | Action | Shortcut |

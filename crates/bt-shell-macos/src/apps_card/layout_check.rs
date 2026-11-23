@@ -90,7 +90,25 @@ fn scenes() -> Vec<(&'static str, Card, f64)> {
     for line in 1..12 {
         low_failed.settle(line, Ok(()));
     }
+    let link = |host: &str| Card::for_link(host, row("browserpen"), "http://localhost:8790/");
+    let mut link_installing = link("rasp");
+    link_installing.begin();
+    let mut link_failed = link("rasp");
+    link_failed.begin();
+    link_failed.settle(0, Err("No space left on this machine.".to_owned()));
+    let mut link_done = link("rasp");
+    link_done.begin();
+    link_done.settle(0, Ok(()));
     vec![
+        ("link-ask", link("rasp"), PANE.1),
+        (
+            "link-long-host",
+            link("a-very-long-server-name.production.example.internal"),
+            PANE.1,
+        ),
+        ("link-installing", link_installing, PANE.1),
+        ("link-failed", link_failed, PANE.1),
+        ("link-done", link_done, PANE.1),
         ("ask", made("dev-1", &["textpen", "notes"]), PANE.1),
         (
             "many",

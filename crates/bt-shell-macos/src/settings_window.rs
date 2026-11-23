@@ -307,11 +307,12 @@ enum Key {
     ClaudeIntegration,
     ClaudeSkill,
     OpenWith,
+    OpenLinksWith,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 54] = [
+    const ALL: [Key; 55] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -366,6 +367,7 @@ impl Key {
         Key::ClaudeIntegration,
         Key::ClaudeSkill,
         Key::OpenWith,
+        Key::OpenLinksWith,
     ];
 
     fn tag(self) -> NSInteger {
@@ -435,6 +437,7 @@ impl Key {
             Key::ClaudeIntegration => "agents.claude_integration",
             Key::ClaudeSkill => "agents.claude_skill",
             Key::OpenWith => "apps.open_with",
+            Key::OpenLinksWith => "apps.open_links_with",
         }
     }
 }
@@ -955,6 +958,8 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         },
         Key::StatsInterval => Some("Pauses in hidden tabs and while idle."),
         Key::OpenWith => Some(open_with_description(&settings.apps_open_with)),
+        // What a click does depends on what is on this computer: the row says it itself.
+        Key::OpenLinksWith => None,
         Key::DownloadNotify => Some("Only while bateri is in the background."),
         Key::Theme if settings.theme == SYSTEM_THEME => {
             Some("The light theme while the system is light, the dark one while it is dark.")
@@ -1497,6 +1502,10 @@ fn missing_font_title(name: &str, notice: Option<FontNotice>) -> String {
     }
 }
 
+/// The Links popup's choices, in the order of [`Key::OpenLinksWith`]'s edits: browserpen, and the
+/// person's own browser.
+const LINKS_CHOICES: [&str; 2] = ["browserpen", "Your Browser"];
+
 /// An item of the Open with popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum OpenItem {
@@ -1566,8 +1575,10 @@ fn programs_that_open_files() -> (Vec<String>, Vec<String>) {
         .into_iter()
         .map(|(name, _)| name)
         .collect();
+    // A program that opens web addresses only (browserpen) is the Links row's, not this one's.
     let opening = bt_shell_common::apps::opens::among(&root, followed.iter().cloned())
         .into_iter()
+        .filter(|opener| opener.opens_paths())
         .map(|opener| opener.name)
         .collect();
     (opening, followed)
@@ -1766,6 +1777,8 @@ struct Controls {
     font: Retained<NSPopUpButton>,
     /// Apps ▸ Files ▸ Open with: the followed programs that open files, and Nothing.
     open_with: Retained<NSPopUpButton>,
+    /// Apps ▸ Links ▸ Open with: browserpen, and Your Browser.
+    open_links: Retained<NSPopUpButton>,
     /// The switches of the options the selected font offers.
     font_options: font_options::Options,
     size: Number,
@@ -2004,6 +2017,9 @@ pub(crate) struct Ivars {
     /// every `refresh`.
     fonts: RefCell<Vec<FontItem>>,
     open_withs: RefCell<Vec<OpenItem>>,
+    /// What the Links row is shown to be built from in place of what is on this computer: set by
+    /// the layout check, which pictures each of the row's states.
+    links_sample: RefCell<Option<(bool, bt_shell_common::web_links::Engine)>>,
     /// The options the Options row shows, in the order of the switches' tags.
     /// Rebuilt on every `refresh`.
     font_options: RefCell<Vec<FontOption>>,
@@ -2128,6 +2144,10 @@ define_class!(
             let Some(key) = Key::from_tag(popup.tag()) else {
                 return;
             };
+            if key == Key::OpenLinksWith {
+                self.links_chosen(index);
+                return;
+            }
             self.save(self.choice_edit(key, index));
         }
 
@@ -2616,6 +2636,7 @@ impl SettingsWindow {
             controls: OnceCell::new(),
             fonts: RefCell::new(Vec::new()),
             open_withs: RefCell::new(Vec::new()),
+            links_sample: RefCell::new(None),
             font_options: RefCell::new(Vec::new()),
             contrasts: RefCell::new(Vec::new()),
             folders: RefCell::new(String::new()),
@@ -2626,6 +2647,11 @@ impl SettingsWindow {
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build();
         this
+    }
+
+    /// The window itself, for a sheet over it.
+    pub(crate) fn ns_window(&self) -> Option<Retained<NSWindow>> {
+        self.ivars().window.get().cloned()
     }
 
     /// Whether the window is open (miniaturized too) — refreshing while closed
@@ -2775,6 +2801,7 @@ impl SettingsWindow {
         }
         self.ivars().fonts.replace(items);
         self.sync_open_with(&settings.apps_open_with);
+        self.sync_links(settings.apps_open_links_with.as_deref());
         set_number(
             &c.size,
             settings.font.size,
@@ -2884,10 +2911,18 @@ impl SettingsWindow {
                 .then(|| open_with_warning(&self.ivars().open_withs.borrow()))
                 .flatten();
             let diagnostic = diagnostic.or(unlisted.as_deref());
+            // The Links row says what the next click does, from what is on this computer: not
+            // a function of the settings alone.
+            let links_note = (key == Key::OpenLinksWith).then(|| {
+                self.links_state(settings.apps_open_links_with.as_deref())
+                    .note
+            });
             row.set_note(
                 diagnostic,
                 leans.reason.or(forced.map(|forced| forced.note)),
-                row_description(key, settings, resolved),
+                links_note
+                    .as_deref()
+                    .or_else(|| row_description(key, settings, resolved)),
                 enabled,
             );
         }
@@ -2959,6 +2994,7 @@ impl SettingsWindow {
         &self,
         sources: &[String],
         open_with: &str,
+        open_links_with: Option<&str>,
         tracked: Option<&bt_shell_common::apps::page::Tracked>,
     ) {
         if let Some(apps) = self.ivars().apps.get() {
@@ -2967,6 +3003,84 @@ impl SettingsWindow {
         // The programs that open files change with the list (Add, Remove) and with a release.
         self.sync_open_with(open_with);
         self.set_open_with_note(open_with);
+        // What the Links row says changes with a release, and with the engine on its way.
+        self.sync_links(open_links_with);
+        self.set_links_note(open_links_with);
+    }
+
+    /// What the Links row shows for `setting`, from what is on this computer
+    /// ([`bt_shell_common::web_links::links_row`]).
+    fn links_state(&self, setting: Option<&str>) -> bt_shell_common::web_links::RowState {
+        let (program_here, engine) =
+            self.ivars()
+                .links_sample
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| {
+                    app::delegate(self.mtm())
+                        .map(|app| app.links_facts())
+                        .unwrap_or((false, bt_shell_common::web_links::Engine::Missing))
+                });
+        bt_shell_common::web_links::links_row(&bt_shell_common::web_links::RowFacts {
+            setting,
+            program_here,
+            engine,
+        })
+    }
+
+    /// Selects the Links popup's choice for `setting`.
+    fn sync_links(&self, setting: Option<&str>) {
+        let Some(c) = self.ivars().controls.get() else {
+            return;
+        };
+        let index = match self.links_state(setting).chosen {
+            bt_shell_common::web_links::Chosen::Browserpen => 0,
+            bt_shell_common::web_links::Chosen::YourBrowser => 1,
+        };
+        c.open_links.selectItemAtIndex(index);
+    }
+
+    /// The line under the Links row.
+    fn set_links_note(&self, setting: Option<&str>) {
+        let Some(c) = self.ivars().controls.get() else {
+            return;
+        };
+        if let Some(row) = c
+            .rows
+            .iter()
+            .find(|row| row.key == Some(Key::OpenLinksWith))
+        {
+            row.set_note(
+                None,
+                None,
+                Some(&self.links_state(setting).note),
+                c.open_links.isEnabled(),
+            );
+        }
+    }
+
+    /// The person chose in the Links popup: Your Browser is written; browserpen is written at once
+    /// where it is all here, and asked about where it is not (what saying yes brings is said, as the
+    /// first click's note says it). The popup goes back to what the file says until it says more.
+    fn links_chosen(&self, index: NSInteger) {
+        let Some(app) = app::delegate(self.mtm()) else {
+            return;
+        };
+        let file = app.file_settings().apps_open_links_with;
+        if index == 1 {
+            self.save(Some(SettingsEdit::AppsOpenLinksWith(String::new())));
+        } else if self.links_state(file.as_deref()).ready {
+            self.save(Some(SettingsEdit::AppsOpenLinksWith(
+                bt_shell_common::web_links::BROWSER_PROGRAM.to_owned(),
+            )));
+        } else {
+            app.ask_to_use_browserpen();
+        }
+        // What the file says now (a write refreshes the window, which may not have yet reached
+        // this popup): the popup shows that, and goes back to the old choice for a question that
+        // is not yet answered.
+        let now = app.file_settings().apps_open_links_with;
+        self.sync_links(now.as_deref());
     }
 
     /// Fills the Open with popup from the programs that open files (the folder of the followed
@@ -4028,6 +4142,12 @@ impl SettingsWindow {
         let minimum_contrast = self.string_popup(Key::MinimumContrast);
         let font = self.string_popup(Key::Font);
         let open_with = self.string_popup(Key::OpenWith);
+        let open_links = self.string_popup(Key::OpenLinksWith);
+        fill_popup(
+            &open_links,
+            LINKS_CHOICES.iter().map(|title| Entry::item(*title)),
+            1,
+        );
         // Half a point a step: the size is a decimal, and a whole point is a large step at the
         // sizes a terminal is read at.
         let size = self.number(Key::Size, MIN_SIZE, MAX_SIZE, 0.5, NUMBER_WIDTH);
@@ -4112,6 +4232,7 @@ impl SettingsWindow {
             dark_theme,
             font,
             open_with,
+            open_links,
             font_options,
             size,
             line_height,
@@ -4635,6 +4756,7 @@ impl Controls {
             Key::DarkTheme => Parts::of(&self.dark_theme),
             Key::Font => Parts::of(&self.font),
             Key::OpenWith => Parts::of(&self.open_with),
+            Key::OpenLinksWith => Parts::of(&self.open_links),
             Key::FontFeatures => Parts {
                 view: self.font_options.view(),
                 controls: Vec::new(),
@@ -5690,7 +5812,7 @@ mod tests {
                     [agents]\nclaude_integration = []\nclaude_skill = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
                     [commands]\nlevel = []\n\
-                    [apps]\nopen_with = []\n\
+                    [apps]\nopen_with = []\nopen_links_with = []\n\
                     [remote]\n\
                     download_dir = []\ndownload_conflict = []\ndownload_notify = []\n\
                     stats = []\nstats_interval = []\nintegration = []\n";
@@ -5752,6 +5874,7 @@ mod tests {
                 Key::ClaudeSkill => SettingsEdit::AgentsClaudeSkill(true),
                 Key::CommandLevel => SettingsEdit::CommandLevel(CommandLevel::Off),
                 Key::OpenWith => SettingsEdit::AppsOpenWith(String::new()),
+                Key::OpenLinksWith => SettingsEdit::AppsOpenLinksWith(String::new()),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
                 Key::FocusFrame => SettingsEdit::FocusFrame(true),
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),

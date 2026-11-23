@@ -56,8 +56,8 @@ use objc2::{
 use objc2_app_kit::{
     NSCursor, NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo,
     NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags, NSEventPhase, NSMenuItem,
-    NSPasteboard, NSPasteboardTypeFileURL, NSResponder, NSTextInputClient, NSTrackingArea,
-    NSTrackingAreaOptions, NSView,
+    NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeURL, NSResponder, NSTextInputClient,
+    NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
@@ -1367,6 +1367,12 @@ define_class!(
             self.menu_open_link();
         }
 
+        /// A web address's own item: the system's browser whatever `[apps] open_links_with` says.
+        #[unsafe(method(openInYourBrowserFromMenu:))]
+        fn open_in_your_browser_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.menu_open_in_your_browser();
+        }
+
         #[unsafe(method(revealLinkFromMenu:))]
         fn reveal_link_from_menu(&self, _sender: Option<&AnyObject>) {
             self.menu_reveal_link();
@@ -2347,9 +2353,13 @@ define_class!(
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
             match crate::carry::taken(sender) {
-                // bateri's own carry first, then files: the one rule of the order.
+                // bateri's own carry first, then files: the one rule of the order. An address that
+                // is no file goes to a page, or nowhere.
                 Some(carry) => self.take_carry(&carry),
-                None => self.drop_files(sender),
+                None => match self.drop_address(sender) {
+                    Some(taken) => taken,
+                    None => self.drop_files(sender),
+                },
             }
         }
     }
@@ -2382,6 +2392,25 @@ define_class!(
         }
     }
 );
+
+/// The first web address on the pasteboard that is not a file ([`links::is_web_address`] says
+/// which is one): what Safari, a link of another application or a terminal's own link gives.
+fn dropped_address(board: &NSPasteboard) -> Option<String> {
+    let classes: Retained<NSArray<AnyClass>> = NSArray::from_slice(&[NSURL::class()]);
+    // SAFETY: both conditions of the signature are met - the class array carries a real class
+    // (`NSURL`) and no options dictionary is given (`None`).
+    let objects = unsafe { board.readObjectsForClasses_options(&classes, None) }?;
+    objects
+        .iter()
+        .filter_map(|object| {
+            object
+                .downcast_ref::<NSURL>()
+                .filter(|url| !url.isFileURL())
+                .and_then(NSURL::absoluteString)
+                .map(|text| text.to_string())
+        })
+        .find(|text| bt_shell_common::links::is_web_address(text))
+}
 
 /// The file-system paths of the file URLs on the pasteboard.
 ///
@@ -2621,10 +2650,53 @@ impl BateriView {
             }
     }
 
+    /// The answer to a drag of a web address over the view: copy where a page of the kit is up,
+    /// none anywhere else — a terminal takes no address, and an address is nothing to upload.
+    /// `None` when the drag is not one of an address with no file in it. A drag of files is
+    /// counted when it comes in, so the pasteboard is read again only for what has no files.
+    fn address_over(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<NSDragOperation> {
+        if self.ivars().drag_count.get() > 0 {
+            return None;
+        }
+        let board = sender.draggingPasteboard();
+        if !dropped_paths(&board).is_empty() {
+            return None;
+        }
+        dropped_address(&board)?;
+        let page = self.pane().is_some_and(|pane| pane.page_is_up());
+        Some(if page {
+            NSDragOperation::Copy
+        } else {
+            NSDragOperation::None
+        })
+    }
+
+    /// A web address let go on the view: the page of the kit that is up is told it where it was
+    /// let go (`link_dropped`); every other pane turns it away. `None` when what was let go is not
+    /// an address with no file in it, which is the files' ([`BateriView::drop_files`]).
+    fn drop_address(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<bool> {
+        let board = sender.draggingPasteboard();
+        if !dropped_paths(&board).is_empty() {
+            return None;
+        }
+        let url = dropped_address(&board)?;
+        self.ivars().drag_count.set(0);
+        self.ivars().drag_told.set(None);
+        let at = self.convertPoint_fromView(sender.draggingLocation(), None);
+        let at = PagePoint::new(at.x as f32, at.y as f32);
+        Some(
+            self.pane()
+                .is_some_and(|pane| pane.page_link_dropped(at, url)),
+        )
+    }
+
     /// The answer to a drag over the view (`draggingEntered:`, `draggingUpdated:`): copy where
     /// a page is up or the pane takes a drop, and none where it does not; and the page of a
     /// view with files is told how many files are over it and where.
     fn dragged_over(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        if let Some(answer) = self.address_over(sender) {
+            return answer;
+        }
         let pane = self.pane();
         if let Some(pane) = &pane {
             let at = self.convertPoint_fromView(sender.draggingLocation(), None);
@@ -2729,6 +2801,8 @@ impl BateriView {
         // pasteboard type registration and does not resolve to `None`.
         this.registerForDraggedTypes(&NSArray::from_slice(&[
             unsafe { NSPasteboardTypeFileURL },
+            // A web address let go on a page of the kit, which tells the page ([`BateriView::drop_address`]).
+            unsafe { NSPasteboardTypeURL },
             crate::carry::carry_type(),
         ]));
         this
@@ -4488,16 +4562,32 @@ mod tests {
                 .unwrap_or_else(|| panic!("{signature}"));
             &source[at..at + source[at..].find(end).expect("its end")]
         };
-        // Registered for the file URL and the carry's type, and no plain-text type.
+        // Registered for the file URL, the carry's type and a web address (which only a page is
+        // given), and no plain-text type.
         let new = body("    pub(crate) fn new(mtm", "        this\n    }");
         assert!(
             new.contains("NSPasteboardTypeFileURL") && new.contains("crate::carry::carry_type()")
         );
-        assert!(!new.contains("NSPasteboardTypeString") && !new.contains("NSPasteboardTypeURL"));
+        assert!(new.contains("NSPasteboardTypeURL"));
+        assert!(!new.contains("NSPasteboardTypeString"));
         // The carry's arm is before the files' in the release, and in the entering and the moves.
         let perform = body("        fn perform_drag_operation(", "\n        }\n");
         assert!(
             perform.find("crate::carry::taken(sender)") < perform.find("self.drop_files(sender)")
+        );
+        // A web address that is no file goes to a page of the kit (`link_dropped`) and nowhere
+        // else: not typed or pasted into a terminal, not uploaded; and it is looked at before
+        // the files, which are never an address.
+        assert!(
+            perform.find("self.drop_address(sender)") < perform.find("self.drop_files(sender)")
+        );
+        let address = body("    fn drop_address(", "\n    }\n");
+        assert!(address.contains("pane.page_link_dropped("), "{address}");
+        assert!(
+            !address.contains("paste")
+                && !address.contains("upload")
+                && !address.contains("write("),
+            "{address}"
         );
         for signature in [
             "        fn dragging_entered(",

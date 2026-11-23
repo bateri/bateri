@@ -167,6 +167,7 @@ mod tests {
         let edits = [Edit::Cut, Edit::Copy, Edit::Paste, Edit::SelectAll].map(Edit::action);
         let links = [
             sel!(openLinkFromMenu:),
+            sel!(openInYourBrowserFromMenu:),
             sel!(revealLinkFromMenu:),
             sel!(copyLinkFromMenu:),
             sel!(copyScpPathFromMenu:),

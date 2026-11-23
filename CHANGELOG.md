@@ -14,6 +14,9 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Web links open beside your terminal.** ⌘-click a web address and it opens as a tab of browserpen next to the terminal, on the machine the terminal is on; the first time, bateri asks whether to use browserpen. Settings ▸ Apps ▸ Links changes the answer, and a link's menu always has *Open in Your Browser*. On a server without browserpen a card offers to install it there.
+- **A file opens as a tab of the editor you have open.** ⌘-click a file and, when textpen is already open in that tab, the file is a new tab in it instead of a new pane.
+- **Drop a link on a program's page.** A program can take a web address dragged onto it, from Safari or another app.
 - **Programs can show a real web browser.** A program such as browserpen opens web pages inside its pane, with tabs, an address bar, find and zoom; a two-finger swipe and a mouse's side buttons go back and forward.
 - **Clear a site, empty the cache, open a dev server's https.** A program's browser can empty its cache, clear a site's data (which signs you out of it, on every Mac where your sign-ins follow you) and open a page whose certificate isn't trusted, such as a development server's own.
 - **Claude can read a browser's console.** `bateri browser console p7` shows what the page logged since it was first asked; `bateri browser clear p7 --cache` or `--site` clears it, and Claude asks you before clearing a site.

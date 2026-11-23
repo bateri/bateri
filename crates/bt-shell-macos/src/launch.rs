@@ -505,14 +505,26 @@ pub(crate) struct Launch {
 pub struct OpenProgram {
     /// The program's name.
     pub(crate) name: String,
-    /// Whether the path is a file or a folder.
-    pub(crate) thing: bt_shell_common::open_with::Thing,
-    /// The absolute path, as the check found it: this Mac's, or the server's.
-    pub(crate) path: String,
-    /// The line the click named (`path:12`), when it did.
-    pub(crate) line: Option<u32>,
-    /// Whether the path is on the server the pane shows a terminal of, and not on this Mac.
+    /// What it is asked to open.
+    pub(crate) target: OpenTarget,
+    /// Whether the thing is on the server the pane shows a terminal of, and not on this Mac.
     pub(crate) server: bool,
+}
+
+/// What a program is started to open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenTarget {
+    /// A file or a folder.
+    Path {
+        /// Whether the path is a file or a folder.
+        thing: bt_shell_common::open_with::Thing,
+        /// The absolute path, as the check found it: this Mac's, or the server's.
+        path: String,
+        /// The line the click named (`path:12`), when it did.
+        line: Option<u32>,
+    },
+    /// A web address ([`bt_shell_common::links::is_web_address`] says it is one).
+    Address(String),
 }
 
 /// The program a pane was opened for — the file or folder a ⌘-click opened — and what it runs
@@ -549,6 +561,19 @@ pub(crate) struct Opens {
 }
 
 impl Opens {
+    /// The words for `program` opening the web address `url` on `place`: the address's host (and
+    /// its port), which is what a person knows a site by.
+    pub(crate) fn of_address(place: Option<String>, program: &str, url: &str) -> Self {
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+        Self {
+            place,
+            program: program.to_owned(),
+            what: host.to_owned(),
+        }
+    }
+
     /// The words for `program` opening `path` on `place`. A path that ends in `/` (a folder
     /// written so, the root) is named by its last part that is one, and the root by itself.
     pub(crate) fn of(place: Option<String>, program: &str, path: &str) -> Self {
@@ -719,6 +744,24 @@ mod tests {
         );
         // The root has no part to be named by: it is named as it is written.
         assert_eq!(super::Opens::of(None, "textpen", "/").what, "/");
+    }
+
+    /// A pane opened for a web address names the site by its host, not by the last part of the
+    /// address: a person knows `localhost:8790`, not `index.html?x=1`.
+    #[test]
+    fn a_waiting_pane_names_a_web_address_by_its_host() {
+        for (url, what) in [
+            ("http://localhost:8790", "localhost:8790"),
+            ("https://example.com/a/b?c=d#e", "example.com"),
+            ("https://user:pw@example.com:8443/x", "example.com:8443"),
+            ("https://example.com?x=1", "example.com"),
+        ] {
+            let opens = super::Opens::of_address(None, "browserpen", url);
+            assert_eq!(opens.what, what, "{url}");
+            assert_eq!(opens.program, "browserpen");
+        }
+        let opens = super::Opens::of_address(Some("rasp".to_owned()), "browserpen", "http://a/");
+        assert_eq!(opens.place.as_deref(), Some("rasp"));
     }
 
     /// The dock of `-- zsh` and of no `-- sh`: a shell is asked the one decision there is, by its

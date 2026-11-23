@@ -125,6 +125,19 @@ use crate::{Run, Workload};
 use crate::{child, locale};
 use bt_shell_common::child::PaneRuns;
 
+/// The machine a pane's terminal is on, as far as what a click opens is concerned
+/// ([`TerminalPane::machine`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PaneMachine {
+    /// This computer.
+    Here,
+    /// The server (by its account, [`bt_shell_common::kablo::service::Shown::account`]) whose
+    /// terminal the pane shows.
+    Server(String),
+    /// A machine bateri has no part in: a plain `ssh`.
+    Elsewhere,
+}
+
 /// Events the pane hands to its owner: `tab::TabHost`, or a test's fake owner.
 ///
 /// All of them are called **on the main thread** and with the pane's id
@@ -224,6 +237,12 @@ pub trait PaneHost {
     /// Opens the program for a ⌘-click on a path in a floating pane of the tab `from` is in, with
     /// its own terminal. The default is an owner that does not.
     fn open_program(&self, _from: &TerminalPane, _open: crate::launch::OpenProgram) {}
+    /// Opens a web address ⌘-clicked in the pane `from`: beside the terminal, in the program the
+    /// person chose, or in the system's browser, and says it did. The default is an owner that
+    /// does not decide (`false`): the address goes to the system.
+    fn open_web_address(&self, _from: &TerminalPane, _url: &str) -> bool {
+        false
+    }
     /// What keeps the connections to the servers, and so runs a program or opens a connection
     /// on one for the pane's jobs ([`bt_shell_common::kablo::service::Backend::command`]).
     /// The default is an owner that keeps none.
@@ -3441,6 +3460,13 @@ impl TerminalPane {
         self.host().open_program(self, open);
     }
 
+    /// Opens a web address ⌘-clicked in this pane where the person asked for them to open
+    /// (`[apps] open_links_with`). `false` when the pane's owner does not decide: the caller
+    /// hands the address to the system.
+    pub(crate) fn open_web_address(&self, url: &str) -> bool {
+        self.host().open_web_address(self, url)
+    }
+
     /// The program this pane was opened for, if it was: what the terminal a server keeps for it
     /// is asked to run, and where.
     pub(crate) fn program_start(&self) -> Option<crate::launch::ProgramStart> {
@@ -3485,6 +3511,17 @@ impl TerminalPane {
         let target = self.session()?.remote_target()?;
         let shown = self.host().kept_terminal(self.uuid())?;
         shown.serves(&target.1).then_some(target)
+    }
+
+    /// The machine the pane's terminal is on, as far as what a click opens is concerned
+    /// ([`PaneMachine`]): the server whose terminal the pane shows, this computer, or another
+    /// machine bateri has no part in (a plain `ssh`).
+    pub(crate) fn machine(&self) -> PaneMachine {
+        match self.host().kept_terminal(self.uuid()) {
+            Some(shown) => PaneMachine::Server(shown.account),
+            None if self.is_plain_ssh() => PaneMachine::Elsewhere,
+            None => PaneMachine::Here,
+        }
     }
 
     /// Whether the pane is in a remote session that is a plain `ssh`: an `ssh`
@@ -7348,6 +7385,24 @@ impl TerminalPane {
             (self.page_handle(), crate::native_page::event_key_of(event))
         {
             handle.key_up(key, mods);
+            self.drain_page();
+        }
+        true
+    }
+
+    /// A web address let go on the page up, at `at` in the view's points: the page is told it
+    /// (`link_dropped`), as the text of the address; the session has no say, and nothing is
+    /// written to the program's line. `true` when a page took it.
+    pub(crate) fn page_link_dropped(
+        &self,
+        at: bt_shell_common::native_view::Point,
+        url: String,
+    ) -> bool {
+        if !self.page_is_up() {
+            return false;
+        }
+        if let Some(handle) = self.page_handle() {
+            handle.page().link_dropped(at, url);
             self.drain_page();
         }
         true

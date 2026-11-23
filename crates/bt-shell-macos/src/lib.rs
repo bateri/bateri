@@ -152,6 +152,16 @@ pub fn apps_card_layout_problems(
     apps_card::layout_check::layout_problems(mtm, shots)
 }
 
+/// The one-time note about opening links in browserpen, in each of its forms, laid out; with `shots`,
+/// written as PNGs there. Only for `tests/settings_window.rs`.
+#[doc(hidden)]
+pub fn links_note_layout_problems(
+    mtm: MainThreadMarker,
+    shots: Option<&std::path::Path>,
+) -> Vec<String> {
+    app::note_layout_problems(mtm, shots)
+}
+
 /// Builds the settings window, shows it off the screen before it has a theme, refreshes it in two
 /// light themes and lists each time the sidebar's "Open settings.toml" is not titled in the
 /// theme's text colour. Only for `tests/settings_window.rs`, before anything else there: a button

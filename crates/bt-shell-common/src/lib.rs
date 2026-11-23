@@ -111,4 +111,5 @@ pub mod view_strip;
 // rather than half-present (a `Notify` without a `Watch`).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod watch;
+pub mod web_links;
 pub mod zoom;

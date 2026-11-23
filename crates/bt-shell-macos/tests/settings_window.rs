@@ -107,5 +107,15 @@ fn check(who: &str) {
         "{} layout problems in the card a server asks with",
         card.len()
     );
+    // The note about opening links in browserpen.
+    let note = bt_shell_macos::links_note_layout_problems(mtm, shots.as_deref());
+    for problem in &note {
+        eprintln!("{who}: {problem}");
+    }
+    assert!(
+        note.is_empty(),
+        "{} layout problems in the note about links",
+        note.len()
+    );
     println!("{who}: ok");
 }

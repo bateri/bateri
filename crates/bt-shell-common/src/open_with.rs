@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use bt_core::pencere::apps::{self, Opens};
 
 use crate::apps::opens::Opener;
+use crate::links;
 
 /// What was clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +168,32 @@ pub fn argv_server(name: &str, line: Option<u32>, path: &str) -> Option<Vec<Stri
     Some(argv)
 }
 
+/// What this computer runs to open a web address in the program `name`: the program's link under
+/// `bin` ([`bin_here`]), then the address. `None` for a name that is not a program's, a link that
+/// is not text, and what is not a web address ([`links::is_web_address`]): the address is one word
+/// and begins with `http`, so it cannot be taken for an option.
+pub fn argv_address_here(bin: &Path, name: &str, url: &str) -> Option<Vec<String>> {
+    if !apps::is_name(name) || !links::is_web_address(url) {
+        return None;
+    }
+    Some(vec![bin.join(name).to_str()?.to_owned(), url.to_owned()])
+}
+
+/// What a server runs to open a web address: the constant line ([`SERVER_LINE`]), the name as its
+/// `$0`, then the address. `None` as [`argv_address_here`] says.
+pub fn argv_address_server(name: &str, url: &str) -> Option<Vec<String>> {
+    if !apps::is_name(name) || !links::is_web_address(url) {
+        return None;
+    }
+    Some(vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        SERVER_LINE.to_owned(),
+        name.to_owned(),
+        url.to_owned(),
+    ])
+}
+
 /// The folder the program starts in: the folder that was clicked, or the one a file is in.
 pub fn directory(thing: Thing, path: &str) -> String {
     match thing {
@@ -300,6 +327,47 @@ mod tests {
             let argv = argv_server("textpen", Some(3), path).expect("words");
             assert_eq!(argv.len(), 6, "{path:?}");
             assert_eq!(argv[5], path);
+        }
+    }
+
+    /// A web address is the program's one argument, whatever is in it that is a character of
+    /// an address; what is not a web address makes no words.
+    #[test]
+    fn a_web_address_is_one_word_and_nothing_else_is_one() {
+        let bin = bin_here(Path::new("/Users/me"));
+        let url = "https://example.com/a?b=c&d=$(touch)`x`;rm#e";
+        assert_eq!(
+            argv_address_here(&bin, "browserpen", url).expect("words"),
+            ["/Users/me/.local/share/bateri/apps/bin/browserpen", url]
+        );
+        let server = argv_address_server("browserpen", url).expect("words");
+        assert_eq!(server[..4], ["sh", "-c", SERVER_LINE, "browserpen"]);
+        assert_eq!(server[4], url);
+        for text in [
+            "ftp://example.com/",
+            "mailto:me@example.com",
+            "javascript:alert(1)",
+            "-https://x",
+            "https:/x",
+            "https://",
+            "https://a b",
+            "https://a\nb",
+            "/tmp/file",
+            "",
+        ] {
+            assert!(
+                argv_address_here(&bin, "browserpen", text).is_none(),
+                "{text:?}"
+            );
+            assert!(
+                argv_address_server("browserpen", text).is_none(),
+                "{text:?}"
+            );
+        }
+        // The program is a program's name, not a path or an option.
+        for name in ["../x", "-x", "Browserpen", "a/b", ""] {
+            assert!(argv_address_here(&bin, name, url).is_none(), "{name:?}");
+            assert!(argv_address_server(name, url).is_none(), "{name:?}");
         }
     }
 

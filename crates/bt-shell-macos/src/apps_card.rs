@@ -89,6 +89,9 @@ struct Cards {
     /// The servers whose card was answered.
     answered: HashSet<String>,
     open: HashMap<String, Open>,
+    /// The programs a click's card brought to a server, by the server's account: the server says
+    /// it has them at its next `state`, and until then the next click must not ask again.
+    brought: HashSet<(String, String)>,
 }
 
 impl Cards {
@@ -100,6 +103,10 @@ impl Cards {
             return;
         };
         match open.card.stage() {
+            // A click's card is for that click and goes with it: the server is asked about the
+            // programs it lacks only as it always is, and the address is not opened anywhere (the
+            // pane it was clicked in is gone).
+            Stage::Ask if open.card.link().is_some() => {}
             Stage::Ask => {
                 self.pending
                     .entry(account.to_owned())
@@ -326,7 +333,14 @@ pub(super) fn act(mtm: MainThreadMarker, account: &str, act: Act) {
                 }
                 None => (None, None),
             });
-            if first.is_some() {
+            // A card of a click answers that click, not the question the server is asked once.
+            let link = with(|cards| {
+                cards
+                    .open
+                    .get(account)
+                    .is_some_and(|open| open.card.link().is_some())
+            });
+            if first.is_some() && !link {
                 with(|cards| cards.answered.insert(account.to_owned()));
             }
             redraw(mtm, account);
@@ -342,6 +356,19 @@ pub(super) fn act(mtm: MainThreadMarker, account: &str, act: Act) {
             }
         }
         Act::NotHere => {
+            // The card of a click: the other answer is the system's browser, and the server is
+            // told nothing.
+            if let Some(url) = with(|cards| {
+                cards.open.get(account).and_then(|open| {
+                    (open.card.stage() == Stage::Ask)
+                        .then(|| open.card.link().map(str::to_owned))
+                        .flatten()
+                })
+            }) {
+                remove(mtm, account);
+                crate::hyperlink::open_url(&url);
+                return;
+            }
             let Some((host, ssh, words)) = with(|cards| {
                 cards.open.get(account).and_then(|open| {
                     (open.card.stage() == Stage::Ask).then(|| {
@@ -370,7 +397,22 @@ pub(super) fn act(mtm: MainThreadMarker, account: &str, act: Act) {
                 eprintln!("bateri: no thread to tell a server about its programs: {error}");
             }
         }
-        Act::Close => remove(mtm, account),
+        Act::Close => {
+            // The click that raised a card of a program that did not come is not lost: its
+            // address opens in the system's browser. Only a card that failed has this button (one
+            // that is ready has opened its address in the program already).
+            let url = with(|cards| {
+                cards.open.get(account).and_then(|open| {
+                    (open.card.stage() == Stage::Failed)
+                        .then(|| open.card.link().map(str::to_owned))
+                        .flatten()
+                })
+            });
+            remove(mtm, account);
+            if let Some(url) = url {
+                crate::hyperlink::open_url(&url);
+            }
+        }
     }
 }
 
@@ -433,6 +475,25 @@ fn finished(mtm: MainThreadMarker, account: &str, line: usize, outcome: Result<(
     match (next, stage) {
         (Some(line), _) => bring(mtm, account, line, None),
         (None, Stage::Done) => {
+            // The program is there: the address a click asked to open opens in it, once.
+            let opening = with(|cards| {
+                cards
+                    .open
+                    .get(account)
+                    .and_then(|open| open.card.link().map(|url| (open.pane, url.to_owned())))
+            });
+            if let Some((pane, url)) = opening
+                && let Some(app) = app::delegate(mtm)
+            {
+                with(|cards| {
+                    if let Some(name) = cards.open.get(account).and_then(|open| {
+                        open.card.lines().first().map(|line| line.row.name.clone())
+                    }) {
+                        cards.brought.insert((account.to_owned(), name));
+                    }
+                });
+                app.open_address_in_installed(pane, &url);
+            }
             // Ready: it says so for a moment and goes.
             let account = account.to_owned();
             if let Ok(when) = DispatchTime::try_from(Duration::from_secs(READY_SECONDS)) {
@@ -494,9 +555,68 @@ pub(crate) fn asking_in(tab: &TerminalTab, install: bool) -> Option<String> {
     })
 }
 
+/// The programs a card of a click brought to the server of `account` in this run: what the server
+/// has, to the next click, before it has said so itself.
+pub(crate) fn brought_to(account: &str) -> Vec<String> {
+    with(|cards| {
+        cards
+            .brought
+            .iter()
+            .filter(|(brought_to, _)| brought_to == account)
+            .map(|(_, name)| name.clone())
+            .collect()
+    })
+}
+
 /// A menu item of the card was chosen for the card of `account`.
 pub(crate) fn chosen(mtm: MainThreadMarker, account: &str, act_on: Act) {
     act(mtm, account, act_on);
+}
+
+/// A web address ⌘-clicked in `from`, a pane of a server that lacks the program `name` that opens
+/// it: the card that offers to bring the program and open the address in it, or to open the
+/// address in the system's browser. `false` when the server cannot be offered the program (it is
+/// not followed here, has no file for the server's kind of computer, its release has not landed, or
+/// the server has a card up already): the caller opens the address in the system's browser.
+pub(crate) fn offer_link(
+    mtm: MainThreadMarker,
+    from: &TerminalPane,
+    name: &str,
+    url: &str,
+) -> bool {
+    let crate::pane::PaneMachine::Server(account) = from.machine() else {
+        return false;
+    };
+    if with(|cards| cards.open.contains_key(&account)) {
+        return false;
+    }
+    let (Some(root), Some(answerer)) = (crate::apps_root(), crate::apps_answerer()) else {
+        return false;
+    };
+    let Some(row) = answerer
+        .machine(&account)
+        .and_then(|machine| card::row_for(&root, &machine, name))
+    else {
+        return false;
+    };
+    let Some((_, ssh, _)) = from.server_target() else {
+        return false;
+    };
+    let Some((program, args)) = ssh.argv.split_first() else {
+        return false;
+    };
+    if program != "ssh" || args.is_empty() {
+        return false;
+    }
+    let host = from.kept_host().unwrap_or_else(|| ssh.label().into_owned());
+    let card = Card::for_link(&host, row, url);
+    let pending = Pending {
+        host,
+        ssh: args.to_vec(),
+        rows: Vec::new(),
+    };
+    raise(mtm, from, &account, pending, card);
+    true
 }
 
 #[cfg(test)]

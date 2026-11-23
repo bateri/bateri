@@ -341,16 +341,42 @@ fn is_development(profile: Option<&str>) -> bool {
 /// The helper app a development copy runs where it is (`make dev BROWSER_APP=…` writes it into
 /// the copy's `Info.plist` as `BateriBrowserApp`); `None` for every other copy.
 fn development_app(profile: Option<&str>) -> Option<PathBuf> {
+    development_path(profile, objc2_foundation::ns_string!("BateriBrowserApp"))
+}
+
+/// The folder of a local release a development copy downloads its engine from, with the real
+/// downloader and its checks, in place of GitHub (`make dev BROWSER_RELEASES=…` writes it into the
+/// copy's `Info.plist` as `BateriBrowserReleases`; `make browser-release` makes the folder). `None`
+/// for every other copy: the release package has no such key, and a copy that names no profile
+/// does not read it.
+fn development_releases(profile: Option<&str>) -> Option<PathBuf> {
+    development_path(
+        profile,
+        objc2_foundation::ns_string!("BateriBrowserReleases"),
+    )
+}
+
+/// A path the `Info.plist` of a development copy names under `key`.
+fn development_path(profile: Option<&str>, key: &objc2_foundation::NSString) -> Option<PathBuf> {
     if !is_development(profile) {
         return None;
     }
-    let value = objc2_foundation::NSBundle::mainBundle()
-        .objectForInfoDictionaryKey(objc2_foundation::ns_string!("BateriBrowserApp"))?;
+    let value = objc2_foundation::NSBundle::mainBundle().objectForInfoDictionaryKey(key)?;
     let path = value
         .downcast::<objc2_foundation::NSString>()
         .ok()?
         .to_string();
     Some(PathBuf::from(path))
+}
+
+/// The `file://` address of a folder of releases, as the downloader reads it: the notice, the
+/// sums and the archive are fetched from it as they are from GitHub.
+pub(crate) fn folder_base(folder: &Path) -> Option<String> {
+    let url = objc2_foundation::NSURL::fileURLWithPath_isDirectory(
+        &objc2_foundation::NSString::from_str(folder.to_str()?),
+        true,
+    );
+    Some(url.absoluteString()?.to_string())
 }
 
 /// The browser helper's manager: one for the process. `None` without a home directory.
@@ -361,6 +387,9 @@ pub(crate) fn manager() -> Option<Arc<Manager>> {
             let profile = crate::profile();
             let root = browser_path(&bt_shell_common::child::home()?, profile.as_deref());
             let fixed = development_app(profile.as_deref());
+            // An engine downloaded from a local release is checked as the digests say, and run as
+            // a development copy runs one: no team signs a copy made for a Mac's own desk.
+            let local = development_releases(profile.as_deref()).is_some();
             let config = Config {
                 source: fixed.clone().map_or_else(
                     || Source::Installed(Layout::new(root.join("helper"))),
@@ -370,10 +399,10 @@ pub(crate) fn manager() -> Option<Arc<Manager>> {
                 run: root.join("run"),
                 // A copy run where it is is a development copy: its cookies are not worth the
                 // keychain's question on every build.
-                mock_keychain: fixed.is_some(),
+                mock_keychain: fixed.is_some() || local,
                 linger: helper::LINGER,
                 start_timeout: helper::START_TIMEOUT,
-                trust: if fixed.is_some() {
+                trust: if fixed.is_some() || local {
                     Arc::new(|_| Ok(()))
                 } else {
                     team_trust()
@@ -395,9 +424,48 @@ pub(crate) fn installer() -> Option<Installer> {
         return None;
     }
     let root = browser_path(&bt_shell_common::child::home()?, profile.as_deref());
-    Some(Installer::new(
-        Layout::new(root.join("helper")),
-        RELEASES,
-        team_trust(),
-    ))
+    let layout = Layout::new(root.join("helper"));
+    if let Some(folder) = development_releases(profile.as_deref()) {
+        return Some(Installer::new(
+            layout,
+            &folder_base(&folder)?,
+            Arc::new(|_| Ok(())),
+        ));
+    }
+    Some(Installer::new(layout, RELEASES, team_trust()))
+}
+
+/// Whether this copy has an engine to draw a browser's pages with: the app a development copy
+/// runs where it is, or an installed release. Read from the disk and nothing else — a click does
+/// not wait for the network.
+pub(crate) fn engine_ready() -> bool {
+    engine_installed().is_some()
+}
+
+/// What the engine on this Mac is: its version, and (read from the disk) its size in bytes; `None`
+/// without one. A development copy that runs an app where it is has no version to say.
+pub(crate) fn engine_installed() -> Option<EngineHere> {
+    let profile = crate::profile();
+    if let Some(app) = development_app(profile.as_deref()) {
+        return app.exists().then_some(EngineHere {
+            version: None,
+            folder: app,
+        });
+    }
+    let root = browser_path(&bt_shell_common::child::home()?, profile.as_deref());
+    let layout = Layout::new(root.join("helper"));
+    let version = layout.newest()?;
+    Some(EngineHere {
+        folder: layout.app(&version),
+        version: Some(version),
+    })
+}
+
+/// The engine that is on this Mac ([`engine_installed`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EngineHere {
+    /// The version, when the copy has an installed release.
+    pub(crate) version: Option<Version>,
+    /// The app.
+    pub(crate) folder: PathBuf,
 }

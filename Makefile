@@ -887,7 +887,13 @@ install: kablo-rev bundle
 # not trust: `make dev BROWSER_APP=<the helper's app>` makes the copy run that app where it is
 # (`BateriBrowserApp` in its `Info.plist`, read only by a copy that names a profile), with no
 # signature check and no keychain; without it the copy has no engine.
+# To try the download the person is offered (the note on the first link, Settings ▸ Apps ▸ Links),
+# `make dev BROWSER_RELEASES=<folder>` makes the copy download its engine from a local release
+# (`BateriBrowserReleases` in its `Info.plist`, read only by a copy that names a profile) with the
+# real downloader and its checks, the team's signature apart; `make browser-release` makes the
+# folder from the helper's app. The release package has neither key.
 BROWSER_APP ?=
+BROWSER_RELEASES ?=
 DEV_NAME ?= dev
 DEV_APP = $(TARGET_DIR)/$(DEV_NAME)/bateri-$(DEV_NAME).app
 DEV_ID = $(DEV_NAME).bateri.dev
@@ -940,6 +946,7 @@ kablo-published: kablo-rev
 
 dev: kablo-rev
 	@echo '$(DEV_NAME)' | grep -Eq '^dev[A-Za-z0-9-]*$$' || { echo "dev: DEV_NAME is dev, or dev and letters, digits and - (dev2): '$(DEV_NAME)'"; exit 1; }
+	@test -z '$(BROWSER_APP)' || test -z '$(BROWSER_RELEASES)' || { echo "dev: BROWSER_APP runs an engine where it is and BROWSER_RELEASES downloads one: give one of them"; exit 1; }
 	@if pgrep -f '^$(DEV_APP)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
 		echo "dev: bateri-$(DEV_NAME) is open — quit it first (⌘Q), then retry"; exit 1; fi
 	@lock=$$(mktemp); cp Cargo.lock $$lock; \
@@ -952,6 +959,7 @@ dev: kablo-rev
 	plutil -replace CFBundleDisplayName -string bateri-$(DEV_NAME) $$p && \
 	plutil -insert BateriProfile -string $(DEV_NAME) $$p && \
 	{ test -z '$(BROWSER_APP)' || plutil -insert BateriBrowserApp -string '$(abspath $(BROWSER_APP))' $$p; } && \
+	{ test -z '$(BROWSER_RELEASES)' || plutil -insert BateriBrowserReleases -string '$(abspath $(BROWSER_RELEASES))' $$p; } && \
 	for k in CFBundleURLTypes SUFeedURL SUPublicEDKey SUEnableAutomaticChecks; do plutil -remove $$k $$p || exit 1; done
 	rm -rf $(DEV_APP)/Contents/Frameworks/Sparkle.framework
 	codesign --force --deep --sign - --entitlements assets/bundle/bateri.entitlements $(DEV_APP)
@@ -960,6 +968,15 @@ dev: kablo-rev
 		if test -d $(HOME)/.config/bateri; then cp -R $(HOME)/.config/bateri/. $(DEV_SETTINGS)/; fi && \
 		echo "dev: the copy's settings are $(DEV_SETTINGS), from the installed bateri's this once"; }
 	open $(DEV_APP)
+
+# A local release of the browser engine for `make dev BROWSER_RELEASES=<folder>`: the helper's
+# archive, SHA256SUMS and notice.json in a folder. Not a release: it signs, notarizes and uploads
+# nothing (`tools/browser-release.sh` says what it does).
+#   make browser-release BROWSER_APP=<the helper's bateri-browser.app> BROWSER_RELEASES=<folder>
+.PHONY: browser-release
+browser-release:
+	@test -n '$(BROWSER_APP)' && test -n '$(BROWSER_RELEASES)' || { echo "browser-release: give BROWSER_APP=<the helper's bateri-browser.app> and BROWSER_RELEASES=<the folder to make>"; exit 1; }
+	@tools/browser-release.sh '$(abspath $(BROWSER_APP))' '$(abspath $(BROWSER_RELEASES))'
 
 terminfo:
 	$(call not_yet,assets/terminfo comes with a shell/TERM set)

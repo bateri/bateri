@@ -296,6 +296,77 @@ fn a_release_is_downloaded_checked_unpacked_and_put_in_place() {
     std::fs::remove_dir_all(&rig.root).unwrap();
 }
 
+/// A release made by `make browser-release` in a folder is what the real downloader takes an engine
+/// from, as it takes one from GitHub (`make dev BROWSER_RELEASES=<folder>`): the notice, the sums,
+/// the archive and its unpacking are the ones the other tests run against a server.
+#[test]
+fn a_local_release_folder_made_by_the_tool_is_downloaded_and_put_in_place() {
+    let root = temp("local-release");
+    let app = signed_app(&root.join("build"), IDENTIFIER);
+    // The tool reads the version from the app, which is sealed: sign again with it in.
+    let inserted = Command::new("/usr/bin/plutil")
+        .args(["-insert", "CFBundleShortVersionString", "-string", "0.3.0"])
+        .arg(app.join("Contents/Info.plist"))
+        .status()
+        .unwrap();
+    assert!(inserted.success());
+    let signed = Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-", "--identifier", IDENTIFIER])
+        .arg(&app)
+        .output()
+        .unwrap();
+    assert!(signed.status.success());
+    let folder = root.join("release");
+    let made = Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/browser-release.sh"
+    ))
+    .arg(&app)
+    .arg(&folder)
+    .output()
+    .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    // Made again over what is there, it is the same release.
+    assert!(
+        Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/browser-release.sh"
+        ))
+        .arg(&app)
+        .arg(&folder)
+        .output()
+        .unwrap()
+        .status
+        .success()
+    );
+
+    let base = folder_base(&folder).expect("an address for the folder");
+    assert!(base.starts_with("file://"), "{base}");
+    let layout = Layout::new(root.join("helper"));
+    // No signature is asked of an engine from a folder a person made for their own Mac.
+    let installer = Installer::new(layout, &base, Arc::new(|_| Ok(())));
+    let offer = offer(installer.check());
+    assert_eq!(offer.version, v("0.3.0"));
+    let reported = Mutex::new(Vec::new());
+    let installed = installer
+        .install(
+            &offer,
+            &|received, total| reported.lock().unwrap().push((received, total)),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(installed, v("0.3.0"));
+    assert_eq!(installer.layout().installed(), vec![v("0.3.0")]);
+    assert!(installer.layout().executable(&v("0.3.0")).is_file());
+    assert!(!reported.lock().unwrap().is_empty(), "the progress is told");
+    assert_eq!(installer.check(), Check::Current);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn an_archive_that_is_not_what_the_notice_says_is_not_unpacked() {
     for (what, release) in [

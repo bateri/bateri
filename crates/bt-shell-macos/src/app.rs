@@ -71,8 +71,11 @@ use crate::watch::{Notify, Watch};
 use crate::window::{self, CloseScope, Placement, Seat, TerminalWindow};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
+mod web_links;
 use crate::{child, focus, jobs, retired_holders, settings};
 use bt_shell_common::child::PaneRuns;
+use web_links::EngineJob;
+pub(crate) use web_links::note_layout_problems;
 
 /// Guard for zero idle frames: in the [`Workload::Smoke`] workload the window
 /// sits idle for ~`run_seconds` seconds after the first draw.
@@ -996,6 +999,11 @@ pub(crate) struct Ivars {
     /// by the first ⌘-hover over a path, then kept and dropped when the programs change
     /// ([`AppDelegate::openers`]).
     openers: RefCell<Option<Rc<Vec<bt_shell_common::apps::opens::Opener>>>>,
+    /// The one-time note about opening links beside the terminal was put (or is being asked for):
+    /// it is not put again in this run unless it came to nothing ([`AppDelegate::open_web_address`]).
+    links_asked: Cell<bool>,
+    /// The download of the browser engine ([`EngineJob`]).
+    engine_job: RefCell<EngineJob>,
     /// The Shell menu's delegate ([`crate::menu::install`]): the menu holds it
     /// weakly, this is what keeps it alive.
     shell_menu: OnceCell<Retained<ShellMenuDelegate>>,
@@ -2765,6 +2773,8 @@ impl AppDelegate {
             settings_state: RefCell::new(settings::FileState::Missing),
             apps: OnceCell::new(),
             openers: RefCell::new(None),
+            links_asked: Cell::new(false),
+            engine_job: RefCell::new(EngineJob::Idle),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
             masters,
@@ -6318,32 +6328,61 @@ impl AppDelegate {
     ) {
         let launch::OpenProgram {
             name,
-            thing,
-            path,
-            line,
+            target,
             server,
         } = open;
-        let directory = bt_shell_common::open_with::directory(thing, &path);
+        // A file the program that opens it has open in this tab already is handed to it: a new
+        // tab there, and the pane in front. Nothing is started.
+        if let launch::OpenTarget::Path {
+            thing: bt_shell_common::open_with::Thing::File,
+            path,
+            line,
+        } = &target
+            && self.hand_file(tab, from, &name, path, *line)
+        {
+            return;
+        }
+        // The folder the program starts in: the folder that was clicked, or the one a file is in.
+        // An address has none (a program that opens one reads no folder).
+        let directory = match &target {
+            launch::OpenTarget::Path { thing, path, .. } => {
+                Some(bt_shell_common::open_with::directory(*thing, path))
+            }
+            launch::OpenTarget::Address(_) => None,
+        };
         let start = if server {
             // The terminal is asked for on the server the pane shows one of, as ⌘D would, with the
             // program as what it runs and the folder it starts in.
-            let Some((_, target, _)) = from.server_target() else {
+            let Some((_, ssh, _)) = from.server_target() else {
                 return;
             };
-            let Some((program, args)) = target.argv.split_first() else {
+            let Some((program, args)) = ssh.argv.split_first() else {
                 return;
             };
-            if target.kind != RemoteKind::Ssh || program != "ssh" || args.is_empty() {
+            if ssh.kind != RemoteKind::Ssh || program != "ssh" || args.is_empty() {
                 return;
             }
-            let Some(argv) = bt_shell_common::open_with::argv_server(&name, line, &path) else {
+            let argv = match &target {
+                launch::OpenTarget::Path { path, line, .. } => {
+                    bt_shell_common::open_with::argv_server(&name, *line, path)
+                }
+                launch::OpenTarget::Address(url) => {
+                    bt_shell_common::open_with::argv_address_server(&name, url)
+                }
+            };
+            let Some(argv) = argv else {
                 return;
             };
             // The server by the word the program's own header will name it by.
-            let place = from
-                .kept_host()
-                .unwrap_or_else(|| target.label().into_owned());
-            let opens = launch::Opens::of(Some(place), &name, &path);
+            let place = from.kept_host().unwrap_or_else(|| ssh.label().into_owned());
+            let opens = match &target {
+                launch::OpenTarget::Path { path, .. } => {
+                    launch::Opens::of(Some(place), &name, path)
+                }
+                launch::OpenTarget::Address(url) => {
+                    launch::Opens::of_address(Some(place), &name, url)
+                }
+            };
             Start {
                 held: Some(Held {
                     args: args.to_vec(),
@@ -6354,7 +6393,7 @@ impl AppDelegate {
                 }),
                 program: Some(launch::ProgramStart {
                     argv,
-                    directory: Some(directory),
+                    directory,
                     // The shell that was asked is this computer's, not the server's.
                     env: Vec::new(),
                     opens,
@@ -6369,8 +6408,20 @@ impl AppDelegate {
             else {
                 return;
             };
-            let Some(argv) = bt_shell_common::open_with::argv_here(&bin, &name, line, &path) else {
+            let argv = match &target {
+                launch::OpenTarget::Path { path, line, .. } => {
+                    bt_shell_common::open_with::argv_here(&bin, &name, *line, path)
+                }
+                launch::OpenTarget::Address(url) => {
+                    bt_shell_common::open_with::argv_address_here(&bin, &name, url)
+                }
+            };
+            let Some(argv) = argv else {
                 return;
+            };
+            let opens = match &target {
+                launch::OpenTarget::Path { path, .. } => launch::Opens::of(None, &name, path),
+                launch::OpenTarget::Address(url) => launch::Opens::of_address(None, &name, url),
             };
             // The program starts as it would typed in a new tab: with what the person's shell
             // has, as it last said. The shell is asked again behind this start, so that a
@@ -6380,12 +6431,12 @@ impl AppDelegate {
                 .unwrap_or_default();
             child::refresh_login_env();
             Start {
-                directory: Some(PathBuf::from(directory)),
+                directory: directory.map(PathBuf::from),
                 program: Some(launch::ProgramStart {
                     argv,
                     directory: None,
                     env,
-                    opens: launch::Opens::of(None, &name, &path),
+                    opens,
                 }),
                 runs: PaneRuns::Program { keep_open: false },
                 ..Start::default()
@@ -6416,6 +6467,7 @@ impl AppDelegate {
             window.refresh_apps(
                 &file.apps_sources,
                 &file.apps_open_with,
+                file.apps_open_links_with.as_deref(),
                 self.apps_tracked().as_ref(),
             );
         }

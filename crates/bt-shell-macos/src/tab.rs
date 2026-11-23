@@ -169,6 +169,16 @@ impl PaneHost for TabHost {
         }
     }
 
+    fn open_web_address(&self, from: &TerminalPane, url: &str) -> bool {
+        match (app::delegate(Self::mtm()), self.tab()) {
+            (Some(app), Some(tab)) => {
+                app.open_web_address(&tab, from, url);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn connections(&self) -> Option<std::sync::Arc<dyn bt_shell_common::kablo::service::Backend>> {
         crate::hold_service::backend()
     }
@@ -477,6 +487,9 @@ pub(crate) struct TabIvars {
     /// back to when a floating card empties and takes the focused pane with it
     /// ([`TerminalTab::close_pane`]).
     back: Cell<u64>,
+    /// The ids of the panes the focus has been in, the last one first ([`TerminalTab::recent_panes`]):
+    /// the pane a link or a file is handed to when more than one could take it.
+    visited: RefCell<Vec<u64>>,
     /// Commands and transfers that ended while the tab was not selected — the
     /// chip's tick and dot until the tab is selected
     /// ([`TerminalTab::activity_changed`], [`TerminalTab::upload_ended`],
@@ -536,6 +549,7 @@ impl TerminalTab {
             container,
             focused: Cell::new(pane.id()),
             back: Cell::new(pane.id()),
+            visited: RefCell::new(vec![pane.id()]),
             unseen: Cell::new(Unseen::default()),
             tallies: RefCell::new(Vec::new()),
             ends: RefCell::new(Vec::new()),
@@ -615,6 +629,22 @@ impl TerminalTab {
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible)
         })
+    }
+
+    /// The tab's panes, the one the focus was in last first and then the others in the order
+    /// the focus has left them (a pane it was never in last, in tree order): what a
+    /// link or a file goes to the first fit of.
+    pub(crate) fn recent_panes(&self) -> Vec<Retained<TerminalPane>> {
+        let mut panes = self.panes();
+        let order = self.ivars().visited.borrow();
+        let rank = |pane: &Retained<TerminalPane>| {
+            order
+                .iter()
+                .position(|id| *id == pane.id())
+                .unwrap_or(usize::MAX)
+        };
+        panes.sort_by_key(rank);
+        panes
     }
 
     /// The tab's panes, in tree order (left to right, top to bottom). Never
@@ -732,6 +762,12 @@ impl TerminalTab {
     /// views were taken out and put back ([`SplitView::reveal`]).
     pub(crate) fn pane_focused(&self, id: u64) {
         let before = self.ivars().focused.replace(id);
+        {
+            let mut visited = self.ivars().visited.borrow_mut();
+            visited.retain(|seen| *seen != id);
+            visited.insert(0, id);
+            visited.truncate(32);
+        }
         if before == id {
             return;
         }

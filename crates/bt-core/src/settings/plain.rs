@@ -339,7 +339,7 @@ mod tests {
             .filter(|key| key.default.is_none())
             .map(|key| key.path)
             .collect();
-        assert_eq!(unset, ["font.family"]);
+        assert_eq!(unset, ["font.family", "apps.open_links_with"]);
         assert!(plain_key("keys.copy_last_output").is_err());
         assert!(plain_key("remote.hosts").is_err());
         assert!(plain_key("apps.sources").is_err());
@@ -350,10 +350,17 @@ mod tests {
     #[test]
     fn every_default_is_accepted_written_alone() {
         for key in plain_keys() {
-            let value = key
-                .default
-                .clone()
-                .unwrap_or_else(|| PlainValue::Text("Menlo".to_owned()));
+            let value = key.default.clone().unwrap_or_else(|| {
+                // A key with no default takes a value of its own kind: a font and a program.
+                PlainValue::Text(
+                    if key.path == "apps.open_links_with" {
+                        "browserpen"
+                    } else {
+                        "Menlo"
+                    }
+                    .to_owned(),
+                )
+            });
             let written = Settings::with_plain("", key, Some(&value))
                 .unwrap_or_else(|refused| panic!("{}: {refused}", key.path));
             assert_eq!(key.read(&written), Ok(Some(value)), "{}", key.path);

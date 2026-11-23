@@ -81,7 +81,7 @@ use objc2_foundation::{
 
 use crate::child;
 use crate::clipboard;
-use crate::launch::OpenProgram;
+use crate::launch::{OpenProgram, OpenTarget};
 use crate::links::{self, Entry, LinkAction, Resolved};
 use crate::pointer;
 use crate::remote_files::{self, RemoteEntry};
@@ -1108,10 +1108,24 @@ impl BateriView {
             return;
         }
         match links::action(&link.hit.target, &link.hit.kind) {
-            Some(LinkAction::OpenUrl(url)) => open_url(&url),
+            Some(LinkAction::OpenUrl(url)) => self.open_web_address(&url),
             Some(LinkAction::Confirm(target)) => self.confirm_open(target),
             Some(LinkAction::Swallow) | None => {}
         }
+    }
+
+    /// A web address clicked: the owner of the pane decides where it opens (`[apps] open_links_with`:
+    /// beside the terminal, in the program the person chose, or the system's browser —
+    /// [`bt_shell_common::web_links::route`]); a pane with no owner, and every other address (`ftp`,
+    /// `mailto`), goes to the application the system has for it.
+    fn open_web_address(&self, url: &str) {
+        if links::is_web_address(url)
+            && let Some(pane) = self.pane()
+            && pane.open_web_address(url)
+        {
+            return;
+        }
+        open_url(url);
     }
 
     /// Opens the path of `link` in the program the check found for it, in a floating pane
@@ -1146,9 +1160,7 @@ impl BateriView {
         }
         pane.open_program(OpenProgram {
             name,
-            thing,
-            path,
-            line,
+            target: OpenTarget::Path { thing, path, line },
             server,
         });
     }
@@ -1316,6 +1328,17 @@ impl BateriView {
                 (ns_string!("Copy Path"), sel!(copyLinkFromMenu:), true),
             ]);
             items
+        } else if links::is_web_address(&link.hit.target) {
+            // Whatever `open_links_with` says, the person's own browser is one item away.
+            vec![
+                (ns_string!("Open Link"), sel!(openLinkFromMenu:), true),
+                (
+                    ns_string!("Open in Your Browser"),
+                    sel!(openInYourBrowserFromMenu:),
+                    true,
+                ),
+                (ns_string!("Copy Link"), sel!(copyLinkFromMenu:), true),
+            ]
         } else {
             vec![
                 (ns_string!("Open Link"), sel!(openLinkFromMenu:), true),
@@ -1357,6 +1380,18 @@ impl BateriView {
         let link = self.link_state().borrow_mut().menu.take();
         if let Some(link) = link {
             self.open_link(&link);
+        }
+    }
+
+    /// "Open in Your Browser": the system's browser, whatever `open_links_with` says and wherever
+    /// the terminal is. The address is the one the policy opens ([`links::action`]); a
+    /// link the policy has nothing for opens nothing here either.
+    pub(crate) fn menu_open_in_your_browser(&self) {
+        let link = self.link_state().borrow_mut().menu.take();
+        if let Some(link) = link
+            && let Some(LinkAction::OpenUrl(url)) = links::action(&link.hit.target, &link.hit.kind)
+        {
+            open_url(&url);
         }
     }
 

@@ -1702,7 +1702,7 @@ pub struct Settings {
     pub remote_integration: RemoteIntegration,
     /// `[apps] sources`: where the programs bateri keeps up to date publish their releases, as
     /// written (`user/repo`, an `https://` address or a `file:///` one — [`app_source_address`]
-    /// reads them), in the file's order. `["bateri/textpen"]` unless the file writes the key;
+    /// reads them), in the file's order. `["bateri/textpen", "bateri/browserpen"]` unless the file writes the key;
     /// written, even empty, the file's list is the list.
     pub apps_sources: Vec<String>,
     /// Whether `apps_sources` is **all** that the file wrote: `false` when an entry was dropped
@@ -1716,6 +1716,12 @@ pub struct Settings {
     /// the key. Empty is `Nothing`: no path is a link. A value that is neither is not accepted and
     /// the previous one stays ([`app_open_with`]).
     pub apps_open_with: String,
+    /// `[apps] open_links_with`: the program that opens a web address (`http`, `https`) ⌘-clicked in
+    /// a terminal, by its name (`"browserpen"`); `""` is the system browser. `None` when the file
+    /// does not write the key: the person has not decided, and the first such click asks
+    /// ([`app_open_links_with`]). A value that is neither a name nor `""` is not accepted and the
+    /// previous one stays.
+    pub apps_open_links_with: Option<String>,
     /// `[keys]`: the shortcuts the file gives the commands, by the command's fixed name, in the
     /// file's order. A command that has no entry has its default; the names are the shell
     /// layer's, and an entry for a name it does not know is kept here and reported there.
@@ -1787,6 +1793,7 @@ impl Default for Settings {
                 .collect(),
             apps_sources_whole: true,
             apps_open_with: DEFAULT_APP_OPEN_WITH.to_owned(),
+            apps_open_links_with: None,
             keys: Vec::new(),
         }
     }
@@ -2010,6 +2017,9 @@ pub enum SettingsEdit {
     AppsSources(Vec<String>),
     /// Settings ▸ Apps ▸ Files ▸ Open with: the program's name, or the empty text for `Nothing`.
     AppsOpenWith(String),
+    /// Settings ▸ Apps ▸ Links, and the answer to the one-time note: the program that opens a web
+    /// address, by its name, or the empty text for the system browser.
+    AppsOpenLinksWith(String),
 }
 
 impl SettingsEdit {
@@ -2106,6 +2116,7 @@ impl SettingsEdit {
             }
             Self::AppsSources(_) => ("apps", "sources", "apps.sources"),
             Self::AppsOpenWith(_) => ("apps", "open_with", "apps.open_with"),
+            Self::AppsOpenLinksWith(_) => ("apps", "open_links_with", "apps.open_links_with"),
             Self::DownloadDir(_) => ("remote", "download_dir", "remote.download_dir"),
             Self::DownloadConflict(_) => {
                 ("remote", "download_conflict", "remote.download_conflict")
@@ -2193,6 +2204,7 @@ impl SettingsEdit {
             | Self::DarkTheme(name)
             | Self::FontFamily(name)
             | Self::AppsOpenWith(name)
+            | Self::AppsOpenLinksWith(name)
             | Self::DownloadDir(name) => name.as_str().into(),
         }
     }
@@ -2580,12 +2592,17 @@ stats_interval = 3
 # once; the servers keep their copies (bateri package remove takes one off).
 # An entry taken out of this file by hand only leaves the list: the copy that
 # runs here stays until bateri package remove.
-sources = ["bateri/textpen"]
+sources = ["bateri/textpen", "bateri/browserpen"]
 # The program that opens a file or a folder you Command-click in a terminal,
 # in a floating pane, on the computer the path is on: the name of a program
 # from the list above that opens files, or "" for none. Where the program is
 # not installed, or with "", a path is not a link.
 open_with = "textpen"
+# The program that opens a web address you Command-click in a terminal, beside
+# the terminal and on the computer the terminal is on: "browserpen", or "" for
+# your own browser. Left out, the first click asks. Where browserpen is not
+# installed, the address opens in your own browser.
+# open_links_with = "browserpen"
 
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
@@ -3305,6 +3322,14 @@ open_with = "textpen"
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = apps.get("open_links_with") {
+                    parsed.settings.apps_open_links_with = app_open_links_with(
+                        text,
+                        item,
+                        &fallback.apps_open_links_with,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("apps") => {
                 parsed
@@ -3316,6 +3341,10 @@ open_with = "textpen"
                     .settings
                     .apps_open_with
                     .clone_from(&fallback.apps_open_with);
+                parsed
+                    .settings
+                    .apps_open_links_with
+                    .clone_from(&fallback.apps_open_links_with);
             }
             None => {}
         }
@@ -4856,7 +4885,7 @@ fn folder(
 }
 
 /// `[apps] sources` when the file does not write the key.
-pub const DEFAULT_APP_SOURCES: &[&str] = &["bateri/textpen"];
+pub const DEFAULT_APP_SOURCES: &[&str] = &["bateri/textpen", "bateri/browserpen"];
 
 /// `[apps] open_with` when the file does not write the key.
 pub const DEFAULT_APP_OPEN_WITH: &str = "textpen";
@@ -4870,30 +4899,52 @@ fn app_open_with(
     fallback: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> String {
-    const KEY: &str = "apps.open_with";
+    program_name("apps.open_with", text, item, diagnostics).unwrap_or_else(|| fallback.to_owned())
+}
+
+/// `apps.open_links_with`: as [`app_open_with`] reads its key, and what a file that does not write
+/// the key leaves is `None` (the person has not decided): a rejected value keeps `fallback`,
+/// whatever it is.
+fn app_open_links_with(
+    text: &str,
+    item: &Item,
+    fallback: &Option<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    program_name("apps.open_links_with", text, item, diagnostics).or_else(|| fallback.clone())
+}
+
+/// The name of a program, or the empty text, as the key `key` says it; `None` and a diagnostic
+/// for anything else.
+fn program_name(
+    key: &'static str,
+    text: &str,
+    item: &Item,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
     let line = item.span().and_then(|span| line_of(text, span.start));
     let Some(name) = item.as_str() else {
         diagnostics.push(Diagnostic {
-            key: Some(KEY),
+            key: Some(key),
             line,
             message: format!(
-                "`{KEY}` must be the name of a program or \"\", found {}; keeping the previous value",
+                "`{key}` must be the name of a program or \"\", found {}; keeping the previous value",
                 kind(item)
             ),
         });
-        return fallback.to_owned();
+        return None;
     };
     if !name.is_empty() && !pencere_host::apps::is_name(name) {
         diagnostics.push(Diagnostic {
-            key: Some(KEY),
+            key: Some(key),
             line,
             message: format!(
-                "`{KEY}` is the name of a program (lowercase letters, digits and `-`) or \"\", found {name:?}; keeping the previous value"
+                "`{key}` is the name of a program (lowercase letters, digits and `-`) or \"\", found {name:?}; keeping the previous value"
             ),
         });
-        return fallback.to_owned();
+        return None;
     }
-    name.to_owned()
+    Some(name.to_owned())
 }
 
 /// The address of the `app.json` an `[apps] sources` entry names, or `None` if it names none.
@@ -5515,6 +5566,7 @@ mod tests {
             apps_sources: Settings::default().apps_sources,
             apps_sources_whole: true,
             apps_open_with: Settings::default().apps_open_with,
+            apps_open_links_with: None,
             keys: Vec::new(),
         };
         let parsed = Settings::parse_keeping(
@@ -8599,10 +8651,19 @@ hosts = [
 
     #[test]
     fn app_sources_are_the_default_until_the_file_writes_them() {
-        assert_eq!(Settings::default().apps_sources, ["bateri/textpen"]);
-        assert_eq!(clean("").apps_sources, ["bateri/textpen"]);
+        assert_eq!(
+            Settings::default().apps_sources,
+            ["bateri/textpen", "bateri/browserpen"]
+        );
+        assert_eq!(
+            clean("").apps_sources,
+            ["bateri/textpen", "bateri/browserpen"]
+        );
         // The section alone says nothing about the list.
-        assert_eq!(clean("[apps]\n").apps_sources, ["bateri/textpen"]);
+        assert_eq!(
+            clean("[apps]\n").apps_sources,
+            ["bateri/textpen", "bateri/browserpen"]
+        );
         // Written, even empty, the file's list is the list.
         assert_eq!(
             clean("[apps]\nsources = []\n").apps_sources,
@@ -8713,7 +8774,10 @@ hosts = [
         assert_eq!(parsed.settings.apps_sources, current.apps_sources);
         assert!(!parsed.settings.apps_sources_whole);
         let (settings, _) = rejected("[apps]\nsources = \"acme/tool\"\n");
-        assert_eq!(settings.apps_sources, ["bateri/textpen"]);
+        assert_eq!(
+            settings.apps_sources,
+            ["bateri/textpen", "bateri/browserpen"]
+        );
     }
 
     #[test]
@@ -8797,6 +8861,112 @@ hosts = [
         )
         .expect("edits");
         assert_eq!(clean(&fresh).apps_open_with, "x");
+    }
+
+    #[test]
+    fn the_program_that_opens_a_web_address_is_not_decided_until_the_file_says() {
+        // No key, no section, an empty file: the person has not decided, which is not the system
+        // browser (`""`) and not browserpen.
+        assert_eq!(Settings::default().apps_open_links_with, None);
+        assert_eq!(clean("").apps_open_links_with, None);
+        assert_eq!(clean("[apps]\n").apps_open_links_with, None);
+        assert_eq!(
+            clean("[apps]\nopen_with = \"notes\"\n").apps_open_links_with,
+            None
+        );
+        assert_eq!(
+            clean("[apps]\nopen_links_with = \"browserpen\"\n")
+                .apps_open_links_with
+                .as_deref(),
+            Some("browserpen")
+        );
+        // Written empty it is the system browser: decided.
+        assert_eq!(
+            clean("[apps]\nopen_links_with = \"\"\n")
+                .apps_open_links_with
+                .as_deref(),
+            Some("")
+        );
+        // The two program keys do not change each other.
+        let both = clean("[apps]\nopen_with = \"tool\"\nopen_links_with = \"web\"\n");
+        assert_eq!(both.apps_open_with, "tool");
+        assert_eq!(both.apps_open_links_with.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn a_name_no_program_has_keeps_the_given_one_for_links_and_changes_nothing_else() {
+        let current = Settings {
+            apps_open_links_with: Some("browserpen".to_owned()),
+            apps_open_with: "notes".to_owned(),
+            ..Settings::default()
+        };
+        for value in [
+            "\"Not A Name\"",
+            "\"-tool\"",
+            "\"a/b\"",
+            "3",
+            "[\"browserpen\"]",
+        ] {
+            let text = format!("[apps]\nopen_with = \"x\"\nopen_links_with = {value}\n");
+            let parsed = Settings::parse_keeping(&text, &current).expect("parseable text");
+            assert_eq!(
+                parsed.settings.apps_open_links_with.as_deref(),
+                Some("browserpen"),
+                "{value}"
+            );
+            // The key beside it is read as ever.
+            assert_eq!(parsed.settings.apps_open_with, "x", "{value}");
+            let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
+                .unwrap_or_else(|got| panic!("a single diagnostic expected: {got:?}"));
+            assert_eq!(diagnostic.key, Some("apps.open_links_with"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+        }
+        // Nothing decided before stays undecided.
+        let parsed = Settings::parse_keeping(
+            "[apps]\nopen_links_with = \"Not A Name\"\n",
+            &Settings::default(),
+        )
+        .expect("parseable");
+        assert_eq!(parsed.settings.apps_open_links_with, None);
+        // A section of the wrong type keeps what was.
+        let parsed = Settings::parse_keeping("apps = 1\n", &current).expect("parseable");
+        assert_eq!(
+            parsed.settings.apps_open_links_with.as_deref(),
+            Some("browserpen")
+        );
+    }
+
+    #[test]
+    fn the_writer_of_open_links_with_writes_that_key_and_leaves_the_rest_of_the_file() {
+        let text = "[apps]\n# mine\nsources = [\"acme/tool\"]\nopen_with = \"tool\"\nfuture = 1\n";
+        let edited = Settings::with_edit(
+            text,
+            &SettingsEdit::AppsOpenLinksWith("browserpen".to_owned()),
+        )
+        .expect("edits");
+        assert!(edited.contains("# mine"), "{edited}");
+        assert!(edited.contains("future = 1"), "{edited}");
+        assert!(edited.contains("open_with = \"tool\""), "{edited}");
+        assert!(
+            edited.contains("open_links_with = \"browserpen\""),
+            "{edited}"
+        );
+        let read = clean(&edited);
+        assert_eq!(read.apps_open_links_with.as_deref(), Some("browserpen"));
+        assert_eq!(read.apps_open_with, "tool");
+        assert_eq!(read.apps_sources, ["acme/tool"]);
+        // The system browser is written as the empty text, which is a decision; not as a missing key.
+        let own = Settings::with_edit(&edited, &SettingsEdit::AppsOpenLinksWith(String::new()))
+            .expect("edits");
+        assert!(own.contains("open_links_with = \"\""), "{own}");
+        assert_eq!(clean(&own).apps_open_links_with.as_deref(), Some(""));
+        // A file with no [apps] gets the section with the one key.
+        let fresh = Settings::with_edit(
+            "[font]\nsize = 14\n",
+            &SettingsEdit::AppsOpenLinksWith("x".to_owned()),
+        )
+        .expect("edits");
+        assert_eq!(clean(&fresh).apps_open_links_with.as_deref(), Some("x"));
     }
 
     #[test]
@@ -9122,6 +9292,7 @@ cursor = \"spring\"
             SettingsEdit::RemoteIntegrationUpdated => {}
             SettingsEdit::AppsSources(sources) => settings.apps_sources = sources,
             SettingsEdit::AppsOpenWith(name) => settings.apps_open_with = name,
+            SettingsEdit::AppsOpenLinksWith(name) => settings.apps_open_links_with = Some(name),
             SettingsEdit::DownloadDir(path) => settings.remote_files.download_dir = path,
             SettingsEdit::DownloadConflict(conflict) => {
                 settings.remote_files.download_conflict = conflict;
@@ -9236,6 +9407,8 @@ cursor = \"spring\"
             ]),
             SettingsEdit::AppsOpenWith("notes".to_owned()),
             SettingsEdit::AppsOpenWith(String::new()),
+            SettingsEdit::AppsOpenLinksWith("browserpen".to_owned()),
+            SettingsEdit::AppsOpenLinksWith(String::new()),
             SettingsEdit::ShellPorts(false),
             SettingsEdit::ShellPythonEnv(false),
             SettingsEdit::ShellNodeVersion(false),
