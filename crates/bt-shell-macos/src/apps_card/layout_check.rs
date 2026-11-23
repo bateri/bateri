@@ -285,20 +285,16 @@ pub(crate) fn layout_problems(mtm: MainThreadMarker, shots: Option<&Path>) -> Ve
             pane.addSubview(&container);
             let terminal = plain_view(mtm, width, height);
             container.addSubview(&terminal);
-            let built = view::build(mtm, &card, &target, NSSize::new(width, height));
             // The find panel, open in the same corner, and the card under it.
             let panel = name
                 .ends_with("-under-find")
                 .then(|| find_panel(mtm, width, height));
+            let top = card_top_inset(height, panel.as_ref().map(|panel| panel.frame()));
+            let built = view::build(mtm, &card, &target, NSSize::new(width, height), top);
             if let Some(panel) = &panel {
                 container.addSubview(panel);
             }
-            stand_card_over(
-                &built,
-                &terminal,
-                &container,
-                card_top_inset(height, panel.as_ref().map(|panel| panel.frame())),
-            );
+            stand_card_over(&built, &terminal, &container, top);
             let mut found = Vec::new();
             if name.ends_with("-over-floating") {
                 found.extend(over_floating(mtm, dark, &container, &built));
@@ -531,7 +527,7 @@ fn in_place_problems(mtm: MainThreadMarker) -> Vec<String> {
     };
     let (before, after) = (at(Coming::Busy(Some(42))), at(Coming::Busy(Some(43))));
     let room = NSSize::new(PANE.0, PANE.1);
-    let built = view::build(mtm, &before, &target, room);
+    let built = view::build(mtm, &before, &target, room, CORNER_INSET.0);
     let ring_of = |card: &NSView| {
         let mut found = Vec::new();
         collect_class(card, "NSProgressIndicator", &mut found);
@@ -543,7 +539,7 @@ fn in_place_problems(mtm: MainThreadMarker) -> Vec<String> {
         return problems;
     }
     let size = built.frame().size;
-    if !view::refresh_notes(&built, &before, &after, room, room) {
+    if !view::refresh_notes(&built, &before, &after) {
         problems.push("a percent that moved was not written in place".to_owned());
     }
     let again = ring_of(&built);
@@ -569,68 +565,118 @@ fn in_place_problems(mtm: MainThreadMarker) -> Vec<String> {
     // The first figure makes the row taller, and a row that changes is not a number: both are the
     // card made again.
     let none = at(Coming::Busy(None));
-    let bare = view::build(mtm, &none, &target, room);
-    if view::refresh_notes(&bare, &none, &before, room, room) {
+    let bare = view::build(mtm, &none, &target, room, CORNER_INSET.0);
+    if view::refresh_notes(&bare, &none, &before) {
         problems
             .push("a percent that came was written in place, where the row is taller".to_owned());
     }
     // A pane that was resized is another width: the card is made again though nothing else changed.
-    if view::refresh_notes(&built, &after, &after, room, NSSize::new(NARROW, PANE.1)) {
+    let top = CORNER_INSET.0;
+    let narrow = NSSize::new(NARROW, PANE.1);
+    if view::made_for(mtm, &built, &after, &target, narrow, top) {
         problems.push("a card was kept at its width in a pane of another width".to_owned());
     }
-    if !view::refresh_notes(&built, &after, &after, room, room) {
+    if !view::made_for(mtm, &built, &after, &target, room, top) {
+        problems.push("a card that nothing changed the room of was made again".to_owned());
+    }
+    if !view::refresh_notes(&built, &after, &after) {
         problems.push("a card that nothing changed in was made again".to_owned());
     }
     let failed = at(Coming::Failed("The server answered 503.".to_owned()));
-    if view::refresh_notes(&built, &after, &failed, room, room) {
+    if view::refresh_notes(&built, &after, &failed) {
         problems.push("a row that failed was written in place".to_owned());
     }
     problems.extend(height_problems(mtm));
     problems
 }
 
-/// A pane that becomes lower or higher than the card was made for: the room of its list is the
-/// pane's height, so the card is made again (a card kept at its height in a lower pane has its
-/// buttons below the pane), and the one made again for the lower pane is the lower card.
+/// A pane that becomes lower or higher, or a find panel that takes the corner: the room of the
+/// card's list is the pane's height under the card's top, so a card the new room cuts differently
+/// is made again (kept, its buttons would be below the pane), and one it does not touch is left as
+/// it is (made again at every step of a download or of a drag of the divider, its rings would start
+/// over). In a pane too low for the card's foot, the list gives up its room down to nothing, under
+/// the panel too.
 fn height_problems(mtm: MainThreadMarker) -> Vec<String> {
     let mut problems = Vec::new();
     let target = Target::new(mtm, "layout-check");
-    let Some((_, card, _)) = scenes()
-        .into_iter()
-        .find(|(name, ..)| *name == "failed-low")
-    else {
-        return vec!["the scene whose list is cut by a low pane is gone".to_owned()];
+    let scene = |name: &str| {
+        scenes()
+            .into_iter()
+            .find(|(found, ..)| *found == name)
+            .map(|(_, card, _)| card)
     };
-    let (tall, low) = (NSSize::new(PANE.0, PANE.1), NSSize::new(PANE.0, LOW));
-    let (made_tall, made_low) = (
-        view::build(mtm, &card, &target, tall),
-        view::build(mtm, &card, &target, low),
-    );
-    if made_low.frame().size.height > low.height - 2.0 * crate::pane::CORNER_INSET.0 + SLACK {
-        problems.push(format!(
-            "the card made for a pane {} high is {} high",
-            low.height,
-            made_low.frame().size.height
-        ));
+    let (Some(ask), Some(cut), Some(scrolling)) =
+        (scene("ask"), scene("failed-low"), scene("scrolling"))
+    else {
+        return vec!["a scene the height checks stand on is gone".to_owned()];
+    };
+    let top = CORNER_INSET.0;
+    let room = |height: f64| NSSize::new(PANE.0, height);
+    let made = view::build(mtm, &ask, &target, room(PANE.1), top);
+    // A card the room does not cut is left as it is, in a pane made higher or a little lower.
+    for height in [PANE.1 + 120.0, PANE.1 - 30.0] {
+        if !view::made_for(mtm, &made, &ask, &target, room(height), top) {
+            problems.push(format!(
+                "a card the room does not cut was made again in a pane {height} high"
+            ));
+        }
     }
-    if made_low.frame().size.height >= made_tall.frame().size.height - SLACK {
+    // One the room cuts is made again, lower or higher.
+    let tall = view::build(mtm, &cut, &target, room(PANE.1), top);
+    let low = view::build(mtm, &cut, &target, room(LOW), top);
+    if low.frame().size.height >= tall.frame().size.height - SLACK {
         problems.push(
             "the card made for a low pane is no lower than the one made for a tall pane: the \
              scene does not show what the height of the pane changes"
                 .to_owned(),
         );
     }
-    if view::made_for(tall, low) || view::made_for(low, tall) {
-        problems.push("a card was taken for the right one in a pane of another height".to_owned());
-    }
-    if !view::made_for(tall, tall) {
-        problems.push("a card was made again in a pane that kept its size".to_owned());
-    }
-    if view::refresh_notes(&made_tall, &card, &card, tall, low) {
+    if view::made_for(mtm, &tall, &cut, &target, room(LOW), top) {
         problems.push("a card was kept at its height in a pane that became lower".to_owned());
     }
-    if view::refresh_notes(&made_low, &card, &card, low, tall) {
+    if view::made_for(mtm, &low, &cut, &target, room(PANE.1), top) {
         problems.push("a card was kept at its height in a pane that became higher".to_owned());
+    }
+    // A pane too low for the card's foot: the foot stands in it, the list has given up its room.
+    for height in [110.0, 120.0, 140.0] {
+        let card = view::build(mtm, &ask, &target, room(height), top);
+        let foot = top + card.frame().size.height;
+        if foot > height - CORNER_INSET.0 + SLACK {
+            problems.push(format!(
+                "the card made for a pane {height} high ends {foot} from its top"
+            ));
+        }
+    }
+    // The find panel in the corner: the card stands under it, and the room is what is left.
+    for height in [200.0, 220.0, 260.0] {
+        let panel = find_panel(mtm, PANE.0, height);
+        let top = card_top_inset(height, Some(panel.frame()));
+        let card = view::build(mtm, &scrolling, &target, room(height), top);
+        let foot = top + card.frame().size.height;
+        if foot > height - CORNER_INSET.0 + SLACK {
+            problems.push(format!(
+                "under the find panel the card made for a pane {height} high ends {foot} from its top"
+            ));
+        }
+        // The panel opening changes what the card shows in a pane this low: the card is made again.
+        let before = view::build(mtm, &scrolling, &target, room(height), CORNER_INSET.0);
+        if view::made_for(mtm, &before, &scrolling, &target, room(height), top) {
+            problems.push(format!(
+                "a card was kept when the find panel took the corner of a pane {height} high"
+            ));
+        }
+    }
+    // In a pane that has room, the card keeps to its share of what is under the panel, not of the
+    // pane: the same share of a lower corner.
+    let panel = find_panel(mtm, PANE.0, PANE.1);
+    let top = card_top_inset(PANE.1, Some(panel.frame()));
+    let card = view::build(mtm, &scrolling, &target, room(PANE.1), top);
+    let share = view::ROOM_SHARE * (PANE.1 - (top - CORNER_INSET.0));
+    if card.frame().size.height > share + SLACK {
+        problems.push(format!(
+            "under the find panel the card is {} high, more than its share, {share}, of what is under it",
+            card.frame().size.height
+        ));
     }
     problems
 }

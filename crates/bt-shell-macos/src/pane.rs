@@ -174,10 +174,12 @@ pub trait PaneHost {
     /// that draws no such icon (the tests'); `activity_changed`'s is a command's or the
     /// screen's.
     fn program_changed(&self, _pane: u64) {}
-    /// The pane's size changed while a card hangs in its corner ([`TerminalPane::set_corner_card`]):
-    /// the card is as wide as the pane lets it be and its list as high as the pane's height leaves
-    /// room for, so the owner that made it makes it again. Told from inside the pane's layout;
-    /// nothing for an owner with no such card (the tests').
+    /// The room of a card that hangs in the pane's corner ([`TerminalPane::set_corner_card`])
+    /// changed: the pane's size, or the find panel taking the corner or leaving it
+    /// ([`TerminalPane::corner_card_top`]). The card is as wide as the pane lets it be and its
+    /// list as high as the room under its top leaves, so the owner that made it asks whether the
+    /// card it would make now is another size, and makes it again only then. Told from inside the
+    /// pane's layout; nothing for an owner with no such card (the tests').
     fn resized(&self, _pane: u64) {}
     /// A card was put in the pane's corner ([`TerminalPane::set_corner_card`]): the owner that
     /// keeps the stacking of the views the pane stands among puts it in its place at once. Nothing
@@ -8571,7 +8573,7 @@ impl TerminalPane {
         }
         bar.show(!self.ivars().reduce_motion.get());
         // A card in the corner steps down under the panel.
-        self.place_corner_card();
+        self.corner_card_moved();
         if focus && let Some(window) = self.window() {
             window.makeFirstResponder(Some(bar.field()));
             // SAFETY: the sender is optional; the field's own action.
@@ -8792,10 +8794,10 @@ impl TerminalPane {
         let pane = WeakId::new(self);
         bar.hide(!self.ivars().reduce_motion.get(), move || {
             if let Some(pane) = pane.load() {
-                pane.place_corner_card();
+                pane.corner_card_moved();
             }
         });
-        self.place_corner_card();
+        self.corner_card_moved();
         bar.forget_applied();
         if let Some(session) = self.session() {
             session.select_search_match();
@@ -8997,16 +8999,30 @@ impl TerminalPane {
         let Some(host) = (unsafe { self.superview() }) else {
             return;
         };
-        // Under the find panel while it is open: it stands in the same corner.
+        stand_card_over(&card, self, &host, self.corner_card_top());
+        card.setHidden(self.isHidden());
+    }
+
+    /// How far from the pane's top the card in its corner stands: under the find panel while it
+    /// is open, since it stands in the same corner (the room the card is made for,
+    /// `apps_card::view::build`).
+    pub(crate) fn corner_card_top(&self) -> f64 {
         let panel = self
             .ivars()
             .search
             .get()
             .filter(|bar| bar.holds_corner())
             .map(SearchBar::resting_frame);
-        let top = card_top_inset(self.bounds().size.height, panel);
-        stand_card_over(&card, self, &host, top);
-        card.setHidden(self.isHidden());
+        card_top_inset(self.bounds().size.height, panel)
+    }
+
+    /// The find panel took the corner or left it: the card steps down or back up, and the owner
+    /// that made it is told, since the room under its top is another ([`PaneHost::resized`]).
+    fn corner_card_moved(&self) {
+        self.place_corner_card();
+        if self.ivars().corner_card.borrow().is_some() {
+            self.host().resized(self.id());
+        }
     }
 
     /// The pane leaves the container it stands in (closed there, or carried to another tab): its
@@ -10255,26 +10271,30 @@ mod tests {
         };
         let open = body_of("    fn open_search(");
         let shown = open.find("bar.show(").expect("the panel opens");
-        assert!(open[shown..].contains("self.place_corner_card()"), "{open}");
+        assert!(open[shown..].contains("self.corner_card_moved()"), "{open}");
         let close = body_of("    pub(crate) fn close_search(");
         let hidden = close.find("bar.hide(").expect("the panel closes");
         assert!(
-            close[hidden..].contains("self.place_corner_card()"),
+            close[hidden..].contains("self.corner_card_moved()"),
             "{close}"
         );
         // It goes back up when the panel has faded out (the callback), and the place it is
         // stood in keeps it under the panel until then (the panel holds the corner while it fades).
         assert!(
-            close[hidden..].contains("pane.place_corner_card()"),
+            close[hidden..].contains("pane.corner_card_moved()"),
             "{close}"
         );
+        // The card is stood again and its owner is told, since the room under its top changed
+        // (the card is made again where that changes what it shows).
+        let moved = body_of("    fn corner_card_moved(");
+        assert!(moved.contains("self.place_corner_card()"), "{moved}");
+        assert!(moved.contains("self.host().resized("), "{moved}");
         let place = body_of("    pub(crate) fn place_corner_card(");
-        assert!(
-            place.contains(".filter(|bar| bar.holds_corner())"),
-            "{place}"
-        );
-        assert!(place.contains("SearchBar::resting_frame"), "{place}");
-        assert!(place.contains("card_top_inset("), "{place}");
+        assert!(place.contains("self.corner_card_top()"), "{place}");
+        let top = body_of("    pub(crate) fn corner_card_top(");
+        assert!(top.contains(".filter(|bar| bar.holds_corner())"), "{top}");
+        assert!(top.contains("SearchBar::resting_frame"), "{top}");
+        assert!(top.contains("card_top_inset("), "{top}");
     }
 
     /// A pane opened for a program waits for it under a cover and wears it once: put on at the

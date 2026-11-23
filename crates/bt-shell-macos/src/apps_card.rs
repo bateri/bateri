@@ -45,7 +45,6 @@ use bt_shell_common::web_links;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_foundation::NSSize;
 
 use crate::app;
 use crate::hold_service;
@@ -92,8 +91,6 @@ struct Open {
     /// What `view` shows: `card` as it was when the view was made or last brought up to date.
     drawn: Card,
     view: Retained<CardView>,
-    /// The size of the pane `view` was made for ([`view::made_for`]).
-    room: NSSize,
     /// The buttons' target: the view holds it, and so does this, for the next view.
     target: Retained<Target>,
 }
@@ -274,8 +271,13 @@ fn ground(settings: &Settings, account: &str, host: &str, answered: bool, open: 
 
 fn raise(mtm: MainThreadMarker, pane: &TerminalPane, account: &str, pending: Pending, card: Card) {
     let target = Target::new(mtm, account);
-    let room = pane.bounds().size;
-    let view = view::build(mtm, &card, &target, room);
+    let view = view::build(
+        mtm,
+        &card,
+        &target,
+        pane.bounds().size,
+        pane.corner_card_top(),
+    );
     pane.set_corner_card(Some(&view));
     with(|cards| {
         cards.open.insert(
@@ -287,7 +289,6 @@ fn raise(mtm: MainThreadMarker, pane: &TerminalPane, account: &str, pending: Pen
                 drawn: card.clone(),
                 card,
                 view,
-                room,
                 target,
             },
         );
@@ -313,10 +314,12 @@ fn redraw(mtm: MainThreadMarker, account: &str) {
     };
     // Where only how far a download has come changed, the number under the name is written in
     // place: the view is not made again, so the ring on its row does not start over at every step.
-    let room = pane.bounds().size;
+    let (room, top) = (pane.bounds().size, pane.corner_card_top());
     let in_place = with(|cards| {
         cards.open.get_mut(account).is_some_and(|open| {
-            let same = view::refresh_notes(&open.view, &open.drawn, &card, open.room, room);
+            // The room is the one the card was made for, and only a percent moved.
+            let same = view::made_for(mtm, &open.view, &open.drawn, &open.target, room, top)
+                && view::refresh_notes(&open.view, &open.drawn, &card);
             if same {
                 open.drawn = card.clone();
             }
@@ -333,7 +336,7 @@ fn redraw(mtm: MainThreadMarker, account: &str) {
             .get(account)
             .and_then(|open| view::scrolled(&open.view))
     });
-    let view = view::build(mtm, &card, &target, room);
+    let view = view::build(mtm, &card, &target, room, top);
     if let Some(offset) = offset {
         view::scroll_to(&view, offset);
     }
@@ -341,16 +344,16 @@ fn redraw(mtm: MainThreadMarker, account: &str) {
     with(|cards| {
         if let Some(open) = cards.open.get_mut(account) {
             open.view = view;
-            open.room = room;
             open.drawn = card;
         }
     });
 }
 
-/// A pane's size changed: its card is as wide as the pane lets it be and its list as high as the
-/// pane's height leaves room for ([`view::made_for`]), so a card made for another size is made
-/// again, whether the pane became narrower, wider, lower or higher. Told by the pane on the next
-/// turn of the loop, so that nothing here runs inside its layout.
+/// A pane's size changed, or the find panel took its corner or left it: its card is as wide as the
+/// pane lets it be and its list as high as the room under the top leaves ([`view::made_for`]), so a
+/// card that would be another size in the pane now is made again, whether the pane became
+/// narrower, wider, lower or higher, and a card the new room does not touch is left as it is. Told
+/// by the pane on the next turn of the loop, so that nothing here runs inside its layout.
 pub(crate) fn pane_resized(mtm: MainThreadMarker, id: u64) {
     let Some(app) = app::delegate(mtm) else {
         return;
@@ -358,15 +361,20 @@ pub(crate) fn pane_resized(mtm: MainThreadMarker, id: u64) {
     let Some(pane) = app.all_panes().into_iter().find(|pane| pane.id() == id) else {
         return;
     };
-    let now = pane.bounds().size;
-    let account = with(|cards| {
+    let (now, top) = (pane.bounds().size, pane.corner_card_top());
+    // Every card the pane holds, not the first only.
+    let stale: Vec<String> = with(|cards| {
         cards
             .open
             .iter()
-            .find(|(_, open)| open.pane == id && !view::made_for(open.room, now))
+            .filter(|(_, open)| {
+                open.pane == id
+                    && !view::made_for(mtm, &open.view, &open.drawn, &open.target, now, top)
+            })
             .map(|(account, _)| account.clone())
+            .collect()
     });
-    if let Some(account) = account {
+    for account in stale {
         redraw(mtm, &account);
     }
 }

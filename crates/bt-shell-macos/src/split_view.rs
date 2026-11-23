@@ -1758,6 +1758,26 @@ impl SplitView {
         put_in_order(self, &wanted, ring, ring_slot);
     }
 
+    /// [`Self::restack`] now, if none of the lists it reads is held: a layout, a close or a drag
+    /// holds some while it calls out, and a card put in from there is put in order by the caller's
+    /// next turn (`false`). Every list `restack` reads is tried here: the source test of this
+    /// file keeps the two together.
+    pub(crate) fn restack_if_free(&self) -> bool {
+        let iv = self.ivars();
+        let free = iv.panes.try_borrow_mut().is_ok()
+            && iv.cards.try_borrow_mut().is_ok()
+            && iv.shades.try_borrow_mut().is_ok()
+            && iv.card_handles.try_borrow_mut().is_ok()
+            && iv.heads.try_borrow_mut().is_ok()
+            && iv.grips.try_borrow_mut().is_ok()
+            && iv.capsules.try_borrow_mut().is_ok()
+            && iv.zoom_motion.try_borrow_mut().is_ok();
+        if free {
+            self.restack();
+        }
+        free
+    }
+
     /// Where the pane of a terminal a program on a server asked for goes beside `anchor` of this
     /// tab, as the agent asked (`ask`): the rule is [`bt_shell_common::agent::place::place`],
     /// in this container's room with the spacing of the tree it becomes. `incoming` is the id
@@ -4470,10 +4490,39 @@ mod tests {
         let tab = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tab.rs"))
             .expect("tab.rs");
         let host = &tab[tab.find("fn card_put(").expect("the host's answer")..];
-        assert!(host[..host.find("fn resized(").expect("next")].contains(".restack()"));
+        let host = &host[..host.find("fn resized(").expect("next")];
+        // At once where the container's lists are free, the next turn where they are held.
+        assert!(host.contains("restack_if_free()"), "{host}");
+        assert!(host.contains("exec_async"), "{host}");
+        assert!(host.contains(".restack()"), "{host}");
         // And a pane that leaves takes its card out of the container with it.
         assert!(body_of("pub(crate) fn detach(").contains("leave_container()"));
         assert!(body_of("pub(crate) fn drain(").contains("leave_container()"));
+    }
+
+    /// `restack_if_free` tries every list `restack` reads, so that a card put in from inside a
+    /// layout or a close (which hold some) never borrows one that is held.
+    #[test]
+    fn the_restack_that_asks_first_tries_every_list_the_restack_reads() {
+        let restack = body_of("fn restack(");
+        let free = body_of("pub(crate) fn restack_if_free(");
+        let mut lists = Vec::new();
+        for (at, _) in restack.match_indices("iv.") {
+            let name: String = restack[at + 3..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if restack[at + 3 + name.len()..].starts_with(".borrow()") && !lists.contains(&name) {
+                lists.push(name);
+            }
+        }
+        assert!(lists.len() >= 8, "{lists:?}");
+        for name in lists {
+            assert!(
+                free.contains(&format!("iv.{name}.try_borrow_mut()")),
+                "restack reads {name}, which restack_if_free does not try: {free}"
+            );
+        }
     }
 
     #[test]

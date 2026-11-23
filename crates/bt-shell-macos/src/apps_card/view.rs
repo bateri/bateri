@@ -48,13 +48,24 @@ const MIN_WIDTH: f64 = 140.0;
 pub(crate) fn width_for(pane_width: f64) -> f64 {
     (pane_width - 2.0 * crate::pane::CORNER_INSET.1).clamp(MIN_WIDTH, WIDTH)
 }
-/// Whether a card made for a pane of the size `built` is right for one of the size `now`: as wide
-/// as the pane lets it be ([`width_for`]), and with its list as high as the pane's height leaves
-/// room for ([`ROOM_SHARE`]). A pane that became lower (a split across it) or higher is another
-/// card's room, and the card is made again, so that its buttons are not pushed below the pane.
-pub(crate) fn made_for(built: NSSize, now: NSSize) -> bool {
-    (width_for(built.width) - width_for(now.width)).abs() <= 0.5
-        && (built.height - now.height).abs() <= 0.5
+/// Whether `view`, the card `card` made in some room, is the card `card` makes in the room `now`
+/// (the pane's size, and `top`: how far from the pane's top the card stands, which the find panel
+/// moves): as wide and as high. A pane made lower (a split across it), higher or narrower, or a
+/// panel that takes the corner, is another card only where the room cuts what the card shows (its
+/// list, [`ROOM_SHARE`]); a card the room does not touch is left as it is, because made again its
+/// rings would start over at every step of a download. A card of another size is made again, so
+/// that its buttons are not pushed below the pane. The card it would make is not kept.
+pub(crate) fn made_for(
+    mtm: MainThreadMarker,
+    view: &NSView,
+    card: &Card,
+    target: &Retained<Target>,
+    now: NSSize,
+    top: f64,
+) -> bool {
+    let would = build(mtm, card, target, now, top).frame().size;
+    let made = view.frame().size;
+    (made.width - would.width).abs() <= 0.5 && (made.height - would.height).abs() <= 0.5
 }
 
 /// The room at its sides, and above its title and under its buttons.
@@ -851,23 +862,28 @@ fn ns_empty() -> &'static NSString {
 }
 
 /// How high the card may be of the pane it hangs over: the rest is the terminal's.
-const ROOM_SHARE: f64 = 0.8;
+pub(super) const ROOM_SHARE: f64 = 0.8;
 
 /// A list of at most this many rows does not scroll for being long ([`LIST_MAX`]).
 const FEW_ROWS: usize = 3;
 
-/// The least a list is let shrink to for a small pane: about two rows.
+/// The least a list is let shrink to for a small pane: about two rows, unless the pane is too low
+/// for the card's foot to stand in it with that (then the list gives up its room down to nothing).
 const LIST_MIN: f64 = 44.0;
 
 /// The card as the model says it is, as wide as the pane lets it be ([`width_for`]) and as high as
-/// it needs, with its buttons wired to `target`. `room` is the size of the pane it hangs over: a
-/// list that would not fit scrolls in less than [`LIST_MAX`]. Its origin is the corner of the
-/// pane's ([`crate::pane::CORNER_INSET`]) and is the pane's to set.
+/// it needs, with its buttons wired to `target`. `room` is the size of the pane it hangs over and
+/// `top` how far from the pane's top it will stand ([`crate::pane::card_top_inset`]: lower than
+/// [`crate::pane::CORNER_INSET`]'s while the find panel is in the corner): a list that would not
+/// fit scrolls in less than [`LIST_MAX`], and in a pane too low for the card's foot to stand in it
+/// the list gives up room down to nothing. Its origin is the corner of the pane's and is the
+/// pane's to set.
 pub(crate) fn build(
     mtm: MainThreadMarker,
     card: &Card,
     target: &Retained<Target>,
     room: NSSize,
+    top: f64,
 ) -> Retained<CardView> {
     let width = width_for(room.width);
     let inner = width - 2.0 * PAD_X;
@@ -958,7 +974,12 @@ pub(crate) fn build(
     } else {
         LIST_MAX
     };
-    let list_max = (room.height * ROOM_SHARE - around).clamp(LIST_MIN, cap);
+    // What is under the find panel is the room the share is of; and what the pane holds at all,
+    // the card's foot standing as far from its bottom as its top from the top, is what the list
+    // gives up room for, below [`LIST_MIN`], when the pane is too low.
+    let under = room.height - (top - crate::pane::CORNER_INSET.0);
+    let fits = (room.height - top - crate::pane::CORNER_INSET.0 - around).max(0.0);
+    let list_max = (under * ROOM_SHARE - around).clamp(LIST_MIN, cap).min(fits);
     let shown = scrolls.min(list_max);
     y += 8.0;
     if scrolls > list_max {
@@ -1072,19 +1093,9 @@ fn specs(card: &Card) -> Vec<Spec> {
 /// Brings the view of a card up to date with the model where only how far a download has come
 /// changed: the number under the name of a row is written in its label, and nothing is made
 /// again, so that the ring beside it goes on turning. `false` when something else changed (or the
-/// number comes or goes, which changes the row's height, or the pane is not the size the card was
-/// made for, `built`, but `now` ([`made_for`])): the card is to be made again.
-pub(crate) fn refresh_notes(
-    view: &NSView,
-    before: &Card,
-    after: &Card,
-    built: NSSize,
-    now: NSSize,
-) -> bool {
-    // The pane's size is what the card was made for: a card of another room is made again.
-    if !made_for(built, now) {
-        return false;
-    }
+/// number comes or goes, which changes the row's height): the card is to be made again. Whether
+/// the room is still the one the card was made for is [`made_for`]'s.
+pub(crate) fn refresh_notes(view: &NSView, before: &Card, after: &Card) -> bool {
     if before.stage() != after.stage()
         || before.title() != after.title()
         || before.notes() != after.notes()
