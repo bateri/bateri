@@ -6315,17 +6315,19 @@ impl AppDelegate {
         choice.is_on(Some(&said.installed)).then_some(choice)
     }
 
-    /// A ⌘-click on a file or a folder, which the program the person chose opens: in a floating
+    /// A ⌘-click on a file, a folder or a web address, which the program the person chose opens: in a floating
     /// pane of `tab`, next to `from`. On this Mac the pane's terminal starts the program itself;
     /// on a server it is a new terminal of the server `from` shows, which runs it. The pane ends
     /// with the program. Nothing is typed to any shell: the words are made by
-    /// [`bt_shell_common::open_with`].
+    /// [`bt_shell_common::open_with`]. Whether the program was started, or a program of that name
+    /// that is open was handed the file: `false` when nothing came of it, which the caller of an
+    /// address turns into the system's browser.
     pub(crate) fn open_program(
         &self,
         tab: &TerminalTab,
         from: &TerminalPane,
         open: launch::OpenProgram,
-    ) {
+    ) -> bool {
         let launch::OpenProgram {
             name,
             target,
@@ -6338,9 +6340,9 @@ impl AppDelegate {
             path,
             line,
         } = &target
-            && self.hand_file(tab, from, &name, path, *line)
+            && self.hand_file(tab, from, &name, path, *line, server)
         {
-            return;
+            return true;
         }
         // The folder the program starts in: the folder that was clicked, or the one a file is in.
         // An address has none (a program that opens one reads no folder).
@@ -6354,13 +6356,13 @@ impl AppDelegate {
             // The terminal is asked for on the server the pane shows one of, as ⌘D would, with the
             // program as what it runs and the folder it starts in.
             let Some((_, ssh, _)) = from.server_target() else {
-                return;
+                return false;
             };
             let Some((program, args)) = ssh.argv.split_first() else {
-                return;
+                return false;
             };
             if ssh.kind != RemoteKind::Ssh || program != "ssh" || args.is_empty() {
-                return;
+                return false;
             }
             let argv = match &target {
                 launch::OpenTarget::Path { path, line, .. } => {
@@ -6371,7 +6373,7 @@ impl AppDelegate {
                 }
             };
             let Some(argv) = argv else {
-                return;
+                return false;
             };
             // The server by the word the program's own header will name it by.
             let place = from.kept_host().unwrap_or_else(|| ssh.label().into_owned());
@@ -6406,7 +6408,7 @@ impl AppDelegate {
             // folder of what this copy follows has none.
             let Some(bin) = child::home().map(|home| bt_shell_common::open_with::bin_here(&home))
             else {
-                return;
+                return false;
             };
             let argv = match &target {
                 launch::OpenTarget::Path { path, line, .. } => {
@@ -6417,7 +6419,7 @@ impl AppDelegate {
                 }
             };
             let Some(argv) = argv else {
-                return;
+                return false;
             };
             let opens = match &target {
                 launch::OpenTarget::Path { path, .. } => launch::Opens::of(None, &name, path),
@@ -6447,10 +6449,14 @@ impl AppDelegate {
         // Mac that was never asked for the program.
         if server && launch.held.is_none() {
             eprintln!("bateri: there is no pipe to a server in this process");
-            return;
+            return false;
         }
-        if let Err(e) = tab.add_floating(self.mtm(), launch, None, None) {
-            eprintln!("bateri: {e}");
+        match tab.add_floating(self.mtm(), launch, None, None) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("bateri: {e}");
+                false
+            }
         }
     }
 

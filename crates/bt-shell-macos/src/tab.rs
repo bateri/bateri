@@ -165,7 +165,7 @@ impl PaneHost for TabHost {
 
     fn open_program(&self, from: &TerminalPane, open: crate::launch::OpenProgram) {
         if let (Some(app), Some(tab)) = (app::delegate(Self::mtm()), self.tab()) {
-            app.open_program(&tab, from, open);
+            let _ = app.open_program(&tab, from, open);
         }
     }
 

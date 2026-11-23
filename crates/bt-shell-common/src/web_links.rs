@@ -163,7 +163,7 @@ pub struct Question {
 }
 
 impl Question {
-    /// The whole note in one line, as the plan's and the documents' words have it.
+    /// The whole note in one line, as the documents' words have it.
     #[must_use]
     pub fn line(&self) -> String {
         match &self.detail {
@@ -208,6 +208,8 @@ pub struct RowFacts<'a> {
 pub enum Chosen {
     Browserpen,
     YourBrowser,
+    /// Another program, which the file names: neither choice is shown as made.
+    Other,
 }
 
 /// What the Links row shows: the choice, and the line under it, which says what the next click
@@ -226,6 +228,20 @@ pub struct RowState {
 /// browserpen is asked about again when it is chosen).
 pub fn links_row(facts: &RowFacts<'_>) -> RowState {
     let ready = facts.program_here && matches!(facts.engine, Engine::Here { .. });
+    // A program the file names that is neither of the two choices opens links all the same
+    // (`route` sends them to it): the row says so and shows neither choice as made.
+    if let Some(name) = facts
+        .setting
+        .filter(|name| !name.is_empty() && *name != BROWSER_PROGRAM)
+    {
+        return RowState {
+            chosen: Chosen::Other,
+            note: format!(
+                "Links open in {name}, as settings.toml says. Choose one here to change it."
+            ),
+            ready,
+        };
+    }
     if facts.setting != Some(BROWSER_PROGRAM) {
         let note = if facts.setting == Some("") {
             "Links open in your browser. Choose browserpen to open them beside your terminal."
@@ -526,6 +542,10 @@ mod tests {
             .note
             .contains("offline")
         );
+        // A program the file names is the one that opens links, and neither choice is shown made.
+        let other = row(Some("web"), false, Engine::Missing);
+        assert_eq!(other.chosen, Chosen::Other);
+        assert!(other.note.contains("web"), "{}", other.note);
         let app = Engine::Here {
             version: None,
             bytes: None,

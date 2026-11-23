@@ -3028,6 +3028,12 @@ impl SettingsWindow {
         })
     }
 
+    /// The Links row drawn again from what is on this computer: nothing else of the page.
+    pub(crate) fn refresh_links(&self, setting: Option<&str>) {
+        self.sync_links(setting);
+        self.set_links_note(setting);
+    }
+
     /// Selects the Links popup's choice for `setting`.
     fn sync_links(&self, setting: Option<&str>) {
         let Some(c) = self.ivars().controls.get() else {
@@ -3036,6 +3042,7 @@ impl SettingsWindow {
         let index = match self.links_state(setting).chosen {
             bt_shell_common::web_links::Chosen::Browserpen => 0,
             bt_shell_common::web_links::Chosen::YourBrowser => 1,
+            bt_shell_common::web_links::Chosen::Other => -1,
         };
         c.open_links.selectItemAtIndex(index);
     }
@@ -3073,8 +3080,10 @@ impl SettingsWindow {
             self.save(Some(SettingsEdit::AppsOpenLinksWith(
                 bt_shell_common::web_links::BROWSER_PROGRAM.to_owned(),
             )));
-        } else {
-            app.ask_to_use_browserpen();
+        } else if !app.ask_to_use_browserpen() {
+            // This copy has no release to offer (it runs an engine where it is): nothing is asked,
+            // browserpen is used.
+            app.use_browserpen_for_links();
         }
         // What the file says now (a write refreshes the window, which may not have yet reached
         // this popup): the popup shows that, and goes back to the old choice for a question that

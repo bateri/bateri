@@ -90,7 +90,8 @@ struct Cards {
     answered: HashSet<String>,
     open: HashMap<String, Open>,
     /// The programs a click's card brought to a server, by the server's account: the server says
-    /// it has them at its next `state`, and until then the next click must not ask again.
+    /// it has them at its next `state` (which clears them), and until then the next click must not
+    /// ask again.
     brought: HashSet<(String, String)>,
 }
 
@@ -113,6 +114,9 @@ impl Cards {
                     .or_insert(open.pending);
             }
             Stage::Done => {}
+            // A click's card never marked its server answered: what the person said to the card of
+            // the programs they follow stands.
+            Stage::Installing | Stage::Failed if open.card.link().is_some() => {}
             Stage::Installing | Stage::Failed => {
                 self.answered.remove(account);
             }
@@ -141,6 +145,11 @@ pub(crate) fn state_arrived(
     rows: Vec<Row>,
 ) {
     with(|cards| {
+        // The server has said what it has: that is what the next click goes by, not what a card
+        // of a click brought before it said.
+        cards
+            .brought
+            .retain(|(brought_to, _)| brought_to != account);
         if rows.is_empty() {
             cards.pending.remove(account);
         } else {

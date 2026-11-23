@@ -461,6 +461,17 @@ pub(crate) fn engine_installed() -> Option<EngineHere> {
     })
 }
 
+/// Whether the release of the program followed as `source` (`bateri/browserpen`) can be read: the
+/// `app.json` of the address the source stands for. A question put to the person about bringing a
+/// program is put only where it can be brought. Waits for the network: a thread of its own.
+pub(crate) fn program_released(source: &str) -> Result<(), String> {
+    let address =
+        bt_core::app_source_address(source).ok_or_else(|| format!("{source} is not a source"))?;
+    fetch::bytes(&address, 1 << 20)
+        .map(drop)
+        .map_err(|error| error.to_string())
+}
+
 /// The engine that is on this Mac ([`engine_installed`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EngineHere {

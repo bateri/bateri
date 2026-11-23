@@ -34,9 +34,10 @@ codesign --verify --deep --strict "$app" 2>/dev/null || {
     exit 1
 }
 
-plist() { /usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null; }
+# A file that is not there is no value (PlistBuddy would say on stdout that it makes one).
+plist() { [ -f "$1" ] || return 1; /usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null; }
 
-version=$(plist "$app/Contents/Info.plist" CFBundleShortVersionString)
+version=$(plist "$app/Contents/Info.plist" CFBundleShortVersionString || true)
 case "$version" in
     [0-9]*.[0-9]*.[0-9]*) ;;
     *) echo "browser-release: the app's version is '$version', not x.y.z" >&2; exit 1 ;;
@@ -44,6 +45,12 @@ esac
 chromium=${CHROMIUM:-$(plist "$app/Contents/Frameworks/Chromium Embedded Framework.framework/Resources/Info.plist" CFBundleShortVersionString || true)}
 chromium=${chromium:-unknown}
 protocol=${PROTOCOL:-1}
+case "$protocol" in
+    ''|*[!0-9]*) echo "browser-release: PROTOCOL is '$protocol', not a number" >&2; exit 1 ;;
+esac
+case "$chromium" in
+    *[!0-9A-Za-z._+-]*) echo "browser-release: CHROMIUM is '$chromium', not a version" >&2; exit 1 ;;
+esac
 arch=$(uname -m | sed 's/aarch64/arm64/')
 name=bateri-browser-$version-$arch.zip
 

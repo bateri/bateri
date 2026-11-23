@@ -146,9 +146,13 @@ impl AppDelegate {
         name: &str,
         path: &str,
         line: Option<u32>,
+        server: bool,
     ) -> bool {
         let machine = from.machine();
-        if machine == PaneMachine::Elsewhere {
+        // The path is on the machine it was found on (`server`): a program on another one, in the
+        // same tab, is not handed it.
+        if machine == PaneMachine::Elsewhere || matches!(machine, PaneMachine::Server(_)) != server
+        {
             return false;
         }
         let panes = self.hosts(tab, &machine);
@@ -169,7 +173,7 @@ impl AppDelegate {
             return hyperlink::open_url(url);
         };
         let server = matches!(from.machine(), PaneMachine::Server(_));
-        self.open_program(
+        let started = self.open_program(
             tab,
             from,
             launch::OpenProgram {
@@ -178,6 +182,11 @@ impl AppDelegate {
                 server,
             },
         );
+        // An address is not lost: where the program could not be started (no way to reach the
+        // server, a setting that names no program) the system's browser opens it, as it did before.
+        if !started {
+            hyperlink::open_url(url);
+        }
     }
 
     /// The one-time note: whether to open links beside the terminal with browserpen. Looked up in
@@ -197,36 +206,93 @@ impl AppDelegate {
     /// Settings ▸ Apps ▸ Links ▸ browserpen, where it is not all here: the same question, as a sheet
     /// of the settings window, with *Use browserpen* and *Cancel* (what the person did is
     /// the choice; nothing is written for a cancel).
-    pub(crate) fn ask_to_use_browserpen(&self) {
-        self.look_up_notice(Place::Settings);
+    pub(crate) fn ask_to_use_browserpen(&self) -> bool {
+        self.look_up_notice(Place::Settings)
     }
 
-    /// Reads the release notice on a thread of its own and puts the question where `place` is
-    /// when it is read. `false` when this copy has no release to look at (a copy that runs an engine
-    /// where it is): there is nothing to offer.
+    /// Reads the release notice on a thread of its own, and where browserpen is not here yet
+    /// whether its release can be read too, and puts the question where `place` is when they are
+    /// read. `false` when this copy has no release to look at (a copy that runs an engine where it
+    /// is): there is nothing to offer.
     fn look_up_notice(&self, place: Place) -> bool {
         let Some(installer) = crate::browser_install::installer() else {
             return false;
         };
+        let (program_here, _) = self.links_facts();
         let _ = std::thread::Builder::new()
             .name("links-notice".into())
             .spawn(move || {
                 let check = installer.check();
+                // A question about bringing browserpen is asked only where it can be brought.
+                let released = (!program_here).then(|| {
+                    crate::browser_install::program_released(&format!(
+                        "bateri/{}",
+                        web_links::BROWSER_PROGRAM
+                    ))
+                });
                 DispatchQueue::main().exec_async(move || {
                     // audit: a block running on the main queue is on the main thread by definition.
                     let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                     if let Some(app) = delegate(mtm) {
-                        app.links_noticed(place, check);
+                        app.links_noticed(place, check, released);
                     }
                 });
             });
         true
     }
 
+    /// The seat of a sheet at `place`, when no other sheet is up there.
+    fn seat_at(&self, place: &Place) -> Option<sheets::Seat> {
+        match place {
+            Place::Pane(id) => self
+                .pane(*id)
+                .and_then(|pane| sheets::seat(Asker::Pane(&pane))),
+            Place::Settings => self
+                .settings_window()
+                .and_then(|window| window.ns_window())
+                .and_then(|window| sheets::seat(Asker::Window(&window))),
+        }
+        .filter(|seat| !seat.is_taken())
+    }
+
+    /// Says something to the person at `place`, with one button; to the log where no sheet can be
+    /// put there.
+    fn inform(&self, place: &Place, title: &str, detail: &str) {
+        let Some(seat) = self.seat_at(place) else {
+            eprintln!("bateri: {title}: {detail}");
+            return;
+        };
+        let alert = NSAlert::new(self.mtm());
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(detail));
+        alert.addButtonWithTitle(ns_string!("OK"));
+        seat.begin(&alert, &RcBlock::new(|_: NSModalResponse| {}));
+    }
+
     /// The release notice was read: the question, with what it would download.
-    fn links_noticed(&self, place: Place, check: crate::browser_install::Check) {
+    fn links_noticed(
+        &self,
+        place: Place,
+        check: crate::browser_install::Check,
+        released: Option<Result<(), String>>,
+    ) {
         use crate::browser_install::Check;
         let from_click = matches!(place, Place::Pane(_));
+        if let Some(Err(why)) = &released {
+            if from_click {
+                // Nothing to promise: the next click looks again.
+                self.ivars().links_asked.set(false);
+            } else {
+                self.inform(
+                    &place,
+                    "browserpen can\u{2019}t be reached",
+                    &format!(
+                        "Its release could not be read ({why}). Try again when you are online."
+                    ),
+                );
+            }
+            return;
+        }
         let engine = crate::browser_install::engine_installed();
         let bytes = match &check {
             Check::Offer(offer) => Some(offer.asset.size),
@@ -241,17 +307,7 @@ impl AppDelegate {
         };
         let (program_here, _) = self.links_facts();
         let question = web_links::question(program_here, engine.is_some(), bytes);
-        let seat = match &place {
-            Place::Pane(id) => self
-                .pane(*id)
-                .and_then(|pane| sheets::seat(Asker::Pane(&pane))),
-            Place::Settings => self
-                .settings_window()
-                .and_then(|window| window.ns_window())
-                .and_then(|window| sheets::seat(Asker::Window(&window))),
-        }
-        .filter(|seat| !seat.is_taken());
-        let Some(seat) = seat else {
+        let Some(seat) = self.seat_at(&place) else {
             if from_click {
                 self.ivars().links_asked.set(false);
             }
@@ -304,7 +360,24 @@ impl AppDelegate {
         {
             let settings = self.file_settings();
             let source = format!("bateri/{}", web_links::BROWSER_PROGRAM);
-            if settings.apps_sources_whole && !settings.apps_sources.contains(&source) {
+            // What the file follows is compared by the address it stands for: `bateri/browserpen`
+            // and its full address are one source.
+            let address = bt_core::app_source_address(&source);
+            let followed = settings.apps_sources.iter().any(|have| {
+                have == &source
+                    || (address.is_some() && bt_core::app_source_address(have) == address)
+            });
+            if !followed {
+                if !settings.apps_sources_whole {
+                    // An entry of the list could not be read, and a list that is not whole is not
+                    // written (it would lose what the person wrote): say so, and change nothing.
+                    self.inform(
+                        &Place::Settings,
+                        "settings.toml needs a look first",
+                        "An entry of [apps] sources could not be read, so bateri does not rewrite the list. Fix it, or add bateri/browserpen to it, and choose browserpen again.",
+                    );
+                    return;
+                }
                 let mut sources = settings.apps_sources.clone();
                 sources.push(source);
                 edits.push(SettingsEdit::AppsSources(sources));
@@ -355,9 +428,9 @@ impl AppDelegate {
                             .map_err(|e| e.to_string())
                     }
                     crate::browser_install::Check::Current => Ok(()),
-                    crate::browser_install::Check::Refused(why) => Err(format!(
-                        "the engine on offer is not one this bateri uses ({why:?})"
-                    )),
+                    crate::browser_install::Check::Refused(_) => {
+                        Err("the engine on offer is not one this bateri uses".to_owned())
+                    }
                     crate::browser_install::Check::Unavailable(why) => Err(why),
                 };
                 engine_job_on_main(match outcome {
@@ -369,8 +442,14 @@ impl AppDelegate {
 
     /// What the engine's download does now: kept, and the Apps page told.
     fn set_engine_job(&self, job: EngineJob) {
+        let progress = matches!(job, EngineJob::Downloading(_));
         self.ivars().engine_job.replace(job);
-        self.apps_changed();
+        // A figure that moves redraws the Links row's line, not the whole page.
+        if progress && let Some(window) = self.settings_window() {
+            window.refresh_links(self.file_settings().apps_open_links_with.as_deref());
+        } else {
+            self.apps_changed();
+        }
     }
 
     /// The download of the engine, as the Apps page shows it.
@@ -503,38 +582,64 @@ pub(crate) fn note_layout_problems(
     problems
 }
 
-/// The size of what is under `folder`, in bytes, read once per folder: the Apps page asks on every
-/// refresh, and the engine is a few thousand files.
+thread_local! {
+    /// The folders whose size was measured, and what it came to (a folder that cannot be read: 0).
+    static SIZES: RefCell<Vec<(PathBuf, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Set while a folder is being measured: one at a time.
+static MEASURING: AtomicBool = AtomicBool::new(false);
+
+/// The size of what is under `folder`, in bytes, as it was measured: the Apps page asks on every
+/// refresh, and the engine is a few thousand files, so the first ask starts a measure on a thread
+/// of its own (`None` until it is done, when the Links row is drawn again) and the size is kept.
 fn folder_bytes(folder: &std::path::Path) -> Option<u64> {
-    thread_local! {
-        static SIZES: RefCell<Vec<(PathBuf, u64)>> = const { RefCell::new(Vec::new()) };
-    }
-    if let Some(known) = SIZES.with(|sizes| {
+    let known = SIZES.with(|sizes| {
         sizes
             .borrow()
             .iter()
             .find(|(seen, _)| seen == folder)
             .map(|(_, bytes)| *bytes)
-    }) {
-        return Some(known);
+    });
+    if let Some(bytes) = known {
+        return (bytes > 0).then_some(bytes);
     }
-    fn walk(folder: &std::path::Path, depth: usize) -> u64 {
-        let Ok(entries) = std::fs::read_dir(folder) else {
-            return 0;
-        };
-        entries
-            .flatten()
-            .map(|entry| match entry.file_type() {
-                Ok(kind) if kind.is_dir() && depth < 16 => walk(&entry.path(), depth + 1),
-                Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
-                _ => 0,
-            })
-            .sum()
+    if !MEASURING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let folder = folder.to_owned();
+        let started = std::thread::Builder::new()
+            .name("engine-size".into())
+            .spawn(move || {
+                let bytes = folder_walk(&folder, 0);
+                DispatchQueue::main().exec_async(move || {
+                    SIZES.with(|sizes| sizes.borrow_mut().push((folder, bytes)));
+                    MEASURING.store(false, std::sync::atomic::Ordering::Release);
+                    // audit: a block running on the main queue is on the main thread by definition.
+                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                    if let Some(app) = delegate(mtm)
+                        && let Some(window) = app.settings_window()
+                    {
+                        window.refresh_links(app.file_settings().apps_open_links_with.as_deref());
+                    }
+                });
+            });
+        if started.is_err() {
+            MEASURING.store(false, std::sync::atomic::Ordering::Release);
+        }
     }
-    let bytes = walk(folder, 0);
-    if bytes == 0 {
-        return None;
-    }
-    SIZES.with(|sizes| sizes.borrow_mut().push((folder.to_owned(), bytes)));
-    Some(bytes)
+    None
+}
+
+/// What the files under `folder` add up to, going down at most 16 folders.
+fn folder_walk(folder: &std::path::Path, depth: usize) -> u64 {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() && depth < 16 => folder_walk(&entry.path(), depth + 1),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
+            _ => 0,
+        })
+        .sum()
 }
