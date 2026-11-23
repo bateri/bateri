@@ -2965,10 +2965,16 @@ with the address. With `""`, or where browserpen is not installed or the browser
 downloaded yet, the address opens in your own browser, as it did before; nothing waits for a check on the network. Where
 the terminal is on a server that has no browserpen, a card over the pane asks whether to install it there and open the
 address (Install and Open, ⌘Return) or to open it in your own browser (⌘Escape). Not written, `open_links_with` is not
-decided: the first click opens the address in your own browser and asks once, in a note, whether to open links beside the
-terminal with browserpen, which downloads browserpen and the browser engine (the note says how large); Yes follows
-`bateri/browserpen` and writes `"browserpen"`, No writes `""` and the note does not come again. Settings ▸ Apps ▸ Links
-shows the same choice and what a click does now. The context menu of a web address has Open in Your Browser besides
+decided: the first click on a web address asks, in a card over the pane and before anything opens, whether to open links
+beside the terminal with browserpen, which downloads browserpen and the browser engine (the card says how large). Download
+and Open (⌘Return) follows `bateri/browserpen`, writes `"browserpen"`, says how far the download has come and opens the
+address in browserpen when it is there; Open in Your Browser (⌘Escape) writes `""`, opens the address in your own browser
+and the card does not come again. While it downloads, Open in Your Browser Now opens the address at once and the download
+goes on; a download that did not finish says why and has Try Again. A second click while the card is up opens in your own
+browser. bateri asks only when it has read, as it checks the programs at launch, that both can be downloaded: with no
+network, or no release of browserpen, the click opens in your own browser and bateri reads again later. With
+`"browserpen"` written and the download unfinished (it failed, or its files were deleted) the next click opens in your
+own browser and starts it again. Settings ▸ Apps ▸ Links shows the same choice and what a click does now. The context menu of a web address has Open in Your Browser besides
 Open Link, whatever this says. A value that is not a program's name keeps the value in use, with a warning. A file
 Command-clicked while a textpen of that machine is open in a pane of the same tab opens as a new tab of that textpen.
 

@@ -38,6 +38,7 @@ use bt_shell_common::browser::layout::{self, Layout};
 use bt_shell_common::browser::notice::{self, Offer, Refusal, Verdict};
 use bt_shell_common::browser::version::Version;
 use bt_shell_common::digest::{parse_sums, sha256_file};
+use bt_shell_common::web_links::Look;
 
 /// Where a release's files are: the newest release's, by name. The notice, `SHA256SUMS` and the
 /// archive are fetched from one place, so a release that is replaced between two of the fetches
@@ -60,9 +61,12 @@ pub(crate) enum Check {
     Current,
     /// The notice is not one to follow.
     Refused(Refusal),
-    /// The notice could not be had or read (offline, no release yet, a Mac with no archive): not
-    /// a failure of anything the person did, so it is a quiet state.
+    /// The notice could not be had or read (offline, a server that did not answer): not a failure
+    /// of anything the person did, so it is a quiet state, and it may be mended by a later look.
     Unavailable(String),
+    /// There is nothing to be had: no release has been published yet, or its notice has no engine
+    /// for this kind of Mac. A later look finds the same until a release is made.
+    Absent(String),
 }
 
 #[derive(Debug)]
@@ -123,6 +127,9 @@ impl Installer {
         let url = format!("{}/{NOTICE}", self.base);
         let bytes = match fetch::bytes(&url, SMALL) {
             Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Check::Absent(format!("the release notice: {e}"));
+            }
             Err(e) => return Check::Unavailable(format!("the release notice: {e}")),
         };
         let manifest = match Manifest::parse(&bytes) {
@@ -130,7 +137,7 @@ impl Installer {
             Err(e) => return Check::Unavailable(format!("the release notice: {e}")),
         };
         let Some(offer) = notice::offer(&manifest, notice::arch()) else {
-            return Check::Unavailable(format!("the release has no engine for {}", notice::arch()));
+            return Check::Absent(format!("the release has no engine for {}", notice::arch()));
         };
         match notice::judge(
             offer,
@@ -211,7 +218,7 @@ impl Installer {
                 }
                 Some(installed)
             }
-            Check::Unavailable(_) => None,
+            Check::Unavailable(_) | Check::Absent(_) => None,
             Check::Current | Check::Refused(_) => {
                 let _ = std::fs::write(&stamp, "");
                 None
@@ -470,6 +477,35 @@ pub(crate) fn program_released(source: &str) -> Result<(), String> {
     fetch::bytes(&address, 1 << 20)
         .map(drop)
         .map_err(|error| error.to_string())
+}
+
+/// How the release of the program followed as `source` looks to read, for the first click's
+/// question: there to be had, not there (`404`: nothing published), or the network did not answer.
+/// Waits for the network: a thread of its own.
+pub(crate) fn read_program(source: &str) -> Look {
+    let Some(address) = bt_core::app_source_address(source) else {
+        return Look::Nothing;
+    };
+    match fetch::bytes(&address, 1 << 20) {
+        Ok(_) => Look::Found,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Look::Nothing,
+        Err(_) => Look::Unreadable,
+    }
+}
+
+/// How the engine's release looks to read, and its size in bytes when the notice says one: what
+/// the first click's question says it would download. A copy that runs an engine where it is has
+/// none to read. Waits for the network: a thread of its own.
+pub(crate) fn read_engine() -> (Look, Option<u64>) {
+    let Some(installer) = installer() else {
+        return (Look::Nothing, None);
+    };
+    match installer.check() {
+        Check::Offer(offer) => (Look::Found, Some(offer.asset.size)),
+        Check::Current => (Look::Found, None),
+        Check::Refused(_) | Check::Absent(_) => (Look::Nothing, None),
+        Check::Unavailable(_) => (Look::Unreadable, None),
+    }
 }
 
 /// The engine that is on this Mac ([`engine_installed`]).

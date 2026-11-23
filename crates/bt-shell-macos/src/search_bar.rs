@@ -79,19 +79,70 @@ const APPEAR_SECS: f64 = 0.18;
 /// enough for a "settling into place" feel, short enough not to read as a motion.
 const SLIDE: f64 = 6.0;
 
-/// The panel's views and the animation's generation.
+/// Where the panel is in its life as far as its corner goes: it holds the corner from the moment
+/// it opens until its fade-out has ended, not only while it is open. A card that stood aside for
+/// it comes back when the corner is free, and not while the panel is still there fading (it
+/// would stand over it). The count increases on every open and close: the close animation's
+/// completion hides the panel only if its own close is still the last, so an intervening ⌘F
+/// does not have it hidden.
+#[derive(Default)]
+struct Presence {
+    open: Cell<bool>,
+    fading: Cell<bool>,
+    generation: Cell<u64>,
+}
+
+impl Presence {
+    /// Opens: `false` if it was open already.
+    fn open(&self) -> bool {
+        if self.open.replace(true) {
+            return false;
+        }
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.fading.set(false);
+        true
+    }
+
+    /// Closes: the token of this close, or `None` if it was not open. With `animate` the corner
+    /// is held until [`Self::faded`] is given the token.
+    fn close(&self, animate: bool) -> Option<u64> {
+        if !self.open.replace(false) {
+            return None;
+        }
+        let token = self.generation.get().wrapping_add(1);
+        self.generation.set(token);
+        self.fading.set(animate);
+        Some(token)
+    }
+
+    /// The fade of the close `token` ended: `true` if it is still the last, and the corner is
+    /// free now.
+    fn faded(&self, token: u64) -> bool {
+        if self.generation.get() != token {
+            return false;
+        }
+        self.fading.set(false);
+        true
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.get()
+    }
+
+    fn holds_corner(&self) -> bool {
+        self.open.get() || self.fading.get()
+    }
+}
+
+/// The panel's views and its life ([`Presence`]).
 pub(crate) struct SearchBar {
     surface: Retained<NSBox>,
     field: Retained<NSSearchField>,
     case: Retained<NSButton>,
     regex: Retained<NSButton>,
     count: Retained<NSTextField>,
-    /// Whether the panel is **open** (`false` while the close animation runs too).
-    shown: Cell<bool>,
-    /// Increases on every open and close: the close animation's completion
-    /// block hides the panel only if its own generation is still current - an
-    /// intervening ⌘F must not hide it.
-    generation: Rc<Cell<u64>>,
+    /// Whether the panel is open, and whether it still holds its corner while it fades out.
+    presence: Rc<Presence>,
     /// The query last given to the session - so the same query does not cause
     /// a second `set_search` (the field's action and the toggles can send the
     /// same query again, and every `set_search` is a frame).
@@ -212,15 +263,21 @@ impl SearchBar {
             case,
             regex,
             count,
-            shown: Cell::new(false),
-            generation: Rc::new(Cell::new(0)),
+            presence: Rc::new(Presence::default()),
             applied: std::cell::RefCell::new(None),
         }
     }
 
     /// Whether the panel is open.
     pub(crate) fn is_shown(&self) -> bool {
-        self.shown.get()
+        self.presence.is_open()
+    }
+
+    /// Whether the panel is in its corner: open, or on its way out. Something that makes room
+    /// for it comes back when this is `false`, not when the panel is asked to close (it would
+    /// stand over the panel while it fades).
+    pub(crate) fn holds_corner(&self) -> bool {
+        self.presence.holds_corner()
     }
 
     /// The search field - the view to make first responder.
@@ -250,10 +307,9 @@ impl SearchBar {
     /// Opens the panel: places it at the top right and shows it (unless
     /// Reduce Motion) with a short fade + descent. No-op if already open.
     pub(crate) fn show(&self, animate: bool) {
-        if self.shown.replace(true) {
+        if !self.presence.open() {
             return;
         }
-        self.generation.set(self.generation.get().wrapping_add(1));
         let place = self.resting_frame().origin;
         let surface = self.surface.clone();
         surface.setHidden(false);
@@ -279,13 +335,13 @@ impl SearchBar {
     }
 
     /// Closes the panel: hides it with a short fade + rise (instantly under
-    /// Reduce Motion). No-op if closed.
-    pub(crate) fn hide(&self, animate: bool) {
-        if !self.shown.replace(false) {
+    /// Reduce Motion). No-op if closed. `faded` is called when the fade has ended and the corner
+    /// is free ([`Self::holds_corner`]); not at all if the panel was opened again meanwhile, and
+    /// not when nothing fades (the corner is free when this returns).
+    pub(crate) fn hide(&self, animate: bool, faded: impl Fn() + 'static) {
+        let Some(token) = self.presence.close(animate) else {
             return;
-        }
-        let generation = self.generation.get().wrapping_add(1);
-        self.generation.set(generation);
+        };
         let surface = self.surface.clone();
         if !animate {
             surface.setHidden(true);
@@ -304,12 +360,13 @@ impl SearchBar {
             animator.setAlphaValue(0.0);
             animator.setFrameOrigin(NSPoint::new(origin.x, origin.y + SLIDE));
         });
-        let current = Rc::clone(&self.generation);
+        let presence = Rc::clone(&self.presence);
         let done = RcBlock::new(move || {
             // If an open came in between, the panel belongs to it.
-            if current.get() == generation {
+            if presence.faded(token) {
                 surface.setHidden(true);
                 surface.setFrameOrigin(origin);
+                faded();
             }
         });
         NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&done));
@@ -527,8 +584,49 @@ fn symbol(
 
 #[cfg(test)]
 mod tests {
-    use super::{SURFACE_APART, count_label, mix, selection_query, surface_colors};
+    use super::{Presence, SURFACE_APART, count_label, mix, selection_query, surface_colors};
     use bt_core::{SearchReport, SearchStatus, Theme};
+
+    #[test]
+    fn the_panel_holds_its_corner_until_it_has_faded_out() {
+        let panel = Presence::default();
+        assert!(!panel.holds_corner());
+        assert!(panel.open());
+        assert!(!panel.open(), "open already");
+        assert!(panel.is_open() && panel.holds_corner());
+        // Closed, but fading: the corner is not free, so a card that stood aside stays where it is.
+        let token = panel.close(true).expect("it was open");
+        assert!(!panel.is_open());
+        assert!(panel.holds_corner());
+        assert!(panel.faded(token));
+        assert!(!panel.holds_corner(), "free once it has faded");
+        assert!(panel.close(true).is_none(), "closed already");
+    }
+
+    #[test]
+    fn a_fade_that_ends_after_the_panel_opened_again_frees_nothing_and_hides_nothing() {
+        let panel = Presence::default();
+        panel.open();
+        let old = panel.close(true).expect("open");
+        // ⌘F again before the fade is over.
+        assert!(panel.open());
+        assert!(!panel.faded(old), "the panel belongs to the open now");
+        assert!(panel.is_open() && panel.holds_corner());
+        // A second close is the one that counts.
+        let token = panel.close(true).expect("open");
+        assert!(!panel.faded(old));
+        assert!(panel.holds_corner());
+        assert!(panel.faded(token));
+        assert!(!panel.holds_corner());
+    }
+
+    #[test]
+    fn with_nothing_to_fade_the_corner_is_free_at_once() {
+        let panel = Presence::default();
+        panel.open();
+        assert!(panel.close(false).is_some());
+        assert!(!panel.holds_corner());
+    }
 
     #[test]
     fn the_label_says_what_the_query_found() {

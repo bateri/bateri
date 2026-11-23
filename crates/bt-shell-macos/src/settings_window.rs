@@ -3083,7 +3083,7 @@ impl SettingsWindow {
         } else if !app.ask_to_use_browserpen() {
             // This copy has no release to offer (it runs an engine where it is): nothing is asked,
             // browserpen is used.
-            app.use_browserpen_for_links();
+            app.use_browserpen_from_settings();
         }
         // What the file says now (a write refreshes the window, which may not have yet reached
         // this popup): the popup shows that, and goes back to the old choice for a question that

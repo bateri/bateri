@@ -3,8 +3,11 @@
 //!
 //! **A frame is a calculation.** The card is laid out by hand, top to bottom, in a flipped view:
 //! the title (which wraps), a list of rows (a mark, a name that fades where it does not fit, and
-//! under it the reason a row failed), and the buttons at the right. A list longer than
-//! [`LIST_MAX`] scrolls inside its box, so that the card never grows over the whole pane.
+//! under it the reason a row failed, which wraps), and the buttons at the right. The card is
+//! [`WIDTH`] wide, or as wide as its pane lets it be ([`width_for`]); buttons that do not fit in a
+//! line stand one under the other. A list of many rows longer than [`LIST_MAX`] scrolls inside its
+//! box, so that the card never grows over the whole pane (a few rows grow with their words, up to
+//! the pane's room).
 //! Nothing here takes the keyboard: a button is not the key view's business and the shortcuts
 //! (⌘Return, ⌘Escape) are the menu's.
 
@@ -20,19 +23,31 @@ use objc2::{
 use objc2_app_kit::{
     NSAccessibility, NSAttributedStringNSStringDrawing, NSBezierPath, NSButton, NSButtonType,
     NSColor, NSControl, NSControlSize, NSEvent, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSGradient, NSLineCapStyle, NSLineJoinStyle,
-    NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView, NSShadow, NSStringDrawing,
-    NSTextField, NSView,
+    NSForegroundColorAttributeName, NSGradient, NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSProgressIndicator,
+    NSProgressIndicatorStyle, NSScrollView, NSShadow, NSStringDrawing, NSTextAlignment,
+    NSTextField, NSUserInterfaceItemIdentification, NSView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSDictionary, NSMutableAttributedString, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString,
+    NSAttributedString, NSDictionary, NSMutableAttributedString, NSObjectProtocol, NSPoint,
+    NSRange, NSRect, NSSize, NSString,
 };
 
 use super::Act;
 
-/// The card's width.
+/// The card's width, at most: in a narrower pane it is as wide as the pane lets it be
+/// ([`width_for`]).
 pub(crate) const WIDTH: f64 = 264.0;
+
+/// The least the card is made narrower than that: below it the words would wrap at every other
+/// letter; a pane narrower than this and the room kept at its sides loses a bit of the card's edge.
+const MIN_WIDTH: f64 = 140.0;
+
+/// How wide the card is over a pane `pane_width` wide: [`WIDTH`], or what is left of the pane
+/// after the room kept at each of its sides ([`crate::pane::CORNER_INSET`]).
+pub(crate) fn width_for(pane_width: f64) -> f64 {
+    (pane_width - 2.0 * crate::pane::CORNER_INSET.1).clamp(MIN_WIDTH, WIDTH)
+}
 /// The room at its sides, and above its title and under its buttons.
 const PAD_X: f64 = 12.0;
 const PAD_Y: f64 = 11.0;
@@ -46,6 +61,8 @@ const MARK_GAP: f64 = 6.0;
 const BUTTON_H: f64 = 24.0;
 const BUTTON_GAP: f64 = 8.0;
 const BUTTONS_TOP: f64 = 12.0;
+/// The gap above each line a card says under its title.
+const NOTE_GAP: f64 = 4.0;
 /// How much of a name's end fades when it does not fit.
 const FADE: f64 = 22.0;
 /// The card's corners.
@@ -499,18 +516,75 @@ pub(crate) fn wanted_width(button: &NSButton) -> f64 {
     button.attributedTitle().size().width.ceil() + 2.0 * PILL_PAD
 }
 
-/// A button of the card: `title` and, dimmer after it, the name of its key. `main` is the accent
-/// one; one that cannot be pressed is dim.
+/// A button the card may have: what it says, its key, and what it does.
+#[derive(Clone, Copy)]
+struct Spec {
+    title: &'static str,
+    key: Option<&'static str>,
+    /// The accent one.
+    main: bool,
+    /// One that cannot be pressed is dim.
+    enabled: bool,
+    action: objc2::runtime::Sel,
+}
+
+impl Spec {
+    fn new(
+        title: &'static str,
+        key: Option<&'static str>,
+        main: bool,
+        enabled: bool,
+        action: objc2::runtime::Sel,
+    ) -> Self {
+        Self {
+            title,
+            key,
+            main,
+            enabled,
+            action,
+        }
+    }
+
+    /// The width its title wants in one line, with its key's name or without.
+    fn natural(&self, keyed: bool) -> f64 {
+        let key = self.key.filter(|_| keyed);
+        PillButton::titled(self.title, key, self.main, self.enabled)
+            .size()
+            .width
+            .ceil()
+            + 2.0 * PILL_PAD
+    }
+}
+
+/// Whether a button of the card holds its title: in one line when it is as wide as the title wants,
+/// else in the lines it wraps into, which none of its words may be wider than.
+pub(crate) fn holds_title(button: &NSButton) -> bool {
+    let width = button.frame().size.width;
+    if wanted_width(button) <= width + 0.5 {
+        return true;
+    }
+    let font = NSFont::systemFontOfSize(12.0);
+    button.title().to_string().split_whitespace().all(|word| {
+        plain(word, &font, &NSColor::labelColor())
+            .size()
+            .width
+            .ceil()
+            + 2.0 * PILL_PAD
+            <= width + 0.5
+    }) && button.frame().size.height > BUTTON_H + 0.5
+}
+
+/// A button of the card: `title` and, dimmer after it, the name of its key when `keyed`. One whose
+/// title is wider than `room` is `room` wide and its title wraps into as many lines as it needs,
+/// the button as high as they are.
 fn button(
     mtm: MainThreadMarker,
-    title: &str,
-    key: Option<&str>,
-    main: bool,
-    enabled: bool,
+    spec: &Spec,
+    keyed: bool,
     target: &Target,
-    action: objc2::runtime::Sel,
+    room: f64,
 ) -> Retained<NSButton> {
-    let this = PillButton::alloc(mtm).set_ivars(PillIvars { main });
+    let this = PillButton::alloc(mtm).set_ivars(PillIvars { main: spec.main });
     // SAFETY: `initWithFrame:` is NSView's designated initializer; the ivars are set.
     let this: Retained<PillButton> = unsafe {
         msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(80.0, BUTTON_H))]
@@ -523,17 +597,121 @@ fn button(
     // of its own actions.
     unsafe {
         this.setTarget(Some(target.as_ref()));
-        this.setAction(Some(action));
+        this.setAction(Some(spec.action));
     }
-    this.setAttributedTitle(&PillButton::titled(title, key, main, enabled));
-    this.setEnabled(enabled);
-    this.setAccessibilityLabel(Some(&NSString::from_str(&match key {
-        Some(key) => format!("{title}, {key}"),
-        None => title.to_owned(),
+    let titled = PillButton::titled(
+        spec.title,
+        spec.key.filter(|_| keyed),
+        spec.main,
+        spec.enabled,
+    );
+    let wraps = spec.natural(keyed) > room + 0.01;
+    if wraps {
+        // The lines keep the room of the title's padding at each side, and stand in the middle.
+        let style = NSMutableParagraphStyle::new();
+        style.setAlignment(NSTextAlignment::Center);
+        style.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        style.setFirstLineHeadIndent(PILL_PAD);
+        style.setHeadIndent(PILL_PAD);
+        style.setTailIndent(-PILL_PAD);
+        // SAFETY: the one attribute and the value type AppKit documents for it, over the whole
+        // of the string.
+        unsafe {
+            titled.addAttribute_value_range(
+                NSParagraphStyleAttributeName,
+                &style,
+                NSRange::new(0, titled.length()),
+            );
+        }
+    }
+    this.setAttributedTitle(&titled);
+    this.setEnabled(spec.enabled);
+    // The key is said whether or not it is shown: the shortcut works.
+    this.setAccessibilityLabel(Some(&NSString::from_str(&match spec.key {
+        Some(key) => format!("{}, {key}", spec.title),
+        None => spec.title.to_owned(),
     })));
     let button: Retained<NSButton> = Retained::into_super(this);
-    button.setFrameSize(NSSize::new(wanted_width(&button), BUTTON_H));
+    if !wraps {
+        button.setFrameSize(NSSize::new(wanted_width(&button), BUTTON_H));
+    } else {
+        // Wider than the card's room: the title wraps at its words.
+        button.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        if let Some(cell) = button.cell() {
+            cell.setWraps(true);
+        }
+        // As high as the lines the title wraps into, which a label of the same font measures.
+        let lines = text(
+            mtm,
+            spec.title,
+            &NSFont::systemFontOfSize(12.0),
+            &NSColor::labelColor(),
+            (room - 2.0 * PILL_PAD).max(1.0),
+        );
+        button.setFrameSize(NSSize::new(
+            room,
+            BUTTON_H.max(lines.frame().size.height + BUTTON_PAD_Y),
+        ));
+    }
     button
+}
+
+/// What a button has above and below its title's lines.
+const BUTTON_PAD_Y: f64 = 8.0;
+
+/// The card's buttons, made and measured but not yet placed.
+struct Buttons {
+    /// In the order they stand in a line, left to right: the one that is the card's answer last.
+    views: Vec<Retained<NSButton>>,
+    /// One under the other, the last on top; else in a line.
+    stacked: bool,
+    /// How high they stand together.
+    height: f64,
+}
+
+impl Buttons {
+    /// The buttons of `specs` for a card `inner` wide inside: in a line where they all fit in one,
+    /// else one under the other, the answer first. The names of the keys go where one of them
+    /// would be wider than the card, and a title that is still wider wraps.
+    fn make(
+        mtm: MainThreadMarker,
+        specs: &[Spec],
+        target: &Target,
+        inner: f64,
+        stacked_always: bool,
+    ) -> Self {
+        let line: f64 = specs.iter().map(|spec| spec.natural(true)).sum::<f64>()
+            + BUTTON_GAP * specs.len().saturating_sub(1) as f64;
+        if !stacked_always && line <= inner {
+            return Self {
+                views: specs
+                    .iter()
+                    .map(|spec| button(mtm, spec, true, target, inner))
+                    .collect(),
+                stacked: false,
+                height: BUTTON_H,
+            };
+        }
+        let widest = specs
+            .iter()
+            .map(|spec| spec.natural(true))
+            .fold(0.0, f64::max);
+        let keyed = widest <= inner;
+        let views: Vec<_> = specs
+            .iter()
+            .map(|spec| button(mtm, spec, keyed, target, inner))
+            .collect();
+        let height = views
+            .iter()
+            .map(|view| view.frame().size.height)
+            .sum::<f64>()
+            + BUTTON_GAP * views.len().saturating_sub(1) as f64;
+        Self {
+            views,
+            stacked: true,
+            height,
+        }
+    }
 }
 
 fn plain(words: &str, font: &NSFont, color: &NSColor) -> Retained<NSAttributedString> {
@@ -603,27 +781,60 @@ fn row(rows: &Rows, top: f64, index: usize, line: &Line) -> f64 {
     mark.setFrame(NSRect::new(NSPoint::new(0.0, top), NSSize::new(MARK, MARK)));
     parent.addSubview(&mark);
     let name = NameView::new(mtm, &line.row.name, name_font);
-    name.setAccessibilityLabel(Some(&NSString::from_str(&line.row.name)));
+    // What the mark and the line under the name show is said with the name: a screen reader finds
+    // no dot or triangle, and the line under it is a label of its own that is not read with it.
+    name.setAccessibilityLabel(Some(&NSString::from_str(&spoken(line))));
+    name.setIdentifier(Some(&NSString::from_str(&format!("name-{index}"))));
     name.setFrame(NSRect::new(
         NSPoint::new(name_at, top),
         NSSize::new(name_width, MARK),
     ));
     parent.addSubview(&name);
     let mut height = MARK;
-    if !line.why.is_empty() {
+    // Under the name: why it failed, or how far it has come.
+    let under = if line.why.is_empty() {
+        &line.note
+    } else {
+        &line.why
+    };
+    if !under.is_empty() {
         let why = text(
             mtm,
-            &line.why,
+            under,
             &NSFont::systemFontOfSize(11.5),
             &NSColor::secondaryLabelColor(),
             name_width,
         );
+        why.setIdentifier(Some(&NSString::from_str(&format!("note-{index}"))));
         // The label's own inset of two points is taken back, so that it begins where the name does.
         why.setFrameOrigin(NSPoint::new(name_at - 2.0, top + MARK + 1.0));
         height = MARK + 1.0 + why.frame().size.height;
         parent.addSubview(&why);
     }
     height
+}
+
+/// What a row says to a screen reader: its name, how it stands, and what is under the name.
+pub(crate) fn spoken(line: &Line) -> String {
+    let stands = match line.mark {
+        Mark::Idle => "",
+        Mark::Busy => "on its way",
+        Mark::Done => "ready",
+        Mark::Failed => "failed",
+    };
+    let under = if line.why.is_empty() {
+        &line.note
+    } else {
+        &line.why
+    };
+    let mut said = line.row.name.clone();
+    for part in [stands, under.as_str()] {
+        if !part.is_empty() {
+            said.push_str(", ");
+            said.push_str(part);
+        }
+    }
+    said
 }
 
 fn ns_empty() -> &'static NSString {
@@ -633,26 +844,37 @@ fn ns_empty() -> &'static NSString {
 /// How high the card may be of the pane it hangs over: the rest is the terminal's.
 const ROOM_SHARE: f64 = 0.8;
 
+/// A list of at most this many rows does not scroll for being long ([`LIST_MAX`]).
+const FEW_ROWS: usize = 3;
+
 /// The least a list is let shrink to for a small pane: about two rows.
 const LIST_MIN: f64 = 44.0;
 
-/// The card as the model says it is, `WIDTH` wide and as high as it needs, with its buttons wired
-/// to `target`. `room` is the height of the pane it hangs over: a list that would not fit scrolls
-/// in less than [`LIST_MAX`]. Its origin is the corner of the pane's
-/// ([`crate::pane::CORNER_INSET`]) and is the pane's to set.
+/// The card as the model says it is, as wide as the pane lets it be ([`width_for`]) and as high as
+/// it needs, with its buttons wired to `target`. `room` is the size of the pane it hangs over: a
+/// list that would not fit scrolls in less than [`LIST_MAX`]. Its origin is the corner of the
+/// pane's ([`crate::pane::CORNER_INSET`]) and is the pane's to set.
 pub(crate) fn build(
     mtm: MainThreadMarker,
     card: &Card,
     target: &Retained<Target>,
-    room: f64,
+    room: NSSize,
 ) -> Retained<CardView> {
-    let inner = WIDTH - 2.0 * PAD_X;
+    let width = width_for(room.width);
+    let inner = width - 2.0 * PAD_X;
     let asking = card.stage() == Stage::Ask;
     // The card of a click says its one program in its title, and asks nothing about it: a list
-    // would say it twice, and a box would offer what the click did not.
-    let link_ask = asking && card.link().is_some();
-    let lines: &[Line] = if link_ask { &[] } else { card.lines() };
-    let view = CardView::new(mtm, NSSize::new(WIDTH, 40.0), target);
+    // would say it twice, and a box would offer what the click did not. The card of the first
+    // click's question has no list at all: what it says is in its lines under the title.
+    let here = card.is_here();
+    let link_ask = asking && card.link().is_some() && !here;
+    // A yes that could not be written started nothing: no row says it did.
+    let lines: &[Line] = if link_ask || (here && asking) || card.not_saved() {
+        &[]
+    } else {
+        card.lines()
+    };
+    let view = CardView::new(mtm, NSSize::new(width, 40.0), target);
     let mut y = PAD_Y;
 
     let title = text(
@@ -665,6 +887,22 @@ pub(crate) fn build(
     title.setFrameOrigin(NSPoint::new(PAD_X, y));
     view.addSubview(&title);
     y += title.frame().size.height;
+
+    // What the first click's card says besides its question: what it would download, how far it
+    // has come, why it did not, and where the answer can be changed.
+    for note in card.notes() {
+        y += NOTE_GAP;
+        let note = text(
+            mtm,
+            &note,
+            &NSFont::systemFontOfSize(11.5),
+            &NSColor::secondaryLabelColor(),
+            inner,
+        );
+        note.setFrameOrigin(NSPoint::new(PAD_X, y));
+        view.addSubview(&note);
+        y += note.frame().size.height;
+    }
 
     // The list, in a box of its own so that a long one scrolls.
     let list = FlippedView::new(mtm);
@@ -685,20 +923,33 @@ pub(crate) fn build(
         }
         at
     };
-    // What is around the list: the title above (`y` so far), the gap, the buttons and the padding.
-    let buttons_wanted = matches!(card.stage(), Stage::Ask | Stage::Failed);
     // The two answers of a click's card are too wide for one line of a card this wide: one under
     // the other, the one that installs first.
-    let button_lines = if link_ask { 2.0 } else { 1.0 };
+    let buttons = Buttons::make(
+        mtm,
+        &specs(card),
+        target,
+        inner,
+        link_ask || (here && asking),
+    );
+    // What is around the list: the title above (`y` so far), the gap, the buttons and the padding.
     let around = y
         + 8.0
-        + if buttons_wanted {
-            BUTTONS_TOP + button_lines * BUTTON_H + (button_lines - 1.0) * BUTTON_GAP
-        } else {
+        + if buttons.views.is_empty() {
             0.0
+        } else {
+            BUTTONS_TOP + buttons.height
         }
         + PAD_Y;
-    let list_max = (room * ROOM_SHARE - around).clamp(LIST_MIN, LIST_MAX);
+    // A list of a few rows is as high as its words make it (in a narrow card they wrap into more
+    // lines, and a reason is not to be cut off to keep the list short); a long one scrolls beyond
+    // [`LIST_MAX`]. Both keep to the pane's room.
+    let cap = if lines.len() <= FEW_ROWS {
+        f64::INFINITY
+    } else {
+        LIST_MAX
+    };
+    let list_max = (room.height * ROOM_SHARE - around).clamp(LIST_MIN, cap);
     let shown = scrolls.min(list_max);
     y += 8.0;
     if scrolls > list_max {
@@ -727,68 +978,21 @@ pub(crate) fn build(
     }
     y += shown;
 
-    let buttons: Vec<Retained<NSButton>> = match card.stage() {
-        Stage::Ask if card.link().is_some() => vec![
-            button(
-                mtm,
-                "Install and Open",
-                Some("\u{2318}Enter"),
-                true,
-                card.can_install(),
-                target,
-                sel!(install:),
-            ),
-            button(
-                mtm,
-                "Open in Your Browser",
-                Some("\u{2318}Esc"),
-                false,
-                true,
-                target,
-                sel!(notHere:),
-            ),
-        ],
-        Stage::Ask => vec![
-            button(
-                mtm,
-                "Not Here",
-                Some("\u{2318}Esc"),
-                false,
-                true,
-                target,
-                sel!(notHere:),
-            ),
-            button(
-                mtm,
-                "Install",
-                Some("\u{2318}Enter"),
-                true,
-                card.can_install(),
-                target,
-                sel!(install:),
-            ),
-        ],
-        Stage::Failed => vec![
-            button(mtm, "Close", None, false, true, target, sel!(close:)),
-            button(mtm, "Try Again", None, true, true, target, sel!(retry:)),
-        ],
-        Stage::Installing | Stage::Done => Vec::new(),
-    };
-    if !buttons.is_empty() {
+    if !buttons.views.is_empty() {
         y += BUTTONS_TOP;
-        if link_ask {
-            for (at, button) in buttons.iter().enumerate() {
+        if buttons.stacked {
+            for (at, button) in buttons.views.iter().rev().enumerate() {
                 let size = button.frame().size;
-                button.setFrameOrigin(NSPoint::new(WIDTH - PAD_X - size.width, y));
+                button.setFrameOrigin(NSPoint::new(width - PAD_X - size.width, y));
                 view.addSubview(button);
-                y += BUTTON_H;
-                if at + 1 < buttons.len() {
+                y += size.height;
+                if at + 1 < buttons.views.len() {
                     y += BUTTON_GAP;
                 }
             }
         } else {
-            let mut right = WIDTH - PAD_X;
-            for button in buttons.iter().rev() {
+            let mut right = width - PAD_X;
+            for button in buttons.views.iter().rev() {
                 let size = button.frame().size;
                 button.setFrameOrigin(NSPoint::new(right - size.width, y));
                 view.addSubview(button);
@@ -798,10 +1002,127 @@ pub(crate) fn build(
         }
     }
     y += PAD_Y;
-    view.setFrameSize(NSSize::new(WIDTH, y));
+    view.setFrameSize(NSSize::new(width, y));
     view.setAccessibilityElement(true);
     view.setAccessibilityLabel(Some(&NSString::from_str(&card.title())));
     view
+}
+
+/// The buttons the card has in its stage, in the order they stand in a line, left to right: the
+/// card's answer last.
+fn specs(card: &Card) -> Vec<Spec> {
+    let here = card.is_here();
+    let enter = Some("\u{2318}Enter");
+    let escape = Some("\u{2318}Esc");
+    match card.stage() {
+        Stage::Ask if here => vec![
+            Spec::new("Open in Your Browser", escape, false, true, sel!(notHere:)),
+            Spec::new(card.yes_title(), enter, true, true, sel!(install:)),
+        ],
+        // The download goes on, and the address need not wait for it.
+        Stage::Installing if here => vec![Spec::new(
+            "Open in Your Browser Now",
+            None,
+            false,
+            true,
+            sel!(notHere:),
+        )],
+        // As a server's failed card has its two: the way out, and the try again.
+        Stage::Failed if here => vec![
+            Spec::new("Open in Your Browser", None, false, true, sel!(notHere:)),
+            Spec::new("Try Again", None, true, true, sel!(retry:)),
+        ],
+        // A click's card that failed has the address to open, and says so: closing it opens it in
+        // the system's browser.
+        Stage::Failed if card.link().is_some() => vec![
+            Spec::new("Open in Your Browser", None, false, true, sel!(close:)),
+            Spec::new("Try Again", None, true, true, sel!(retry:)),
+        ],
+        Stage::Ask if card.link().is_some() => vec![
+            Spec::new("Open in Your Browser", escape, false, true, sel!(notHere:)),
+            Spec::new(
+                "Install and Open",
+                enter,
+                true,
+                card.can_install(),
+                sel!(install:),
+            ),
+        ],
+        Stage::Ask => vec![
+            Spec::new("Not Here", escape, false, true, sel!(notHere:)),
+            Spec::new("Install", enter, true, card.can_install(), sel!(install:)),
+        ],
+        Stage::Failed => vec![
+            Spec::new("Close", None, false, true, sel!(close:)),
+            Spec::new("Try Again", None, true, true, sel!(retry:)),
+        ],
+        Stage::Installing | Stage::Done => Vec::new(),
+    }
+}
+
+/// Brings the view of a card up to date with the model where only how far a download has come
+/// changed: the number under the name of a row is written in its label, and nothing is made
+/// again, so that the ring beside it goes on turning. `false` when something else changed (or the
+/// number comes or goes, which changes the row's height, or the pane's width is not the one the
+/// card was made for): the card is to be made again.
+pub(crate) fn refresh_notes(view: &NSView, before: &Card, after: &Card, pane_width: f64) -> bool {
+    // The pane's width is what the card's was made for: a card of another width is made again.
+    if (view.frame().size.width - width_for(pane_width)).abs() > 0.5 {
+        return false;
+    }
+    if before.stage() != after.stage()
+        || before.title() != after.title()
+        || before.notes() != after.notes()
+        || before.lines().len() != after.lines().len()
+    {
+        return false;
+    }
+    for (old, new) in before.lines().iter().zip(after.lines()) {
+        if old.row != new.row || old.on != new.on || old.mark != new.mark || old.why != new.why {
+            return false;
+        }
+    }
+    for (index, (old, new)) in before.lines().iter().zip(after.lines()).enumerate() {
+        if old.note == new.note {
+            continue;
+        }
+        if old.note.is_empty() || new.note.is_empty() {
+            return false;
+        }
+        let Some(field) = labelled(view, &format!("note-{index}"))
+            .and_then(|found| found.downcast::<NSTextField>().ok())
+        else {
+            return false;
+        };
+        field.setStringValue(&NSString::from_str(&new.note));
+        let fits = field
+            .sizeThatFits(NSSize::new(field.preferredMaxLayoutWidth(), 10_000.0))
+            .height
+            .ceil();
+        if (fits - field.frame().size.height).abs() > 0.5 {
+            return false;
+        }
+        if let Some(name) = labelled(view, &format!("name-{index}")) {
+            name.setAccessibilityLabel(Some(&NSString::from_str(&spoken(new))));
+        }
+    }
+    true
+}
+
+/// The view under `view` whose identifier is `identifier`.
+pub(crate) fn labelled(view: &NSView, identifier: &str) -> Option<Retained<NSView>> {
+    for sub in view.subviews() {
+        if sub
+            .identifier()
+            .is_some_and(|found| found.to_string() == identifier)
+        {
+            return Some(sub);
+        }
+        if let Some(found) = labelled(&sub, identifier) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 // ─── a flipped container ──────────────────────────────────────────────────────

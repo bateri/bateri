@@ -18,6 +18,13 @@
 //! about them again. ⌘Return and ⌘Escape are those two buttons, from the Shell menu, and only
 //! while a card asks (the menu greys them otherwise).
 //!
+//! The same card, in another shape, asks the first ⌘-click on a web address, before anything is
+//! decided: *Open links beside your terminal with browserpen?*, over the pane clicked in, whatever
+//! machine it shows (`Card::for_here`, kept under this Mac's own account). Its yes writes the choice
+//! and brings what is not here (browserpen, the browser engine), says how far it has come, and opens
+//! the address in browserpen when it is there; its other answer opens the address in the system's
+//! browser. The address is not opened before it is answered.
+//!
 //! What the card says and when it may be raised are decided in
 //! [`bt_shell_common::apps::card`]; this file is the application's side of it — the panes, the
 //! connection, the clock.
@@ -31,8 +38,10 @@ use std::thread;
 use std::time::Duration;
 
 use bt_core::Settings;
-use bt_shell_common::apps::card::{self, Candidate, Card, Ground, Row, Stage};
+use bt_shell_common::apps::card::{self, Candidate, Card, Coming, Ground, Row, Stage, Yes};
 use bt_shell_common::apps::followed;
+use bt_shell_common::kablo::local;
+use bt_shell_common::web_links;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -46,6 +55,10 @@ use view::{CardView, Target};
 
 /// How long a card that has brought everything stays to say so.
 const READY_SECONDS: u64 = 3;
+
+/// The key of the card of the first click's question in [`Cards::open`]: this Mac's own account.
+/// There is one such card, over the pane that was clicked in.
+const HERE: &str = local::ACCOUNT;
 
 /// What the person did on the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +88,8 @@ struct Open {
     /// What the card was made from, to ask again if its pane goes before it was answered.
     pending: Pending,
     card: Card,
+    /// What `view` shows: `card` as it was when the view was made or last brought up to date.
+    drawn: Card,
     view: Retained<CardView>,
     /// The buttons' target: the view holds it, and so does this, for the next view.
     target: Retained<Target>,
@@ -222,7 +237,9 @@ fn consider(mtm: MainThreadMarker) {
                 .map(|pane| Candidate {
                     on_server: hold_service::shown(pane.uuid())
                         .is_some_and(|shown| shown.account == account),
-                    prompted: cards.prompted.contains(&pane.id()),
+                    // A pane that holds a card has no room for a second.
+                    prompted: cards.prompted.contains(&pane.id())
+                        && !cards.open.values().any(|open| open.pane == pane.id()),
                 })
                 .collect()
         });
@@ -254,7 +271,7 @@ fn ground(settings: &Settings, account: &str, host: &str, answered: bool, open: 
 
 fn raise(mtm: MainThreadMarker, pane: &TerminalPane, account: &str, pending: Pending, card: Card) {
     let target = Target::new(mtm, account);
-    let view = view::build(mtm, &card, &target, pane.bounds().size.height);
+    let view = view::build(mtm, &card, &target, pane.bounds().size);
     pane.set_corner_card(Some(&view));
     with(|cards| {
         cards.open.insert(
@@ -263,6 +280,7 @@ fn raise(mtm: MainThreadMarker, pane: &TerminalPane, account: &str, pending: Pen
                 pane: pane.id(),
                 ssh: pending.ssh.clone(),
                 pending,
+                drawn: card.clone(),
                 card,
                 view,
                 target,
@@ -288,6 +306,21 @@ fn redraw(mtm: MainThreadMarker, account: &str) {
         with(|cards| cards.pane_closed(account));
         return;
     };
+    // Where only how far a download has come changed, the number under the name is written in
+    // place: the view is not made again, so the ring on its row does not start over at every step.
+    let pane_width = pane.bounds().size.width;
+    let in_place = with(|cards| {
+        cards.open.get_mut(account).is_some_and(|open| {
+            let same = view::refresh_notes(&open.view, &open.drawn, &card, pane_width);
+            if same {
+                open.drawn = card.clone();
+            }
+            same
+        })
+    });
+    if in_place {
+        return;
+    }
     // A long list stays where it was scrolled to when a box is checked or a line settles.
     let offset = with(|cards| {
         cards
@@ -295,7 +328,7 @@ fn redraw(mtm: MainThreadMarker, account: &str) {
             .get(account)
             .and_then(|open| view::scrolled(&open.view))
     });
-    let view = view::build(mtm, &card, &target, pane.bounds().size.height);
+    let view = view::build(mtm, &card, &target, pane.bounds().size);
     if let Some(offset) = offset {
         view::scroll_to(&view, offset);
     }
@@ -303,8 +336,35 @@ fn redraw(mtm: MainThreadMarker, account: &str) {
     with(|cards| {
         if let Some(open) = cards.open.get_mut(account) {
             open.view = view;
+            open.drawn = card;
         }
     });
+}
+
+/// A pane's size changed: its card is as wide as the pane lets it be ([`view::width_for`]), so a
+/// card whose width is not that now is made again. Told by the pane on the next turn of the loop,
+/// so that nothing here runs inside its layout.
+pub(crate) fn pane_resized(mtm: MainThreadMarker, id: u64) {
+    let Some(app) = app::delegate(mtm) else {
+        return;
+    };
+    let Some(pane) = app.all_panes().into_iter().find(|pane| pane.id() == id) else {
+        return;
+    };
+    let width = pane.bounds().size.width;
+    let account = with(|cards| {
+        cards
+            .open
+            .iter()
+            .find(|(_, open)| {
+                open.pane == id
+                    && (open.view.frame().size.width - view::width_for(width)).abs() > 0.5
+            })
+            .map(|(account, _)| account.clone())
+    });
+    if let Some(account) = account {
+        redraw(mtm, &account);
+    }
 }
 
 /// The card goes.
@@ -323,6 +383,9 @@ fn remove(mtm: MainThreadMarker, account: &str) {
 
 /// The person pressed something on the card of `account`.
 pub(super) fn act(mtm: MainThreadMarker, account: &str, act: Act) {
+    if local::is_account(account) {
+        return act_here(mtm, act);
+    }
     match act {
         Act::Toggle(line) => {
             with(|cards| {
@@ -596,7 +659,11 @@ pub(crate) fn offer_link(
     let crate::pane::PaneMachine::Server(account) = from.machine() else {
         return false;
     };
-    if with(|cards| cards.open.contains_key(&account)) {
+    // One card to a pane: a pane that holds one (the programs this server lacks, or the first
+    // click's question) has none for this click.
+    if with(|cards| {
+        cards.open.contains_key(&account) || cards.open.values().any(|open| open.pane == from.id())
+    }) {
         return false;
     }
     let (Some(root), Some(answerer)) = (crate::apps_root(), crate::apps_answerer()) else {
@@ -626,6 +693,202 @@ pub(crate) fn offer_link(
     };
     raise(mtm, from, &account, pending, card);
     true
+}
+
+// ─── the first click's question ───────────────────────────────────────────────
+
+/// Where the card of the first click's question is in its life, when it is up.
+pub(crate) fn here_stage() -> Option<Stage> {
+    with(|cards| cards.open.get(HERE).map(|open| open.card.stage()))
+}
+
+/// Whether the card of the first click's question is up.
+pub(crate) fn here_open() -> bool {
+    with(|cards| cards.open.contains_key(HERE))
+}
+
+/// A web address ⌘-clicked in `from` before anything was decided about links: the card that asks
+/// whether to open links beside the terminal with browserpen, over that pane, with a row for each
+/// thing that is not on this Mac. `false` when it cannot be put there (the pane holds a card, or
+/// the question is up in another): the caller opens the address in the system's browser.
+pub(crate) fn offer_here(
+    mtm: MainThreadMarker,
+    from: &TerminalPane,
+    url: &str,
+    program_here: bool,
+    engine_here: bool,
+    engine_bytes: Option<u64>,
+) -> bool {
+    if with(|cards| {
+        cards.open.contains_key(HERE) || cards.open.values().any(|open| open.pane == from.id())
+    }) {
+        return false;
+    }
+    let card = Card::for_here(url, program_here, engine_here, engine_bytes);
+    let pending = Pending {
+        host: String::new(),
+        ssh: Vec::new(),
+        rows: Vec::new(),
+    };
+    raise(mtm, from, HERE, pending, card);
+    true
+}
+
+/// What the person pressed on the card of the first click's question.
+fn act_here(mtm: MainThreadMarker, act: Act) {
+    let Some(app) = app::delegate(mtm) else {
+        return;
+    };
+    match act {
+        Act::Install => {
+            let Some(yes) = with(|cards| {
+                cards
+                    .open
+                    .get_mut(HERE)
+                    .and_then(|open| open.card.say_yes())
+            }) else {
+                return;
+            };
+            // Where everything is here the yes has nothing to bring: the card is not drawn as
+            // installing for the moment the choice takes to be written, it goes with the address
+            // opening ([`here_sync`]).
+            if yes == Yes::Download {
+                redraw(mtm, HERE);
+            }
+            app.said_yes_to_links();
+        }
+        Act::Retry => {
+            if !with(|cards| {
+                cards
+                    .open
+                    .get_mut(HERE)
+                    .is_some_and(|open| open.card.try_again())
+            }) {
+                return;
+            }
+            redraw(mtm, HERE);
+            app.said_yes_to_links();
+        }
+        Act::NotHere => {
+            let Some(no) = with(|cards| cards.open.get(HERE).and_then(|open| open.card.say_no()))
+            else {
+                return;
+            };
+            remove(mtm, HERE);
+            // The question answered no is not asked again; a way out of a download that goes on, or
+            // of one that failed, changes nothing.
+            if no.writes {
+                app.save_edit(&web_links::no_edit());
+            }
+            crate::hyperlink::open_url(&no.url);
+        }
+        Act::Toggle(_) | Act::Close => {}
+    }
+}
+
+/// Where what the card's yes brought stands, as the shell found it ([`Coming`]): the rows follow it,
+/// and the card is ready when each thing is here, which opens the address.
+pub(crate) fn here_sync(mtm: MainThreadMarker, program: &Coming, engine: &Coming) {
+    let Some((changed, arrived, stays, pane, url)) = with(|cards| {
+        let open = cards.open.get_mut(HERE)?;
+        let before = open.card.clone();
+        let stage = open.card.sync_here(program, engine);
+        Some((
+            before != open.card,
+            before.stage() != Stage::Done && stage == Stage::Done,
+            open.card.stays_when_ready(),
+            open.pane,
+            open.card.link().map(str::to_owned),
+        ))
+    }) else {
+        return;
+    };
+    // Where nothing had to come the card was never drawn as ready: it goes and the address opens.
+    if arrived && !stays {
+        remove(mtm, HERE);
+        if let (Some(app), Some(url)) = (app::delegate(mtm), url) {
+            app.open_address_here(pane, &url);
+        }
+        return;
+    }
+    if changed {
+        redraw(mtm, HERE);
+    }
+    // A card that failed can be on its way again without a *Try Again* (another click started the
+    // download again): nothing tells when the link is in place, so it is looked at again.
+    if here_stage() == Some(Stage::Installing) {
+        here_watch();
+    }
+    if !arrived {
+        return;
+    }
+    // Everything is here: the address opens as a click on it would now, and the card says so for a
+    // moment, as a server's does, and goes.
+    if let (Some(app), Some(url)) = (app::delegate(mtm), url) {
+        app.open_address_here(pane, &url);
+    }
+    if let Ok(when) = DispatchTime::try_from(Duration::from_secs(READY_SECONDS)) {
+        let _ = DispatchQueue::main().after(when, move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if here_stage() == Some(Stage::Done) {
+                remove(mtm, HERE);
+            }
+        });
+    }
+}
+
+/// The card's yes could not be carried out at all (the choice could not be written): it says why.
+pub(crate) fn here_failed(mtm: MainThreadMarker, why: &str) {
+    let failed = with(|cards| {
+        cards.open.get_mut(HERE).map(|open| {
+            open.card.fail(why);
+            open.card.stage() == Stage::Failed
+        })
+    });
+    if failed == Some(true) {
+        redraw(mtm, HERE);
+    }
+}
+
+/// The first click's card goes at once: the corner is wanted for another card (a server's, which
+/// offers browserpen where it has none).
+pub(crate) fn remove_here(mtm: MainThreadMarker) {
+    remove(mtm, HERE);
+}
+
+thread_local! {
+    /// Whether the card's once-a-second look at what its yes is bringing is running.
+    static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Looks, once a second while the card waits for its yes to come, at whether it has: a program
+/// that landed is put in place by kablo behind the check of the programs, which tells nobody when
+/// it is done, and a link on the disk is read in a moment.
+pub(crate) fn here_watch() {
+    if WATCHING.replace(true) {
+        return;
+    }
+    here_tick();
+}
+
+fn here_tick() {
+    let Ok(when) = DispatchTime::try_from(Duration::from_secs(1)) else {
+        WATCHING.set(false);
+        return;
+    };
+    let _ = DispatchQueue::main().after(when, move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        if here_stage() != Some(Stage::Installing) {
+            WATCHING.set(false);
+            return;
+        }
+        if let Some(app) = app::delegate(mtm) {
+            app.links_progress();
+        }
+        here_tick();
+    });
 }
 
 #[cfg(test)]

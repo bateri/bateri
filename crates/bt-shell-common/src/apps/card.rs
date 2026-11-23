@@ -16,6 +16,8 @@ use std::path::Path;
 
 use bt_core::pencere::apps;
 
+use crate::web_links::Question;
+
 use super::followed;
 use super::package::{MachineState, public};
 use super::store;
@@ -152,6 +154,9 @@ pub struct Line {
     pub mark: Mark,
     /// Why it failed, in a line.
     pub why: String,
+    /// What is under its name while it is on its way: how far it has come (the first click's card;
+    /// a server's rows say nothing until they fail).
+    pub note: String,
 }
 
 /// The card of one server.
@@ -163,7 +168,68 @@ pub struct Card {
     /// The web address a person clicked that the program is being brought to open: set for the
     /// card [`Card::for_link`] makes, and opened when the program is there ([`Card::link`]).
     link: Option<String>,
+    /// Set for the card of this Mac's one question ([`Card::for_here`]): what it says and where it
+    /// is in its life are its own; its rows are what its yes brings, shown once it is answered
+    /// (and not when the answer could not be saved, [`Card::not_saved`]).
+    here: Option<Here>,
 }
+
+/// What the card of the first click's question knows besides the address and its rows (what is not
+/// on this Mac yet, a row each): the question it asks, the size of the engine's download, and why
+/// it could not be started at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Here {
+    question: Question,
+    /// The engine's download in bytes, when its release notice said.
+    engine_bytes: Option<u64>,
+    /// Why the yes could not be carried out at all (the choice could not be written): nothing was
+    /// started, so no row says it; the card shows it under its title, in place of its rows.
+    why: String,
+}
+
+/// How one thing the first click's yes brings stands, as the shell found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coming {
+    /// On its way; for the engine, the percent when it is known.
+    Busy(Option<u8>),
+    /// It is here.
+    Done,
+    /// It could not be had: a plain sentence.
+    Failed(String),
+}
+
+/// The names of the rows of the first click's card: what its yes brings.
+pub const PROGRAM_ROW: &str = "browserpen";
+pub const ENGINE_ROW: &str = "Browser engine";
+
+/// What a yes to the first click's card asks the shell to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Yes {
+    /// Everything is on this Mac: write the choice, and open the address in the program.
+    Use,
+    /// Write the choice, follow browserpen and download what is not here; the address opens in it
+    /// when it is.
+    Download,
+}
+
+/// What the other answer of the first click's card asks the shell to do: open `url` in the system's
+/// browser, and write `""` (browserpen is not wanted) only when it is the question that is
+/// answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Browser {
+    pub url: String,
+    pub writes: bool,
+}
+
+/// The title of the first click's card when its yes could not be written (the reason is under it).
+pub const NOT_SAVED: &str = "Your choice couldn\u{2019}t be saved";
+
+/// What is under the engine's name when every byte has come and it is being checked and put in
+/// place (a few seconds in which the percent would stay at 100).
+pub const ENGINE_FINISHING: &str = "Installing\u{2026}";
+
+/// The line under the first click's question that says where the answer can be changed.
+pub const CHANGE_LATER: &str = "You can change this in Settings\u{a0}▸\u{a0}Apps.";
 
 impl Card {
     /// A card for `host` asking about `rows`, all of them checked. `None` when there are none:
@@ -182,9 +248,11 @@ impl Card {
                     on: true,
                     mark: Mark::Idle,
                     why: String::new(),
+                    note: String::new(),
                 })
                 .collect(),
             link: None,
+            here: None,
         })
     }
 
@@ -200,9 +268,223 @@ impl Card {
                 on: true,
                 mark: Mark::Idle,
                 why: String::new(),
+                note: String::new(),
             }],
             link: Some(url.to_owned()),
+            here: None,
         }
+    }
+
+    /// The card of the first click on the web address `url`, before anything is decided: it asks
+    /// whether to open links beside the terminal with browserpen over the pane clicked in, and the
+    /// address opens by the answer. `program_here` and `engine_here` say what is on this Mac
+    /// already; what is not is what its yes brings, a row each, and `engine_bytes` is the engine's
+    /// download as its release notice gave it.
+    pub fn for_here(
+        url: &str,
+        program_here: bool,
+        engine_here: bool,
+        engine_bytes: Option<u64>,
+    ) -> Self {
+        let row = |name: &str| Line {
+            row: Row {
+                name: name.to_owned(),
+                words: Vec::new(),
+            },
+            on: true,
+            mark: Mark::Idle,
+            why: String::new(),
+            note: String::new(),
+        };
+        let mut lines = Vec::new();
+        if !program_here {
+            lines.push(row(PROGRAM_ROW));
+        }
+        if !engine_here {
+            lines.push(row(ENGINE_ROW));
+        }
+        Self {
+            host: "this Mac".to_owned(),
+            stage: Stage::Ask,
+            lines,
+            link: Some(url.to_owned()),
+            here: Some(Here {
+                question: crate::web_links::question(program_here, engine_here, engine_bytes),
+                engine_bytes,
+                why: String::new(),
+            }),
+        }
+    }
+
+    /// Whether this is the card of this Mac's one question ([`Card::for_here`]).
+    pub fn is_here(&self) -> bool {
+        self.here.is_some()
+    }
+
+    /// The lines under the title of the card of this Mac's question: while it asks, what it would
+    /// download and where the answer can be changed; when its yes could not be carried out at all,
+    /// why. None otherwise (its rows say how far each thing has come).
+    pub fn notes(&self) -> Vec<String> {
+        let Some(here) = &self.here else {
+            return Vec::new();
+        };
+        match self.stage {
+            Stage::Ask => here
+                .question
+                .detail
+                .iter()
+                .cloned()
+                .chain([CHANGE_LATER.to_owned()])
+                .collect(),
+            Stage::Failed if !here.why.is_empty() => vec![here.why.clone()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The title of the yes button of the first click's card: what it does says what it brings.
+    pub fn yes_title(&self) -> &'static str {
+        match &self.here {
+            Some(here) if here.question.what.is_none() => "Use browserpen",
+            _ => "Download and Open",
+        }
+    }
+
+    /// The first click's card says yes: what is not here comes, a row of the card each, on its way.
+    /// `None` (and nothing changes) when it is not asking.
+    pub fn say_yes(&mut self) -> Option<Yes> {
+        let here = self.here.as_ref()?;
+        if self.stage != Stage::Ask {
+            return None;
+        }
+        let yes = if here.question.what.is_none() {
+            Yes::Use
+        } else {
+            Yes::Download
+        };
+        self.stage = Stage::Installing;
+        for line in &mut self.lines {
+            line.mark = Mark::Busy;
+        }
+        Some(yes)
+    }
+
+    /// The other answer: the address opens in the system's browser and the card goes. Only the
+    /// answer to the question writes anything (`""`); to open the address in the browser now while
+    /// the download goes on, or after it failed, is not a change of mind. `None` when it is done
+    /// with already.
+    pub fn say_no(&self) -> Option<Browser> {
+        self.here.as_ref()?;
+        let writes = match self.stage {
+            Stage::Ask => true,
+            Stage::Installing | Stage::Failed => false,
+            Stage::Done => return None,
+        };
+        Some(Browser {
+            url: self.link.clone()?,
+            writes,
+        })
+    }
+
+    /// What the shell found of the program and of the engine, laid on the rows that are there: a
+    /// thing on its way spins (the engine says how far, in a line under its name), one that is here
+    /// is a green dot, one that could not be had says why under its name. Stage follows the rows as
+    /// a server's card does: ready when each is here, failed when none is on its way and some could
+    /// not be had, on its way while one is. Returns the stage. Only a card that waits for its yes
+    /// (or for a *Try Again*) takes it.
+    pub fn sync_here(&mut self, program: &Coming, engine: &Coming) -> Stage {
+        let Some(here) = self.here.as_ref() else {
+            return self.stage;
+        };
+        // A yes that could not be carried out (nothing was started) is not read as what a download
+        // is doing: only *Try Again* sets it going again.
+        if !matches!(self.stage, Stage::Installing | Stage::Failed) || !here.why.is_empty() {
+            return self.stage;
+        }
+        let bytes = here.engine_bytes;
+        for line in &mut self.lines {
+            let (coming, is_engine) = match line.row.name.as_str() {
+                ENGINE_ROW => (engine, true),
+                _ => (program, false),
+            };
+            line.why.clear();
+            line.note.clear();
+            match coming {
+                Coming::Busy(percent) => {
+                    line.mark = Mark::Busy;
+                    if let (true, Some(percent)) = (is_engine, percent) {
+                        line.note = match bytes {
+                            // Every byte is here: what is left is the check and the unpacking.
+                            _ if *percent >= 100 => ENGINE_FINISHING.to_owned(),
+                            Some(bytes) => {
+                                format!("{percent}% of {}", crate::web_links::megabytes(bytes))
+                            }
+                            None => format!("{percent}%"),
+                        };
+                    }
+                }
+                Coming::Done => line.mark = Mark::Done,
+                Coming::Failed(why) => {
+                    line.mark = Mark::Failed;
+                    line.why.clone_from(why);
+                }
+            }
+        }
+        self.stage = if self.lines.iter().any(|line| line.mark == Mark::Busy) {
+            Stage::Installing
+        } else if self.lines.iter().any(|line| line.mark == Mark::Failed) {
+            Stage::Failed
+        } else {
+            Stage::Done
+        };
+        self.stage
+    }
+
+    /// What its yes asked could not be carried out at all (the choice could not be written):
+    /// nothing was started, so no row says anything and the card shows none ([`Card::not_saved`]);
+    /// `why`, a plain sentence, stands under its title, which says the choice was not saved.
+    pub fn fail(&mut self, why: &str) {
+        let Some(here) = self.here.as_mut() else {
+            return;
+        };
+        if !matches!(self.stage, Stage::Ask | Stage::Installing) {
+            return;
+        }
+        self.stage = Stage::Failed;
+        here.why = why.to_owned();
+    }
+
+    /// *Try Again*: what could not be had is asked for again, on its way. `false` when the card
+    /// shows no failure.
+    pub fn try_again(&mut self) -> bool {
+        let Some(here) = self.here.as_mut() else {
+            return false;
+        };
+        if self.stage != Stage::Failed {
+            return false;
+        }
+        here.why.clear();
+        for line in &mut self.lines {
+            if line.mark != Mark::Done {
+                line.mark = Mark::Busy;
+                line.why.clear();
+                line.note.clear();
+            }
+        }
+        self.stage = Stage::Installing;
+        true
+    }
+
+    /// Whether the card of the first click's question stays a moment when it is ready. Where
+    /// everything was here already, its yes had nothing to bring and there is nothing to say
+    /// "ready" about: the address opens and the card goes at once.
+    pub fn stays_when_ready(&self) -> bool {
+        !self.lines.is_empty()
+    }
+
+    /// Whether the first click's card says its yes could not be written (nothing was started, so
+    /// it shows no rows: they would say things were tried that were not).
+    pub fn not_saved(&self) -> bool {
+        self.stage == Stage::Failed && self.here.as_ref().is_some_and(|here| !here.why.is_empty())
     }
 
     /// The address to open when the program is there; `None` for a card that asks about the
@@ -225,6 +507,15 @@ impl Card {
 
     /// The card's title.
     pub fn title(&self) -> String {
+        if let Some(here) = &self.here {
+            match self.stage {
+                Stage::Ask => return here.question.title.clone(),
+                // Nothing was started: the choice itself could not be written, and the line under
+                // the title says why.
+                Stage::Failed if !here.why.is_empty() => return NOT_SAVED.to_owned(),
+                _ => {}
+            }
+        }
         match self.stage {
             Stage::Ask if self.link.is_some() => {
                 let name = self.lines.first().map_or("", |line| line.row.name.as_str());
@@ -248,7 +539,7 @@ impl Card {
 
     /// Whether *Install* does something: asking, with a box checked.
     pub fn can_install(&self) -> bool {
-        self.stage == Stage::Ask && self.lines.iter().any(|line| line.on)
+        self.stage == Stage::Ask && (self.here.is_some() || self.lines.iter().any(|line| line.on))
     }
 
     /// *Install*: the unchecked rows leave the card, and the first of the rest is being
@@ -400,6 +691,277 @@ mod tests {
         assert_eq!(link_card.link(), Some("http://localhost:8790"));
         // A card of the programs the person follows has none.
         assert_eq!(card(&["textpen"]).link(), None);
+    }
+
+    fn here_card(program_here: bool, engine_here: bool) -> Card {
+        Card::for_here(
+            "http://localhost:8790",
+            program_here,
+            engine_here,
+            Some(181_000_000),
+        )
+    }
+
+    fn names(card: &Card) -> Vec<&str> {
+        card.lines()
+            .iter()
+            .map(|line| line.row.name.as_str())
+            .collect()
+    }
+
+    /// The first click asks, in the words the note's question has, what it would download and where
+    /// the answer can be changed; its buttons are the two answers.
+    #[test]
+    fn the_card_of_the_first_click_asks_what_it_would_download() {
+        let asking = here_card(false, false);
+        assert!(asking.is_here());
+        assert_eq!(
+            asking.title(),
+            "Open links beside your terminal with browserpen?"
+        );
+        assert_eq!(
+            asking.notes(),
+            [
+                "It downloads browserpen and the browser engine (181 MB).",
+                "You can change this in Settings\u{a0}▸\u{a0}Apps."
+            ]
+        );
+        assert_eq!(asking.stage(), Stage::Ask);
+        assert!(asking.can_install());
+        assert_eq!(asking.link(), Some("http://localhost:8790"));
+        assert_eq!(asking.yes_title(), "Download and Open");
+        // A row for each thing that is missing, and for nothing that is here.
+        assert_eq!(names(&asking), ["browserpen", "Browser engine"]);
+        assert_eq!(names(&here_card(true, false)), ["Browser engine"]);
+        assert_eq!(names(&here_card(false, true)), ["browserpen"]);
+        let engine = here_card(true, false);
+        assert_eq!(
+            engine.notes()[0],
+            "It downloads the browser engine (181 MB)."
+        );
+        // Everything here: no size, no rows, and the yes says what it does.
+        let all = here_card(true, true);
+        assert!(all.lines().is_empty());
+        assert_eq!(
+            all.notes(),
+            ["You can change this in Settings\u{a0}▸\u{a0}Apps."]
+        );
+        assert_eq!(all.yes_title(), "Use browserpen");
+        // A card of the programs the person follows is none of this.
+        assert!(!card(&["textpen"]).is_here());
+        assert!(card(&["textpen"]).notes().is_empty());
+    }
+
+    /// Its rows go as a server's do: on its way, a green dot, a triangle with the reason; the card
+    /// is ready when each is here, and the title is the server card's, for this Mac.
+    #[test]
+    fn yes_puts_each_missing_thing_on_its_way_and_the_card_follows_them_to_ready() {
+        let mut card = here_card(false, false);
+        assert_eq!(card.say_yes(), Some(Yes::Download));
+        assert_eq!(card.stage(), Stage::Installing);
+        assert_eq!(card.title(), "Installing on this Mac");
+        assert!(card.notes().is_empty());
+        assert!(card.lines().iter().all(|line| line.mark == Mark::Busy));
+        // One yes only.
+        assert_eq!(card.say_yes(), None);
+        // The engine says how far, under its name, with its size; the program has nothing to say.
+        assert_eq!(
+            card.sync_here(&Coming::Busy(None), &Coming::Busy(Some(42))),
+            Stage::Installing
+        );
+        assert_eq!(card.lines()[0].note, "");
+        assert_eq!(card.lines()[1].note, "42% of 181 MB");
+        // The program is here, the engine is not: still on its way.
+        assert_eq!(
+            card.sync_here(&Coming::Done, &Coming::Busy(Some(99))),
+            Stage::Installing
+        );
+        assert_eq!(card.lines()[0].mark, Mark::Done);
+        assert_eq!(card.lines()[1].note, "99% of 181 MB");
+        assert_eq!(card.sync_here(&Coming::Done, &Coming::Done), Stage::Done);
+        assert_eq!(card.title(), "Ready on this Mac");
+        assert!(card.lines().iter().all(|line| line.mark == Mark::Done));
+        assert!(card.lines().iter().all(|line| line.note.is_empty()));
+        assert_eq!(card.link(), Some("http://localhost:8790"));
+        // A card that is ready takes no more, and is done with answering.
+        assert_eq!(
+            card.sync_here(&Coming::Busy(None), &Coming::Busy(None)),
+            Stage::Done
+        );
+        assert_eq!(card.say_no(), None);
+        assert!(!card.try_again());
+    }
+
+    #[test]
+    fn a_size_that_is_not_known_leaves_the_percent_alone() {
+        let mut card = Card::for_here("http://localhost:8790", true, false, None);
+        card.say_yes();
+        card.sync_here(&Coming::Done, &Coming::Busy(Some(7)));
+        assert_eq!(card.lines()[0].note, "7%");
+        // Before any figure there is nothing under the name.
+        card.sync_here(&Coming::Done, &Coming::Busy(None));
+        assert_eq!(card.lines()[0].note, "");
+    }
+
+    #[test]
+    fn when_every_byte_has_come_the_engine_says_it_is_installing_and_the_ring_goes_on() {
+        for bytes in [Some(150_000_000), None] {
+            let mut card = Card::for_here("http://localhost:8790", true, false, bytes);
+            card.say_yes();
+            card.sync_here(&Coming::Done, &Coming::Busy(Some(99)));
+            assert!(card.lines()[0].note.starts_with("99%"), "{bytes:?}");
+            // The download is whole but the engine is not in place: the row is still on its way.
+            assert_eq!(
+                card.sync_here(&Coming::Done, &Coming::Busy(Some(100))),
+                Stage::Installing
+            );
+            assert_eq!(card.lines()[0].mark, Mark::Busy);
+            assert_eq!(card.lines()[0].note, ENGINE_FINISHING);
+            assert_eq!(ENGINE_FINISHING, "Installing\u{2026}");
+            // Then the green dot, with nothing under the name.
+            assert_eq!(card.sync_here(&Coming::Done, &Coming::Done), Stage::Done);
+            assert_eq!(card.lines()[0].mark, Mark::Done);
+            assert_eq!(card.lines()[0].note, "");
+        }
+    }
+
+    #[test]
+    fn where_everything_is_already_here_yes_has_nothing_to_download() {
+        let mut card = here_card(true, true);
+        assert_eq!(card.say_yes(), Some(Yes::Use));
+        // No row is on its way: the first look finds it ready, with nothing to show for it, so the
+        // card does not stay.
+        assert!(card.lines().is_empty());
+        assert!(!card.stays_when_ready());
+        assert_eq!(card.sync_here(&Coming::Done, &Coming::Done), Stage::Done);
+    }
+
+    #[test]
+    fn a_card_that_brought_something_stays_a_moment_when_it_is_ready() {
+        for (program_here, engine_here) in [(false, false), (true, false), (false, true)] {
+            let mut card = here_card(program_here, engine_here);
+            card.say_yes();
+            assert!(card.stays_when_ready());
+            assert_eq!(card.sync_here(&Coming::Done, &Coming::Done), Stage::Done);
+            assert_eq!(card.title(), "Ready on this Mac");
+        }
+    }
+
+    #[test]
+    fn the_other_answer_writes_only_while_the_question_is_asked() {
+        let mut card = here_card(false, false);
+        let no = card.say_no().expect("the question can be answered no");
+        assert_eq!(no.url, "http://localhost:8790");
+        // The question answered no: `""` is written, so that it is not asked again.
+        assert!(no.writes);
+        // Open in Your Browser Now: the address goes to the browser, the download goes on, and the
+        // setting stays what the yes wrote.
+        assert_eq!(card.say_yes(), Some(Yes::Download));
+        let now = card
+            .say_no()
+            .expect("the address can go to the browser now");
+        assert!(!now.writes);
+        assert_eq!(card.stage(), Stage::Installing);
+        // After a failure the same.
+        card.sync_here(
+            &Coming::Done,
+            &Coming::Failed("No connection to the internet.".to_owned()),
+        );
+        assert_eq!(card.stage(), Stage::Failed);
+        assert!(!card.say_no().expect("after a failure too").writes);
+    }
+
+    /// A row that could not be had says why under its name, in a plain sentence; the title stays
+    /// the server card's, *Try Again* sets the rows that failed going again, and the others stay.
+    #[test]
+    fn a_failure_says_why_under_the_row_and_try_again_sets_it_going_again() {
+        let mut card = here_card(false, false);
+        assert_eq!(card.say_yes(), Some(Yes::Download));
+        // The engine failed while the program is still on its way: the card is not failed yet.
+        assert_eq!(
+            card.sync_here(
+                &Coming::Busy(None),
+                &Coming::Failed("The server answered 503.".to_owned())
+            ),
+            Stage::Installing
+        );
+        assert_eq!(
+            card.sync_here(
+                &Coming::Done,
+                &Coming::Failed("The server answered 503.".to_owned())
+            ),
+            Stage::Failed
+        );
+        assert_eq!(card.title(), "Installing on this Mac");
+        assert_eq!(card.lines()[0].mark, Mark::Done);
+        assert_eq!(card.lines()[1].mark, Mark::Failed);
+        assert_eq!(card.lines()[1].why, "The server answered 503.");
+        assert!(card.notes().is_empty());
+        assert!(card.try_again());
+        assert_eq!(card.stage(), Stage::Installing);
+        assert_eq!(card.lines()[0].mark, Mark::Done);
+        assert_eq!(card.lines()[1].mark, Mark::Busy);
+        assert_eq!(card.lines()[1].why, "");
+        // Nothing asks again of a card that did not fail, and nothing fails one that is ready.
+        assert!(!card.try_again());
+        card.sync_here(&Coming::Done, &Coming::Done);
+        card.fail("late");
+        assert_eq!(card.stage(), Stage::Done);
+    }
+
+    /// A yes that could not be written starts nothing: the card has a title of its own, says why
+    /// under it and shows no row (none of them was tried), with rows to be had or without any.
+    #[test]
+    fn a_yes_that_could_not_be_written_says_why_under_a_title_of_its_own_and_shows_no_row() {
+        let mut card = here_card(false, true);
+        assert_eq!(card.say_yes(), Some(Yes::Download));
+        card.fail("settings.toml is not available.");
+        assert_eq!(card.stage(), Stage::Failed);
+        // Nothing was tried: no row is marked as if it had been.
+        assert_eq!(card.lines()[0].mark, Mark::Busy);
+        assert_eq!(card.notes(), ["settings.toml is not available."]);
+        // The card says what failed: the choice, not an install, and shows no row for what was
+        // never tried.
+        assert_eq!(card.title(), NOT_SAVED);
+        assert!(card.not_saved());
+        assert_eq!(NOT_SAVED, "Your choice couldn\u{2019}t be saved");
+        // What the shell finds afterwards (the check of the programs ended, nothing is downloading)
+        // does not turn it back into a download that is on its way.
+        assert_eq!(
+            card.sync_here(&Coming::Busy(None), &Coming::Busy(None)),
+            Stage::Failed
+        );
+        assert_eq!(card.lines()[0].mark, Mark::Busy);
+        assert_eq!(card.notes(), ["settings.toml is not available."]);
+        assert!(card.try_again());
+        assert_eq!(card.stage(), Stage::Installing);
+        assert_eq!(card.lines()[0].mark, Mark::Busy);
+        assert!(card.notes().is_empty());
+        // Tried again, it is an install again, with its rows.
+        assert_eq!(card.title(), "Installing on this Mac");
+        assert!(!card.not_saved());
+        let mut all = here_card(true, true);
+        assert_eq!(all.say_yes(), Some(Yes::Use));
+        all.fail("settings.toml is not available.");
+        assert_eq!(all.notes(), ["settings.toml is not available."]);
+        // With nothing to install it is the same title, and the same line under it.
+        assert_eq!(all.title(), NOT_SAVED);
+        // A download that failed is still an install that failed.
+        let mut failed = here_card(false, true);
+        failed.say_yes();
+        failed.sync_here(
+            &Coming::Failed("No connection to the internet.".to_owned()),
+            &Coming::Done,
+        );
+        assert_eq!(failed.title(), "Installing on this Mac");
+        assert!(!failed.not_saved());
+        // Nor is the question, or a card of a server, ever "not saved".
+        assert!(!here_card(false, false).not_saved());
+        assert!(
+            !Card::new("dev-1", rows(&["textpen"]))
+                .expect("a card")
+                .not_saved()
+        );
     }
 
     #[test]

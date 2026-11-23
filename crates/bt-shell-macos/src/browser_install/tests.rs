@@ -495,8 +495,10 @@ fn a_protocol_this_bateri_does_not_speak_is_not_an_offer() {
 #[test]
 fn no_release_yet_is_a_quiet_state() {
     let rig = rig("quiet");
+    // Nothing is published: that is an answer (it looks the same on the next look), and not a
+    // network that did not answer.
     assert!(
-        matches!(rig.installer.check(), Check::Unavailable(_)),
+        matches!(rig.installer.check(), Check::Absent(_)),
         "a server with no notice"
     );
     let closed = {
@@ -517,6 +519,35 @@ fn no_release_yet_is_a_quiet_state() {
         matches!(rig.installer.check(), Check::Unavailable(_)),
         "a notice that is not one"
     );
+    std::fs::remove_dir_all(&rig.root).unwrap();
+}
+
+/// What the first click's question reads: a release that is not there is not a network that did not
+/// answer, for a server and for a folder of releases alike.
+#[test]
+fn a_release_that_is_not_there_is_told_from_a_network_that_did_not_answer() {
+    let rig = rig("absent");
+    let missing = fetch::bytes(&format!("{}/notice.json", rig.server.base()), 100)
+        .expect_err("nothing is published");
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    let folder = rig.root.join("releases");
+    std::fs::create_dir_all(&folder).unwrap();
+    let installer = Installer::new(
+        Layout::new(rig.root.join("helper")),
+        &folder_base(&folder).expect("a folder has an address"),
+        is_ours(),
+    );
+    assert!(
+        matches!(installer.check(), Check::Absent(_)),
+        "a folder with no notice"
+    );
+    let closed = {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let unreachable = fetch::bytes(&format!("http://127.0.0.1:{closed}/notice.json"), 100)
+        .expect_err("nobody listening");
+    assert_ne!(unreachable.kind(), std::io::ErrorKind::NotFound);
     std::fs::remove_dir_all(&rig.root).unwrap();
 }
 

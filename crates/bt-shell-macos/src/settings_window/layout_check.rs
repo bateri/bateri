@@ -719,7 +719,7 @@ impl SettingsWindow {
                         "the release could not be reached".to_owned(),
                     ),
                     0,
-                    "The browser engine did not come",
+                    "The browser engine could not be downloaded",
                 ),
                 (
                     "links-no",

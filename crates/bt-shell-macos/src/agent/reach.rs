@@ -284,6 +284,12 @@ pub(super) fn package(letter: Letter, server: &Server, package: Package) {
             {
                 for (name, why) in followed::install_missing(backend, &root, Some(&here)) {
                     eprintln!("bateri: could not install {name} on this computer: {why}");
+                    // The first click's card waits for browserpen: it says why it did not come.
+                    if name == bt_shell_common::web_links::BROWSER_PROGRAM {
+                        app::links_install_ended(Some(bt_shell_common::web_links::plain_reason(
+                            &why,
+                        )));
+                    }
                 }
             }
         });

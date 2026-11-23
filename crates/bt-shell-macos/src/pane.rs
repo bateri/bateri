@@ -174,6 +174,10 @@ pub trait PaneHost {
     /// that draws no such icon (the tests'); `activity_changed`'s is a command's or the
     /// screen's.
     fn program_changed(&self, _pane: u64) {}
+    /// The pane's size changed while a card hangs in its corner ([`TerminalPane::set_corner_card`]):
+    /// the card is as wide as the pane lets it be, so the owner that made it makes it again. Told
+    /// from inside the pane's layout; nothing for an owner with no such card (the tests').
+    fn resized(&self, _pane: u64) {}
     /// The pane's transfer queue ended, as `finish` says: what the tab's chip plays out and
     /// leaves on the tab while the user is elsewhere. Called **before** the pane tells its
     /// title the transfer is gone, so the tab reads the end together with that news. Nothing for
@@ -554,6 +558,41 @@ const LINK_LABEL_MARGIN: f64 = 6.0;
 /// How far a card the application holds over the pane stands from its top and from its right edge
 /// ([`TerminalPane::set_corner_card`]).
 pub(crate) const CORNER_INSET: (f64, f64) = (10.0, 12.0);
+
+/// How far from the top of its pane a card stands: [`CORNER_INSET`]'s, or, where the find panel
+/// is open in the same corner (`panel` is its frame, in the pane's coordinates, y up), the same
+/// distance under the panel's lower edge.
+pub(crate) fn card_top_inset(pane_height: f64, panel: Option<NSRect>) -> f64 {
+    match panel {
+        Some(panel) => (pane_height - panel.origin.y) + CORNER_INSET.0,
+        None => CORNER_INSET.0,
+    }
+}
+
+/// Stands `card` over the top right corner of `pane`, `top` from the pane's top
+/// ([`card_top_inset`]), as a view of `host`, the view `pane` stands in (it is moved there if it
+/// is in another). A pane too low for the card keeps the card's foot (its buttons) in view and
+/// loses the top of its title. The card's own stacking in `host` is the container's to keep: a
+/// view put in is on top.
+pub(crate) fn stand_card_over(card: &NSView, pane: &NSView, host: &NSView, top: f64) {
+    // SAFETY: a read of the card's parent on the main thread, where the card is used.
+    let there = unsafe { card.superview() }.is_some_and(|now| std::ptr::eq(&*now, host));
+    if !there {
+        card.removeFromSuperview();
+        host.addSubview(card);
+    }
+    let bounds = pane.bounds();
+    let size = card.frame().size;
+    // The pane's own coordinates (y up), then the host's.
+    let corner = NSRect::new(
+        NSPoint::new(
+            bounds.origin.x + (bounds.size.width - CORNER_INSET.1 - size.width).max(0.0),
+            bounds.origin.y + (bounds.size.height - top - size.height).max(0.0),
+        ),
+        size,
+    );
+    card.setFrame(host.convertRect_fromView(corner, Some(pane)));
+}
 const LINK_LABEL_PAD_X: f64 = 6.0;
 const LINK_LABEL_PAD_Y: f64 = 2.0;
 
@@ -2496,6 +2535,11 @@ define_class!(
         #[unsafe(method(viewFrameDidChange:))]
         fn view_frame_did_change(&self, _n: &NSNotification) {
             self.refresh_geometry();
+            // A card in the corner is as wide as the pane lets it be: it is told of the new size
+            // on the next turn of the loop, outside of the layout this runs in.
+            if self.ivars().corner_card.borrow().is_some() {
+                self.host().resized(self.id());
+            }
         }
     }
 
@@ -8521,6 +8565,8 @@ impl TerminalPane {
             bar.set_text(&text);
         }
         bar.show(!self.ivars().reduce_motion.get());
+        // A card in the corner steps down under the panel.
+        self.place_corner_card();
         if focus && let Some(window) = self.window() {
             window.makeFirstResponder(Some(bar.field()));
             // SAFETY: the sender is optional; the field's own action.
@@ -8736,7 +8782,15 @@ impl TerminalPane {
         let Some(bar) = self.ivars().search.get() else {
             return;
         };
-        bar.hide(!self.ivars().reduce_motion.get());
+        // ...and goes back up when the panel is gone: when it has faded out, not before (it
+        // would stand over the panel while it fades). Where nothing fades the corner is free now.
+        let pane = WeakId::new(self);
+        bar.hide(!self.ivars().reduce_motion.get(), move || {
+            if let Some(pane) = pane.load() {
+                pane.place_corner_card();
+            }
+        });
+        self.place_corner_card();
         bar.forget_applied();
         if let Some(session) = self.session() {
             session.select_search_match();
@@ -8909,8 +8963,9 @@ impl TerminalPane {
     /// Puts `card` over the pane's top right corner, or takes the one that is there away (`None`).
     /// The card is the application's: it takes no key and is the pane's only as far as where it
     /// stands, which follows the pane's size ([`CORNER_INSET`]); the terminal's oldest lines are
-    /// where it is, and not the input. It goes right over the terminal's view, under the veils, as
-    /// the search panel does.
+    /// where it is, and not the input. It is a view of the container the pane stands in, not of
+    /// the pane, so that a floating pane of the tab cannot come over it: the container keeps it
+    /// over them (`SplitView::restack`).
     pub(crate) fn set_corner_card(&self, card: Option<&NSView>) {
         let slot = &self.ivars().corner_card;
         if let Some(old) = slot.borrow_mut().take() {
@@ -8919,29 +8974,46 @@ impl TerminalPane {
         let Some(card) = card else {
             return;
         };
-        // The container is not flipped (y up): sticking to the top right corner is flexible
-        // left and bottom margins.
-        card.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
-        );
-        self.addSubview_positioned_relativeTo(card, NSWindowOrderingMode::Above, Some(self.view()));
         *slot.borrow_mut() = Some(objc2::Message::retain(card));
         self.place_corner_card();
     }
 
-    /// Stands the card in the corner again: its size changed.
+    /// Stands the card in the corner again: the pane or the card changed its size or place, or
+    /// the pane went to another container. Hidden with the pane (a zoom hides the others).
     pub(crate) fn place_corner_card(&self) {
         let Some(card) = self.ivars().corner_card.borrow().clone() else {
             return;
         };
-        let bounds = self.bounds();
-        let size = card.frame().size;
-        // A pane too low for the card keeps the card's foot (its buttons) in view and loses
-        // the top of its title.
-        card.setFrameOrigin(NSPoint::new(
-            (bounds.size.width - CORNER_INSET.1 - size.width).max(0.0),
-            (bounds.size.height - CORNER_INSET.0 - size.height).max(0.0),
-        ));
+        // A pane that stands in no container has no place for it yet: its container places it.
+        // SAFETY: a read of the pane's parent on the main thread, where the pane is used.
+        let Some(host) = (unsafe { self.superview() }) else {
+            return;
+        };
+        // Under the find panel while it is open: it stands in the same corner.
+        let panel = self
+            .ivars()
+            .search
+            .get()
+            .filter(|bar| bar.holds_corner())
+            .map(SearchBar::resting_frame);
+        let top = card_top_inset(self.bounds().size.height, panel);
+        stand_card_over(&card, self, &host, top);
+        card.setHidden(self.isHidden());
+    }
+
+    /// The pane leaves the container it stands in (closed there, or carried to another tab): its
+    /// card, a view of that container, goes with it, and stands in the next container the pane is
+    /// placed in ([`Self::place_corner_card`]).
+    pub(crate) fn leave_container(&self) {
+        if let Some(card) = self.ivars().corner_card.borrow().as_ref() {
+            card.removeFromSuperview();
+        }
+        self.removeFromSuperview();
+    }
+
+    /// The card over this pane's corner, if there is one ([`Self::set_corner_card`]).
+    pub(crate) fn corner_card_view(&self) -> Option<Retained<NSView>> {
+        self.ivars().corner_card.borrow().clone()
     }
 
     pub(crate) fn listeners(&self) -> &RefCell<Vec<Listener>> {
@@ -10159,6 +10231,42 @@ mod tests {
         assert!(body.contains("pencere_view::content_size(self.bounds())"));
         // The parent is the one the command was chosen with, in the same branch.
         assert!(pane.contains("views: self.view_options(shell_parent),"));
+    }
+
+    /// A card over the pane's corner steps down under the find panel while it is open (they stand
+    /// in the same corner) and goes back up when it closes: the card is stood again where the panel
+    /// is opened and closed, and the place it is stood in follows the panel while it is shown.
+    /// A source scan, because a pane needs a window server.
+    #[test]
+    fn a_corner_card_steps_down_under_the_find_panel_and_back_up() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |name: &str| {
+            let at = pane.find(name).unwrap_or_else(|| panic!("{name}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let open = body_of("    fn open_search(");
+        let shown = open.find("bar.show(").expect("the panel opens");
+        assert!(open[shown..].contains("self.place_corner_card()"), "{open}");
+        let close = body_of("    pub(crate) fn close_search(");
+        let hidden = close.find("bar.hide(").expect("the panel closes");
+        assert!(
+            close[hidden..].contains("self.place_corner_card()"),
+            "{close}"
+        );
+        // It goes back up when the panel has faded out (the callback), and the place it is
+        // stood in keeps it under the panel until then (the panel holds the corner while it fades).
+        assert!(
+            close[hidden..].contains("pane.place_corner_card()"),
+            "{close}"
+        );
+        let place = body_of("    pub(crate) fn place_corner_card(");
+        assert!(
+            place.contains(".filter(|bar| bar.holds_corner())"),
+            "{place}"
+        );
+        assert!(place.contains("SearchBar::resting_frame"), "{place}");
+        assert!(place.contains("card_top_inset("), "{place}");
     }
 
     /// A pane opened for a program waits for it under a cover and wears it once: put on at the

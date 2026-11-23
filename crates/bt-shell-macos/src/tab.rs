@@ -141,6 +141,16 @@ impl PaneHost for TabHost {
         }
     }
 
+    fn resized(&self, pane: u64) {
+        // On the next turn of the loop: the card is made again outside of the layout this is
+        // told in.
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = objc2::MainThreadMarker::new().expect("the main queue is the main thread");
+            crate::apps_card::pane_resized(mtm, pane);
+        });
+    }
+
     fn shell_exited(&self, pane: u64) {
         // Only that pane; the last pane closes the tab.
         if let Some(tab) = self.tab() {

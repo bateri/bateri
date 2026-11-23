@@ -1671,12 +1671,26 @@ impl SplitView {
     }
 
     /// The views of the cards, back to front — each card's shadow, panes, headers and handles, in
-    /// that order — stand above everything of the flat area, and the focus frame stands over the
+    /// that order — stand above everything of the flat area, then the cards the application holds
+    /// over the panes ([`TerminalPane::set_corner_card`]), and the focus frame stands over the
     /// views of the card it is round (and under the cards in front of that one) when it is round a
     /// floating pane, and under every card otherwise. Only the views that are out of place are
     /// moved: taking a pane out of its superview puts the keyboard down.
     fn restack(&self) {
         let iv = self.ivars();
+        // The cards the application holds over its panes (the first click's, a server's) stand in
+        // this container where their panes are now, and over the floating panes (placed first:
+        // moving a view in and out of its superview is not done while the lists below are held).
+        let corner: Vec<Retained<NSView>> = {
+            let panes = iv.panes.borrow().clone();
+            panes
+                .iter()
+                .filter_map(|pane| {
+                    pane.place_corner_card();
+                    pane.corner_card_view()
+                })
+                .collect()
+        };
         let cards = iv.cards.borrow();
         let shades = iv.shades.borrow();
         let card_handles = iv.card_handles.borrow();
@@ -1713,6 +1727,9 @@ impl SplitView {
                 ring_slot = Some(wanted.len());
             }
         }
+        // A card over a pane is seen whole whatever floats over the pane: over every floating
+        // pane of the tab (and over one that opens while the card is up), under the grips.
+        wanted.extend(corner);
         if wanted.is_empty() {
             return;
         }
@@ -1738,52 +1755,7 @@ impl SplitView {
             let view: &NSView = capsule;
             wanted.push(view.retain());
         }
-        let subviews = self.subviews();
-        // Read afresh at every step: once a view has moved, the order taken before it no longer
-        // says which view stands right over which (a card's header judged by the old order stayed
-        // under the shade its pane had been moved over).
-        let at = |view: &NSView| {
-            self.subviews()
-                .iter()
-                .position(|candidate| std::ptr::eq(&*candidate, view))
-        };
-        let own = |view: &NSView| {
-            std::ptr::eq(view, ring) || wanted.iter().any(|mine| std::ptr::eq(&**mine, view))
-        };
-        // The highest view of the flat area: what the cards stand on.
-        let mut anchor: Option<Retained<NSView>> = subviews
-            .iter()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .find(|view| !own(view));
-        let put = |view: &NSView, anchor: &mut Option<Retained<NSView>>| {
-            let in_place = match (anchor.as_deref(), at(view)) {
-                (Some(under), Some(now)) => at(under).is_some_and(|below| now == below + 1),
-                (None, Some(now)) => now == 0,
-                _ => false,
-            };
-            if !in_place {
-                self.addSubview_positioned_relativeTo(
-                    view,
-                    NSWindowOrderingMode::Above,
-                    anchor.as_deref(),
-                );
-            }
-            *anchor = Some(view.retain());
-        };
-        if ring_slot.is_none() {
-            put(ring, &mut anchor);
-        }
-        for (placed, view) in wanted.iter().enumerate() {
-            if ring_slot == Some(placed) {
-                put(ring, &mut anchor);
-            }
-            put(view, &mut anchor);
-        }
-        if ring_slot == Some(wanted.len()) {
-            put(ring, &mut anchor);
-        }
+        put_in_order(self, &wanted, ring, ring_slot);
     }
 
     /// Where the pane of a terminal a program on a server asked for goes beside `anchor` of this
@@ -2027,7 +1999,7 @@ impl SplitView {
         let panes = self.panes();
         self.ivars().panes.borrow_mut().clear();
         for pane in &panes {
-            pane.removeFromSuperview();
+            pane.leave_container();
         }
         panes
     }
@@ -2071,7 +2043,7 @@ impl SplitView {
             let index = panes.iter().position(|pane| pane.id() == id)?;
             panes.remove(index)
         };
-        removed.removeFromSuperview();
+        removed.leave_container();
         self.layout_panes();
         // Two panes became one: the survivor opens out to the whole area (the
         // closed one is already gone, closing does not wait for a slide).
@@ -3976,6 +3948,65 @@ impl sheets::Cover for SplitView {
     }
 }
 
+/// Puts `wanted`, back to front, over the flat area of `container` (the highest of its views that
+/// are not among them), with the focus `ring` where `ring_slot` says it stands among them (`None`:
+/// right over the flat area). Only the views that are out of place are moved: taking a pane out
+/// of its superview puts the keyboard down.
+pub(crate) fn put_in_order(
+    container: &NSView,
+    wanted: &[Retained<NSView>],
+    ring: &NSView,
+    ring_slot: Option<usize>,
+) {
+    let subviews = container.subviews();
+    // Read afresh at every step: once a view has moved, the order taken before it no longer
+    // says which view stands right over which (a card's header judged by the old order stayed
+    // under the shade its pane had been moved over).
+    let at = |view: &NSView| {
+        container
+            .subviews()
+            .iter()
+            .position(|candidate| std::ptr::eq(&*candidate, view))
+    };
+    let own = |view: &NSView| {
+        std::ptr::eq(view, ring) || wanted.iter().any(|mine| std::ptr::eq(&**mine, view))
+    };
+    // The highest view of the flat area: what the cards stand on.
+    let mut anchor: Option<Retained<NSView>> = subviews
+        .iter()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .find(|view| !own(view));
+    let put = |view: &NSView, anchor: &mut Option<Retained<NSView>>| {
+        let in_place = match (anchor.as_deref(), at(view)) {
+            (Some(under), Some(now)) => at(under).is_some_and(|below| now == below + 1),
+            (None, Some(now)) => now == 0,
+            _ => false,
+        };
+        if !in_place {
+            container.addSubview_positioned_relativeTo(
+                view,
+                NSWindowOrderingMode::Above,
+                anchor.as_deref(),
+            );
+        }
+        *anchor = Some(view.retain());
+    };
+    if ring_slot.is_none() {
+        put(ring, &mut anchor);
+    }
+    for (placed, view) in wanted.iter().enumerate() {
+        if ring_slot == Some(placed) {
+            put(ring, &mut anchor);
+        }
+        put(view, &mut anchor);
+    }
+    if ring_slot == Some(wanted.len()) {
+        put(ring, &mut anchor);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4405,6 +4436,32 @@ mod tests {
         // The slot is where the framed card's own views end, not "over everything".
         assert!(restack.contains("ring_slot = Some(wanted.len())"));
         assert!(!restack.contains("ring_over"));
+    }
+
+    #[test]
+    fn the_cards_over_the_panes_stand_over_the_floating_panes_and_under_the_grips() {
+        let restack = body_of("fn restack(");
+        // Each pane stands its card where the pane is now, in this container; they are among the
+        // views put in order, after the floating panes' own and before the grips.
+        assert!(restack.contains("pane.place_corner_card()"));
+        let floating = restack
+            .find("for (index, card) in cards.iter().enumerate()")
+            .expect("the floating panes");
+        let corner = restack
+            .find("wanted.extend(corner)")
+            .expect("the cards over the panes");
+        let grips = restack.find("iv.grips.borrow()").expect("the grips");
+        assert!(floating < corner && corner < grips, "{restack}");
+        // They are views of the container, not of their panes: a pane's own subview is under
+        // every view that is over the pane.
+        let placed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/pane.rs"))
+            .expect("pane.rs");
+        let set = &placed[placed.find("pub(crate) fn set_corner_card(").expect("set")..];
+        let set = &set[..set.find("pub(crate) fn corner_card_view(").expect("end")];
+        assert!(!set.contains("self.addSubview"), "{set}");
+        // And a pane that leaves takes its card out of the container with it.
+        assert!(body_of("pub(crate) fn detach(").contains("leave_container()"));
+        assert!(body_of("pub(crate) fn drain(").contains("leave_container()"));
     }
 
     #[test]

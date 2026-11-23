@@ -75,6 +75,7 @@ mod web_links;
 use crate::{child, focus, jobs, retired_holders, settings};
 use bt_shell_common::child::PaneRuns;
 use web_links::EngineJob;
+pub(crate) use web_links::links_install_ended;
 pub(crate) use web_links::note_layout_problems;
 
 /// Guard for zero idle frames: in the [`Workload::Smoke`] workload the window
@@ -999,9 +1000,23 @@ pub(crate) struct Ivars {
     /// by the first ⌘-hover over a path, then kept and dropped when the programs change
     /// ([`AppDelegate::openers`]).
     openers: RefCell<Option<Rc<Vec<bt_shell_common::apps::opens::Opener>>>>,
-    /// The one-time note about opening links beside the terminal was put (or is being asked for):
-    /// it is not put again in this run unless it came to nothing ([`AppDelegate::open_web_address`]).
-    links_asked: Cell<bool>,
+    /// What the last look at the releases of browserpen and the browser engine found, which decides
+    /// whether the first click on a web address asks ([`bt_shell_common::web_links::Lookup`]).
+    links_lookup: Cell<bt_shell_common::web_links::Lookup>,
+    /// The releases are being read now, on a thread of their own.
+    links_reading: Cell<bool>,
+    /// How long the next read waits after one that the network did not answer: five minutes,
+    /// and longer after each, as the check of the programs does.
+    links_retry: Cell<std::time::Duration>,
+    /// A read of the releases is waiting for its retry's turn: the one chain of retries there is
+    /// (a read that is asked for meanwhile, and again finds no answer, does not start another).
+    links_retry_pending: Cell<bool>,
+    /// When a click last brought back what was said yes to ([`AppDelegate::links_fetching`]): the
+    /// next clicks do not check the programs and read the notice again for a while.
+    links_fetched: Cell<Option<std::time::Instant>>,
+    /// Why kablo could not put browserpen in place on this Mac, from the check of the programs
+    /// that last ended (what the first click's card says under browserpen).
+    links_install_trouble: RefCell<Option<String>>,
     /// The download of the browser engine ([`EngineJob`]).
     engine_job: RefCell<EngineJob>,
     /// The Shell menu's delegate ([`crate::menu::install`]): the menu holds it
@@ -2773,7 +2788,12 @@ impl AppDelegate {
             settings_state: RefCell::new(settings::FileState::Missing),
             apps: OnceCell::new(),
             openers: RefCell::new(None),
-            links_asked: Cell::new(false),
+            links_lookup: Cell::new(bt_shell_common::web_links::Lookup::UNREAD),
+            links_reading: Cell::new(false),
+            links_retry: Cell::new(web_links::READ_RETRY),
+            links_retry_pending: Cell::new(false),
+            links_fetched: Cell::new(None),
+            links_install_trouble: RefCell::new(None),
             engine_job: RefCell::new(EngineJob::Idle),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
@@ -6228,13 +6248,23 @@ impl AppDelegate {
                             answerer.machine(bt_shell_common::kablo::local::ACCOUNT)
                         })
                         .map(|machine| machine.installed);
+                    let mut trouble = None;
                     for (name, why) in bt_shell_common::apps::followed::install_missing(
                         &backend,
                         &root,
                         here.as_deref(),
                     ) {
                         eprintln!("bateri: could not install {name} on this computer: {why}");
+                        if name == bt_shell_common::web_links::BROWSER_PROGRAM {
+                            trouble = Some(bt_shell_common::web_links::plain_reason(&why));
+                        }
                     }
+                    links_install_ended(trouble);
+                } else {
+                    links_install_ended(Some(
+                        "bateri keeps no connection to kablo, which puts programs in place."
+                            .to_owned(),
+                    ));
                 }
             })
         };
@@ -6465,6 +6495,10 @@ impl AppDelegate {
     fn apps_changed(&self) {
         // What a click opens in is read from the same folders.
         self.ivars().openers.replace(None);
+        // A program that landed may be the one the first click's card is waiting for, and the
+        // releases are read in this turn, where nothing has been decided about links.
+        self.links_progress();
+        self.read_links_offer();
         let Some(window) = self.ivars().settings_window.borrow().clone() else {
             return;
         };

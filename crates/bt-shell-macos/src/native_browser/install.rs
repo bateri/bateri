@@ -80,7 +80,7 @@ impl PageBrowsers {
                     ),
                 );
             }
-            Check::Unavailable(why) => {
+            Check::Unavailable(why) | Check::Absent(why) => {
                 self.installing.set(false);
                 self.tell(
                     pane,

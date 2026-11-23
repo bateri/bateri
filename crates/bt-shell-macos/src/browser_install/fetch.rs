@@ -47,6 +47,23 @@ fn describe(error: *mut NSError) -> String {
     )
 }
 
+/// `NSURLErrorFileDoesNotExist`: what a `file:` address that names nothing fails with.
+const FILE_DOES_NOT_EXIST: isize = -1100;
+
+/// A request that failed without an HTTP answer, as an error: a `file:` address that names nothing
+/// is `ErrorKind::NotFound` as a `404` is (a release folder that has no notice in it has nothing to
+/// offer), and any other failure is of the moment.
+fn failed(error: *mut NSError) -> io::Error {
+    // SAFETY: the completion handler's error is an `NSError` or null; it lives for the call.
+    let missing = unsafe { error.as_ref() }.is_some_and(|e| e.code() == FILE_DOES_NOT_EXIST);
+    let kind = if missing {
+        io::ErrorKind::NotFound
+    } else {
+        io::ErrorKind::Other
+    };
+    io::Error::new(kind, describe(error))
+}
+
 /// `Some(status)` when the response is an HTTP one that is not a success.
 fn http_failure(response: *mut NSURLResponse) -> Option<isize> {
     // SAFETY: the response is an `NSURLResponse` or null; it lives for the call.
@@ -57,6 +74,18 @@ fn http_failure(response: *mut NSURLResponse) -> Option<isize> {
     (!(200..300).contains(&status)).then_some(status)
 }
 
+/// What a server's refusal is as an error: a file that is not there (`404`, `410`) is
+/// `ErrorKind::NotFound`, which is an answer (there is nothing at that address), and any other
+/// status is a failure of the moment.
+fn answered(status: isize) -> io::Error {
+    let kind = if matches!(status, 404 | 410) {
+        io::ErrorKind::NotFound
+    } else {
+        io::ErrorKind::Other
+    };
+    io::Error::new(kind, format!("the server answered {status}"))
+}
+
 /// The bytes of `url`, at most `limit` of them (a notice, a list of sums).
 pub fn bytes(url: &str, limit: usize) -> io::Result<Vec<u8>> {
     let url = url_of(url)?;
@@ -64,9 +93,9 @@ pub fn bytes(url: &str, limit: usize) -> io::Result<Vec<u8>> {
     let block = RcBlock::new(
         move |data: *mut NSData, response: *mut NSURLResponse, error: *mut NSError| {
             let outcome = if let Some(status) = http_failure(response) {
-                Err(io::Error::other(format!("the server answered {status}")))
+                Err(answered(status))
             } else if data.is_null() {
-                Err(io::Error::other(describe(error)))
+                Err(failed(error))
             } else {
                 // SAFETY: `data` is the handler's `NSData`, non-null here, valid for the call.
                 Ok(unsafe { &*data }.to_vec())
@@ -107,7 +136,7 @@ pub fn file(
     let block = RcBlock::new(
         move |location: *mut NSURL, response: *mut NSURLResponse, error: *mut NSError| {
             let outcome = if let Some(status) = http_failure(response) {
-                Err(io::Error::other(format!("the server answered {status}")))
+                Err(answered(status))
             } else {
                 // SAFETY: `location` is the handler's file URL (non-null on success), valid for the call.
                 match unsafe { location.as_ref() }.and_then(|url| url.path()) {
@@ -118,7 +147,7 @@ pub fn file(
                         std::fs::rename(&from, &target)
                             .or_else(|_| std::fs::copy(&from, &target).map(drop))
                     }
-                    None => Err(io::Error::other(describe(error))),
+                    None => Err(failed(error)),
                 }
             };
             let _ = done.send(outcome);
