@@ -9365,6 +9365,35 @@ impl PageDriveHost for PageHost<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// A pane's surface whose first configuration wgpu refused (here a width no GPU has; on a busy
+    /// machine, a GPU that does not come idle in time) fails a frame, which the frame policy tries
+    /// again, instead of ending the process: wgpu panics in `get_current_texture` for a surface it
+    /// never took a configuration for.
+    #[test]
+    fn a_surface_whose_first_configuration_was_refused_fails_a_frame_and_does_not_end_the_process()
+    {
+        let renderer = super::Renderer::system_default().expect("a GPU");
+        let layer = super::CAMetalLayer::new();
+        // SAFETY: `layer` is a live `CAMetalLayer`, kept to the end of the test; wgpu retains it.
+        let surface = unsafe {
+            super::Surface::from_layer(
+                &renderer,
+                super::NonNull::from(&*layer).cast::<super::c_void>(),
+            )
+        }
+        .expect("a surface");
+        surface.set_size(1_000_000.0, 16.0);
+        let refused = surface
+            .acquires()
+            .expect_err("no frame from a refused configuration");
+        assert!(refused.to_string().contains("configured"), "{refused}");
+        // Still refused: still a failed frame, and still no panic.
+        assert!(surface.acquires().is_err());
+        // A size wgpu takes: frames come.
+        surface.set_size(64.0, 32.0);
+        assert_eq!(surface.acquires().ok(), Some(true));
+    }
+
     /// The command memory is filled on the start of a command, while its rows are on the grid: a
     /// start edge that does not ask for the memory's turn loses the command from the palette's
     /// history without anything failing. A source scan: the edges are the reader thread's.

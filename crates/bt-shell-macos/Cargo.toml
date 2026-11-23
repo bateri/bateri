@@ -260,6 +260,8 @@ libc = { workspace = true }
 # The shared crate's test helpers (`TempRoot`, `SilentWake`, `wait_until`)
 # for this crate's tests (`bt-atlas`'s `fixture` precedent).
 bt-shell-common = { workspace = true, features = ["test-support"] }
+# What a frame gets from a pane's surface (`Surface::acquires`): the layer is this crate's.
+bt-gpu = { workspace = true, features = ["test-support"] }
 
 # A pane opened the way an application that embeds one opens it — no bateri
 # application object, a host that records what it hears. Its own `main`: AppKit

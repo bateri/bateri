@@ -7,7 +7,7 @@
 //! `bt-shell` never sees a wgpu type. On Linux the same entry will take
 //! winit's `raw-window-handle` (the winit set).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
@@ -16,7 +16,7 @@ use std::ptr::NonNull;
 use crate::GpuError;
 #[cfg(target_os = "macos")]
 use crate::Renderer;
-use crate::renderer::{FORMAT, Gpu, Target};
+use crate::renderer::{FORMAT, Gpu, Target, block_on};
 
 /// A window's surface: the swap chain the frame path draws into.
 ///
@@ -33,6 +33,15 @@ pub struct Surface {
     /// configures again first. Without it the window would stay dead until a
     /// resize, because [`Surface::set_size`] skips an unchanged size.
     stale: Cell<bool>,
+    /// wgpu took a configuration once. Until it has, it treats an error of
+    /// `get_current_texture` as fatal (the surface has no error sink yet: a
+    /// panic in wgpu, not a status), so nothing is acquired before it. A first
+    /// `configure` fails where the GPU does not come idle in time (a busy
+    /// machine), and the pane that was just made would take the process down.
+    taken: Cell<bool>,
+    /// What wgpu said when it last refused a configuration: the cause a failed
+    /// frame carries while the `taken` field is not set.
+    refused: RefCell<Option<String>>,
 }
 
 /// What [`Surface::acquire`] got — three classes, three answers (the tick
@@ -80,6 +89,8 @@ impl Surface {
             gpu,
             size: Cell::new(None),
             stale: Cell::new(false),
+            taken: Cell::new(false),
+            refused: RefCell::new(None),
         })
     }
 
@@ -99,7 +110,13 @@ impl Surface {
         self.size.set(Some((width, height)));
     }
 
+    /// Configures the surface; one wgpu refuses leaves it stale, so that the
+    /// next acquisition tries again (and, before the first that was taken,
+    /// acquires nothing: see the `taken` field).
     fn configure(&self, width: u32, height: u32) {
+        let device = self.gpu.device();
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.surface.configure(
             self.gpu.device(),
             &wgpu::SurfaceConfiguration {
@@ -130,11 +147,37 @@ impl Surface {
                 view_formats: Vec::new(),
             },
         );
+        // Popped in reverse order; on native both futures are ready at once.
+        let refused = [block_on(validation.pop()), block_on(internal.pop())]
+            .into_iter()
+            .flatten()
+            .next();
+        match refused {
+            None => {
+                self.taken.set(true);
+                self.refused.replace(None);
+            }
+            Some(error) => {
+                self.refused.replace(Some(error.to_string()));
+                self.stale.set(true);
+            }
+        }
     }
 
     fn reconfigure(&self) {
         if let Some((width, height)) = self.size.get() {
             self.configure(width, height);
+        }
+    }
+
+    /// What a frame would get now, for a test: `Ok(true)` a texture (dropped
+    /// unpresented), `Ok(false)` a skipped frame, `Err` a failed one.
+    #[cfg(feature = "test-support")]
+    pub fn acquires(&self) -> Result<bool, GpuError> {
+        match self.acquire() {
+            Acquired::Frame(_) => Ok(true),
+            Acquired::Skip => Ok(false),
+            Acquired::Failed(e) => Err(e),
         }
     }
 
@@ -160,6 +203,14 @@ impl Surface {
     pub(crate) fn acquire(&self) -> Acquired {
         if self.stale.replace(false) {
             self.reconfigure();
+        }
+        if !self.taken.get() {
+            // Configured again at the next try ([`Surface::configure`] left it
+            // stale), which the frame policy asks for.
+            let why = self.refused.borrow().clone().unwrap_or_default();
+            return Acquired::Failed(GpuError::Wgpu(format!(
+                "the surface could not be configured: {why}"
+            )));
         }
         for attempt in 0..2 {
             match self.surface.get_current_texture() {
