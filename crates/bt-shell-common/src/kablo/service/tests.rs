@@ -5107,6 +5107,37 @@ fn a_pane_of_this_mac_reads_its_terminals_bytes_as_they_are_and_types_into_it() 
     assert!(world.changed().is_empty() && world.links().is_empty());
 }
 
+/// What is in front of the terminal of a pane of this Mac is news to the pane, once per change: a
+/// program's view that waits behind a card goes when its program does, and a pane with no
+/// connection of a server's has no other word of it.
+#[test]
+fn a_pane_of_this_mac_is_told_once_when_the_program_in_front_of_its_terminal_changes() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-news", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    let _mac = Pane::of(open_local(&rig, &pane).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    assert_eq!(world.fronted(), 0, "nothing is in front yet");
+
+    world.bridge().set_state(&id, saying("zsh"));
+    until("told of the shell", || world.fronted() == 1);
+    // Another program comes in front of the first: one piece of news, not two.
+    world.bridge().set_state(&id, saying("demopen"));
+    until("told of the program", || world.fronted() >= 2);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(world.fronted(), 2, "once for the change");
+    // The same word again is no news.
+    world.bridge().set_state(&id, saying("demopen"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(world.fronted(), 2, "the same program is no news");
+    // The shell back in front is: that is the program's end.
+    world.bridge().set_state(&id, saying("zsh"));
+    until("told it is the shell again", || world.fronted() >= 3);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(world.fronted(), 3);
+}
+
 #[test]
 fn the_end_of_the_program_reaches_the_pane_after_its_last_byte_with_the_status() {
     let ledger = Arc::new(Ledger::memory());

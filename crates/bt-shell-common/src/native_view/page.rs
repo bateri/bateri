@@ -38,7 +38,7 @@
 use std::cell::{Cell, RefCell, RefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bt_core::Flow;
@@ -394,6 +394,47 @@ struct Failure {
     told: RefCell<Option<OnFailure>>,
 }
 
+/// How the shell turns what its platform raises where Rust cannot catch it into words: it runs the
+/// body and answers `Err` with what was raised (the macOS shell's: an Objective-C exception, caught
+/// where it unwinds out of the body). A panic in the body is not its business: it passes through.
+pub type Contain = fn(&mut dyn FnMut()) -> Result<(), String>;
+
+static CONTAIN: OnceLock<Contain> = OnceLock::new();
+
+/// The shell says how it catches what its platform raises ([`Contain`]), once, before the first page.
+/// Where it never does (a platform that raises nothing Rust cannot catch) a body runs as it is.
+pub fn contain_with(contain: Contain) {
+    let _ = CONTAIN.set(contain);
+}
+
+/// Runs `call` and answers what it answered, or the words of how it failed: a panic, or what the
+/// shell's containment catches ([`contain_with`]). A foreign exception that reached a Rust
+/// `catch_unwind` would end the process, so the containment is **inside** the panic's catch and
+/// nearest to the call: a failure is an error here and goes no further.
+pub fn contained<R>(call: impl FnOnce() -> R) -> Result<R, String> {
+    let mut call = Some(call);
+    let mut answer = None;
+    let outcome = {
+        let mut body = || {
+            if let Some(call) = call.take() {
+                answer = Some(call());
+            }
+        };
+        catch_unwind(AssertUnwindSafe(|| match CONTAIN.get() {
+            Some(contain) => contain(&mut body),
+            None => {
+                body();
+                Ok(())
+            }
+        }))
+    };
+    match outcome {
+        Ok(Ok(())) => answer.ok_or_else(|| "it did not run".to_owned()),
+        Ok(Err(words)) => Err(words),
+        Err(payload) => Err(words_of(payload.as_ref())),
+    }
+}
+
 /// The words a panic's payload carries.
 fn words_of(payload: &(dyn std::any::Any + Send)) -> String {
     payload
@@ -417,10 +458,11 @@ impl PageHandle {
     }
 
     /// Runs `call`, which is the page's own code or a host's on the page's behalf, in the page's
-    /// error boundary: a panic in it is the page's failure and goes no further, and so is an
-    /// Objective-C exception raised under it where the shell makes those panics (the shell's
-    /// objc2 `catch-all`). Answers what `call` answered, or `None` where it failed — or where the
-    /// page had failed already, in which case nothing of it runs any more.
+    /// error boundary: a panic in it is the page's failure and goes no further, and so is what the
+    /// shell's platform raises under it ([`contained`]: an Objective-C exception, caught where it
+    /// leaves the call and not made a panic everywhere, which would end a process a catcher further
+    /// out — AppKit's own — would have kept). Answers what `call` answered, or `None` where it
+    /// failed — or where the page had failed already, in which case nothing of it runs any more.
     ///
     /// The failure only says so ([`PageHandle::watch_failure`]): the page is not taken down here,
     /// where its code, its borrows and its AppKit views may be on the stack.
@@ -428,10 +470,10 @@ impl PageHandle {
         if self.failed() {
             return None;
         }
-        match catch_unwind(AssertUnwindSafe(call)) {
+        match contained(call) {
             Ok(answer) => Some(answer),
-            Err(payload) => {
-                let words = format!("{what}: {}", words_of(payload.as_ref()));
+            Err(failure) => {
+                let words = format!("{what}: {failure}");
                 eprintln!("bateri: a page failed in {words}");
                 *self.failure.said.borrow_mut() = Some(words.clone());
                 let told = self.failure.told.borrow().clone();

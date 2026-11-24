@@ -24,7 +24,7 @@ use crate::{child, settings, ssh_route};
 use bt_core::{PaneUuid, SettingsEdit};
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::install::Bundle;
-use bt_shell_common::kablo::ledger::{Ledger, ViewMark};
+use bt_shell_common::kablo::ledger::{Ledger, ViewMark, WaitCause};
 use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{
@@ -167,9 +167,9 @@ pub(crate) fn view_mark(pane: &PaneUuid) -> Option<ViewMark> {
         .and_then(|terminal| ledger.view_mark(local::ACCOUNT, &terminal))
 }
 
-/// The view the pane's terminal of this Mac had open waits for the person, or does not any more
-/// ([`Ledger::set_view_waits`]).
-pub(crate) fn view_waits(pane: &PaneUuid, waits: bool) {
+/// The view the pane's terminal of this Mac had open waits for the person, and why, or does not
+/// any more ([`Ledger::set_view_waits`]).
+pub(crate) fn view_waits(pane: &PaneUuid, waits: Option<WaitCause>) {
     let ledger = ledger();
     if let Some(terminal) = ledger.local_terminal_of(pane) {
         ledger.set_view_waits(local::ACCOUNT, &terminal, waits);

@@ -54,7 +54,10 @@ pub use files::{
     place_saved,
 };
 pub use look::{LookSlot, caret_width_pt, terminal_look};
-pub use page::{MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, script_page};
+pub use page::{
+    Contain, MenuUp, Opening, PageEditors, PageHandle, ShownMenu, contain_with, contained,
+    containers_demo, script_page,
+};
 pub use pencere_drive::{
     CarryOut, Drained, Field, Held, Host, Outline, Painted, Placement, Reading, ReadingInput,
     Route, Scrolling, Tip, ZOOM_TEXT, carriable,

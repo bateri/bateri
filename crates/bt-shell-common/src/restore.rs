@@ -3324,6 +3324,38 @@ mod tests {
         begin_launch(lock, true).count
     }
 
+    /// A launch that gave the session up lets go of the directory's lock and writes nothing; the
+    /// person's **Open Them** takes the lock again, counts a launch, reads the session as it was
+    /// left and writes it again at quit.
+    #[test]
+    fn a_launch_that_gave_up_takes_the_lock_again_and_writes_what_it_opens() {
+        let root = TempRoot::new("restore-give-up");
+        let dir = root.0.join("s");
+        let first = lock(&dir).expect("lock");
+        save(&first, &rich(), &[]).expect("the layout the launches before left");
+        assert_eq!(begin_launch(&first, true).count, 0);
+        // Two launches that did not settle say the third gives up: it reads nothing, settles at
+        // once (the count is none) and lets go of the lock.
+        assert_eq!(begin_launch(&first, true).count, 1);
+        assert_eq!(
+            attempt_mode(begin_launch(&first, true).count),
+            AttemptMode::GiveUp
+        );
+        settle_attempt(&first);
+        drop(first);
+        // Nothing was written over the layout meanwhile, and the lock is free to take.
+        let again = lock(&dir).expect("the lock is taken again");
+        // Open Them: counted as any launch that reads the session (the giving up reset the count).
+        let before = begin_launch(&again, true);
+        assert_eq!(before.count, 0);
+        assert_eq!(attempt_mode(before.count), AttemptMode::Normal);
+        let saved = take(&again, false).expect("the layout was kept");
+        assert_eq!(saved.windows.len(), rich().windows.len());
+        // And it writes again: the windows it opened are what the quit saves.
+        save(&again, &rich(), &[]).expect("a save under the lock taken again");
+        assert!(take(&again, false).is_some());
+    }
+
     #[test]
     fn the_attempt_marker_counts_until_cleared_and_outlasts_the_layouts_clears() {
         let root = TempRoot::new("restore-attempt");

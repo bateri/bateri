@@ -10503,6 +10503,22 @@ mod tests {
             body_of("    pub(crate) fn open_given_up_windows(").contains("self.settle_later()"),
             "the windows the person opened settle like those of any launch"
         );
+        // The launch that gave up let go of the lock; Open Them takes it again, and `take_saved`
+        // keeps it for the save at quit, so that what it opens is written.
+        let open_them = body_of("    pub(crate) fn open_given_up_windows(");
+        assert!(
+            open_them
+                .find("self.restore_lock()")
+                .expect("the lock taken again")
+                < open_them.find(".take_saved(lock)").expect("the read")
+        );
+        assert!(
+            body_of("    fn take_saved(").contains("self.ivars().restore_lock.replace(Some(lock))")
+        );
+        // It leaves the layout's write to settling, as every launch does.
+        assert!(open_them.contains("self.ivars().layout_writer.set(false)"));
+        // A launch that gave the windows up and quits with them unopened leaves the marker.
+        assert!(body_of("    fn mark_clean_quit(").contains("!self.ivars().gave_up.get()"));
     }
 
     #[test]

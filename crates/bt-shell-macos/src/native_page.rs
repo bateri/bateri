@@ -900,8 +900,8 @@ pub(crate) struct PageTextFieldIvars {
 }
 
 /// Runs `body`, which is the part of a field's method that reaches the page or AppKit's views of
-/// it, in the page's error boundary: AppKit calls these methods, and a panic (or an exception
-/// objc2 made one) that unwound out of them would unwind through AppKit's frames. A failure is the
+/// it, in the page's error boundary: AppKit calls these methods, and a panic or an exception that
+/// unwound out of them would unwind through AppKit's frames. A failure is the
 /// page's and no more ([`bt_shell_common::native_view::PageHandle::guard`]); the answer is
 /// `otherwise` then. Where the page is down already there is nothing to guard.
 fn guarded<R>(ivars: &PageTextFieldIvars, what: &str, otherwise: R, body: impl FnOnce() -> R) -> R {

@@ -75,7 +75,7 @@ fn rich() -> Rows {
         ending: false,
         view: false,
         program: None,
-        waits: false,
+        waits: None,
     });
     rows.terminals.push(Row {
         account: "root@prod:22".to_owned(),
@@ -84,7 +84,7 @@ fn rich() -> Rows {
         ending: false,
         view: false,
         program: None,
-        waits: false,
+        waits: None,
     });
     rows.terminals.push(Row {
         account: "gone@elsewhere:22".to_owned(),
@@ -93,7 +93,7 @@ fn rich() -> Rows {
         ending: true,
         view: false,
         program: None,
-        waits: false,
+        waits: None,
     });
     rows
 }
@@ -142,7 +142,7 @@ fn richer() -> Rows {
         ending: false,
         view: false,
         program: None,
-        waits: false,
+        waits: None,
     });
     rows
 }
@@ -432,10 +432,16 @@ fn a_view_that_waits_and_the_name_of_its_program_are_the_fourth_version_and_noth
         .terminals
         .last_mut()
         .expect("the terminal of this Mac");
-    row.waits = true;
+    row.waits = Some(WaitCause::Quit);
     row.program = Some("line ear".to_owned());
     assert_eq!(Rows::parse(V4_WAITING_FIXTURE), Some(waiting.clone()));
     assert_eq!(waiting.render(), V4_WAITING_FIXTURE);
+    // A view whose page stopped says so in a word of its own, and reads back as it was said.
+    let stopped_text = V4_WAITING_FIXTURE.replacen(" view waits", " view stopped", 1);
+    let mut stopped = waiting.clone();
+    stopped.terminals.last_mut().expect("row").waits = Some(WaitCause::Stopped);
+    assert_eq!(Rows::parse(&stopped_text), Some(stopped.clone()));
+    assert_eq!(stopped.render(), stopped_text);
     // A name alone is the fourth version too; a view with neither is the second, as it was.
     let mut named = watched();
     named.terminals.last_mut().expect("row").program = Some("textpen".to_owned());
@@ -453,6 +459,9 @@ fn a_view_that_waits_and_the_name_of_its_program_are_the_fourth_version_and_noth
             1,
         ),
         V4_WAITING_FIXTURE.replacen(" view waits", " view waits waits", 1),
+        V4_WAITING_FIXTURE.replacen(" view waits", " view waits stopped", 1),
+        V4_WAITING_FIXTURE.replacen(" view waits", " view stopped waits", 1),
+        V2_WATCHED_FIXTURE.replacen(" live view\n", " live view stopped\n", 1),
         V4_WAITING_FIXTURE.replacen(" live view waits", " live waits", 1),
         V4_WAITING_FIXTURE.replacen("name:line\\sear", "name:line\\qear", 1),
     ] {
@@ -476,7 +485,7 @@ fn a_view_that_waits_stays_waiting_until_it_opens_again_or_ends() {
     ledger.shown(local::ACCOUNT, &id("t1"), Some(&pane()));
     // No view, no mark; and no wait can be put on a terminal with none.
     assert_eq!(ledger.view_mark(local::ACCOUNT, &id("t1")), None);
-    ledger.set_view_waits(local::ACCOUNT, &id("t1"), true);
+    ledger.set_view_waits(local::ACCOUNT, &id("t1"), Some(WaitCause::Quit));
     assert_eq!(ledger.view_mark(local::ACCOUNT, &id("t1")), None);
     // The view opens with the program's name, and does not wait.
     ledger.set_view(local::ACCOUNT, &id("t1"), true, Some("textpen"));
@@ -484,27 +493,30 @@ fn a_view_that_waits_stays_waiting_until_it_opens_again_or_ends() {
         Ledger::open(path.clone()).view_mark(local::ACCOUNT, &id("t1")),
         Some(ViewMark {
             program: Some("textpen".to_owned()),
-            waits: false
+            waits: None
         })
     );
-    // The wait outlives the process, and the name stays with it.
-    ledger.set_view_waits(local::ACCOUNT, &id("t1"), true);
-    assert_eq!(
-        Ledger::open(path.clone()).view_mark(local::ACCOUNT, &id("t1")),
-        Some(ViewMark {
-            program: Some("textpen".to_owned()),
-            waits: true
-        })
-    );
+    // The wait outlives the process, and the name stays with it — and so does why it waits: the
+    // card of a page that stopped is not the card of a quit.
+    for wait in [WaitCause::Quit, WaitCause::Stopped] {
+        ledger.set_view_waits(local::ACCOUNT, &id("t1"), Some(wait));
+        assert_eq!(
+            Ledger::open(path.clone()).view_mark(local::ACCOUNT, &id("t1")),
+            Some(ViewMark {
+                program: Some("textpen".to_owned()),
+                waits: Some(wait)
+            })
+        );
+    }
     // Opened again (the card answered), the view waits no more; ended, nothing is left.
     ledger.set_view(local::ACCOUNT, &id("t1"), true, Some("textpen"));
     assert_eq!(
         ledger
             .view_mark(local::ACCOUNT, &id("t1"))
             .map(|mark| mark.waits),
-        Some(false)
+        Some(None)
     );
-    ledger.set_view_waits(local::ACCOUNT, &id("t1"), true);
+    ledger.set_view_waits(local::ACCOUNT, &id("t1"), Some(WaitCause::Stopped));
     ledger.set_view(local::ACCOUNT, &id("t1"), false, None);
     assert_eq!(ledger.view_mark(local::ACCOUNT, &id("t1")), None);
     assert!(!ledger.view_of(local::ACCOUNT, &id("t1")));
@@ -514,7 +526,7 @@ fn a_view_that_waits_stays_waiting_until_it_opens_again_or_ends() {
     assert!(
         rows.terminals
             .iter()
-            .any(|row| row.view && row.program.is_none() && !row.waits)
+            .any(|row| row.view && row.program.is_none() && row.waits.is_none())
     );
 }
 

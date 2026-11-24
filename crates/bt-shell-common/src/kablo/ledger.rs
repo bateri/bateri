@@ -41,9 +41,10 @@
 //! that finds the terminal again offers the program a restart of it
 //! ([`Ledger::set_view`], [`Ledger::view_of`]). The row also says **what the program calls
 //! itself** (`name:`, [`ViewMark::program`]) and whether the view **waits** behind the card that
-//! asks the person to open it again (`waits`, [`Ledger::set_view_waits`]): after a bateri quit
-//! unexpectedly the view is not opened by itself, and that stays so until the card is answered,
-//! whichever way the bateri after it was left (both are version 4: a ledger with neither is
+//! asks the person to open it again (`waits` after a bateri quit unexpectedly, `stopped` after a
+//! page of it failed: [`WaitCause`], [`Ledger::set_view_waits`]): the view is not opened by itself, and
+//! that stays so until the card is answered, whichever way the bateri after it was left, and the
+//! card says which of the two it was (both are version 4: a ledger with neither is
 //! written as before, and an earlier bateri that finds a fourth version reads it as no ledger).
 //! One more fact outlives the process and is
 //! not a terminal's: that the bateri that left did so **for an update** (`U`; version 2),
@@ -179,10 +180,18 @@ pub struct Row {
     /// What that program calls itself, as the view said it (cut and cleaned by the session);
     /// none for a row written before it was kept.
     pub program: Option<String>,
-    /// The view is not opened by itself where the pane is shown again: a card asks the person
-    /// (bateri quit unexpectedly with it open, or a page of it failed). It stays until the card
-    /// is answered or the program is gone.
-    pub waits: bool,
+    /// The view is not opened by itself where the pane is shown again: a card asks the person,
+    /// and says why. It stays until the card is answered or the program is gone.
+    pub waits: Option<WaitCause>,
+}
+
+/// Why a view waits behind a card: the words after the state, `waits` or `stopped`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitCause {
+    /// bateri quit unexpectedly with the view open (`waits`).
+    Quit,
+    /// A page of the view failed in bateri's own code (`stopped`).
+    Stopped,
 }
 
 /// What a ledger says of a view that was open ([`Ledger::view_mark`]).
@@ -190,8 +199,8 @@ pub struct Row {
 pub struct ViewMark {
     /// What the program called itself; none for a row written before it was kept.
     pub program: Option<String>,
-    /// The view waits for the person ([`Row::waits`]).
-    pub waits: bool,
+    /// The view waits for the person, and why ([`Row::waits`]).
+    pub waits: Option<WaitCause>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -228,7 +237,7 @@ impl Rows {
         let version = if self
             .terminals
             .iter()
-            .any(|row| row.program.is_some() || row.waits)
+            .any(|row| row.program.is_some() || row.waits.is_some())
         {
             NAMED
         } else if self
@@ -288,8 +297,10 @@ impl Rows {
                 if row.view { " view" } else { "" },
             ));
             // The words after the state are the ones a version holds; the line ends with them.
-            if row.waits {
-                out.push_str(" waits");
+            match row.waits {
+                Some(WaitCause::Quit) => out.push_str(" waits"),
+                Some(WaitCause::Stopped) => out.push_str(" stopped"),
+                None => {}
             }
             if let Some(program) = &row.program {
                 out.push_str(&format!(" name:{}", escape(program)));
@@ -434,19 +445,24 @@ fn parse_terminal<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) 
     // The words after the state, in a ledger that has such things, each once and in the order
     // they are written; the line ends after them.
     let mut view = false;
-    let mut waits = false;
+    let mut waits = None;
     let mut program = None;
     for word in tokens {
         match word {
-            "view" if version >= 2 && !view && !waits && program.is_none() => view = true,
-            "waits" if version >= NAMED && !waits && program.is_none() => waits = true,
+            "view" if version >= 2 && !view && waits.is_none() && program.is_none() => view = true,
+            "waits" if version >= NAMED && waits.is_none() && program.is_none() => {
+                waits = Some(WaitCause::Quit);
+            }
+            "stopped" if version >= NAMED && waits.is_none() && program.is_none() => {
+                waits = Some(WaitCause::Stopped);
+            }
             name if version >= NAMED && program.is_none() && name.starts_with("name:") => {
                 program = Some(unescape(&name["name:".len()..])?);
             }
             _ => return None,
         }
     }
-    (!account.is_empty() && (view || (!waits && program.is_none()))).then_some(Row {
+    (!account.is_empty() && (view || (waits.is_none() && program.is_none()))).then_some(Row {
         account,
         terminal,
         pane,
@@ -559,7 +575,7 @@ impl Ledger {
                     ending: false,
                     view: false,
                     program: None,
-                    waits: false,
+                    waits: None,
                 }),
             }
             (true, ())
@@ -579,7 +595,7 @@ impl Ledger {
                     ending: true,
                     view: false,
                     program: None,
-                    waits: false,
+                    waits: None,
                 }),
             }
             rows.forget_idle_accounts();
@@ -702,19 +718,19 @@ impl Ledger {
             };
             let program = program.filter(|_| open).map(str::to_owned);
             let row = &mut rows.terminals[at];
-            if row.view == open && row.program == program && !row.waits {
+            if row.view == open && row.program == program && row.waits.is_none() {
                 return (false, ());
             }
             row.view = open;
             row.program = program;
-            row.waits = false;
+            row.waits = None;
             (true, ())
         });
     }
 
-    /// Says that the view the terminal's pane had open waits for the person (`waits`) or does
-    /// not any more. A terminal with no view open has nothing to wait.
-    pub fn set_view_waits(&self, account: &str, terminal: &SessionId, waits: bool) {
+    /// Says that the view the terminal's pane had open waits for the person, and why (`waits`,
+    /// `stopped`), or does not any more. A terminal with no view open has nothing to wait.
+    pub fn set_view_waits(&self, account: &str, terminal: &SessionId, waits: Option<WaitCause>) {
         self.change(|rows| {
             let Some(at) = rows.position(account, terminal) else {
                 return (false, ());

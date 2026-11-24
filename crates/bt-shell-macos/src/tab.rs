@@ -286,7 +286,11 @@ impl PaneHost for TabHost {
         crate::hold_service::view_mark(pane)
     }
 
-    fn view_waits(&self, pane: &bt_core::PaneUuid, waits: bool) {
+    fn view_waits(
+        &self,
+        pane: &bt_core::PaneUuid,
+        waits: Option<bt_shell_common::kablo::ledger::WaitCause>,
+    ) {
         crate::hold_service::view_waits(pane, waits);
     }
 

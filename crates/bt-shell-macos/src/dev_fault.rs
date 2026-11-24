@@ -9,8 +9,8 @@
 //!   milliseconds) — the failure the page's boundary cannot meet, and the one the loop is tried
 //!   with;
 //! - `panic`: a Rust panic where the page's frame is built ([`page_delivered`]);
-//! - `exception`: an Objective-C exception raised there (objc2 makes it a panic where it is
-//!   raised, `catch-all`);
+//! - `exception`: an Objective-C exception raised there (caught where it leaves the page's call,
+//!   [`crate::contain`]);
 //! - `keyboard`: the same exception where a field of the page takes the keyboard, inside
 //!   AppKit's `makeFirstResponder` ([`keyboard_handed`]), the chain of the failure that closed
 //!   bateri on 2026-11-23.
@@ -118,7 +118,7 @@ pub(crate) fn keyboard_handed(program: Option<&str>) {
 }
 
 /// An `NSException`, raised as AppKit's own are: it unwinds through whatever Rust frames are on
-/// the stack, unless the message send that raises it was one objc2 wraps (`catch-all`).
+/// the stack to the nearest `@catch`.
 fn raise() {
     let name = NSString::from_str("BateriDevFault");
     let reason = NSString::from_str("a fault the development copy was asked for");
@@ -187,13 +187,20 @@ mod tests {
         assert!(matches(&any, None) && matches(&any, Some("anything")));
     }
 
-    /// The boundary of a page meets what AppKit raises because objc2 makes it a panic where a
-    /// message send raises it (`catch-all`): were it not on, the exception would unwind through
-    /// Rust frames, which Rust cannot catch, and the process would end here.
+    /// The boundary of a page meets what AppKit raises where it leaves the page's call
+    /// ([`crate::contain`], under `catch_unwind`): a foreign exception reaching `catch_unwind`
+    /// itself would end the process, and so the catch for it is the nearest, and a panic passes
+    /// through it to the outer one.
     #[test]
-    fn an_exception_raised_under_a_message_send_is_a_panic_a_boundary_catches() {
-        let caught = std::panic::catch_unwind(raise);
-        assert!(caught.is_err());
+    fn an_exception_raised_under_a_pages_call_is_an_error_its_boundary_returns() {
+        bt_shell_common::native_view::contain_with(crate::contain);
+        let caught = bt_shell_common::native_view::contained(raise);
+        assert!(
+            caught
+                .as_ref()
+                .is_err_and(|words| words.contains("BateriDevFault")),
+            "{caught:?}"
+        );
         // The same where Rust frames lie between the raise and the catch, as in a page's frame.
         fn deep(depth: u32) {
             if depth == 0 {
@@ -202,7 +209,42 @@ mod tests {
                 deep(depth - 1);
             }
         }
-        assert!(std::panic::catch_unwind(|| deep(5)).is_err());
+        assert!(bt_shell_common::native_view::contained(|| deep(5)).is_err());
+        // A panic is the same failure, with its words; what did not fail answers as it does.
+        let panicked = bt_shell_common::native_view::contained(|| panic!("a page's panic"));
+        assert!(panicked.is_err_and(|words| words.contains("a page's panic")));
+        assert_eq!(bt_shell_common::native_view::contained(|| 7), Ok(7));
+    }
+
+    objc2::define_class!(
+        // SAFETY: NSObject is designed for subclassing; the class has no ivars and no `Drop`.
+        #[unsafe(super(objc2::runtime::NSObject))]
+        #[name = "BateriDevFaultProbe"]
+        struct Probe;
+
+        impl Probe {
+            #[unsafe(method(boom))]
+            fn boom(&self) {
+                raise();
+            }
+        }
+    );
+
+    /// What objc2's `catch-all` took away, measured on 0.6.4 (a probe process, `exception` against
+    /// `catch-all`: the one exits 101 where the other keeps the process): an exception raised under
+    /// a method defined here reaches the catcher that stands further out — AppKit's own in its
+    /// event loop, which reports it and goes on. With every message send made a panic it would
+    /// pass that catcher by and end the process; here it would fail this test instead.
+    #[test]
+    fn an_exception_under_a_method_defined_here_reaches_a_catcher_further_out() {
+        use objc2::ClassType;
+        use objc2::msg_send;
+        let object: objc2::rc::Retained<objc2::runtime::NSObject> =
+            unsafe { msg_send![Probe::class(), new] };
+        let reached = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+            let _: () = unsafe { msg_send![&*object, boom] };
+        }));
+        assert!(reached.is_err(), "the outer catcher got no control");
     }
 
     #[test]

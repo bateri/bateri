@@ -85,7 +85,7 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::agent::view::{Held, Shared as AgentSession, Shown as ViewShown};
 use bt_shell_common::apps::card::{Card as NoticeCard, Why};
-use bt_shell_common::kablo::ledger::ViewMark;
+use bt_shell_common::kablo::ledger::{ViewMark, WaitCause};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{Answer, PaneLink, Shown};
 use bt_shell_common::native_view::{
@@ -377,10 +377,10 @@ pub trait PaneHost {
     fn view_mark(&self, _pane: &PaneUuid) -> Option<ViewMark> {
         None
     }
-    /// The view the pane had open waits behind a card for the person (or no longer does): written
-    /// with the view, so that a bateri that is left cleanly with the card unanswered does not
-    /// open it by itself at the next launch.
-    fn view_waits(&self, _pane: &PaneUuid, _waits: bool) {}
+    /// The view the pane had open waits behind a card for the person, and why (or no longer
+    /// does): written with the view, so that a bateri that is left cleanly with the card
+    /// unanswered does not open it by itself at the next launch, and the card then says the same.
+    fn view_waits(&self, _pane: &PaneUuid, _waits: Option<WaitCause>) {}
     /// The program in front of the terminal of this Mac that carries the pane's bytes, as kablo
     /// last said. The default is an owner that keeps no terminals.
     fn local_program(&self, _pane: &PaneUuid) -> Option<String> {
@@ -4330,10 +4330,10 @@ impl TerminalPane {
                 // was the program's view that may have taken bateri with it, and the next launch
                 // would find it open again. The same for one the person was asked about and did
                 // not answer, whichever way the bateri after it was left.
-                if view_waits_at_launch(&mark, self.host().launch_was_unexpected()) {
+                if let Some(why) = hold_at_launch(&mark, self.host().launch_was_unexpected()) {
                     self.hold_view(
                         mark.program,
-                        Why::Quit,
+                        why,
                         held.as_ref().is_some_and(|held| held.resume.is_some()),
                     );
                 }
@@ -8169,7 +8169,7 @@ impl TerminalPane {
             to_program,
             held_back: false,
         }));
-        self.host().view_waits(self.uuid(), true);
+        self.host().view_waits(self.uuid(), Some(wait_of(why)));
     }
 
     fn want_view_card(&self, hold: &ViewHold) {
@@ -8187,7 +8187,7 @@ impl TerminalPane {
         };
         // The ledger stops saying the view waits: if the program takes the offer, its view opens and
         // says what is open; if there is none to take it, nothing would say the card back.
-        self.host().view_waits(self.uuid(), false);
+        self.host().view_waits(self.uuid(), None);
         let Some(session) = self.session().cloned() else {
             return;
         };
@@ -8233,8 +8233,8 @@ impl TerminalPane {
         self.ivars().view_program.borrow().clone()
     }
 
-    /// The page that is up failed ([`PageHandle::guard`]: a panic, or an Objective-C exception that
-    /// became one, in the page's code or in what runs for it). Said from where it was caught, the
+    /// The page that is up failed ([`PageHandle::guard`]: a panic, or an Objective-C exception, in
+    /// the page's code or in what runs for it). Said from where it was caught, the
     /// page's code and its borrows and AppKit's own frames on the stack: nothing is taken down
     /// here, on that stack. The page goes on a later turn of the main queue.
     fn page_failed(&self, words: &str) {
@@ -8273,17 +8273,17 @@ impl TerminalPane {
         let name = self.view_program_name();
         // Taking down is AppKit's work on views that failed once: it is guarded too, and what it
         // cannot let go of is let go of without being used, not given to the process to die of.
-        let down = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let down = bt_shell_common::native_view::contained(|| {
             if program {
                 self.view_gone();
             }
             self.take_page_down();
-        }));
-        if down.is_err() {
-            eprintln!("bateri: the page that failed could not be taken down whole");
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        });
+        if let Err(words) = down {
+            eprintln!("bateri: the page that failed could not be taken down whole: {words}");
+            let _ = bt_shell_common::native_view::contained(|| {
                 drop(self.ivars().page_up.take());
-            }));
+            });
         }
         // A field that held the keyboard may have taken it with it, before it was a field in
         // editing: nothing holds the keyboard then, and the card's ⌃C goes to the terminal.
@@ -9473,11 +9473,33 @@ struct ViewHold {
 }
 
 /// Whether the view the ledger says a pane had open waits for the person where the pane is shown
-/// again, and is not offered a restart by itself: the launch follows a quit that was not expected
-/// (the view was open then, and may be what took bateri with it), or the card that asked was
-/// never answered, whichever way the bateri after it was left.
-fn view_waits_at_launch(mark: &ViewMark, launch_unexpected: bool) -> bool {
-    mark.waits || launch_unexpected
+/// again, and is not offered a restart by itself, and **why** — which is what its card says. The
+/// launch follows a quit that was not expected (the view was open then, and may be what took bateri
+/// with it: [`Why::Quit`]), or the card that asked was never answered, whichever way the bateri
+/// after it was left: it says what the ledger kept, "the view stopped" after a page failed and
+/// "bateri quit unexpectedly" only for an unexpected quit.
+fn hold_at_launch(mark: &ViewMark, launch_unexpected: bool) -> Option<Why> {
+    match mark.waits {
+        Some(wait) => Some(why_of(wait)),
+        None if launch_unexpected => Some(Why::Quit),
+        None => None,
+    }
+}
+
+/// What the ledger keeps of why a view waits.
+fn wait_of(why: Why) -> WaitCause {
+    match why {
+        Why::Quit => WaitCause::Quit,
+        Why::Stopped => WaitCause::Stopped,
+    }
+}
+
+/// What the card says of a view that waits, from what the ledger kept.
+fn why_of(wait: WaitCause) -> Why {
+    match wait {
+        WaitCause::Quit => Why::Quit,
+        WaitCause::Stopped => Why::Stopped,
+    }
 }
 
 fn owed_offer(owed: &Resume, shown: &Shown, view: Option<State>) -> Owed {
@@ -10514,32 +10536,135 @@ mod tests {
         );
     }
 
-    /// What the ledger says of a view and how the launch was reached decide whether it waits.
+    /// What the ledger says of a view and how the launch was reached decide whether it waits, and
+    /// which of its two cards it has: the one for a view whose page stopped is not the one for a
+    /// quit that was not expected, whichever way the bateri after it was left.
     #[test]
-    fn a_view_waits_after_an_unexpected_quit_or_an_unanswered_card_and_not_otherwise() {
+    fn a_view_waits_after_an_unexpected_quit_or_an_unanswered_card_and_says_which() {
+        use super::{WaitCause, Why};
         let open = super::ViewMark {
             program: Some("linearpen".to_owned()),
-            waits: false,
+            waits: None,
         };
         let asked = super::ViewMark {
-            waits: true,
+            waits: Some(WaitCause::Quit),
+            ..open.clone()
+        };
+        let stopped = super::ViewMark {
+            waits: Some(WaitCause::Stopped),
             ..open.clone()
         };
         // After a clean quit, or an update's relaunch, or a connection that came back in a run
         // that was fine (which never comes here at all): the view is offered a restart by itself.
-        assert!(!super::view_waits_at_launch(&open, false));
-        // After any unexpected quit — a crash, a forced quit, a power cut — it waits.
-        assert!(super::view_waits_at_launch(&open, true));
-        // A card nobody answered keeps it waiting through a quit that was clean.
-        assert!(super::view_waits_at_launch(&asked, false));
+        assert_eq!(super::hold_at_launch(&open, false), None);
+        // After any unexpected quit — a crash, a forced quit, a power cut — it waits, and the
+        // card says the quit.
+        assert_eq!(super::hold_at_launch(&open, true), Some(Why::Quit));
+        // A card nobody answered keeps it waiting through a quit that was clean, saying what it
+        // said: the quit for one that asked after a quit, "stopped" for a page that failed.
+        assert_eq!(super::hold_at_launch(&asked, false), Some(Why::Quit));
+        assert_eq!(super::hold_at_launch(&stopped, false), Some(Why::Stopped));
+        // A page that stopped and a bateri that then quit unexpectedly: it did stop.
+        assert_eq!(super::hold_at_launch(&stopped, true), Some(Why::Stopped));
+        // And only a quit that was not expected says "quit unexpectedly".
+        assert_eq!(super::hold_at_launch(&open, false), None);
         // A row an earlier bateri wrote has no name and is the same.
         let nameless = super::ViewMark {
             program: None,
-            waits: false,
+            waits: None,
         };
+        assert_eq!(super::hold_at_launch(&nameless, true), Some(Why::Quit));
+        assert_eq!(super::hold_at_launch(&nameless, false), None);
+        // What the ledger keeps is what the card says, both ways round.
+        for why in [Why::Quit, Why::Stopped] {
+            assert_eq!(super::why_of(super::wait_of(why)), why);
+        }
+        // And the words are the card's: the title of the one for a stopped page says so after a
+        // clean quit as well.
+        let card =
+            bt_shell_common::apps::card::Card::for_waiting_view(Some("linearpen"), Why::Stopped);
+        assert_eq!(card.title(), "linearpen\u{2019}s view stopped.");
+        let card =
+            bt_shell_common::apps::card::Card::for_waiting_view(Some("linearpen"), Why::Quit);
+        assert_eq!(
+            card.title(),
+            "linearpen was open when bateri quit unexpectedly."
+        );
+    }
+
+    /// The legs of a view that waits that the kept terminal of this Mac does not have: the one a
+    /// server keeps (its restart is owed until the server says the program is there, and goes
+    /// through the same gate, and the card's answer offers it to the program and not to a shell)
+    /// and the pane that has no terminal kept (the program's end is its conversation's). Each
+    /// ends in the same place: the card and the ledger's mark go with the program, and nothing
+    /// else ends them. Source scans, because the panes need a window server; what they do not
+    /// say — the sequences — the pure parts do ([`hold_at_launch`], [`owed_offer`]), and kablo's
+    /// news of a program of this Mac's terminals is a test of its own
+    /// (`a_pane_of_this_mac_is_told_once_when_the_program_in_front_of_its_terminal_changes`).
+    #[test]
+    fn a_view_that_waits_on_a_server_or_without_a_kept_terminal_ends_with_its_program_too() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |signature: &str| {
+            let at = pane
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        // The server's leg. Born holding, with the restart owed to the program, not offered now.
+        let born = pane
+            .find("let shown_again = session.is_shown_again();")
+            .expect("the terminal shown again");
+        let born = &pane[born..born
+            + pane[born..]
+                .find("nudge_program(&session);")
+                .expect("nudge")];
+        let held = born.find("self.hold_view(").expect("held at launch");
+        assert!(born[held..].contains("held.as_ref().is_some_and(|held| held.resume.is_some())"));
         assert!(
-            super::view_waits_at_launch(&nameless, true)
-                && !super::view_waits_at_launch(&nameless, false)
+            born.contains("self.ivars().view_owed.replace(Some(resume))"),
+            "{born}"
+        );
+        // Paid by the server's word, through the gate and as an offer to the program; a program
+        // that is not there ends the hold, and the card's answer offers the same way.
+        let owed = body_of("    fn offer_owed_view(");
+        assert!(
+            owed.contains("Owed::Offer => self.restart_view_offered(&session, Session::restart_view_to_program)"),
+            "{owed}"
+        );
+        assert!(owed.contains("Owed::ProgramGone"), "{owed}");
+        let reopen = body_of("    pub(crate) fn reopen_view(");
+        assert!(reopen.contains("hold.to_program"), "{reopen}");
+        // The server's word is the news that ends the card of a program that is not there.
+        let news = body_of("    pub fn server_program_changed(");
+        assert!(news.find("self.offer_owed_view()") < news.find("self.check_view_hold()"));
+        let hold_service = include_str!("hold_service.rs");
+        let told = &hold_service[hold_service.find("fn program_changed(").expect("the news")..];
+        assert!(
+            told[..told.find("\n}\n").expect("its end")].contains("pane.server_program_changed()")
+        );
+        // Where the terminal is kept (here or on a server) the card goes when the shell is in
+        // front: the server's word, or the shell kablo says is in front of this Mac's terminal.
+        let check = body_of("    fn check_view_hold(");
+        assert!(check.contains("kept_terminal(self.uuid())"), "{check}");
+        assert!(check.contains("program_fresh"), "{check}");
+        assert!(check.contains("local_program(self.uuid())"), "{check}");
+        // A pane with no terminal kept has the conversation's own end: the command ending, which
+        // is the session's `Action::DestroyView`, and that ends the hold with the view.
+        assert!(
+            body_of("    pub(crate) fn drain_views(")
+                .contains("Action::DestroyView => self.end_view()")
+        );
+        let end = body_of("    fn end_view(");
+        assert!(
+            end.find("self.end_view_hold()") < end.find("self.program_page_up()"),
+            "{end}"
+        );
+        // Nothing but these ends a hold: the ledger and the card go in the one function.
+        assert_eq!(
+            pane.matches("self.end_view_hold()").count(),
+            4,
+            "its callers"
         );
     }
 
@@ -10579,9 +10704,13 @@ mod tests {
             + pane[born..]
                 .find("nudge_program(&session);")
                 .expect("nudge")];
-        assert!(born.contains("view_waits_at_launch(&mark, self.host().launch_was_unexpected())"));
+        assert!(born.contains("hold_at_launch(&mark, self.host().launch_was_unexpected())"));
         assert!(born.contains("self.hold_view("));
-        assert!(body_of("    fn hold_view(").contains("self.host().view_waits(self.uuid(), true)"));
+        // What the ledger keeps is why the card waits, so that the next launch says the same.
+        assert!(
+            body_of("    fn hold_view(")
+                .contains("self.host().view_waits(self.uuid(), Some(wait_of(why)))")
+        );
         // Gone with the program: the server's word that a shell is in front, the shell speaking
         // after kablo says so, the conversation ending; a program that is not there when the
         // server answers; another view opening.
@@ -10665,7 +10794,8 @@ mod tests {
             assert!(!down.contains(told), "{told}: {down}");
         }
         assert!(down.contains("self.take_page_down()"), "{down}");
-        assert!(down.contains("catch_unwind"), "{down}");
+        assert!(down.contains("native_view::contained("), "{down}");
+        assert!(!down.contains("catch_unwind"), "{down}");
         // Only the page that failed, not one a view that began since put up; and the keyboard it
         // may have taken with it goes back to the terminal.
         assert!(down.contains("handle.failed()"), "{down}");

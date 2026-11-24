@@ -174,6 +174,19 @@ pub fn settings_title_problems(mtm: MainThreadMarker) -> Option<Vec<String>> {
     settings_window::SettingsWindow::new(mtm).title_problems()
 }
 
+/// An Objective-C exception that unwinds out of `body` is an error, and nothing else is touched:
+/// a panic passes through (the page's boundary catches it), and an exception raised anywhere
+/// else is left to whoever catches it — AppKit's own catcher in its event loop keeps the process,
+/// where objc2's `catch-all` (every message send made a panic) ended it
+/// (measured on objc2 0.6.4: the process exits 101 where `exception` alone survives).
+pub(crate) fn contain(body: &mut dyn FnMut()) -> Result<(), String> {
+    match objc2::exception::catch(std::panic::AssertUnwindSafe(body)) {
+        Ok(()) => Ok(()),
+        Err(Some(exception)) => Err(format!("uncaught exception {exception:?}")),
+        Err(None) => Err("uncaught exception nil".to_owned()),
+    }
+}
+
 /// The profile this copy of the application names in its `Info.plist` (`BateriProfile`): a
 /// development copy's (`make dev`) settings are its own
 /// ([`bt_shell_common::settings::profile_root`]). `None` for the application itself, and for a
@@ -445,6 +458,9 @@ pub struct Options {
 pub fn run(opts: Options) -> Result<(), GpuError> {
     // audit: entry point; being called from outside the main thread is a programming error.
     let mtm = MainThreadMarker::new().expect("bt_shell_macos::run runs on the main thread");
+    // Before the first page: what a page's code makes AppKit raise is caught where it leaves the
+    // page's call ([`contain`]).
+    bt_shell_common::native_view::contain_with(contain);
     // The startup stamp must be taken **before** the first renderer (first
     // window), and the type enforces it: `Options` carries an `Instant`, not
     // a flag.
