@@ -1285,6 +1285,60 @@ fn what_was_typed_for_a_suspended_terminal_waits_and_goes_when_it_streams_again(
     assert_eq!(rig.client.input_waiting(&terminal), 0);
 }
 
+/// A connection lost while a terminal is stopped for now forgets what waited for it as it does
+/// for the terminals that stream: nothing is typed late, and the window is empty when it streams
+/// again, so that the next key goes at once.
+#[test]
+fn a_lost_connection_forgets_what_a_suspended_terminal_was_typed_too() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    let paste = vec![b'x'; 2 * WINDOW];
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    rig.client.suspend(&terminal);
+    rig.pump();
+    assert!(rig.client.input_waiting(&terminal) > 0);
+
+    rig.drop_connection();
+    assert_eq!(rig.client.input_waiting(&terminal), 0, "not typed late");
+    rig.redial();
+    rig.pump();
+    assert!(!rig.client.is_attached(&terminal), "it stays stopped");
+    assert!(rig.client.resume(&terminal));
+    rig.pump();
+    let before = typed_so_far(&rig, &terminal);
+    assert!(rig.client.input(&terminal, b"k"));
+    rig.pump();
+    assert_eq!(
+        typed_so_far(&rig, &terminal),
+        before + 1,
+        "the window is open"
+    );
+}
+
+/// The server's refusal of what a pane that is let go of said ([`Client::suspend`]: an attach it
+/// could not serve, and what followed it) does not fail the terminal, which the pane's holder
+/// would end with a line.
+#[test]
+fn a_refusal_of_what_was_said_to_a_suspended_terminal_does_not_fail_it() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.client.suspend(&terminal);
+    rig.pump();
+    rig.take();
+    for code in [ErrorCode::UNAVAILABLE, ErrorCode::NOT_ATTACHED] {
+        rig.bridge
+            .inject(&Packet::error(Some(terminal.clone()), code, "refused"));
+    }
+    rig.pump();
+    assert!(
+        rig.take()
+            .iter()
+            .all(|event| !matches!(event, Event::Failed { .. })),
+        "a terminal that is stopped for now is not failed"
+    );
+    assert!(rig.client.resume(&terminal), "it is as it was");
+}
+
 #[test]
 fn an_answer_that_is_not_one_of_ours_gives_the_window_nothing() {
     let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");

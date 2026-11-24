@@ -1760,6 +1760,11 @@ impl Client {
                     terminal.unavailable = terminal.unavailable.saturating_add(1);
                 }
             }
+            // What a pane that is let go of said to its terminal, behind a stream asked for and
+            // stopped again ([`Client::suspend`]), was not served (the server could not answer the
+            // attach, and what followed was refused for it): it is lost as input is that is lost on
+            // the way, and the terminal is as it was, not failed.
+            (ErrorCode::UNAVAILABLE | ErrorCode::NOT_ATTACHED, Some(Phase::Detached)) => {}
             // A terminal the server will not make, will not attach (an offset past
             // its end, a size it cannot have) or does not have.
             (_, Some(Phase::Creating))

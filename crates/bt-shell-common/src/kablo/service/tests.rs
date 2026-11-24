@@ -5994,6 +5994,33 @@ fn the_time_a_pane_may_take_nothing_is_well_under_the_time_the_relay_waits_for_a
         .map(Duration::from_secs)
         .or_else(|| number("from_millis(").map(Duration::from_millis))
         .unwrap_or_else(|| panic!("a STALL_LIMIT this cannot read: {limit}"));
+    // The limit is read from the source at the pinned revision; the relay that runs in the heavy
+    // tests is the release the sibling repository built. Said to be one and the same, or said
+    // not to have been compared.
+    let source_version = relay
+        .ancestors()
+        .nth(4)
+        .and_then(|root| std::fs::read_to_string(root.join("Cargo.toml")).ok())
+        .and_then(|manifest| {
+            let package = manifest.split("[workspace.package]").nth(1)?;
+            let version = package.lines().find(|line| line.starts_with("version"))?;
+            Some(version.split('"').nth(1)?.to_owned())
+        })
+        .expect("the version of the kablo at the pinned revision");
+    let dist = std::env::var_os("KABLO_DIST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest.join("../../../kablo/dist"));
+    match crate::kablo::install::Bundle::open(&dist) {
+        Ok(bundle) => assert_eq!(
+            bundle.version(),
+            source_version,
+            "the relay the heavy tests run is not the one whose STALL_LIMIT was read"
+        ),
+        Err(_) => eprintln!(
+            "NOT COMPARED: no kablo release to run ({}); the limit was read from the source of {source_version}",
+            dist.display()
+        ),
+    }
     assert!(
         3 * HOLD_STALL <= limit,
         "HOLD_STALL is {HOLD_STALL:?} and kablo's relay waits for a client {limit:?}: at 1.1 s against a second the slow pane beside a stuck one was given a picture three times in three"
