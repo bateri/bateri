@@ -11,8 +11,9 @@
 //! - `panic`: a Rust panic where the page's frame is built ([`page_delivered`]);
 //! - `exception`: an Objective-C exception raised there (objc2 makes it a panic where it is
 //!   raised, `catch-all`);
-//! - `keyboard`: the same exception where the keyboard is handed to a field of the page
-//!   ([`keyboard_handed`]), the chain of the failure that closed bateri on 2026-11-23.
+//! - `keyboard`: the same exception where a field of the page takes the keyboard, inside
+//!   AppKit's `makeFirstResponder` ([`keyboard_handed`]), the chain of the failure that closed
+//!   bateri on 2026-11-23.
 //!
 //! **Only a copy whose profile is named `dev…` reads it:** the application itself has no such
 //! door, whatever its environment says.
@@ -34,7 +35,7 @@ pub(crate) enum Kind {
     Panic,
     /// An Objective-C exception where the page's frame is built.
     Exception,
-    /// An Objective-C exception where the keyboard is handed to a field of the page.
+    /// An Objective-C exception where a field of the page takes the keyboard.
     Keyboard,
 }
 
@@ -106,8 +107,9 @@ pub(crate) fn page_delivered(program: Option<&str>) {
     }
 }
 
-/// The keyboard is being handed to a field of the page of `program`: the exception of the chain of
-/// 2026-11-23, raised in `makeFirstResponder`'s place, when the plan says one.
+/// A field of the page of `program` is taking the keyboard (its `becomeFirstResponder`, which
+/// AppKit's `makeFirstResponder` calls): the exception of the chain of 2026-11-23, raised where
+/// the superclass's own call is, when the plan says one.
 pub(crate) fn keyboard_handed(program: Option<&str>) {
     if fires(Kind::Keyboard, program) {
         eprintln!("bateri: dev fault: an Objective-C exception where the keyboard is handed over");

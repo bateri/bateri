@@ -739,8 +739,6 @@ impl PageFields {
         let Some(window) = pane.window() else {
             return;
         };
-        // A development copy told to fail the keyboard's handover does it here.
-        crate::dev_fault::keyboard_handed(pane.view_program_name().as_deref());
         self.moving.set(true);
         match to.and_then(|id| self.field(id)) {
             Some(field) => {
@@ -919,6 +917,16 @@ fn guarded<R>(ivars: &PageTextFieldIvars, what: &str, otherwise: R, body: impl F
     }
 }
 
+/// What the program whose view the field is in calls itself, for what is made to fail by name.
+fn program_of(ivars: &PageTextFieldIvars) -> Option<String> {
+    ivars
+        .fields
+        .borrow()
+        .upgrade()
+        .and_then(|fields| fields.pane.load())
+        .and_then(|pane| pane.view_program_name())
+}
+
 /// The keyboard came to a field (the person clicked into it, or the page sent it) and AppKit's own
 /// `becomeFirstResponder` says whether it `took` it: the page's fields are told which.
 fn keyboard_came(ivars: &PageTextFieldIvars, took: bool) {
@@ -983,9 +991,16 @@ macro_rules! page_field_class {
                 /// The keyboard comes to the field: the page's fields are told which.
                 #[unsafe(method(becomeFirstResponder))]
                 fn become_first_responder(&self) -> bool {
-                    // SAFETY: the superclass's own `becomeFirstResponder`, which takes nothing and
-                    // answers whether the field took the keyboard.
-                    let took: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+                    // The superclass's own call is where AppKit raised on 2026-11-23: it is in the
+                    // page's boundary, and a failure of it is a field that did not take the keyboard.
+                    let took = guarded(self.ivars(), "a field's keyboard", false, || {
+                        // A development copy told to fail the keyboard's handover does it here,
+                        // where AppKit's own chain does (`makeFirstResponder` calls this).
+                        crate::dev_fault::keyboard_handed(program_of(self.ivars()).as_deref());
+                        // SAFETY: the superclass's own `becomeFirstResponder`, which takes nothing
+                        // and answers whether the field took the keyboard.
+                        unsafe { msg_send![super(self), becomeFirstResponder] }
+                    });
                     if took {
                         // Taken by a press of the main button: that press's own end must not undo
                         // what the page selects in answer to the keyboard coming (`mouse_down`).
@@ -1016,9 +1031,13 @@ macro_rules! page_field_class {
                     if had_the_keyboard {
                         self.ivars().asked.set(None);
                     }
-                    // SAFETY: the superclass's own `mouseDown:`, which takes the event and tracks
-                    // the press until the button is up.
-                    let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+                    // In the page's boundary, as `becomeFirstResponder` is: the press's tracking is
+                    // AppKit's and so is what it raises.
+                    guarded(self.ivars(), "a press in a field", (), || {
+                        // SAFETY: the superclass's own `mouseDown:`, which takes the event and
+                        // tracks the press until the button is up.
+                        let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+                    });
                     if !had_the_keyboard {
                         guarded(self.ivars(), "a press in a field", (), || {
                             keep_asked_selection(self, self.ivars(), down);

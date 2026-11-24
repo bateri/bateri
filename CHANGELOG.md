@@ -14,7 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
-- **A program's view that fails no longer closes bateri.** The view stops behind a small card with one button, Reopen; the program keeps running and your other tabs and panes carry on.
+- **A program's view that fails while it draws, reads the keyboard or speaks no longer closes bateri.** The view stops behind a small card with one button, Reopen; the program keeps running and your other tabs and panes carry on.
 - **A crash no longer reopens the program that caused it.** If bateri quits unexpectedly, the views that were open come back behind a small card with one button, Reopen, instead of opening again by themselves and crashing again. After two launches that never settled, bateri keeps your windows and offers to open them with one button.
 
 ## [0.33.0] - 2026-11-24

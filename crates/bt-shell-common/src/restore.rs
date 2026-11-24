@@ -71,7 +71,7 @@
 //! layout alone, without histories, while bateri runs — the way back after a crash that
 //! left no saved session.
 //!
-//! **The attempt marker** ([`bump_attempt`], [`attempt_mode`]) counts the launches that read the
+//! **The attempt marker** ([`begin_launch`], [`attempt_mode`]) counts the launches that read the
 //! session and never settled — a restore that crashes the launch would otherwise crash every
 //! launch after it, since the layout stays. The second attempt reads what went through a parser
 //! in the launch before again from nothing — no history, and the terminals kablo keeps come back
@@ -79,7 +79,7 @@
 //! with ⇧ held does, and the terminals wait for a later one. The marker is application state like
 //! the Recent: the sweep and the clears leave it. It also says that a launch **is running**
 //! ([`begin_launch`]): settling resets the count and leaves that word, and only a clean quit
-//! removes the marker ([`clear_attempt`]) — so the launch after a crash that came after the
+//! removes the marker ([`clear_attempt_in`]) — so the launch after a crash that came after the
 //! settling is known for it too ([`Before::unexpected`]), which the count alone never showed.
 //!
 //! Pure except the file bodies, which are thin; it sees no AppKit (the `split`/`zoom`
@@ -1606,7 +1606,7 @@ pub fn clear(lock: &Lock) -> io::Result<()> {
 const ATTEMPT: &str = "restore-attempt";
 
 /// What a launch does with the saved session, from the launches before it that read it and never
-/// settled ([`bump_attempt`]'s answer).
+/// settled ([`begin_launch`]'s answer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttemptMode {
     /// The first attempt: everything comes back.
@@ -1705,11 +1705,6 @@ pub fn begin_launch(lock: &Lock, counted: bool) -> Before {
     }
 }
 
-/// Counts one more attempt and returns the count before it ([`begin_launch`]).
-pub fn bump_attempt(lock: &Lock) -> u32 {
-    begin_launch(lock, true).count
-}
-
 /// The launch settled (or gave the session up): what it restored did not crash it, so the count
 /// goes back to nothing — and the launch is still running, so that a crash after this is a
 /// crash the next one knows of.
@@ -1721,13 +1716,8 @@ pub fn settle_attempt(lock: &Lock) {
     let _ = write_atomic(&lock.dir.join(ATTEMPT), now.render().as_bytes());
 }
 
-/// Removes the marker: bateri quit cleanly.
-pub fn clear_attempt(lock: &Lock) {
-    clear_attempt_in(&lock.dir);
-}
-
-/// [`clear_attempt`] where the directory's lock is not held any more (a launch that gave the
-/// session up lets go of it, and quits as cleanly as any).
+/// Removes the marker: bateri quit cleanly. By the directory, since the lock is let go of at the
+/// quit's save (and a launch that gave the session up never held it).
 pub fn clear_attempt_in(dir: &Path) {
     let _ = fs::remove_file(dir.join(ATTEMPT));
 }
@@ -3298,7 +3288,7 @@ mod tests {
         clear_attempt_in(lock.dir());
         assert_eq!(begin_launch(&lock, true), before(0, false));
         // A launch that does not read the session is running and is not counted.
-        clear_attempt(&lock);
+        clear_attempt_in(lock.dir());
         assert_eq!(begin_launch(&lock, false), before(0, false));
         assert_eq!(
             fs::read_to_string(&attempt).expect("marker"),
@@ -3329,6 +3319,11 @@ mod tests {
         assert!(attempt.exists());
     }
 
+    /// One more counted launch: the count before it.
+    fn bump_attempt(lock: &Lock) -> u32 {
+        begin_launch(lock, true).count
+    }
+
     #[test]
     fn the_attempt_marker_counts_until_cleared_and_outlasts_the_layouts_clears() {
         let root = TempRoot::new("restore-attempt");
@@ -3342,8 +3337,8 @@ mod tests {
         clear(&lock).expect("clear");
         assert_eq!(bump_attempt(&lock), 2);
         assert_eq!(bump_attempt(&lock), 3);
-        clear_attempt(&lock);
-        clear_attempt(&lock);
+        clear_attempt_in(lock.dir());
+        clear_attempt_in(lock.dir());
         assert_eq!(bump_attempt(&lock), 0);
         fs::write(lock.dir().join(ATTEMPT), b"garbage").expect("garbage");
         assert_eq!(

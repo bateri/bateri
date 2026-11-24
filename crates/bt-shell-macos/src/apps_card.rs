@@ -387,8 +387,12 @@ fn remove(mtm: MainThreadMarker, account: &str) {
     let Some(open) = with(|cards| cards.open.remove(account)) else {
         return;
     };
+    // The corner is cleared only if it is still this card's: a notice may have taken it since.
     if let Some(app) = app::delegate(mtm)
         && let Some(pane) = app.all_panes().into_iter().find(|p| p.id() == open.pane)
+        && pane.corner_card_view().is_some_and(|corner| {
+            Retained::as_ptr(&corner).cast::<()>() == Retained::as_ptr(&open.view).cast::<()>()
+        })
     {
         pane.set_corner_card(None);
     }
@@ -623,12 +627,9 @@ fn on_server(ssh: &[String], host: &str, words: &[String]) -> Result<(), String>
 /// The account of the card over a pane of `tab`, when it asks: Shell ▸ Install Programs Here
 /// (⌘Return) and Don't Install Programs Here (⌘Escape) act on it. `install` wants a box checked.
 pub(crate) fn asking_in(tab: &TerminalTab, install: bool) -> Option<String> {
-    // A notice has its one answer, which is what ⌘Return is; it has no second one for ⌘Escape.
-    if install && let Some(account) = notice::asking_in(tab) {
-        return Some(account);
-    }
     // The card over the pane the person is in comes first, then the others in the tab's order: two
-    // servers in one tab each have a card, and the keys are for the one they look at.
+    // servers in one tab each have a card, and the keys are for the one they look at. A pane's
+    // notice is its card here: it has one answer, which is what ⌘Return is, and none for ⌘Escape.
     let focused = tab.focused_pane().id();
     let mut order: Vec<u64> = vec![focused];
     order.extend(
@@ -637,8 +638,11 @@ pub(crate) fn asking_in(tab: &TerminalTab, install: bool) -> Option<String> {
             .map(|pane| pane.id())
             .filter(|id| *id != focused),
     );
-    with(|cards| {
-        order.iter().find_map(|id| {
+    order.iter().find_map(|id| {
+        if install && let Some(account) = notice::asking_in_pane(*id) {
+            return Some(account);
+        }
+        with(|cards| {
             cards.open.iter().find_map(|(account, open)| {
                 (open.pane == *id
                     && open.card.stage() == Stage::Ask

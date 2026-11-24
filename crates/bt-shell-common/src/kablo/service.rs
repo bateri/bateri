@@ -3038,10 +3038,16 @@ impl Core {
         // A terminal of this Mac has no kind to tell, but what is in front of it is news too: a
         // program's view that waits for the person is over when the program is.
         let told = std::mem::replace(&mut self.local_told, local_told);
-        for pane in self.local_told.keys().chain(told.keys()) {
+        for pane in self.local_told.keys() {
             if told.get(pane) != self.local_told.get(pane) {
                 self.shared.backend.program_changed(pane);
             }
+        }
+        for pane in told
+            .keys()
+            .filter(|pane| !self.local_told.contains_key(*pane))
+        {
+            self.shared.backend.program_changed(pane);
         }
         self.write_background();
     }

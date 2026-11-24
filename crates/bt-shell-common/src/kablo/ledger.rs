@@ -94,7 +94,8 @@ use crate::ssh_wrap::KabloHost;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-kablo";
 
-/// The format's newest version: the one that says where an account's kablo is.
+/// The version that says where an account's kablo is. A ledger is written as the newest only when
+/// it needs it: [`NAMED`] for one with a view that carries its program's name or its wait.
 pub const VERSION: u32 = 3;
 
 /// The version that can hold a view's program name and the wait of the view ([`Row::program`],
@@ -728,6 +729,7 @@ impl Ledger {
     }
 
     /// Whether the terminal's pane had a view open when it was last said.
+    #[cfg(test)]
     pub fn view_of(&self, account: &str, terminal: &SessionId) -> bool {
         self.read(|rows| {
             rows.position(account, terminal)

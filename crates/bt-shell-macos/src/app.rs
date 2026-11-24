@@ -643,8 +643,8 @@ fn gone_with_its_terminal(pane: &SavedPane, start: &Launch, terminal_here: bool)
 }
 
 /// How long after the first windows are built a launch counts as settled
-/// ([`AppDelegate::settled`]): the layout starts going to disk and the attempt marker goes
-/// ([`restore::clear_attempt`]). Not counted in
+/// ([`AppDelegate::settled`]): the layout starts going to disk and the attempt count goes back to
+/// nothing ([`restore::settle_attempt`]). Not counted in
 /// frames — a background tab, a pane hidden by a zoom or a sleeping display
 /// draws none, and a launch with two tabs would never settle. What can still
 /// crash a launch after its windows are built is the readers parsing the past
@@ -4678,7 +4678,8 @@ impl AppDelegate {
                              wait for the person to open them"
                         );
                         // Nothing of the session is read, so nothing of it can crash this launch:
-                        // the next one reads it all again (or the person opens it now).
+                        // the next one reads it all again, its views behind their cards (or the
+                        // person opens it now: `open_given_up_windows`).
                         restore::settle_attempt(lock);
                         self.ivars().skip_restore.set(true);
                         self.ivars().gave_up.set(true);
@@ -4952,44 +4953,44 @@ impl AppDelegate {
         Some((launch, theme))
     }
 
-    /// Session restore's save, at the head of
-    /// [`AppDelegate::shutdown`], before any pane closes. **One-shot**: it
-    /// takes the lock — a second `shutdown` would find sessionless panes and
-    /// overwrite the save with nothing. `restore_windows = "off"` deletes what
-    /// is left; `"layout"` saves without scrollback; `"all"` with it. No
-    /// window → nothing to restore, deleted ([`restore::save`]). Without a lock
-    /// (timed run, unbundled, another instance) nothing is touched.
     /// The attempt marker of this launch goes ([`restore::clear_attempt_in`]): the launch after
-    /// this one is told that the bateri before it quit cleanly.
+    /// this one is told that the bateri before it quit cleanly. After the save, so that a quit that
+    /// dies in it is no clean one.
+    ///
+    /// **Not by a launch that gave the windows up and was not asked to open them**: it quits with
+    /// them as unread as it found them, so the launch after it follows what the ones before did and
+    /// holds the views behind their cards, as it would have the launch before this one.
     fn mark_clean_quit(&self) {
-        if let Some(dir) = self.ivars().attempt_dir.take() {
+        if let Some(dir) = self.ivars().attempt_dir.take()
+            && !self.ivars().gave_up.get()
+        {
             restore::clear_attempt_in(&dir);
         }
     }
 
     /// **Open Them** on the card of a launch that gave the windows up: it is a launch like any
-    /// that reads the session — counted until it settles, read, its windows opened (the views in
+    /// that reads the session — counted until it settles (the count the giving up reset is none, so
+    /// it reads everything as a first attempt does), read, its windows opened (the views in
     /// them wait for the person, as they do after any unexpected quit) — and from here the
-    /// layout is written again. Nothing happens where another bateri holds the session's lock.
+    /// layout is written again, once it settles. Nothing happens where another bateri holds the
+    /// session's lock.
     pub(crate) fn open_given_up_windows(&self) {
         if !self.ivars().gave_up.replace(false) {
             return;
         }
-        // The launch let go of the lock for the save at quit, or still holds it: either way it is
-        // taken again here, by one handle.
+        // The launch never held the lock past its first window: it is taken here, by one handle.
         drop(self.ivars().restore_lock.take());
         let Some(lock) = self.restore_lock() else {
             self.ivars().gave_up.set(true);
             return;
         };
-        let before = restore::begin_launch(&lock, true);
+        restore::begin_launch(&lock, true);
         self.ivars()
             .attempt_dir
             .replace(Some(lock.dir().to_owned()));
-        if restore::attempt_mode(before.count) != restore::AttemptMode::Normal {
-            self.ivars().safe_restore.set(true);
-            crate::hold_service::without_past();
-        }
+        // The launch that gave up settled, and so the layout was let go to disk: what these windows
+        // are is not settled until they are.
+        self.ivars().layout_writer.set(false);
         self.ivars().skip_restore.set(false);
         let opened = self
             .take_saved(lock)
@@ -5002,12 +5003,17 @@ impl AppDelegate {
         self.settle_later();
     }
 
+    /// Session restore's save, at the head of
+    /// [`AppDelegate::shutdown`], before any pane closes. **One-shot**: it
+    /// takes the lock — a second `shutdown` would find sessionless panes and
+    /// overwrite the save with nothing. `restore_windows = "off"` deletes what
+    /// is left; `"layout"` saves without scrollback; `"all"` with it. No
+    /// window → nothing to restore, deleted ([`restore::save`]). Without a lock
+    /// (timed run, unbundled, another instance) nothing is touched.
     fn save_session(&self) {
         let Some(lock) = self.ivars().restore_lock.take() else {
             return;
         };
-        // A clean quit is no crash of a restore.
-        restore::clear_attempt(&lock);
         // `"off"` is no windows coming back — but the terminals this quit keeps running need
         // windows to be shown in: their layout is saved, without scrollback.
         let keeps = !self.ivars().end_kept.get() && self.any_kept_terminal();
@@ -10476,7 +10482,7 @@ mod tests {
         assert!(said < read && windows.contains("restore::follows_unexpected_quit("));
         assert!(body_of("    fn settled(").contains("restore::settle_attempt("));
         assert!(!body_of("    fn settled(").contains("clear_attempt"));
-        assert!(body_of("    fn save_session(").contains("restore::clear_attempt("));
+        assert!(!body_of("    fn save_session(").contains("clear_attempt"));
         // The quit clears the marker by the directory, right after the save and not inside it.
         let shutdown = body_of("    fn shutdown(");
         assert!(

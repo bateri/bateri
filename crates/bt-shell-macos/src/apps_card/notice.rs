@@ -30,7 +30,6 @@ use objc2::rc::Retained;
 use super::Act;
 use super::view::{self, CardView, Target};
 use crate::app;
-use crate::tab::TerminalTab;
 
 /// What the notice is about, and so what its answer does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,22 +182,14 @@ pub(crate) fn pane_resized(mtm: MainThreadMarker, id: u64) {
     });
 }
 
-/// The account of the notice over a pane of `tab`, the pane the person is in first: Shell ▸
-/// Install Programs Here (⌘Return) answers it.
-pub(crate) fn asking_in(tab: &TerminalTab) -> Option<String> {
-    let focused = tab.focused_pane().id();
-    let mut order = vec![focused];
-    order.extend(
-        tab.panes()
-            .iter()
-            .map(|pane| pane.id())
-            .filter(|id| *id != focused),
-    );
+/// The account of the notice over pane `id`, when it is up: Shell ▸ Install Programs Here
+/// (⌘Return) answers it, in the order the panes of a tab are asked ([`super::asking_in`]).
+pub(crate) fn asking_in_pane(id: u64) -> Option<String> {
     with(|notices| {
-        order
-            .iter()
-            .find(|id| notices.get(id).is_some_and(|entry| entry.made.is_some()))
-            .map(|id| account_of(*id))
+        notices
+            .get(&id)
+            .is_some_and(|entry| entry.made.is_some())
+            .then(|| account_of(id))
     })
 }
 

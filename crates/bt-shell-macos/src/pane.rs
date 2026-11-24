@@ -8185,6 +8185,9 @@ impl TerminalPane {
         let Some(hold) = self.ivars().view_hold.take() else {
             return;
         };
+        // The ledger stops saying the view waits: if the program takes the offer, its view opens and
+        // says what is open; if there is none to take it, nothing would say the card back.
+        self.host().view_waits(self.uuid(), false);
         let Some(session) = self.session().cloned() else {
             return;
         };
@@ -8201,7 +8204,7 @@ impl TerminalPane {
     /// is not known to be newer than the view's own start (a program that has just started is
     /// still "zsh" for a moment), and a card that went because of a stale word leaves a view
     /// nobody opens again.
-    pub(crate) fn check_view_hold(&self) {
+    fn check_view_hold(&self) {
         if !self
             .ivars()
             .view_hold
@@ -8261,13 +8264,15 @@ impl TerminalPane {
     /// is taken and not answered ([`TerminalPane::drain_views`]).
     fn take_failed_page_down(&self) {
         self.ivars().page_failure.set(false);
-        if self.is_closed() || self.ivars().page_up.borrow().is_none() {
+        // Only a page that failed: the one that did may be gone already (its view ended and
+        // another began before this turn), and the one that is up is whole.
+        if self.is_closed() || !self.page_handle().is_some_and(|handle| handle.failed()) {
             return;
         }
         let program = self.program_page_up();
         let name = self.view_program_name();
         // Taking down is AppKit's work on views that failed once: it is guarded too, and what it
-        // cannot let go of is left, not given to the process to die of.
+        // cannot let go of is let go of without being used, not given to the process to die of.
         let down = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if program {
                 self.view_gone();
@@ -8276,6 +8281,21 @@ impl TerminalPane {
         }));
         if down.is_err() {
             eprintln!("bateri: the page that failed could not be taken down whole");
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(self.ivars().page_up.take());
+            }));
+        }
+        // A field that held the keyboard may have taken it with it, before it was a field in
+        // editing: nothing holds the keyboard then, and the card's ⌃C goes to the terminal.
+        if let Some(window) = self.window()
+            && window.firstResponder().is_none_or(|responder| {
+                std::ptr::eq(
+                    Retained::as_ptr(&responder).cast::<()>(),
+                    Retained::as_ptr(&window).cast::<()>(),
+                )
+            })
+        {
+            window.makeFirstResponder(Some(self.view()));
         }
         if !program {
             return;
@@ -10494,10 +10514,6 @@ mod tests {
         );
     }
 
-    /// The token a restart offers the program is a token it was handed unasked, and a program
-    /// that never opens its view again must not leave it valid for as long as the pane lives:
-    /// the offer has a time to be taken up (`Waits`), set where the offer is made. A call of
-    /// `restart_view` anywhere else would offer a token with no clock behind it.
     /// What the ledger says of a view and how the launch was reached decide whether it waits.
     #[test]
     fn a_view_waits_after_an_unexpected_quit_or_an_unanswered_card_and_not_otherwise() {
@@ -10570,7 +10586,11 @@ mod tests {
         // after kablo says so, the conversation ending; a program that is not there when the
         // server answers; another view opening.
         assert!(body_of("    pub fn server_program_changed(").contains("self.check_view_hold()"));
-        let check = body_of("    pub(crate) fn check_view_hold(");
+        // Only the news ends a card, and the one place that tells it: what kablo last said of a
+        // terminal of this Mac can be older than the view (a program that has just started is still
+        // "zsh"), and reading it from anywhere else ended the card for a view nobody opens again.
+        assert_eq!(pane.matches("self.check_view_hold()").count(), 1);
+        let check = body_of("    fn check_view_hold(");
         assert!(check.contains("program::is_shell_name"), "{check}");
         assert!(check.contains("self.end_view_hold()"), "{check}");
         let end = body_of("    fn end_view_hold(");
@@ -10646,6 +10666,13 @@ mod tests {
         }
         assert!(down.contains("self.take_page_down()"), "{down}");
         assert!(down.contains("catch_unwind"), "{down}");
+        // Only the page that failed, not one a view that began since put up; and the keyboard it
+        // may have taken with it goes back to the terminal.
+        assert!(down.contains("handle.failed()"), "{down}");
+        assert!(
+            down.contains("makeFirstResponder(Some(self.view()))"),
+            "{down}"
+        );
         assert!(
             down.contains("self.hold_view(name, Why::Stopped, false)"),
             "{down}"
@@ -10654,6 +10681,10 @@ mod tests {
         assert!(down.contains("self.want_view_card(hold)"), "{down}");
     }
 
+    /// The token a restart offers the program is a token it was handed unasked, and a program
+    /// that never opens its view again must not leave it valid for as long as the pane lives:
+    /// the offer has a time to be taken up (`Waits`), set where the offer is made. A call of
+    /// `restart_view` anywhere else would offer a token with no clock behind it.
     #[test]
     fn a_restart_is_offered_only_where_the_offer_has_its_time() {
         let pane = include_str!("pane.rs");
