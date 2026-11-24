@@ -5575,6 +5575,179 @@ fn panes_that_wait_for_the_account_of_this_mac_share_the_making_of_it() {
     assert_eq!(ledger.terminals_of(local::ACCOUNT).len(), 3);
 }
 
+// ─── panes that take nothing, or little ────────────────────────────────
+
+/// A line of 1 KiB that says which it is.
+fn kib_line(number: usize) -> Vec<u8> {
+    let mut line = format!("{number:08}").into_bytes();
+    line.resize(1023, b'x');
+    line.push(b'\n');
+    line
+}
+
+/// Reads lines of [`kib_line`] from `pane` until `last` has come, each the one after the one
+/// before; returns when it has.
+fn reads_kib_lines(pane: &mut Pane, first: usize, last: usize) {
+    let mut next = first;
+    let mut partial = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    while next <= last {
+        let n = pane.master.read(&mut chunk).expect("the terminal's bytes");
+        assert_ne!(n, 0, "the stream ended before line {next}");
+        partial.extend_from_slice(&chunk[..n]);
+        while partial.len() >= 1024 {
+            let line: Vec<u8> = partial.drain(..1024).collect();
+            assert_eq!(&line[..8], format!("{next:08}").as_bytes(), "line {next}");
+            next += 1;
+        }
+    }
+}
+
+/// A pane that takes nothing of what its terminal wrote stands in the way of every terminal of
+/// the account, the answer to a new one with them (every pane of this Mac shares the bridge's
+/// stream): once it has taken nothing for [`HOLD_STALL`] it is let go of — its terminal's stream
+/// is stopped, the server keeping what the program writes — and the panes beside it go on and a
+/// terminal asked for is made. When it reads, it is given what it was owed first and then what
+/// the terminal wrote since, in order and none twice, and how the program ended.
+#[test]
+fn a_pane_that_takes_nothing_is_let_go_of_so_the_ones_beside_it_go_on_and_it_is_given_the_rest() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-stuck", world.clone(), ledger.clone(), END_GRACE);
+    let mut stuck = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    let mut beside = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    let terminals = ledger.terminals_of(local::ACCOUNT);
+    let (stuck_id, beside_id) = (terminals[0].clone(), terminals[1].clone());
+
+    // Its program writes three times what the bridge lets wait, and the pane reads none of it.
+    let lines = 3 * HIGH_WATER / 1024;
+    for number in 0..lines {
+        world.bridge().write(&stuck_id, &kib_line(number));
+    }
+    let began = Instant::now();
+    while rig.service.queued(local::ACCOUNT).unwrap_or(0) <= HIGH_WATER {
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "the queue never rose"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    // The pane beside it is told what its terminal wrote, and a third terminal is made.
+    world.bridge().write(&beside_id, b"beside\r\n");
+    beside.reads(b"beside\r\n");
+    let third = open_local(&rig, &a_pane()).expect("a terminal while the first is stuck");
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "the panes beside it were held back for {:?}",
+        began.elapsed()
+    );
+    assert_eq!(ledger.terminals_of(local::ACCOUNT).len(), 3);
+    assert!(
+        rig.service.queued(local::ACCOUNT).unwrap_or(0) < HIGH_WATER,
+        "what it is owed still counts: {:?}",
+        rig.service.queued(local::ACCOUNT)
+    );
+    assert!(
+        world.bridge().attaches(&stuck_id).len() == 1,
+        "its stream was stopped and the server was asked for no more than the one attach yet"
+    );
+
+    // The program goes on writing and ends while the pane takes nothing.
+    for number in lines..lines + 100 {
+        world.bridge().write(&stuck_id, &kib_line(number));
+    }
+    world.bridge().exit(&stuck_id, Exit::Code(3));
+
+    // It reads: everything, in order, and then the end.
+    reads_kib_lines(&mut stuck, 0, lines + 99);
+    let mut end = [0u8; 1];
+    assert_eq!(stuck.master.read(&mut end).expect("the end"), 0);
+    assert_eq!(
+        stuck.status.status().and_then(|status| status.code()),
+        Some(3)
+    );
+    let attaches = world.bridge().attaches(&stuck_id);
+    assert_eq!(attaches.len(), 2, "{attaches:?}");
+    // From the byte after the last it was given (some of what its terminal wrote was not
+    // taken from the server when it was let go of), and not from the start.
+    let given = attaches[1].0;
+    assert!(
+        given > 0 && given < (lines * 1024) as u64,
+        "it was attached again from byte {given}"
+    );
+    drop(third);
+}
+
+#[test]
+fn the_bridge_is_held_while_what_is_queued_is_past_the_mark_and_a_clock_runs_only_then() {
+    let queue = Queue::default();
+    // Below the mark nothing is waited for and nothing is timed.
+    assert!(matches!(queue.wait(), Waited::Open));
+    // Past it, the wait ends when what is queued goes down...
+    queue.arrive(HIGH_WATER + 1);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+            queue.settled(HIGH_WATER + 1);
+        });
+        assert!(matches!(queue.wait(), Waited::Open));
+    });
+    // ...and when it does not, it says so after [`HOLD_STALL`], however much goes down in
+    // between and stays past the mark: one pane taking a little does not say that the one beside
+    // it does.
+    queue.raise(HIGH_WATER + 5 * 16 * 1024);
+    let started = Instant::now();
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..4 {
+                thread::sleep(Duration::from_millis(100));
+                queue.lower(16 * 1024);
+            }
+        });
+        assert!(matches!(queue.wait(), Waited::Stalled));
+    });
+    assert!(started.elapsed() >= HOLD_STALL, "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < 3 * HOLD_STALL,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn what_a_holder_is_owed_counts_until_it_is_let_go_of_and_what_it_takes_moves_it() {
+    let queue = Arc::new(Queue::default());
+    let load = Load::new();
+    load.add(100, &queue);
+    assert_eq!(queue.bytes(), 100);
+    // It takes some: that is moving, however little.
+    assert!(!load.wrote(40));
+    assert_eq!(queue.bytes(), 60);
+    let now = Instant::now();
+    assert!(!load.stalled(now, Duration::from_millis(1)));
+    assert!(load.stalled(now + Duration::from_secs(2), Duration::from_secs(1)));
+    // Let go of: what it is owed stops counting, and it is told when it has taken all.
+    load.uncount();
+    assert_eq!(queue.bytes(), 0);
+    assert!(!load.stalled(now + Duration::from_secs(2), Duration::from_secs(1)));
+    load.add(10, &queue);
+    assert_eq!(queue.bytes(), 0);
+    assert!(!load.wrote(60));
+    assert!(load.wrote(10));
+    load.recount();
+    load.add(5, &queue);
+    assert_eq!(queue.bytes(), 5);
+    assert!(!load.wrote(5));
+    assert_eq!(queue.bytes(), 0);
+
+    // The writer takes the last of it while the holder is being let go of: it said nothing, as it
+    // does not of a holder that is counted, and letting go says that nothing is owed.
+    load.add(7, &queue);
+    assert!(!load.wrote(7));
+    assert!(load.uncount());
+}
+
 // ─── a pane that comes back to its terminal ─────────────────────────────
 
 /// A launch after the bateri that showed `pane` was gone: the first service stopped, the program

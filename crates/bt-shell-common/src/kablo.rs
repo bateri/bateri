@@ -954,6 +954,30 @@ impl Client {
         }
     }
 
+    /// Streams a terminal again that [`Client::detach`] stopped, from the byte owed: the next
+    /// after the last it gave, which the server has still or gives a picture of the screen in place
+    /// of. Its size and what it asked for (every byte, to be told how the program ended) are
+    /// as they were. `false` when the terminal was not detached.
+    pub fn resume(&mut self, id: &SessionId) -> bool {
+        let Some(terminal) = self.terminals.get_mut(id) else {
+            return false;
+        };
+        if terminal.phase != Phase::Detached {
+            return false;
+        }
+        terminal.phase = Phase::Wanted;
+        terminal.retry = None;
+        terminal.check_wanted = false;
+        terminal.take_wanted = false;
+        terminal.picture_wanted = false;
+        terminal.replay_wanted = false;
+        terminal.state_fresh = false;
+        if self.link.is_live() {
+            self.send_attach(id);
+        }
+        true
+    }
+
     /// Types `bytes` into the program, exactly as they are. `false` when they
     /// were not accepted — the connection is not live or the terminal is not
     /// attached — and the owner should say so (a bell), not keep them: a line

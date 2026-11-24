@@ -978,6 +978,14 @@ enum Msg {
     Accepted(UnixStream, Peer),
     Hold(HoldId, Vec<u8>),
     HoldEof(HoldId),
+    /// The bridge's reader has waited for the account's holders to take what is queued for them
+    /// for longer than [`HOLD_STALL`] and none has: the ones that took nothing are let go of.
+    Stalled {
+        account: String,
+        generation: u64,
+    },
+    /// A holder that was let go of ([`Core::stalled`]) has taken all it was owed.
+    Drained(HoldId),
     /// A request's preparation wants `argv` run on the holder's terminal; the
     /// status goes back on `reply`.
     Run {
@@ -1059,6 +1067,8 @@ enum Msg {
         account: String,
         generation: u64,
         bytes: Vec<u8>,
+        /// What the reader counted the bytes in ([`Queue::arrive`]).
+        queue: Arc<Queue>,
     },
     /// The user closed the pane: the terminal it shows ends.
     End(PaneUuid),
@@ -1178,14 +1188,238 @@ struct Ready {
     note: Option<String>,
 }
 
-/// More queued for a holder than this and the bridge's stream is not read: the
-/// server's own flow control reaches the program.
+/// More waits for the panes of an account than this (what is queued for their holders, and what
+/// the bridge's reader has sent the loop and the loop has not given them yet) and the account's
+/// bridge is not read: the server's own flow control reaches the program, the program of every
+/// terminal of the account that shares the bridge. A pane that takes nothing for [`HOLD_STALL`]
+/// is let go of ([`Core::stalled`]), so that it does not hold the others.
 const HIGH_WATER: usize = 1 << 20;
 
-/// What a holder's writer thread is given.
+/// How long the account's bridge may be held back before the panes that take nothing of what is
+/// queued for them are let go of ([`Core::stalled`]), and how long a pane may take nothing before
+/// it is one of them. Well under the second the relay of a terminal waits for a client that does
+/// not move (kablo's `STALL_LIMIT`, in `relay.rs`): while the bridge is held back every terminal of the
+/// account stands still, and the relay of a slow pane that is read behind the one that takes
+/// nothing gives up on it — the ring gets past it, a picture in place of bytes — a second after
+/// the bridge stopped; the pane that takes nothing must be let go of before that, and the look
+/// that finds it may come a period late (measured: at 1.1 s a slow pane beside a stuck one was
+/// given a picture three times in three). A pane that reads less than a step in this time
+/// ([`WRITE_STEP`]) is stuck, not slow.
+const HOLD_STALL: Duration = Duration::from_millis(300);
+
+/// How much of a holder's backlog its writer puts in the pane's socket at a time: the count of
+/// what is queued falls with each, so that a pane that reads little but goes on reading is seen
+/// to move.
+const WRITE_STEP: usize = 16 << 10;
+
+/// What a holder's writer thread is given. The load is the holder's ([`Load`]), or one of its
+/// own for bytes that are not counted against the account.
 enum Out {
-    Bytes(Vec<u8>, Arc<AtomicUsize>),
+    Bytes(Vec<u8>, Arc<Load>),
     Close,
+}
+
+/// What waits to reach the panes of one account's terminals, and what the bridge's reader waits
+/// for before it reads more of the account's stream.
+#[derive(Default)]
+struct Queue {
+    /// Bytes the holders' writers have been given and have not put in the panes' sockets.
+    bytes: AtomicUsize,
+    /// Bytes the bridge's reader has sent the loop that the loop has not settled yet: they are
+    /// on their way to the holders, and a reader that did not count them would read on at the
+    /// speed of the pipe while the loop worked them off, and stand far past [`HIGH_WATER`].
+    coming: AtomicUsize,
+    /// What the bridge's reader waits on: it is woken when something goes down.
+    wait_here: Mutex<()>,
+    wake: Condvar,
+}
+
+/// How the bridge's reader found the stream's way: open, or held back so long that the panes
+/// that hold it are to be looked at.
+enum Waited {
+    Open,
+    /// The count has been past the mark for [`HOLD_STALL`] without a break.
+    Stalled,
+}
+
+impl Queue {
+    fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::SeqCst)
+    }
+
+    fn pending(&self) -> usize {
+        self.bytes() + self.coming.load(Ordering::SeqCst)
+    }
+
+    fn raise(&self, n: usize) {
+        self.bytes.fetch_add(n, Ordering::SeqCst);
+    }
+
+    fn lower(&self, n: usize) {
+        let _ = self
+            .bytes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |bytes| {
+                Some(bytes.saturating_sub(n))
+            });
+        self.bump();
+    }
+
+    /// The bridge's reader sent the loop `n` bytes.
+    fn arrive(&self, n: usize) {
+        self.coming.fetch_add(n, Ordering::SeqCst);
+    }
+
+    /// The loop has settled `n` bytes of what the bridge's reader sent.
+    fn settled(&self, n: usize) {
+        let _ = self
+            .coming
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |coming| {
+                Some(coming.saturating_sub(n))
+            });
+        self.bump();
+    }
+
+    /// Wakes whoever waits for the count to go down.
+    fn bump(&self) {
+        drop(lock(&self.wait_here));
+        self.wake.notify_all();
+    }
+
+    /// Returns when what is queued is no more than [`HIGH_WATER`]: the server's own flow control
+    /// reaches the program while it waits. A wait has a clock of its own only while the account
+    /// is held back, and it counts from when it was first held back, whatever goes down since:
+    /// that a pane takes something does not say that the one beside it does, so after
+    /// [`HOLD_STALL`] it says so ([`Waited::Stalled`]) and the panes are looked at one by one
+    /// ([`Core::stalled`]). An account that is not held back has no timer.
+    fn wait(&self) -> Waited {
+        let mut here = lock(&self.wait_here);
+        let mut since = None;
+        loop {
+            if self.pending() <= HIGH_WATER {
+                return Waited::Open;
+            }
+            let began = *since.get_or_insert_with(Instant::now);
+            let left = HOLD_STALL.saturating_sub(began.elapsed());
+            if left.is_zero() {
+                return Waited::Stalled;
+            }
+            here = self
+                .wake
+                .wait_timeout(here, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+/// What is queued for one holder, as the loop that queues it and the writer that takes it both
+/// see it. What the holder has not taken counts against its account while the holder takes
+/// something now and then; a holder that takes nothing for [`HOLD_STALL`] while the account is
+/// held back by it is let go of ([`Core::stalled`]), and what it is owed stops counting then, so
+/// the others' terminals can go on, until its pane has taken it all.
+struct Load {
+    state: Mutex<LoadState>,
+}
+
+struct LoadState {
+    /// The account's queue the bytes count in, once the holder has bytes that count.
+    queue: Option<Arc<Queue>>,
+    /// Bytes given to the writer and not written.
+    owed: usize,
+    /// Whether `owed` is in the account's count.
+    counted: bool,
+    /// When the writer last wrote something, or when the holder was last given bytes with
+    /// nothing owed before: where a holder that takes nothing is measured from.
+    moved: Instant,
+}
+
+impl Load {
+    fn new() -> Arc<Load> {
+        Arc::new(Load {
+            state: Mutex::new(LoadState {
+                queue: None,
+                owed: 0,
+                counted: true,
+                moved: Instant::now(),
+            }),
+        })
+    }
+
+    /// A load of its own, owed `owed` bytes that count against nobody's queue: what the holder
+    /// of a terminal that has not been given its stream yet is sent ([`Core::flush`]).
+    fn alone(owed: usize) -> Arc<Load> {
+        let load = Load::new();
+        let queue = Arc::new(Queue::default());
+        queue.raise(owed);
+        let mut state = lock(&load.state);
+        state.queue = Some(queue);
+        state.owed = owed;
+        drop(state);
+        load
+    }
+
+    /// `n` bytes were given to the holder's writer.
+    fn add(&self, n: usize, queue: &Arc<Queue>) {
+        let mut state = lock(&self.state);
+        let queue = Arc::clone(state.queue.get_or_insert_with(|| Arc::clone(queue)));
+        if state.owed == 0 {
+            state.moved = Instant::now();
+        }
+        state.owed += n;
+        if state.counted {
+            queue.raise(n);
+        }
+    }
+
+    /// The writer wrote `n` bytes. `true` when that was all of what the holder was owed, and
+    /// the holder was let go of: it is to be attached again.
+    fn wrote(&self, n: usize) -> bool {
+        let mut state = lock(&self.state);
+        state.owed = state.owed.saturating_sub(n);
+        state.moved = Instant::now();
+        if state.counted
+            && let Some(queue) = &state.queue
+        {
+            queue.lower(n);
+        }
+        state.owed == 0 && !state.counted
+    }
+
+    /// Whether the holder is owed bytes that count and has taken none for `limit`.
+    fn stalled(&self, now: Instant, limit: Duration) -> bool {
+        let state = lock(&self.state);
+        state.counted && state.owed > 0 && now.saturating_duration_since(state.moved) >= limit
+    }
+
+    /// What the holder is owed no longer counts against the account. `true` when it is owed
+    /// nothing: the writer took the last of it while the holder was being let go of and did not
+    /// say so, as it says it only of a holder that was let go of already.
+    fn uncount(&self) -> bool {
+        let mut state = lock(&self.state);
+        if state.counted {
+            state.counted = false;
+            if let Some(queue) = &state.queue {
+                queue.lower(state.owed);
+            }
+        }
+        state.owed == 0
+    }
+
+    /// What the holder is owed counts again.
+    fn recount(&self) {
+        let mut state = lock(&self.state);
+        if !state.counted {
+            state.counted = true;
+            state.moved = Instant::now();
+            if let Some(queue) = &state.queue {
+                queue.raise(state.owed);
+            }
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// More typed into a pane than the client has put on the wire ([`Client::input_waiting`]) and
@@ -1252,6 +1486,11 @@ struct Conn {
     /// The holder is a pane of this Mac: how its terminal's program ended is written here when
     /// the hub has said its last word, before the connection closes.
     status: Option<Arc<StreamExit>>,
+    /// What the holder's writer is owed ([`Load`]).
+    load: Arc<Load>,
+    /// The holder took nothing for so long that its terminal's stream was stopped
+    /// ([`Core::stalled`]); it is started again when the pane has taken what it was owed.
+    suspended: bool,
 }
 
 /// A bridge that is up.
@@ -1294,7 +1533,7 @@ struct Account {
     /// and the panes that wait for a new terminal there do not wait for it ([`Core::gives_up`]).
     missed: u32,
     /// Bytes queued for the holders of this account's terminals.
-    queued: Arc<AtomicUsize>,
+    queue: Arc<Queue>,
     /// The terminals the ledger has marked to end were asked to, on the connection
     /// that is up (false again when it goes).
     purged: bool,
@@ -1350,7 +1589,7 @@ pub struct Service {
     stages: Arc<Mutex<HashMap<String, Staged>>>,
     /// What each account has queued for its holders, as the loop made the account
     /// ([`Service::queued`]).
-    queues: Arc<Mutex<HashMap<String, Arc<AtomicUsize>>>>,
+    queues: Arc<Mutex<HashMap<String, Arc<Queue>>>>,
     /// What the service asks of the world around it, for what a program asks that is not a
     /// terminal's ([`Service::backend`]).
     backend: Arc<dyn Backend>,
@@ -1450,6 +1689,7 @@ impl Service {
             local_when: Vec::new(),
             local_refused: None,
             awaiting: BTreeMap::new(),
+            arrived: Vec::new(),
             shown: Arc::clone(&shown),
             local_programs: Arc::clone(&local_programs),
             local_told: HashMap::new(),
@@ -1897,13 +2137,12 @@ impl Service {
     }
 
     /// How many bytes are queued for the holders of `account`'s terminals, which the bridge's
-    /// stream is not read past ([`HIGH_WATER`], at the most a chunk more): what the panes of the
-    /// account have not taken. `None` before the account is made. For a test and a measurement.
+    /// stream is not read past ([`HIGH_WATER`], at the most a chunk more, with what the loop has
+    /// not settled yet): what the panes of the account have not taken, less what a pane that was
+    /// let go of is owed. `None` before the account is made. For a test and a measurement.
     pub fn queued(&self, account: &str) -> Option<usize> {
         let queues = self.queues.lock().unwrap_or_else(PoisonError::into_inner);
-        queues
-            .get(account)
-            .map(|queued| queued.load(Ordering::SeqCst))
+        queues.get(account).map(|queue| queue.bytes())
     }
 
     /// What [`Service::queued`] is held to before the bridge's stream is no longer read.
@@ -2037,7 +2276,7 @@ struct Shared {
     /// ([`Service::stage_of`]).
     stages: Arc<Mutex<HashMap<String, Staged>>>,
     /// [`Service::queued`]'s counters, one per account.
-    queues: Arc<Mutex<HashMap<String, Arc<AtomicUsize>>>>,
+    queues: Arc<Mutex<HashMap<String, Arc<Queue>>>>,
 }
 
 /// An account's folder for a program's files.
@@ -2110,6 +2349,9 @@ struct Core {
     local_refused: Option<(Instant, Refusal)>,
     /// The terminals of this Mac that were asked for and have not been made.
     awaiting: BTreeMap<HoldId, Awaiting>,
+    /// What the bridge's readers have sent the loop that it has taken in and not settled
+    /// ([`Queue::settled`]), by the queue the reader counted it in.
+    arrived: Vec<(Arc<Queue>, usize)>,
     /// What [`Service::shown`] reads.
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
     /// What [`Service::local_program`] reads.
@@ -2244,7 +2486,80 @@ impl Core {
                 }
             }
             self.settle();
+            // What came from the bridge is with the holders now (or gone): the reader may count
+            // what is queued for them.
+            for (queue, sum) in self.arrived.drain(..) {
+                queue.settled(sum);
+            }
         }
+    }
+
+    /// The panes of `account` have taken nothing of what is queued for them for [`HOLD_STALL`],
+    /// and the bridge's stream is not read for it: every terminal of the account stands still,
+    /// the answer to a new terminal with them. The panes of this Mac that took nothing in that
+    /// time are let go of: their terminals' streams are stopped (the relay does not wait for a
+    /// client that is detached, and keeps what the terminal writes in its ring), and what they are
+    /// owed no longer counts against the account, so that the others go on. The bytes they are
+    /// owed are theirs and stay queued in order; once the pane has taken them all
+    /// ([`Core::drained`]) its terminal's stream goes on from where it stopped. A pane that takes
+    /// anything, however little, in that time is not touched: it is slow, and holds the stream
+    /// back byte by byte.
+    fn stalled(&mut self, account: &str, generation: u64, now: Instant) {
+        let Some(entry) = self.accounts.get(account) else {
+            return;
+        };
+        if entry.generation != generation {
+            return;
+        }
+        let stuck: Vec<HoldId> = self
+            .conns
+            .iter()
+            .filter(|(hold, conn)| {
+                !conn.suspended
+                    && !self.awaiting.contains_key(hold)
+                    && conn.load.stalled(now, HOLD_STALL)
+                    && self
+                        .hub
+                        .terminal_of(**hold)
+                        .is_some_and(|(of, _)| of == account)
+            })
+            .map(|(hold, _)| *hold)
+            .collect();
+        for hold in stuck {
+            if !self.hub.suspend(hold) {
+                continue;
+            }
+            let mut nothing_owed = false;
+            if let Some(conn) = self.conns.get_mut(&hold) {
+                conn.suspended = true;
+                nothing_owed = conn.load.uncount();
+            }
+            if nothing_owed {
+                self.drained(hold);
+            }
+            let pane = self.panes.get(&hold).map_or_else(
+                || "a pane".to_owned(),
+                |pane| format!("the pane {}", pane.as_str()),
+            );
+            self.shared.backend.log_line(&format!(
+                "{pane} took nothing of what its terminal wrote for {} and the account was held back by it: the panes beside it go on, and it is given the rest when it reads",
+                waiting::seconds(HOLD_STALL),
+            ));
+        }
+    }
+
+    /// A pane that was let go of ([`Core::stalled`]) has taken all it was owed: its terminal's
+    /// stream goes on from the byte after the last it was given.
+    fn drained(&mut self, hold: HoldId) {
+        let Some(conn) = self.conns.get_mut(&hold) else {
+            return;
+        };
+        if !conn.suspended {
+            return;
+        }
+        conn.suspended = false;
+        conn.load.recount();
+        self.hub.awake(hold);
     }
 
     /// Shuts a holder's connection to reading while too much of what it typed waits for the
@@ -2394,7 +2709,18 @@ impl Core {
                 account,
                 generation,
                 bytes,
+                queue,
             } => {
+                // Counted as arrived (and not yet as queued for a holder) until the loop has
+                // settled, whether it keeps the bytes or not.
+                match self
+                    .arrived
+                    .iter_mut()
+                    .find(|(of, _)| Arc::ptr_eq(of, &queue))
+                {
+                    Some((_, sum)) => *sum += bytes.len(),
+                    None => self.arrived.push((Arc::clone(&queue), bytes.len())),
+                }
                 if self
                     .accounts
                     .get(&account)
@@ -2404,6 +2730,11 @@ impl Core {
                     client.push(&bytes, now);
                 }
             }
+            Msg::Stalled {
+                account,
+                generation,
+            } => self.stalled(&account, generation, now),
+            Msg::Drained(hold) => self.drained(hold),
             Msg::BridgeEof {
                 account,
                 generation,
@@ -2541,15 +2872,18 @@ impl Core {
                 out,
                 throttle,
                 status,
+                load: Load::new(),
+                suspended: false,
             },
         );
         let tx = self.shared.tx.clone();
+        let writes = tx.clone();
         let _ = thread::Builder::new()
             .name("ssh-hold reads".into())
             .spawn(move || hold_reader(hold, reader, &tx, &gate));
         let _ = thread::Builder::new()
             .name("ssh-hold writes".into())
-            .spawn(move || hold_writer(stream, &written, after));
+            .spawn(move || hold_writer(hold, stream, &written, after, &writes));
     }
 
     /// Everything that follows from what was just heard: the clients move,
@@ -3503,19 +3837,26 @@ impl Core {
             // lets wait) waits for it apart from the account's count. Counted there, it would stop
             // the bridge before the server's list came — the word the pane waits for — and the
             // pane would give up, and every pane of the account after it with it.
-            let queued = if self.awaiting.contains_key(&hold) {
-                Arc::default()
+            let queue = if self.awaiting.contains_key(&hold) {
+                None
             } else {
                 self.hub
                     .terminal_of(hold)
                     .and_then(|(account, _)| self.accounts.get(account))
-                    .map(|entry| Arc::clone(&entry.queued))
-                    .unwrap_or_default()
+                    .map(|entry| Arc::clone(&entry.queue))
             };
             if let Some(conn) = self.conns.get(&hold) {
                 if !bytes.is_empty() {
-                    queued.fetch_add(bytes.len(), Ordering::SeqCst);
-                    let _ = conn.out.send(Out::Bytes(bytes, queued));
+                    // Counted against the account's queue and the holder's own load, or against
+                    // neither: a load of its own.
+                    let load = match &queue {
+                        Some(queue) => {
+                            conn.load.add(bytes.len(), queue);
+                            Arc::clone(&conn.load)
+                        }
+                        None => Load::alone(bytes.len()),
+                    };
+                    let _ = conn.out.send(Out::Bytes(bytes, load));
                 }
                 if self.hub.is_finished(hold) {
                     // The pane is told how the program ended before its connection closes.
@@ -3644,11 +3985,11 @@ impl Core {
                 } = carried;
                 let (to_bridge, written) = mpsc::channel();
                 let tx = self.shared.tx.clone();
-                let queued = Arc::clone(&entry.queued);
+                let queue = Arc::clone(&entry.queue);
                 let name = account.to_owned();
                 let _ = thread::Builder::new()
                     .name("kablo bridge reads".into())
-                    .spawn(move || bridge_reader(name, generation, reader, &tx, &queued, ended));
+                    .spawn(move || bridge_reader(name, generation, reader, &tx, &queue, ended));
                 let _ = thread::Builder::new()
                     .name("kablo bridge writes".into())
                     .spawn(move || bridge_writer(writer, &written));
@@ -4259,12 +4600,12 @@ impl Core {
             client.take_tickets();
         }
         self.hub.add_client(&key, client);
-        let queued = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::new(Queue::default());
         self.shared
             .queues
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(key.clone(), Arc::clone(&queued));
+            .insert(key.clone(), Arc::clone(&queue));
         self.accounts.insert(
             key,
             Account {
@@ -4276,7 +4617,7 @@ impl Core {
                 bridge: None,
                 dialing: false,
                 missed: 0,
-                queued,
+                queue,
                 purged: false,
                 files,
                 writing: Arc::new(Mutex::new(())),
@@ -4866,15 +5207,27 @@ fn hold_reader(hold: HoldId, mut stream: UnixStream, tx: &Sender<Msg>, gate: &Ga
 /// Writes what the hub has for a holder until it is told to close. `after` is the peer of a
 /// pane's exit signal ([`Stream::exit`]): closed last, so the pane has read every byte there is
 /// when it hears its program is gone.
-fn hold_writer(mut stream: UnixStream, written: &Receiver<Out>, after: Option<UnixStream>) {
+fn hold_writer(
+    hold: HoldId,
+    mut stream: UnixStream,
+    written: &Receiver<Out>,
+    after: Option<UnixStream>,
+    tx: &Sender<Msg>,
+) {
     let mut broken = false;
     while let Ok(out) = written.recv() {
         match out {
-            Out::Bytes(bytes, queued) => {
-                if !broken && stream.write_all(&bytes).is_err() {
-                    broken = true;
+            Out::Bytes(bytes, load) => {
+                // A step at a time, so that what the pane takes is seen as it takes it.
+                for step in bytes.chunks(WRITE_STEP) {
+                    if !broken && stream.write_all(step).is_err() {
+                        broken = true;
+                    }
+                    if load.wrote(step.len()) {
+                        // Let go of for taking nothing, and it has taken all it was owed.
+                        let _ = tx.send(Msg::Drained(hold));
+                    }
                 }
-                queued.fetch_sub(bytes.len(), Ordering::SeqCst);
             }
             Out::Close => break,
         }
@@ -4888,23 +5241,37 @@ fn bridge_reader(
     generation: u64,
     mut reader: Box<dyn Read + Send>,
     tx: &Sender<Msg>,
-    queued: &AtomicUsize,
+    queue: &Arc<Queue>,
     ended: Box<dyn FnOnce() -> Cause + Send>,
 ) {
     let mut buffer = vec![0u8; CHUNK];
     loop {
         // The holders are slow to take what they were given: the stream waits
-        // in the pipe, and the server waits for the pipe.
-        while queued.load(Ordering::SeqCst) > HIGH_WATER {
-            thread::sleep(Duration::from_millis(5));
+        // in the pipe, and the server waits for the pipe. It waits at a condition and not on
+        // a clock, and when the holders take nothing for [`HOLD_STALL`] the loop is told, to
+        // let go of the ones that stand in the way.
+        match queue.wait() {
+            Waited::Open => {}
+            Waited::Stalled => {
+                let told = tx.send(Msg::Stalled {
+                    account: account.clone(),
+                    generation,
+                });
+                if told.is_err() {
+                    return;
+                }
+                continue;
+            }
         }
         match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                queue.arrive(n);
                 let sent = tx.send(Msg::Bridge {
                     account: account.clone(),
                     generation,
                     bytes: buffer[..n].to_vec(),
+                    queue: Arc::clone(queue),
                 });
                 if sent.is_err() {
                     return;

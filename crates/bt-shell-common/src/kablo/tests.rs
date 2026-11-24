@@ -1433,6 +1433,52 @@ fn a_terminal_the_client_let_go_of_is_read_like_one_it_never_had() {
 }
 
 #[test]
+fn a_terminal_that_was_detached_is_streamed_again_from_the_byte_owed_with_what_it_asked_for() {
+    let mut rig = Rig::new(Age::Current);
+    let terminal = id("t1");
+    rig.connect();
+    rig.client
+        .new_terminal(
+            terminal.clone(),
+            NewSession::default(),
+            Attach::new(SIZE).every_byte(),
+        )
+        .expect("a request");
+    rig.pump();
+    rig.take();
+    rig.bridge.write(&terminal, b"abc");
+    rig.pump();
+    rig.take();
+    assert!(!rig.client.resume(&terminal), "it was not detached");
+    rig.client.detach(&terminal);
+    rig.pump();
+    assert!(!rig.bridge.is_attached(&terminal));
+    // What the program writes meanwhile is the server's; none of it reaches the client.
+    rig.bridge.write(&terminal, b"def");
+    rig.pump();
+    assert!(
+        rig.take()
+            .iter()
+            .all(|e| !matches!(e, Event::Output { .. }))
+    );
+
+    assert!(rig.client.resume(&terminal));
+    rig.pump();
+    assert!(rig.bridge.is_attached(&terminal));
+    let attaches = attaches(&rig.bridge, &terminal);
+    let (offset, view) = attaches.last().expect("an attach");
+    assert_eq!(*offset, 3, "the byte after the last it gave");
+    assert!(view.every_byte, "what it asked for is kept");
+    let mut output = Vec::new();
+    for event in rig.take() {
+        if let Event::Output { data, .. } = event {
+            output.extend_from_slice(&data);
+        }
+    }
+    assert_eq!(output, b"def");
+}
+
+#[test]
 fn a_terminal_the_client_attaches_is_not_read_beside_its_attach() {
     let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
     assert!(!rig.client.read_picture(&terminal));

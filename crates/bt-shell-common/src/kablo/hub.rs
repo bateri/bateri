@@ -37,7 +37,13 @@
 //!
 //! A holder that is slow to write what it is given grows [`Hub::backlog`]; the
 //! owner stops reading the server's stream while it is large, which is the
-//! server's own flow control reaching the program.
+//! server's own flow control reaching the program. The server's stream is the account's, and
+//! every terminal of the account is behind the one that is held back, so a raw holder whose pane
+//! takes nothing for a while is let go of ([`Hub::suspend`]): its terminal's stream is stopped
+//! (the server keeps what the program writes, in its ring) and asked for again, from the byte
+//! after the last the holder was given, when the pane has taken what it was given ([`Hub::awake`]);
+//! the server gives a picture of the screen in place of bytes its ring no longer has, as it does
+//! for any client that fell behind it. A holder that takes anything is not let go of.
 //!
 //! **A raw holder** ([`Hub::open_raw`]) is the pane itself, not a program in it: a pane that
 //! shows a terminal of this Mac reads the terminal's bytes as they are (no frames, nothing to
@@ -683,6 +689,43 @@ impl Hub {
             self.release(hold, true);
             self.holds.remove(&hold);
             self.events.push_back(HubEvent::Gone { hold, showed });
+        }
+    }
+
+    /// Stops the stream of the terminal a raw holder shows, which the holder is bound to still
+    /// (it is given what was sent it already): the server keeps what the terminal writes
+    /// meanwhile, and [`Hub::awake`] asks for it from the byte after the last the holder was
+    /// given, as a connection that broke would. For a pane that takes nothing, so that the
+    /// others that share its connection go on. `false` when the holder is not a raw one or its
+    /// terminal is not streaming.
+    pub fn suspend(&mut self, hold: HoldId) -> bool {
+        let Some(entry) = self.holds.get(&hold) else {
+            return false;
+        };
+        if !entry.raw || entry.finished {
+            return false;
+        }
+        let Some(binding) = entry.bound.as_ref() else {
+            return false;
+        };
+        let Some(client) = self.clients.get_mut(&binding.account) else {
+            return false;
+        };
+        if !client.is_attached(&binding.terminal) {
+            return false;
+        }
+        client.detach(&binding.terminal);
+        true
+    }
+
+    /// Streams the terminal of a holder [`Hub::suspend`] stopped again, from the byte after the
+    /// last the holder was given.
+    pub fn awake(&mut self, hold: HoldId) {
+        let Some(binding) = self.holds.get(&hold).and_then(|entry| entry.bound.as_ref()) else {
+            return;
+        };
+        if let Some(client) = self.clients.get_mut(&binding.account) {
+            client.resume(&binding.terminal);
         }
     }
 

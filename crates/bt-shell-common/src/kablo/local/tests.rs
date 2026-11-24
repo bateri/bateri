@@ -1870,11 +1870,6 @@ fn take_now(master: &mut std::fs::File, into: &mut Vec<u8>, limit: usize) {
     }
 }
 
-/// How many of the ticks of [`TICKS`] `bytes` hold.
-fn ticks_in(bytes: &[u8]) -> usize {
-    String::from_utf8_lossy(bytes).matches("tick ").count()
-}
-
 /// Checks that the bytes of [`NUMBERED_LINES`] come whole and in order, as they are given.
 #[derive(Default)]
 struct Numbered {
@@ -1909,72 +1904,114 @@ impl Numbered {
     }
 }
 
-/// A pane that reads nothing of the terminal it shows, beside panes that do: what the bridge's
-/// stream, which every terminal of this Mac shares, does. The terminal's program never stops
-/// writing, the pane never takes a byte, and the account's queue is watched until it is past
-/// [`Service::high_water`] — what stops the reading of the bridge — before a second terminal is
-/// asked for: that it is past it is the premise, and the test fails without it, since a test
-/// that did not get there would measure nothing. What is measured is printed (`MEASURE`) and
-/// held to what it is today: **the second terminal does not come and the pane beside the unread
-/// one is not fed while the unread one holds the queue**, and nothing the unread one was sent is
-/// lost, and everything goes on once it reads again. The two lines about the stall are the ones
-/// a fix turns round.
+/// Checks that the ticks of [`TICKS`] come whole, in order and none twice.
+#[derive(Default)]
+struct Ticked {
+    /// The number the next tick is due to have.
+    next: u64,
+    partial: Vec<u8>,
+}
+
+impl Ticked {
+    fn feed(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.partial.extend_from_slice(bytes);
+        while let Some(end) = self.partial.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.partial.drain(..=end).collect();
+            let text = String::from_utf8_lossy(&line);
+            let number: u64 = text
+                .trim()
+                .strip_prefix("tick ")
+                .and_then(|rest| rest.parse().ok())
+                .ok_or_else(|| format!("not a tick: {text:?} after tick {}", self.next))?;
+            if number != self.next {
+                return Err(format!(
+                    "tick {number} came where tick {} was due",
+                    self.next
+                ));
+            }
+            self.next += 1;
+        }
+        Ok(())
+    }
+
+    /// Takes what `master` has now and checks it.
+    fn take(&mut self, master: &mut std::fs::File) {
+        let mut taken = Vec::new();
+        take_now(master, &mut taken, 1 << 20);
+        self.feed(&taken)
+            .unwrap_or_else(|why| panic!("a tick was lost or doubled: {why}"));
+    }
+}
+
+/// The numbers of the lines of [`NUMBERED_LINES`] that `bytes` hold whole, in the order they
+/// stand: the ones in the stream and the ones in a picture of the screen the stream was given.
+fn numbers_in(bytes: &[u8]) -> Vec<u64> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut numbers = Vec::new();
+    for (at, _) in text.match_indices('L') {
+        let Some(rest) = text.get(at + 1..) else {
+            continue;
+        };
+        if let Some(digits) = rest.get(..9)
+            && rest.get(9..10) == Some(" ")
+            && let Ok(number) = digits.parse::<u64>()
+        {
+            numbers.push(number);
+        }
+    }
+    numbers
+}
+
+/// A program that writes `lines` numbered lines, a thousand at a time, and ends: all of it fits
+/// in the ring of the terminal many times over for a pane that does not read for some seconds.
+fn paced_lines(lines: u32) -> String {
+    format!(
+        r#"exec awk 'BEGIN {{ for (i = 0; i < {lines}; i++) {{ printf "L%09d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n", i; if (i % 1000 == 999) system("sleep 0.02") }} }}'"#
+    )
+}
+
+/// Whether the stream the pane reads has ended (not: has nothing now).
+fn at_end(master: &mut std::fs::File) -> bool {
+    let mut byte = [0u8; 1];
+    matches!(master.read(&mut byte), Ok(0))
+}
+
+/// A pane that reads nothing of the terminal it shows, beside panes that do. The bridge's
+/// stream, which every terminal of this Mac shares, was held back by it (Phase 1 of this set
+/// measured that: no tick of the pane beside it in 3 s, no second terminal in 6 s): the program
+/// never stops writing, the pane never takes a byte, and the account's queue is watched until it
+/// is past [`Service::high_water`] — what stops the reading of the bridge — before anything
+/// else is asked for: that it is past it is the premise, and the test fails without it, since a
+/// test that did not get there would measure nothing. What is measured is printed (`MEASURE`) and
+/// held to: **the pane beside the unread one goes on being fed, every tick in order, and a second
+/// terminal is given**, and what the unread one was sent comes to it in order once it reads, then
+/// the screen in place of what the ring of its terminal no longer has (its program writes faster
+/// than anything could be kept).
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn a_pane_that_reads_nothing_of_its_terminal_holds_back_the_ones_beside_it_and_loses_none_of_its_bytes()
- {
-    let Some(bundle) = release() else {
+fn a_pane_that_reads_nothing_of_its_terminal_does_not_hold_back_the_ones_beside_it() {
+    let Some(mut mac) = HeldMac::start("unread") else {
         eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
         return;
     };
-    let mut ground = Ground::new("unread");
-    let service_dir = ground.root.join("svc");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&service_dir)
-        .expect("the service's directory");
-    let kablo =
-        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
-            .expect("a path");
-    let backend = RealMac {
-        bundle,
-        home: ground.home.clone(),
-        sockets: ground.sockets.clone(),
-        streams: Default::default(),
-        stand_in: Default::default(),
-    };
-    let ledger = Arc::new(Ledger::memory());
-    let service =
-        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
-    ground.kept = Some(PathBuf::from(kablo));
-    let home = ground.home.clone();
-    let open = |script: &str, uuid: &str, wait: Duration| -> Result<bt_core::Stream, Refusal> {
-        let mut options = plain_options(script, &home);
-        options.pane_uuid = bt_core::PaneUuid::parse(uuid);
-        let pane = options.pane_uuid.clone().expect("a pane");
-        let (spec, size) = new_session(&options.child_launch(), 100);
-        service.open_local(&pane, spec, size, wait)
-    };
-
-    // The streams are declared after the service so that they are let go of first: a holder
-    // that is writing to a pane that does not read ends when the pane's end is closed, and the
-    // service cannot stop before it.
-    let beside = open(
-        TICKS,
-        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2B1",
-        Duration::from_secs(30),
-    )
-    .expect("the pane that is read");
-    let unread = open(
-        NUMBERED_LINES,
-        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2B2",
-        Duration::from_secs(30),
-    )
-    .expect("the pane that reads nothing");
-    ground.made = ledger.terminals_of(ACCOUNT);
+    let beside = mac
+        .open(
+            TICKS,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2B1",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that is read");
+    let unread = mac
+        .open(
+            NUMBERED_LINES,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2B2",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that reads nothing");
+    mac.keep_count();
     let mut beside_master = std::fs::File::from(beside.master.try_clone().expect("a clone"));
     let mut unread_master = std::fs::File::from(unread.master.try_clone().expect("a clone"));
-    let mut seen = Vec::new();
+    let mut ticks = Ticked::default();
 
     // The unread pane's stream fills, then the account's queue, until what stops the reading of
     // the bridge. Bounded: a program that cannot fill it in this time is a premise that failed.
@@ -1982,8 +2019,8 @@ fn a_pane_that_reads_nothing_of_its_terminal_holds_back_the_ones_beside_it_and_l
     let began = Instant::now();
     let mut peak = 0;
     let reached = loop {
-        take_now(&mut beside_master, &mut seen, 1 << 20);
-        let queued = service.queued(ACCOUNT).unwrap_or(0);
+        ticks.take(&mut beside_master);
+        let queued = mac.service.queued(ACCOUNT).unwrap_or(0);
         peak = peak.max(queued);
         if queued > high {
             break true;
@@ -2002,25 +2039,26 @@ fn a_pane_that_reads_nothing_of_its_terminal_holds_back_the_ones_beside_it_and_l
         "the queue never went past the high-water mark (peak {peak}): the program did not fill it, and nothing was measured"
     );
 
-    // The pane beside it: does it go on being fed while the unread one holds the queue.
-    let before = ticks_in(&seen);
+    // The pane beside it: it goes on being fed while the unread one holds the queue (the first
+    // second is the account held back until the pane that takes nothing is let go of: its ticks
+    // come then, all of them).
+    let before = ticks.next;
     let window = Instant::now();
     while window.elapsed() < Duration::from_secs(3) {
-        take_now(&mut beside_master, &mut seen, 1 << 20);
+        ticks.take(&mut beside_master);
         thread::sleep(Duration::from_millis(20));
     }
-    let fed = ticks_in(&seen) - before;
+    let fed = ticks.next - before;
     eprintln!("MEASURE unread: ticks of the pane beside it in 3 s: {fed} (it is due about 30)");
-    // Today: held back with the rest of the bridge's stream. A fix makes this about 30.
     assert!(
-        fed < 10,
+        fed >= 20,
         "the pane beside the unread one was fed {fed} ticks in 3 s"
     );
 
     // A second terminal, asked for with a wait that is short for a machine that is not held up
-    // (this Mac makes one in milliseconds).
+    // (this Mac makes one in milliseconds): it comes, and is fed.
     let asked = Instant::now();
-    let second = open(
+    let second = mac.open(
         TICKS,
         "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2B3",
         Duration::from_secs(6),
@@ -2030,49 +2068,397 @@ fn a_pane_that_reads_nothing_of_its_terminal_holds_back_the_ones_beside_it_and_l
         second.is_ok(),
         asked.elapsed()
     );
-    // Today: the server's word that the terminal is made is behind the unread pane's bytes in
-    // the bridge's stream. A fix makes it come.
+    let second = second.expect("the second terminal, while the first holds nothing");
+    let mut second_master = std::fs::File::from(second.master.try_clone().expect("a clone"));
+    let mut second_ticks = Ticked::default();
+    let waiting = Instant::now();
+    while second_ticks.next < 10 && waiting.elapsed() < Duration::from_secs(10) {
+        second_ticks.take(&mut second_master);
+        ticks.take(&mut beside_master);
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(
-        second.is_err(),
-        "the second terminal came while the queue was past the high-water mark"
+        second_ticks.next >= 10,
+        "the second terminal was fed {} ticks",
+        second_ticks.next
     );
-    let queued_then = service.queued(ACCOUNT).unwrap_or(0);
+    let queued_then = mac.service.queued(ACCOUNT).unwrap_or(0);
 
-    // The unread pane reads again: nothing it was sent is lost, the queue goes down and the
-    // pane beside it is fed again.
+    // The unread pane reads again: what it was sent comes first, whole and in order and nothing
+    // between; its program has written far more than the ring of its terminal holds since, so a
+    // picture of the screen follows, and from then on the lines go on forward and never back.
     let mut numbered = Numbered::default();
+    let mut after_picture = Vec::new();
+    let mut whole = None;
     let reading = Instant::now();
-    while numbered.next < 20_000 && reading.elapsed() < Duration::from_secs(60) {
+    while reading.elapsed() < Duration::from_secs(60) {
         let mut taken = Vec::new();
         take_now(&mut unread_master, &mut taken, 1 << 20);
+        match (whole, taken.iter().position(|byte| *byte == 0x1b)) {
+            (None, None) => numbered
+                .feed(&taken)
+                .unwrap_or_else(|why| panic!("a byte was lost or doubled: {why}")),
+            (None, Some(at)) => {
+                numbered
+                    .feed(&taken[..at])
+                    .unwrap_or_else(|why| panic!("a byte was lost or doubled: {why}"));
+                whole = Some(numbered.next);
+                after_picture.extend_from_slice(&taken[at..]);
+            }
+            (Some(_), _) => after_picture.extend_from_slice(&taken),
+        }
+        if numbers_in(&after_picture).len() >= 20_000 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let owed = whole.expect("the program wrote far more than the ring keeps: a picture was due");
+    eprintln!(
+        "MEASURE unread: {owed} whole lines came in order before the picture; queue {queued_then} then, {} now",
+        mac.service.queued(ACCOUNT).unwrap_or(0)
+    );
+    assert!(
+        owed >= 5_000,
+        "only {owed} lines came before the picture: what the pane was sent is not all there"
+    );
+    let numbers = numbers_in(&after_picture);
+    assert!(
+        numbers.windows(2).all(|pair| pair[0] < pair[1]),
+        "the lines after the picture do not go forward"
+    );
+    assert!(
+        numbers.first().is_some_and(|first| *first >= owed),
+        "the screen shows lines the pane had already: {:?} after {owed}",
+        numbers.first()
+    );
+    assert!(
+        numbers.len() >= 20_000,
+        "only {} lines came after",
+        numbers.len()
+    );
+
+    let before = ticks.next;
+    let again = Instant::now();
+    while again.elapsed() < Duration::from_secs(2) {
+        ticks.take(&mut beside_master);
+        thread::sleep(Duration::from_millis(20));
+    }
+    let after = ticks.next - before;
+    eprintln!(
+        "MEASURE unread: ticks of the pane beside it in 2 s once the unread one reads: {after}"
+    );
+    assert!(after >= 10, "the pane beside it was not fed again: {after}");
+    // The ends of the unread pane's stream are let go of before the service stops: its holder is
+    // writing into them, and does not stop while they are open.
+    drop((beside_master, unread_master, second_master));
+    drop((beside, unread, second));
+    mac.service.stop();
+}
+
+/// A pane that takes nothing for some seconds, while the program of its terminal writes a good
+/// deal and ends, is given all of it, in order and none twice, and no picture of the screen,
+/// once it reads: what the ring of its terminal keeps for it is what it was not sent, from the
+/// byte after the last it was sent. The pane beside it is fed the while and so is a terminal made
+/// then. The end of the program, which came while the pane was let go of, is told it.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_takes_nothing_for_some_seconds_is_given_all_its_program_wrote_and_how_it_ended() {
+    let Some(mut mac) = HeldMac::start("resumes") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let beside = mac
+        .open(
+            TICKS,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2D1",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that is read");
+    // 60 000 lines of 65 bytes: 3.9 MB, below half the ring (8 MiB), so that the terminal's relay
+    // never waits for the pane that takes nothing and its program is done in a second or two.
+    let unread = mac
+        .open(
+            &paced_lines(60_000),
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2D2",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that takes nothing");
+    mac.keep_count();
+    let mut beside_master = std::fs::File::from(beside.master.try_clone().expect("a clone"));
+    let mut unread_master = std::fs::File::from(unread.master.try_clone().expect("a clone"));
+    let mut ticks = Ticked::default();
+
+    // Its program is done, the account's queue stands past the mark and then is let go of.
+    let high = Service::high_water();
+    let began = Instant::now();
+    while mac.service.queued(ACCOUNT).unwrap_or(0) <= high
+        && began.elapsed() < Duration::from_secs(20)
+    {
+        ticks.take(&mut beside_master);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        mac.service.queued(ACCOUNT).unwrap_or(0) > high,
+        "the queue never went past the high-water mark"
+    );
+    let window = Instant::now();
+    while window.elapsed() < Duration::from_secs(4) {
+        ticks.take(&mut beside_master);
+        thread::sleep(Duration::from_millis(20));
+    }
+    eprintln!(
+        "MEASURE resumes: {} ticks of the pane beside it, queue {} after 4 s",
+        ticks.next,
+        mac.service.queued(ACCOUNT).unwrap_or(0)
+    );
+    assert!(ticks.next >= 30, "only {} ticks", ticks.next);
+    let second = mac
+        .open(
+            TICKS,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2D3",
+            Duration::from_secs(6),
+        )
+        .expect("a terminal made while a pane takes nothing");
+
+    // It reads: every line, in order, nothing else, and then the end.
+    let mut numbered = Numbered::default();
+    let reading = Instant::now();
+    let mut stray = false;
+    while numbered.next < 60_000 && reading.elapsed() < Duration::from_secs(60) {
+        let mut taken = Vec::new();
+        take_now(&mut unread_master, &mut taken, 1 << 20);
+        stray |= taken.contains(&0x1b);
         numbered
             .feed(&taken)
             .unwrap_or_else(|why| panic!("a byte was lost or doubled: {why}"));
         thread::sleep(Duration::from_millis(1));
     }
-    let lines = numbered.next;
-    assert!(lines >= 20_000, "only {lines} lines came in a minute");
     eprintln!(
-        "MEASURE unread: {lines} whole lines were read, in order, after the pane read again; queue {} then, {} now",
-        queued_then,
-        service.queued(ACCOUNT).unwrap_or(0)
+        "MEASURE resumes: {} lines came in order, in {:?}; a picture came: {stray}",
+        numbered.next,
+        reading.elapsed()
     );
-    let before = ticks_in(&seen);
-    let again = Instant::now();
-    while again.elapsed() < Duration::from_secs(2) {
-        take_now(&mut beside_master, &mut seen, 1 << 20);
+    assert_eq!(numbered.next, 60_000, "lines are missing");
+    assert!(!stray, "a picture of the screen came in place of bytes");
+    let ending = Instant::now();
+    while !at_end(&mut unread_master) && ending.elapsed() < Duration::from_secs(10) {
         thread::sleep(Duration::from_millis(20));
     }
-    let after = ticks_in(&seen) - before;
-    eprintln!(
-        "MEASURE unread: ticks of the pane beside it in 2 s once the unread one reads: {after}"
+    assert!(
+        at_end(&mut unread_master),
+        "the end of the program was not told the pane"
     );
-    assert!(after > 10, "the pane beside it was not fed again: {after}");
-    // The ends of the unread pane's stream are let go of before the service stops: its holder is
-    // writing into them, and does not stop while they are open.
-    drop((beside_master, unread_master, second));
-    drop((beside, unread));
-    service.stop();
+    assert_eq!(
+        unread.status.status().map(|status| status.code()),
+        Some(Some(0)),
+        "how the program ended"
+    );
+    drop((beside_master, unread_master));
+    drop((beside, unread, second));
+    mac.service.stop();
+}
+
+/// A pane that takes nothing beside one that takes a little, always: the one that takes a
+/// little is slow, not stuck, and is given every byte in order and no picture; the one that takes
+/// nothing is let go of (what the slow one takes does not count for it), and the account's
+/// terminals beside them go on.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_takes_nothing_is_let_go_of_beside_one_that_reads_slowly_and_loses_nothing() {
+    let Some(mut mac) = HeldMac::start("stuck-and-slow") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let slow = mac
+        .open(
+            NUMBERED_LINES,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2E1",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that reads slowly");
+    let stuck = mac
+        .open(
+            NUMBERED_LINES,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2E2",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that takes nothing");
+    let beside = mac
+        .open(
+            TICKS,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2E3",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that is read");
+    mac.keep_count();
+    let mut slow_master = std::fs::File::from(slow.master.try_clone().expect("a clone"));
+    let mut beside_master = std::fs::File::from(beside.master.try_clone().expect("a clone"));
+    let mut numbered = Numbered::default();
+    let mut ticks = Ticked::default();
+    let began = Instant::now();
+    let mut bytes = 0;
+    while began.elapsed() < Duration::from_secs(10) {
+        let mut chunk = Vec::new();
+        take_now(&mut slow_master, &mut chunk, 16 * 1024);
+        assert!(
+            !chunk.contains(&0x1b),
+            "a picture came in place of the slow pane's bytes after {bytes} bytes, {:?} in",
+            began.elapsed()
+        );
+        bytes += chunk.len();
+        numbered
+            .feed(&chunk)
+            .unwrap_or_else(|why| panic!("a byte was lost or doubled: {why}"));
+        ticks.take(&mut beside_master);
+        thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!(
+        "MEASURE stuck-and-slow: the slow pane took {bytes} bytes, {} whole lines in order; {} ticks beside, queue {}",
+        numbered.next,
+        ticks.next,
+        mac.service.queued(ACCOUNT).unwrap_or(0)
+    );
+    assert!(bytes >= 6 << 20, "only {bytes} bytes in 10 s");
+    assert!(ticks.next >= 60, "only {} ticks in 10 s", ticks.next);
+    drop((slow_master, beside_master));
+    drop((slow, stuck, beside));
+    mac.service.stop();
+}
+
+/// This Mac's account over a real kablo in a ground of its own, for the tests that open several
+/// panes on it.
+struct HeldMac {
+    service: Service,
+    ledger: Arc<Ledger>,
+    ground: Ground,
+}
+
+impl HeldMac {
+    /// `None` without a kablo release (the caller says `SKIPPED`).
+    fn start(name: &str) -> Option<HeldMac> {
+        let bundle = release()?;
+        let mut ground = Ground::new(name);
+        let service_dir = ground.root.join("svc");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&service_dir)
+            .expect("the service's directory");
+        let kablo =
+            kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+                .expect("a path");
+        let backend = RealMac {
+            bundle,
+            home: ground.home.clone(),
+            sockets: ground.sockets.clone(),
+            streams: Default::default(),
+            stand_in: Default::default(),
+        };
+        let ledger = Arc::new(Ledger::memory());
+        let service = Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger))
+            .expect("a service");
+        ground.kept = Some(PathBuf::from(kablo));
+        Some(HeldMac {
+            service,
+            ledger,
+            ground,
+        })
+    }
+
+    /// A pane `uuid` over `/bin/sh -c script`, waiting at most `wait` for its terminal.
+    fn open(&self, script: &str, uuid: &str, wait: Duration) -> Result<bt_core::Stream, Refusal> {
+        let mut options = plain_options(script, &self.ground.home);
+        options.pane_uuid = bt_core::PaneUuid::parse(uuid);
+        let pane = options.pane_uuid.clone().expect("a pane");
+        let (spec, size) = new_session(&options.child_launch(), 100);
+        self.service.open_local(&pane, spec, size, wait)
+    }
+
+    /// The terminals that exist now are the ones the ground ends when it goes.
+    fn keep_count(&mut self) {
+        self.ground.made = self.ledger.terminals_of(ACCOUNT);
+    }
+}
+
+/// A pane that takes the bytes of a program that never stops writing, `every` of its reading apart,
+/// for `seconds`: every byte of the program must come, in order and as the program wrote it, and no
+/// picture of the screen in place of any. Returns the bytes it was given. Slow is not stuck: what
+/// holds the program back is the pane's reading, byte by byte, and the ring of the terminal never
+/// gets past the pane (the program is far faster than the pane, so the pane is always behind: the
+/// premise, checked: nearly every reading finds a full chunk waiting).
+fn read_slowly(name: &str, every: Duration, seconds: u64) -> Option<usize> {
+    let Some(mut mac) = HeldMac::start(name) else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return None;
+    };
+    let slow = mac
+        .open(
+            NUMBERED_LINES,
+            "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2C1",
+            Duration::from_secs(30),
+        )
+        .expect("the pane that reads slowly");
+    mac.keep_count();
+    let mut master = std::fs::File::from(slow.master.try_clone().expect("a clone"));
+    let mut numbered = Numbered::default();
+    let (mut reads, mut full, mut bytes) = (0u32, 0u32, 0usize);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(seconds) {
+        let mut chunk = Vec::new();
+        take_now(&mut master, &mut chunk, 16 * 1024);
+        if let Some(at) = chunk.iter().position(|byte| *byte == 0x1b) {
+            let around = &chunk[at.saturating_sub(60)..(at + 80).min(chunk.len())];
+            panic!(
+                "a picture of the screen came in place of the program's bytes after {} bytes, {:?} in: {:?}",
+                bytes + at,
+                began.elapsed(),
+                String::from_utf8_lossy(around)
+            );
+        }
+        reads += 1;
+        full += u32::from(chunk.len() >= 16 * 1024);
+        bytes += chunk.len();
+        numbered
+            .feed(&chunk)
+            .unwrap_or_else(|why| panic!("a byte was lost or doubled: {why}"));
+        thread::sleep(every);
+    }
+    eprintln!(
+        "MEASURE slow: {bytes} bytes in {reads} readings {every:?} apart, {full} of them full, {} whole lines, all in order",
+        numbered.next
+    );
+    assert!(
+        full * 10 >= reads * 9,
+        "the pane kept up with its program: {full} of {reads} readings were full"
+    );
+    drop(master);
+    drop(slow);
+    mac.service.stop();
+    Some(bytes)
+}
+
+/// A pane that reads a few megabytes a second of a program that writes without end gets every
+/// byte of it, in order, and no picture: the ring of the terminal waits for it. Any way of letting
+/// the panes beside a pane that reads nothing go on must leave this as it is.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_reads_slowly_is_given_every_byte_of_its_program_in_order_and_no_picture() {
+    if let Some(bytes) = read_slowly("slow", Duration::from_millis(3), 8) {
+        assert!(bytes >= 16 << 20, "only {bytes} bytes in 8 s");
+    }
+}
+
+/// The same for a pane that reads about a megabyte a second (a pane that is busy drawing). The
+/// bridge's reading used to be held back by a count that fell only when a whole backlog was
+/// written and did not include what the bridge's reader had sent the loop and the loop had not
+/// counted yet, so the account stood still for longer than the relay waits for the pane, and the
+/// relay's ring got past it: a picture and some tens of megabytes missing.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_reads_a_megabyte_a_second_is_given_every_byte_of_its_program_in_order_and_no_picture()
+ {
+    if let Some(bytes) = read_slowly("slower", Duration::from_millis(50), 10) {
+        assert!(bytes >= 6 << 20, "only {bytes} bytes in 10 s");
+    }
 }
 
 #[test]
