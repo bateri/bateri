@@ -237,7 +237,7 @@ passes_alone() {
         }' "$log" | sort -u)
     targets=$(sed -n 's/^error: \([0-9]*\) targets\{0,1\} failed:$/\1/p' "$log")
     [ -n "$names" ] && [ "$(wc -l <<<"$names")" -le "$ALONE_MOST" ] || return 1
-    [ "$(wc -l <<<"$tests")" = "$(wc -l <<<"$names")" ] || return 1
+    [ -n "$tests" ] && [ "$(wc -l <<<"$tests")" = "$(wc -l <<<"$names")" ] || return 1
     [ "$targets" = "$(grep -c '^test result: FAILED' "$log")" ] || return 1
     while IFS=$'\t' read -r select t; do
         for ((i = 0; i < ALONE_RUNS; i++)); do
