@@ -318,31 +318,74 @@ fn run_stage(
             Err(_) => return Some(Err(StageError::Io)),
         }
     };
-    let mut buffer = vec![0u8; PIECE];
     let mut at = offset;
-    while at < source.size {
+    let ended = pour_file(&file, &source, &mut writing, &mut at, cancel, waits);
+    drop(writing);
+    // A reader can sleep through the end of a pipe that nothing went into.
+    if at == offset {
+        end_again(pipe, cancel, waits.look_again);
+    }
+    ended
+}
+
+/// Pours the file from `at` to its end into the pipe, moving `at` along with what went in.
+/// `None` when the transfer was taken back.
+fn pour_file(
+    file: &File,
+    source: &GivenFile,
+    writing: &mut File,
+    at: &mut u64,
+    cancel: &AtomicBool,
+    waits: Waits,
+) -> Option<Result<u64, StageError>> {
+    let mut buffer = vec![0u8; PIECE];
+    while *at < source.size {
         if cancel.load(Ordering::Acquire) {
             return None;
         }
-        let wanted = usize::try_from(source.size - at).map_or(PIECE, |left| left.min(PIECE));
-        let read = match file.read_at(&mut buffer[..wanted], at) {
+        let wanted = usize::try_from(source.size - *at).map_or(PIECE, |left| left.min(PIECE));
+        let read = match file.read_at(&mut buffer[..wanted], *at) {
             // A file that ends sooner than it said has changed.
             Ok(0) => return Some(Err(StageError::Gone)),
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return Some(Err(StageError::Io)),
         };
-        match pour(&mut writing, &buffer[..read], cancel, waits.silent_for) {
-            Ok(true) => at += read as u64,
+        match pour(writing, &buffer[..read], cancel, waits.silent_for) {
+            Ok(true) => *at += read as u64,
             Ok(false) => return None,
             Err(_) => return Some(Err(StageError::Io)),
         }
     }
     // What was poured is what was given: a file that changed under the pour is not the file.
-    if let Err(error) = same(&file, &source) {
+    if let Err(error) = same(file, source) {
         return Some(Err(error));
     }
     Some(Ok(source.size))
+}
+
+/// How many times a pipe whose writing end closed with nothing poured is given its end again.
+const ENDS_AGAIN: u32 = 3;
+
+/// Gives a program that still has `pipe` open to read its end again, a few times `look_again`
+/// apart: the writing end was closed with no byte poured into it (nothing was left of the file,
+/// or it failed before its first piece). Now and then macOS leaves a reader that goes into its
+/// `read` just as such an end comes asleep there for ever, with no writer anywhere; it was not
+/// seen to once a byte had gone in. A writing end opened and closed again wakes it with the end.
+/// Only a few times, and not until the program lets go: a program that reads without waiting
+/// keeps its end open until it is told `sent`, which comes after this.
+fn end_again(pipe: &Path, cancel: &AtomicBool, look_again: Duration) {
+    for _ in 0..ENDS_AGAIN {
+        thread::sleep(look_again);
+        if cancel.load(Ordering::Acquire) {
+            return;
+        }
+        // `ENXIO`: nobody has it open to read any more; `ENOENT`: it is gone.
+        match stage::open_pipe(pipe, false) {
+            Ok(again) => drop(again),
+            Err(_) => return,
+        }
+    }
 }
 
 /// Writes all of `bytes` into the pipe; `false` when the transfer was taken back first. A pipe
@@ -503,7 +546,7 @@ mod tests {
     use crate::kablo::served::Served;
     use crate::ssh_route::Ask;
     use crate::stage::{Folder, prepare_here};
-    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
     use std::time::SystemTime;
 
     pub(super) const PIPE: &str = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
@@ -769,14 +812,47 @@ exec sh -c "$last"
             .collect()
     }
 
-    /// What a program does with a pipe it was told of: opens it to read and reads to the end.
-    pub(super) fn read_pipe(path: PathBuf) -> thread::JoinHandle<Vec<u8>> {
-        thread::spawn(move || {
-            let mut pipe = File::open(path).expect("the pipe opens");
+    /// How long a program's read of a pipe may take before the test fails instead of waiting.
+    const READ_WITHIN: Duration = Duration::from_secs(10);
+
+    /// What a program does with a pipe it was told of: opens it to read, waiting for the writer,
+    /// and reads to the end, as a program that does not use the kit may.
+    pub(super) fn read_pipe(path: PathBuf) -> Program {
+        let (ended, read) = mpsc::channel::<()>();
+        let pipe = path.clone();
+        let thread = thread::spawn(move || {
+            // Dropped however the read ends, a panic included.
+            let _ended = ended;
+            let mut pipe = File::open(pipe).expect("the pipe opens");
             let mut got = Vec::new();
             pipe.read_to_end(&mut got).expect("the pipe reads");
             got
-        })
+        });
+        Program { path, read, thread }
+    }
+
+    /// A program reading a pipe on a thread of its own ([`read_pipe`]).
+    pub(super) struct Program {
+        path: PathBuf,
+        read: Receiver<()>,
+        thread: thread::JoinHandle<Vec<u8>>,
+    }
+
+    impl Program {
+        /// What the program read, once its read has come to the end of the pipe. A read that has
+        /// not ended within [`READ_WITHIN`] fails the test by name instead of holding it for
+        /// ever; its thread is left where it waits.
+        #[track_caller]
+        pub(super) fn join(self) -> thread::Result<Vec<u8>> {
+            if let Err(RecvTimeoutError::Timeout) = self.read.recv_timeout(READ_WITHIN) {
+                panic!(
+                    "the program's read of {} has not ended within {READ_WITHIN:?}: \
+                     no end of the pipe reached it",
+                    self.path.display()
+                );
+            }
+            self.thread.join()
+        }
     }
 
     #[test]
@@ -815,6 +891,32 @@ exec sh -c "$last"
         let program = read_pipe(rig.pipe());
         assert_eq!(rig.next(), Told::Staged(4, Ok(200_000)));
         assert!(program.join().expect("the program").is_empty());
+    }
+
+    /// How many stages with nothing to pour the next test tries: macOS leaves a reader without its
+    /// end now and then, not every time.
+    const NOTHING_TRIES: u32 = 400;
+
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_reader_waiting_on_a_pipe_with_nothing_to_pour_is_given_its_end() {
+        // A writer that looks for the reader every millisecond: the stages take less.
+        let waits = Waits {
+            look_again: Duration::from_millis(1),
+            ..Waits::default()
+        };
+        let rig = Rig::with_waits("nothing", waits);
+        let handle = rig.give(&bytes(1000));
+        for transfer in 1..=NOTHING_TRIES {
+            rig.files.stage(transfer, &handle, 1000, PIPE);
+            assert_eq!(rig.next(), Told::PipeReady(transfer));
+            let program = read_pipe(rig.pipe());
+            assert_eq!(rig.next(), Told::Staged(transfer, Ok(1000)));
+            assert!(
+                program.join().expect("the program").is_empty(),
+                "stage {transfer}"
+            );
+        }
     }
 
     #[test]

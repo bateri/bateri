@@ -17,6 +17,7 @@ of every installed copy. A version without a section is not released.
 - **A new pane opens at once and no longer falls back to an ordinary shell for being slow.** The pane is there the moment you open it and what you type waits for the terminal; after two seconds it says it is still starting, and after ten it offers to open an ordinary shell instead. It becomes an ordinary shell by itself only when the terminal is refused or kablo cannot be reached, and then says why.
 - **A pane that stops reading no longer freezes the panes beside it.** A program that floods a pane nobody is reading used to hold every other pane and the next new one; they carry on now, and the pane catches up when it reads again.
 - **A program's view that fails while it draws, reads the keyboard or speaks no longer closes bateri.** The view stops behind a small card with one button, Reopen; the program keeps running and your other tabs and panes carry on.
+- **A program no longer waits for ever for a file with nothing left to send.** A program on this Mac that asked for an empty file, or for the rest of a file it already had whole, could now and then wait without end; it now gets the end of the file.
 - **A crash no longer reopens the program that caused it.** If bateri quits unexpectedly, the views that were open come back behind a small card with one button, Reopen, instead of opening again by themselves and crashing again. After two launches that never settled, bateri keeps your windows and offers to open them with one button.
 
 ## [0.33.0] - 2026-11-24
