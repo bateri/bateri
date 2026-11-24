@@ -322,6 +322,14 @@ impl Hold {
     }
 }
 
+/// A holder [`Hub::give_up_new`] let go of: the terminal it waited for is forgotten by the hub.
+pub struct GivenUp {
+    pub hold: HoldId,
+    pub terminal: SessionId,
+    /// The holder is a pane of this process: nothing was said to it.
+    pub raw: bool,
+}
+
 /// The holders of one application and the clients they ride on. See the
 /// module documentation.
 pub struct Hub {
@@ -1230,41 +1238,53 @@ impl Hub {
         }
     }
 
-    /// The holders of `account` whose new terminal the server has not made are let fall back to a
-    /// plain `ssh`, and the terminals are not asked for any more: said of a connection that is
-    /// not coming, to the ones that are only waiting (a holder that was shown something, or
-    /// whose terminal existed before, waits for the connection as it does). Returns the
-    /// terminals that were given up on.
-    pub fn give_up_new(&mut self, account: &str) -> Vec<SessionId> {
+    /// The holders of `account` whose new terminal the server has not made are let go of, and the
+    /// terminals are not asked for any more: said of a connection that is not coming, to the ones
+    /// that are only waiting (a holder that was shown something, or whose terminal existed
+    /// before, waits for the connection as it does). A holder that is a connection of a program
+    /// falls back to a plain `ssh` (it says what is the matter itself) — the one that is a pane of
+    /// this process ([`Hub::open_raw`]) is told nothing here: its owner gives it what it gives a
+    /// pane that is refused, and says why, for the ones `local_pane` answers `true` for (a pane
+    /// that has no stream of its own yet to give an ordinary shell to is waited for as before).
+    /// Returns the holders that were given up on.
+    pub fn give_up_new(
+        &mut self,
+        account: &str,
+        local_pane: impl Fn(HoldId) -> bool,
+    ) -> Vec<GivenUp> {
         let Some(client) = self.clients.get(account) else {
             return Vec::new();
         };
-        let waiting: Vec<(HoldId, SessionId)> = self
+        let waiting: Vec<GivenUp> = self
             .bound
             .iter()
             .filter(|((owner, terminal), _)| owner == account && client.is_creating(terminal))
-            .map(|((_, terminal), hold)| (*hold, terminal.clone()))
-            .filter(|(hold, _)| {
-                self.holds.get(hold).is_some_and(|entry| {
-                    !entry.raw && entry.bound.as_ref().is_some_and(|b| !b.shown)
+            .filter_map(|((_, terminal), hold)| {
+                let entry = self.holds.get(hold)?;
+                let waits = entry.bound.as_ref().is_some_and(|b| !b.shown);
+                (waits && (!entry.raw || local_pane(*hold))).then(|| GivenUp {
+                    hold: *hold,
+                    terminal: terminal.clone(),
+                    raw: entry.raw,
                 })
             })
             .collect();
-        let mut given_up = Vec::new();
-        for (hold, terminal) in waiting {
-            self.release(hold, false);
+        for given in &waiting {
+            self.release(given.hold, false);
             if let Some(client) = self.clients.get_mut(account) {
-                client.forget(&terminal);
+                client.forget(&given.terminal);
             }
-            if let Some(entry) = self.holds.get_mut(&hold) {
+            if given.raw {
+                continue;
+            }
+            if let Some(entry) = self.holds.get_mut(&given.hold) {
                 entry.finish(&ToHold::Refused {
                     fall_back: true,
                     text: String::new(),
                 });
             }
-            given_up.push(terminal);
         }
-        given_up
+        waiting
     }
 
     /// The wire version a holder speaks (0 before its greeting).

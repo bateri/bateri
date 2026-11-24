@@ -5741,6 +5741,224 @@ fn where_kablo_cannot_be_put_the_pane_is_an_ordinary_one_and_the_step_is_not_rep
     assert_eq!(world.count("carry"), 0);
 }
 
+/// Runs until `ready`, asking for the next dial of this Mac's account as soon as the pause the
+/// last failed one left would end — a bridge that cannot be reached is tried again after a pause
+/// that doubles, and these tests are about the attempts, not the pauses.
+fn redial_until(rig: &Rig, message: &str, mut ready: impl FnMut() -> bool) {
+    let mut asked = Instant::now();
+    until(message, || {
+        if ready() {
+            return true;
+        }
+        if asked.elapsed() >= Duration::from_millis(25) {
+            asked = Instant::now();
+            rig.service.retry_account(local::ACCOUNT);
+        }
+        false
+    });
+}
+
+/// kablo that cannot be reached for the third attempt in a row is a pane that waits for nothing:
+/// the new terminal it asked for is not coming, and it is given an ordinary shell with the reason
+/// said in its own line — the same ending a server pane has, which is a plain `ssh` that says what
+/// is the matter. Before, the pane of this Mac stayed on "Starting the terminal…" for as long as
+/// kablo did not come, with nothing to say why (the hub let go of the panes of servers only).
+#[test]
+fn a_new_pane_whose_kablo_cannot_be_reached_is_an_ordinary_shell_that_says_why() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let rig = Rig::kept("local-unreached", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+
+    let stream = ask_local(&rig, &pane);
+    // Two failed attempts are not three.
+    until("two attempts", || world.count("carry") >= 2);
+    assert!(!stream.pid.is_settled(), "waiting still");
+    redial_until(&rig, "a shell instead", || stream.pid.get().is_some());
+    assert!(stream.status.is_ordinary());
+    assert!(
+        world.count("carry") >= 3,
+        "{} attempts",
+        world.count("carry")
+    );
+    let mut mac = Pane::of(stream);
+    let told = String::from_utf8_lossy(&mac.reads(b"ordinary shell")).into_owned();
+    assert!(
+        told.contains("kablo on this Mac could not be reached"),
+        "{told}"
+    );
+    assert!(told.contains("attempts in a row"), "{told}");
+    // The shell works, and no terminal is kept for the pane.
+    mac.master
+        .write_all(b"echo shell_said_$((6*7))\n")
+        .expect("typed");
+    assert!(String::from_utf8_lossy(&mac.reads(b"shell_said_42")).contains("shell_said_42"));
+    assert_eq!(ledger.local_terminal_of(&pane), None);
+    // The log has the step the wait was in, as for every refusal.
+    let lines = world.lines.lock().expect("lock").clone();
+    assert!(
+        lines.iter().any(
+            |line| line.contains("is an ordinary one") && line.contains("could not be reached")
+        ),
+        "{lines:?}"
+    );
+}
+
+/// A pane that was let go of because kablo could not be reached has asked for a terminal that
+/// may have been made: when the server's word comes late, or the connection that comes up finds
+/// it, it is ended, and the ledger has no row for it — no shell runs where nobody sees it.
+#[test]
+fn a_terminal_that_comes_after_its_pane_was_let_go_of_is_ended_and_leaves_no_row() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-late", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    world.bridge().hold_created();
+    let stream = ask_local(&rig, &pane);
+    until("the terminal asked for", || {
+        ledger
+            .local_terminal_of(&pane)
+            .is_some_and(|terminal| world.bridge().has(&terminal))
+    });
+    let id = ledger.local_terminal_of(&pane).expect("the terminal");
+
+    // The connection goes and kablo cannot be reached: the pane is let go of.
+    world.carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    world.break_connection();
+    redial_until(&rig, "a shell instead", || stream.pid.get().is_some());
+    assert!(stream.status.is_ordinary());
+    assert_eq!(ledger.local_terminal_of(&pane), None);
+
+    // kablo is back, and the server's word of the terminal comes late.
+    world.carry_fails_with(None);
+    world.bridge().release_created();
+    redial_until(&rig, "the terminal ended", || {
+        world.bridge().terminated(&id) == Some(false)
+    });
+    until("no row for it", || {
+        !ledger.terminals_of(local::ACCOUNT).contains(&id)
+    });
+    drop(stream);
+}
+
+/// A connection that broke once, or a kablo that could not be run once, is not a kablo that is not
+/// coming: the pane that waits is given its terminal, as it is where nothing breaks.
+#[test]
+fn a_pane_that_waits_through_one_broken_connection_or_one_missing_kablo_is_given_its_terminal() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-once", world.clone(), ledger.clone(), END_GRACE);
+    let first = ask_local(&rig, &a_pane());
+    until("the first terminal", || first.pid.get().is_some());
+
+    // The connection breaks while the next terminal is on its way.
+    world.bridge().hold_created();
+    let pane = PaneUuid::parse("6B2F3E4D-5C6B-7A89-98A7-B6C5D4E3F2A1").expect("a pane");
+    let stream = ask_local(&rig, &pane);
+    until("asked", || {
+        ledger
+            .local_terminal_of(&pane)
+            .is_some_and(|terminal| world.bridge().has(&terminal))
+    });
+    world.break_connection();
+    redial_until(&rig, "dialed again", || world.count("carry") >= 2);
+    world.bridge().release_created();
+    redial_until(&rig, "the terminal", || stream.pid.get().is_some());
+    assert!(!stream.status.is_ordinary());
+
+    // The kablo cannot be run once.
+    world.carry_fails_with(Some(io::ErrorKind::NotFound));
+    world.break_connection();
+    let third = PaneUuid::parse("7C3A4F5E-6D7C-8B9A-A9B8-C7D6E5F4A3B2").expect("a pane");
+    let stream = ask_local(&rig, &third);
+    let dials = world.count("carry");
+    redial_until(&rig, "the missing kablo", || world.count("carry") > dials);
+    assert!(!stream.pid.is_settled(), "waiting still");
+    world.carry_fails_with(None);
+    redial_until(&rig, "the terminal", || stream.pid.get().is_some());
+    assert!(!stream.status.is_ordinary());
+}
+
+/// When kablo is mended the next new pane is given its terminal: the attempt that fails does not
+/// make the panes after it ordinary for a while, and a pane that is asked for while the account
+/// waits out the pause of its last failed attempt makes that attempt at once.
+#[test]
+fn the_pane_after_a_kablo_that_could_not_be_reached_is_given_its_terminal_when_it_is_mended() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let rig = Rig::kept(
+        "local-mended",
+        world.clone(),
+        Arc::new(Ledger::memory()),
+        END_GRACE,
+    );
+    let first = ask_local(&rig, &a_pane());
+    redial_until(&rig, "a shell instead", || first.pid.get().is_some());
+    assert!(first.status.is_ordinary());
+
+    // The pause the account waits out now is long; kablo is mended in the middle of it.
+    world.carry_fails_with(None);
+    let asked = Instant::now();
+    let second = ask_local(
+        &rig,
+        &PaneUuid::parse("6B2F3E4D-5C6B-7A89-98A7-B6C5D4E3F2A1").expect("a pane"),
+    );
+    until("its terminal", || second.pid.get().is_some());
+    assert!(!second.status.is_ordinary());
+    assert_eq!(second.pid.get(), Some(crate::kablo::fake::FAKE_PID));
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "dialed at once, not after the pause: {:?}",
+        asked.elapsed()
+    );
+}
+
+/// A terminal found again may have a program that lives: it is waited for however long kablo does
+/// not come, and is neither ended nor made an ordinary shell for the reason a new one is.
+#[test]
+fn a_terminal_found_again_is_waited_for_while_kablo_cannot_be_reached() {
+    let back = Comeback::leaves("local-found-unreached", b"x\r\n");
+    back.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    let carries = back.world.count("carry");
+    let mut asked = Instant::now();
+    until("four attempts", || {
+        if asked.elapsed() >= Duration::from_millis(25) {
+            asked = Instant::now();
+            second.retry_account(local::ACCOUNT);
+        }
+        back.world.count("carry") >= carries + 4
+    });
+    assert!(!stream.status.is_ordinary());
+    assert!(!stream.pid.is_settled(), "waiting still");
+    assert_eq!(
+        back.ledger.local_terminal_of(&back.pane),
+        Some(back.terminal.clone())
+    );
+    // The connection comes, and the terminal is shown with what it wrote meanwhile.
+    back.world.carry_fails_with(None);
+    let mut asked = Instant::now();
+    until("the terminal is back", || {
+        if asked.elapsed() >= Duration::from_millis(25) {
+            asked = Instant::now();
+            second.retry_account(local::ACCOUNT);
+        }
+        stream.pid.get() == Some(crate::kablo::fake::FAKE_PID)
+    });
+    assert!(!stream.status.is_ordinary());
+}
+
 #[test]
 fn a_pane_of_this_mac_that_the_counter_numbers_is_started_under_its_number() {
     let ledger = Arc::new(Ledger::memory());
