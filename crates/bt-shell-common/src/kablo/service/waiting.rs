@@ -1,10 +1,11 @@
 //! What a pane's wait for its terminal of this Mac went through, for the log.
 //!
-//! The pane thread and the service's loop share a [`Trace`]: the loop writes the step the wait is
-//! in as it enters it, and the pane thread reads it when the wait ends — or when the pane stops
-//! waiting, which is when the loop has not answered and the step it is stuck in is the thing to
-//! know. The pane thread is the only one that writes a line, once per wait that was slow
-//! ([`Backend::slow_open`]) and once per wait that did not end with a terminal.
+//! The pane's request and the service's loop share a [`Trace`]: the loop writes the step the wait
+//! is in as it enters it, and reads it when the wait ends — or when the pane stops waiting, which
+//! is when the loop has not answered and the step it is stuck in is the thing to know. A line is
+//! written once per wait that was slow ([`Backend::slow_open`]), by the loop when the terminal
+//! comes, and once per wait that did not end with a terminal, by whoever refuses it
+//! ([`super::LocalAsk::refuse`]).
 
 use std::fmt::Write as _;
 use std::sync::Mutex;

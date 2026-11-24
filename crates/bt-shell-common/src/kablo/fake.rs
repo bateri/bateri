@@ -228,6 +228,9 @@ pub struct Bridge {
     /// The programs take what is typed to them only when told to ([`Bridge::stall`]): the
     /// `pong` of a session's `ping` waits, as a server's does for a program that is not reading.
     stalled: bool,
+    /// The server makes the terminals it is asked for and says so only when told to
+    /// ([`Bridge::hold_created`]): what is made is there, the word of it waits.
+    created_held: Option<Vec<Packet>>,
     /// The `pong`s that wait.
     held: VecDeque<Packet>,
     /// How many connections have been greeted.
@@ -265,6 +268,7 @@ impl Bridge {
             far_window: 64 * 1024,
             stubborn: false,
             stalled: false,
+            created_held: None,
             held: VecDeque::new(),
             connections: 0,
             received: Vec::new(),
@@ -277,6 +281,20 @@ impl Bridge {
     /// `ping` after typed input once the program's terminal has taken it.
     pub fn stall(&mut self) {
         self.stalled = true;
+    }
+
+    /// The word that a terminal was made waits from now on until [`Bridge::release_created`]: a
+    /// terminal that is on its way, as one is for a server that is busy.
+    pub fn hold_created(&mut self) {
+        self.created_held.get_or_insert_with(Vec::new);
+    }
+
+    /// The words of the terminals made since [`Bridge::hold_created`] are sent, and are sent at
+    /// once from now on.
+    pub fn release_created(&mut self) {
+        for packet in self.created_held.take().unwrap_or_default() {
+            self.send(&packet);
+        }
     }
 
     /// The programs take what the oldest `pings` pings were after: their `pong`s are sent.
@@ -1024,7 +1042,11 @@ impl Bridge {
         session.env = spec.env.clone();
         self.sessions.insert(id.clone(), session);
         if let Some(status) = self.status(&id) {
-            self.send(&Packet::about(id, Message::Created(status)));
+            let packet = Packet::about(id, Message::Created(status));
+            match &mut self.created_held {
+                Some(held) => held.push(packet),
+                None => self.send(&packet),
+            }
         }
     }
 

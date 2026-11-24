@@ -1012,6 +1012,16 @@ impl Client {
             .is_some_and(|t| !t.input.waiting.is_empty() && t.input.in_flight < INPUT_WINDOW)
     }
 
+    /// Whether the terminal takes what is typed into it now: it is asked for or attached, and the
+    /// connection is live ([`Client::input`] refuses it otherwise).
+    pub fn accepts_input(&self, id: &SessionId) -> bool {
+        self.link.is_live()
+            && self
+                .terminals
+                .get(id)
+                .is_some_and(|t| matches!(t.phase, Phase::Asked | Phase::Attached))
+    }
+
     /// Types `bytes` into the program, exactly as they are. `false` when they
     /// were not accepted — the connection is not live or the terminal is not
     /// attached — and the owner should say so (a bell), not keep them: a line

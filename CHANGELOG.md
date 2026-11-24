@@ -14,6 +14,8 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A new pane opens at once and no longer falls back to an ordinary shell for being slow.** The pane is there the moment you open it and what you type waits for the terminal; after two seconds it says it is still starting. It becomes an ordinary shell only when the terminal is refused, and then says why and carries a small "Not kept" mark.
+- **A pane that stops reading no longer freezes the panes beside it.** A program that floods a pane nobody is reading used to hold every other pane and the next new one; they carry on now, and the pane catches up when it reads again, with the screen as it stands if more came than could be kept.
 - **A program's view that fails while it draws, reads the keyboard or speaks no longer closes bateri.** The view stops behind a small card with one button, Reopen; the program keeps running and your other tabs and panes carry on.
 - **A crash no longer reopens the program that caused it.** If bateri quits unexpectedly, the views that were open come back behind a small card with one button, Reopen, instead of opening again by themselves and crashing again. After two launches that never settled, bateri keeps your windows and offers to open them with one button.
 

@@ -1041,7 +1041,8 @@ impl Hub {
         terminal: SessionId,
         size: Size,
         past: bool,
-    ) -> Result<Arc<Silence>, Declined> {
+        silence: Arc<Silence>,
+    ) -> Result<(), Declined> {
         if !self
             .holds
             .get(&hold)
@@ -1058,15 +1059,42 @@ impl Hub {
             Attach::new(size).from_now().with_picture().every_byte()
         };
         client.attach(terminal.clone(), attach);
-        let silence = Silence::new();
         if let Some(entry) = self.holds.get_mut(&hold) {
-            entry.silence = Some(Arc::clone(&silence));
+            entry.silence = Some(silence);
             entry.forget_past = !past;
         }
         // Not shown until the server attaches it: a terminal it does not have is a refusal the
         // owner answers (the pane makes a new terminal), not a line under what was shown.
         self.bind(hold, account, terminal, 0, !past, false);
-        Ok(silence)
+        Ok(())
+    }
+
+    /// A raw holder whose terminal is not there (the server does not have it) lets go of it and
+    /// is the request of a terminal again, as if it had been opened just now: what the hub said
+    /// of the terminal's end is forgotten, and the past its pane was to be told is closed empty.
+    pub fn let_go_raw(&mut self, hold: HoldId) {
+        self.release(hold, true);
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.out.clear();
+            entry.finished = false;
+            entry.exit = None;
+            entry.pending = None;
+            entry.silence = None;
+            entry.forget_past = false;
+        }
+    }
+
+    /// Whether the terminal of a holder takes what the holder types now ([`Client::accepts_input`]).
+    pub fn accepts_input(&self, hold: HoldId) -> bool {
+        self.holds
+            .get(&hold)
+            .and_then(|entry| entry.bound.as_ref())
+            .and_then(|binding| {
+                self.clients
+                    .get(&binding.account)
+                    .map(|client| client.accepts_input(&binding.terminal))
+            })
+            .unwrap_or(false)
     }
 
     /// How the terminal's program ended, for a holder the hub has said its last word to.
@@ -1354,6 +1382,12 @@ impl Hub {
         self.holds
             .get(&hold)
             .is_some_and(|entry| entry.finished && entry.out.is_empty())
+    }
+
+    /// Whether the hub has said its last word to this holder, whether or not it has been written
+    /// (a raw holder that nobody carries yet has it in [`Hub::take_outgoing`]).
+    pub fn said_last_word(&self, hold: HoldId) -> bool {
+        self.holds.get(&hold).is_some_and(|entry| entry.finished)
     }
 
     /// How many bytes are waiting to be written to a holder. A large number

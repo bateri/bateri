@@ -58,20 +58,24 @@ use bt_core::{Chord, Key, Mods, PaneUuid, Settings, Theme};
 use bt_shell_common::agent::message::{Format, Reply};
 use bt_shell_common::agent::view::{Action, Step, View, Way};
 use bt_shell_common::kablo::SessionId;
-use bt_shell_common::kablo::service::{PaneLink, Shown};
+use bt_shell_common::kablo::service::{LocalAsk, PaneLink, Shown};
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardItem,
-    NSPasteboardTypeString, NSPasteboardWriting, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSAppearance, NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy,
+    NSBackingStoreType, NSBitmapImageFileType, NSBitmapImageRep, NSButton, NSEvent,
+    NSEventModifierFlags, NSEventType, NSGraphicsContext, NSImage, NSMenu, NSMenuItem,
+    NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSPasteboardWriting, NSTextField,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSArray, NSData, NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSRunLoop, NSSize, NSString,
+    NSArray, NSData, NSDate, NSDefaultRunLoopMode, NSDictionary, NSObject, NSObjectProtocol,
+    NSPoint, NSRect, NSRunLoop, NSSize, NSString,
 };
 
 /// What a host heard: nothing this test is about, but the trait wants an answer to each. The
@@ -138,6 +142,15 @@ fn spin(seconds: f64) {
         unsafe { NSDefaultRunLoopMode },
         &NSDate::dateWithTimeIntervalSinceNow(seconds),
     );
+}
+
+/// Runs the main run loop for `seconds` whatever comes in it (one `spin` returns at the first
+/// thing it handled).
+fn spin_for(seconds: f64) {
+    let until = Instant::now() + Duration::from_secs_f64(seconds);
+    while Instant::now() < until {
+        spin(0.05);
+    }
 }
 
 /// Runs the loop until `done` or the step's time is out.
@@ -1322,6 +1335,9 @@ fn run(dir: &Path) {
             agent_reads_a_dialog_behind_a_large_page(mtm, &window, frame_rect, dir);
         },
     );
+    section("a pane born without its terminal", &mut failures, || {
+        born_without_its_terminal(mtm, &window, frame_rect, dir);
+    });
     // Last: it registers the app's fonts for this process, and with them the default font of
     // every pane opened after it.
     section("the app's fonts in the page", &mut failures, || {
@@ -1342,6 +1358,235 @@ fn run(dir: &Path) {
     pane.close();
     assert!(failures.is_empty(), "failed: {failures:?}");
     println!("pencere: ok");
+}
+
+/// The owner of a pane that is born over a stream whose terminal does not come (or is refused at
+/// once, `refuse`): what the service does for a pane of this Mac, as far as the pane can tell.
+struct Born {
+    quiet: Quiet,
+    refuse: Option<&'static str>,
+    found: bool,
+    asks: RefCell<Vec<LocalAsk>>,
+    pids: RefCell<Vec<bt_core::ChildPid>>,
+}
+
+impl Host for Born {
+    fn keeps_key(&self, chord: &Chord) -> bool {
+        self.quiet.keeps_key(chord)
+    }
+    fn title_changed(&self, _: u64) {}
+    fn shell_exited(&self, _: u64) {}
+    fn focused(&self, _: u64) {}
+    fn uploads_changed(&self, _: u64) {}
+    fn activity_changed(&self, _: u64) {}
+    fn notify(&self, _: u64, _: &str, _: &str) {}
+    fn post_notices(&self, _: u64, _: Source, _: Vec<String>) {}
+    fn questions_changed(&self, _: u64) {}
+    fn program_notification(&self, _: u64, _: Option<&str>, _: &str) {}
+    fn cover(&self, _: &TerminalPane) -> Option<Rc<dyn Cover>> {
+        None
+    }
+    fn kept_terminal(&self, _: &PaneUuid) -> Option<Shown> {
+        None
+    }
+    fn open_local_terminal(
+        &self,
+        pane: &PaneUuid,
+        launch: &bt_core::ChildLaunch,
+        history: u32,
+        _program: bool,
+    ) -> Option<bt_core::Stream> {
+        let (spec, size) = bt_shell_common::kablo::local::new_session(launch, history);
+        let (stream, ask) = LocalAsk::new(pane, spec, size, launch.clone(), self.found).ok()?;
+        self.pids.borrow_mut().push(stream.pid.clone());
+        match self.refuse {
+            Some(why) => ask.refuse(why),
+            None => self.asks.borrow_mut().push(ask),
+        }
+        Some(stream)
+    }
+}
+
+/// What `pane` draws, with the labels over it, as a PNG: the terminal is the pane's still, and the
+/// labels (AppKit's views, drawn beside the frame path) are drawn over it where they stand.
+fn picture_of(pane: &TerminalPane, scale: f64) -> Option<Vec<u8>> {
+    let size = pane.bounds().size;
+    let still = pane.snapshot((size.width, size.height), scale)?;
+    let pixels = |points: f64| (points * scale).round() as isize;
+    // SAFETY: a bitmap the rep allocates for itself; the colour space is the device's RGB.
+    let rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            pixels(size.width),
+            pixels(size.height),
+            8,
+            4,
+            true,
+            false,
+            objc2_app_kit::NSDeviceRGBColorSpace,
+            0,
+            0,
+        )
+    }?;
+    rep.setSize(size);
+    let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&context));
+    let whole = NSRect::new(NSPoint::new(0.0, 0.0), size);
+    let terminal = NSImage::initWithCGImage_size(NSImage::alloc(), &still, size);
+    terminal.drawInRect(whole);
+    let view: &NSView = pane;
+    for label in descendants(view.retain()) {
+        if label.isHidden() || label.class().name().to_str() != Ok("BateriLinkLabel") {
+            continue;
+        }
+        let bounds = label.bounds();
+        if let Some(label_rep) = label.bitmapImageRepForCachingDisplayInRect(bounds) {
+            label.cacheDisplayInRect_toBitmapImageRep(bounds, &label_rep);
+            let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+            image.addRepresentation(&label_rep);
+            image.drawInRect(label.frame());
+        }
+    }
+    NSGraphicsContext::restoreGraphicsState_class();
+    // SAFETY: the properties are an empty dictionary, which the type takes for no property.
+    let png = unsafe {
+        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    };
+    png.map(|png| png.to_vec())
+}
+
+/// A pane that is born without its terminal: nothing waits for it, it says so once two seconds in,
+/// the line goes when the terminal comes, and the idle pane draws nothing in the meantime; a pane
+/// that is refused its terminal says why and carries a mark for good, and a pane born where no
+/// kablo is expected has neither. Pictures of each, light and dark, go where
+/// `BT_PANE_SHOTS` says.
+fn born_without_its_terminal(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    let shots = std::env::var_os("BT_PANE_SHOTS").map(PathBuf::from);
+    if let Some(shots) = &shots {
+        fs::create_dir_all(shots).expect("the pictures' folder");
+    }
+    let host = |refuse, found| {
+        Rc::new(Born {
+            quiet: Quiet::default(),
+            refuse,
+            found,
+            asks: RefCell::new(Vec::new()),
+            pids: RefCell::new(Vec::new()),
+        })
+    };
+    let open = |id: u64, host: Rc<Born>, theme: Theme| -> Retained<TerminalPane> {
+        let folder = dir.join(format!("born-{id}"));
+        fs::create_dir_all(folder.join("zdot")).expect("the pane's folder");
+        let identity = Rc::new(Identity {
+            app_name: "pencere-test".to_owned(),
+            helper: None,
+            zsh_wrapper_dir: None,
+            fish_wrapper_dir: None,
+            bash_wrapper_dir: None,
+        });
+        let mut config = embed::Config::new(mtm, id, host, identity, Settings::default(), theme);
+        config.env = vec![
+            (
+                "ZDOTDIR".to_owned(),
+                folder.join("zdot").display().to_string(),
+            ),
+            ("PS1".to_owned(), "% ".to_owned()),
+        ];
+        let pane = embed::open(mtm, frame_rect, config).expect("the pane opens");
+        window
+            .contentView()
+            .expect("a window has a content view")
+            .addSubview(&pane);
+        pane.observe_frame();
+        pane.start(mtm).expect("the pane starts");
+        pane
+    };
+    for (look, theme, appearance) in [
+        ("dark", Theme::BATERI, "NSAppearanceNameDarkAqua"),
+        ("light", Theme::BATERI_LIGHT, "NSAppearanceNameAqua"),
+    ] {
+        let named = NSString::from_str(appearance);
+        window.setAppearance(NSAppearance::appearanceNamed(&named).as_deref());
+        let base = 900 + if look == "dark" { 0 } else { 10 };
+        // Born without its terminal, a new one: nothing yet, then the line, then nothing again.
+        let born = host(None, false);
+        let started = Instant::now();
+        let pane = open(base, born.clone(), theme);
+        assert!(started.elapsed() < Duration::from_secs(1), "nothing waited");
+        assert_eq!(pane.wait_line_text(), None, "not before two seconds");
+        assert_eq!(
+            born.asks.borrow().len(),
+            1,
+            "the pane asked its owner for a terminal"
+        );
+        spin_for(2.4);
+
+        assert_eq!(
+            pane.wait_line_text().as_deref(),
+            Some("Starting the terminal…")
+        );
+        assert_eq!(pane.not_kept_mark_text(), None);
+        if let Some(shots) = &shots {
+            let png = picture_of(&pane, 2.0).expect("a picture");
+            fs::write(shots.join(format!("waiting-new-{look}.png")), png).expect("written");
+        }
+        // The idle pane draws nothing while it waits: no repeating timer, no frames.
+        let before = pane.frames_drawn();
+        spin_for(1.5);
+        assert_eq!(pane.frames_drawn(), before, "an idle waiting pane draws");
+        // The terminal comes: the line goes.
+        born.pids.borrow()[0].set(4242);
+        until("the line to go", || pane.wait_line_text().is_none());
+        assert_eq!(pane.not_kept_mark_text(), None, "a terminal is no refusal");
+        pane.close();
+
+        // A pane that finds its terminal again says so in its words.
+        let found = host(None, true);
+        let pane = open(base + 1, found, theme);
+        spin_for(2.4);
+        assert_eq!(
+            pane.wait_line_text().as_deref(),
+            Some("Bringing the terminal back…")
+        );
+        if let Some(shots) = &shots {
+            let png = picture_of(&pane, 2.0).expect("a picture");
+            fs::write(shots.join(format!("waiting-found-{look}.png")), png).expect("written");
+        }
+        pane.close();
+
+        // A terminal that came before the two seconds are over: the line never shows.
+        let quick = host(None, false);
+        let pane = open(base + 2, quick.clone(), theme);
+        quick.pids.borrow()[0].set(4243);
+        spin_for(2.4);
+        assert_eq!(pane.wait_line_text(), None, "the one-shot found it over");
+        pane.close();
+
+        // Refused: an ordinary shell, told in the pane, and the mark for good.
+        let refused = host(
+            Some("the service that makes the terminals of this Mac did not start"),
+            false,
+        );
+        let pane = open(base + 3, refused, theme);
+        until("the mark", || pane.not_kept_mark_text().is_some());
+        assert_eq!(pane.not_kept_mark_text().as_deref(), Some("Not kept"));
+        assert_eq!(pane.wait_line_text(), None);
+        spin_for(1.5);
+        assert_eq!(pane.not_kept_mark_text().as_deref(), Some("Not kept"));
+        if let Some(shots) = &shots {
+            let png = picture_of(&pane, 2.0).expect("a picture");
+            fs::write(shots.join(format!("refused-{look}.png")), png).expect("written");
+        }
+        pane.close();
+    }
+    window.setAppearance(None);
 }
 
 /// A pane whose terminal a server keeps, with a program's view over it, as its connection goes and

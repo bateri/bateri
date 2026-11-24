@@ -78,7 +78,7 @@ pub use ::pencere_host::take::{Kind as TakeKind, Take};
 
 use crate::color::{Theme, srgb_bytes};
 use crate::flow::Flow;
-use crate::session::PtyOps;
+use crate::session::{ChildPid, PtyOps};
 use crate::shell::ShellLog;
 use crate::wake::Wake;
 
@@ -348,13 +348,13 @@ impl fmt::Debug for ShellGroup {
 /// and keeps its group, and the process table is not asked on every frame.
 struct Shell {
     find: Option<ShellGroup>,
-    child: u32,
+    child: ChildPid,
     /// `0` for not found yet: no process group has that id.
     found: AtomicU32,
 }
 
 impl Shell {
-    fn new(find: Option<ShellGroup>, child: u32) -> Self {
+    fn new(find: Option<ShellGroup>, child: ChildPid) -> Self {
         Self {
             find,
             child,
@@ -365,13 +365,15 @@ impl Shell {
     /// The group, or `None` when it cannot be told yet — which makes the check of the
     /// foreground unknown ([`observed`]), not failed.
     fn group(&self) -> Option<u32> {
+        // A terminal that is still being started has no child to ask about yet.
+        let child = self.child.get()?;
         let Some(find) = &self.find else {
             // The child is the shell, and a shell is the leader of its own group.
-            return Some(self.child);
+            return Some(child);
         };
         match self.found.load(Ordering::Acquire) {
             0 => {
-                let group = (find.0)(self.child).filter(|group| *group > 0)?;
+                let group = (find.0)(child).filter(|group| *group > 0)?;
                 self.found.store(group, Ordering::Release);
                 Some(group)
             }
@@ -616,16 +618,19 @@ fn shell_holds(tty: Option<Tty>, shell: Option<u32>) -> Option<bool> {
 pub(crate) fn pane_foreground(
     master: Arc<Mutex<Option<File>>>,
     stream: Option<Arc<dyn PtyOps>>,
-    child_pid: u32,
+    child_pid: ChildPid,
     group: Option<ShellGroup>,
 ) -> Foreground {
-    let leads = Shell::new(group, child_pid);
+    let leads = Shell::new(group, child_pid.clone());
     Box::new(move || {
         let tty = if let Some(ops) = &stream {
-            ops.tty(child_pid).map(|reading| Tty {
-                foreground: reading.foreground,
-                canonical_or_echo: reading.modes.canonical || reading.modes.echo,
-            })
+            child_pid
+                .get()
+                .and_then(|pid| ops.tty(pid))
+                .map(|reading| Tty {
+                    foreground: reading.foreground,
+                    canonical_or_echo: reading.modes.canonical || reading.modes.echo,
+                })
         } else {
             lock(&master)
                 .as_ref()
@@ -645,10 +650,10 @@ pub(crate) fn pane_observer(
     shell: Arc<Mutex<ShellLog>>,
     master: Arc<Mutex<Option<File>>>,
     stream: Option<Arc<dyn PtyOps>>,
-    child_pid: u32,
+    child_pid: ChildPid,
     group: Option<ShellGroup>,
 ) -> Observer {
-    let leads = Shell::new(group, child_pid);
+    let leads = Shell::new(group, child_pid.clone());
     Box::new(move || {
         let (editing, remote) = {
             let log = lock(&shell);
@@ -659,10 +664,13 @@ pub(crate) fn pane_observer(
         } else if let Some(ops) = &stream {
             // No master: the terminal is read from the outside, by the program's pid. The
             // frame being heard is the program writing, so the pid is its own.
-            ops.tty(child_pid).map(|reading| Tty {
-                foreground: reading.foreground,
-                canonical_or_echo: reading.modes.canonical || reading.modes.echo,
-            })
+            child_pid
+                .get()
+                .and_then(|pid| ops.tty(pid))
+                .map(|reading| Tty {
+                    foreground: reading.foreground,
+                    canonical_or_echo: reading.modes.canonical || reading.modes.echo,
+                })
         } else {
             lock(&master)
                 .as_ref()

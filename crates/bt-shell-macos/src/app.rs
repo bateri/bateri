@@ -3109,7 +3109,7 @@ impl AppDelegate {
             // never ran: the block it printed is the parent of the remote blocks, there
             // being no shell block to read ([`bt_core::FIRST_BLOCK`]).
             block: pane.session().and_then(|session| {
-                if session.child_pid() == pid {
+                if session.child_pid() == Some(pid) {
                     Some(bt_core::FIRST_BLOCK)
                 } else {
                     session.last_local_block()
@@ -3300,7 +3300,9 @@ impl AppDelegate {
         let unit = window::unit_for(panes.len(), self.tabs().len());
         let asked: Vec<_> = panes
             .iter()
-            .filter(|pane| ends_kept || !(pane.shows_kept_terminal() || pane.is_streamed()))
+            .filter(|pane| {
+                ends_kept || !(pane.shows_kept_terminal() || pane.keeps_local_terminal())
+            })
             .cloned()
             .collect();
         // The quit takes everything: a program a pane holds alone is asked about too.
@@ -3403,7 +3405,9 @@ impl AppDelegate {
     /// Whether some pane's program lives in a terminal kablo keeps on this Mac: it runs past this
     /// process unless something ends it, and the windows it is shown in are the layout's to say.
     fn any_kept_terminal(&self) -> bool {
-        self.all_panes().iter().any(|pane| pane.is_streamed())
+        self.all_panes()
+            .iter()
+            .any(|pane| pane.keeps_local_terminal())
     }
 
     /// A layout edge's disk write, once the burst settles
@@ -4568,7 +4572,7 @@ impl AppDelegate {
         let shown: Vec<PaneUuid> = self
             .all_panes()
             .iter()
-            .filter(|pane| pane.is_streamed())
+            .filter(|pane| pane.keeps_local_terminal())
             .map(|pane| pane.uuid().clone())
             .collect();
         let terminals = crate::hold_service::unshown_local(&shown);
@@ -7833,7 +7837,7 @@ impl AppDelegate {
             let foregrounds: Vec<_> = self
                 .all_panes()
                 .iter()
-                .filter(|pane| pane.is_streamed())
+                .filter(|pane| pane.keeps_local_terminal())
                 .map(|pane| pane.foreground())
                 .collect();
             if let Some(notice) = window::kept_notice(&foregrounds, self.ivars().powering_off.get())
@@ -7860,7 +7864,7 @@ impl AppDelegate {
         let panes: Vec<_> = self
             .all_panes()
             .iter()
-            .filter(|pane| ends_kept && (pane.shows_kept_terminal() || pane.is_streamed()))
+            .filter(|pane| ends_kept && (pane.shows_kept_terminal() || pane.keeps_local_terminal()))
             .map(|pane| pane.uuid().clone())
             .collect();
         if !panes.is_empty() {
@@ -10451,7 +10455,7 @@ mod tests {
         let built = show.find("self.restore_window(").expect("then built");
         assert!(named < built);
         assert!(
-            show.contains(".filter(|pane| pane.is_streamed())"),
+            show.contains(".filter(|pane| pane.keeps_local_terminal())"),
             "an ordinary pane shows none"
         );
     }

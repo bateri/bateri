@@ -25,7 +25,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crate::{PtyOps, PtySize, Session, SessionOptions, Stream, StreamExit, Wake};
+use crate::{ChildPid, PtyOps, PtySize, Session, SessionOptions, Stream, StreamExit, Wake};
 
 /// The terminal's side of the stream, held for as long as the session lives: closing either
 /// end would tell the reader the program had ended.
@@ -37,7 +37,7 @@ struct Held {
 impl PtyOps for Held {
     fn resize(&self, _master: std::os::fd::BorrowedFd<'_>, _size: PtySize) {}
 
-    fn hangup(&self, _pid: u32, _exit: std::os::fd::BorrowedFd<'_>) {}
+    fn hangup(&self, _pid: Option<u32>, _exit: std::os::fd::BorrowedFd<'_>) {}
 }
 
 /// A wake that hears everything and does nothing: a picture is read when someone draws it.
@@ -89,7 +89,7 @@ pub fn pictured(mut options: SessionOptions, picture: &[u8]) -> io::Result<Sessi
             master: OwnedFd::from(master),
             exit: OwnedFd::from(exit_end),
             status: Arc::new(StreamExit::default()),
-            pid: 0,
+            pid: ChildPid::unknown(),
             ops: Arc::new(Held {
                 _terminal: terminal,
                 _exit: exit,

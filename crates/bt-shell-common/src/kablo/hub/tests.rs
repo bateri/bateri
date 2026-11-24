@@ -1238,7 +1238,14 @@ fn a_pane_of_this_mac_wants_every_byte_and_a_server_terminal_takes_a_picture() {
     rig.pump();
     let shown = rig.hub.open_raw();
     rig.hub
-        .resume_raw(shown, ACCOUNT, framed.clone(), SIZE, true)
+        .resume_raw(
+            shown,
+            ACCOUNT,
+            framed.clone(),
+            SIZE,
+            true,
+            bt_core::Silence::new(),
+        )
         .expect("resumed");
     rig.pump();
     for terminal in [id("b-2"), framed] {

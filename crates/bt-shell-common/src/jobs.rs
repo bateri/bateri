@@ -1477,7 +1477,7 @@ impl bt_core::PtyOps for StreamTty {
         self.inner.resize(master, size);
     }
 
-    fn hangup(&self, pid: u32, exit: std::os::fd::BorrowedFd<'_>) {
+    fn hangup(&self, pid: Option<u32>, exit: std::os::fd::BorrowedFd<'_>) {
         self.inner.hangup(pid, exit);
     }
 
@@ -2986,7 +2986,7 @@ pub(crate) mod tests {
     #[test]
     fn a_process_is_in_a_pane_when_its_controlling_terminal_is_the_panes_pty() {
         let session = stty_session("-echo");
-        let child = session.child_pid();
+        let child = session.child_pid().expect("a pid");
         let pane = session.with_pty_fd(pty_device).expect("the pty's device");
         wait_until("the shell has its terminal", || {
             controlling_terminal(child).is_some()
@@ -2999,7 +2999,10 @@ pub(crate) mod tests {
             .with_pty_fd(pty_device)
             .expect("the other pty's device");
         assert_ne!(pane, elsewhere);
-        assert_ne!(controlling_terminal(other.child_pid()), Some(pane));
+        assert_ne!(
+            controlling_terminal(other.child_pid().expect("a pid")),
+            Some(pane)
+        );
         assert_ne!(controlling_terminal(std::process::id()), Some(pane));
         // A pid that is not there has no terminal.
         assert_eq!(controlling_terminal(u32::MAX - 1), None);
@@ -3208,7 +3211,7 @@ pub(crate) mod tests {
     #[test]
     fn a_panes_terminal_by_the_childs_pid_is_the_masters() {
         let session = stty_session("-icanon -echo");
-        let pid = session.child_pid();
+        let pid = session.child_pid().expect("a pid");
         let read = || pane_tty(ShellParent::Direct, pid);
         wait_until("`stty` not seen from the outside", || {
             read().map(|tty| tty.modes)
@@ -3270,7 +3273,7 @@ pub(crate) mod tests {
             Arc::new(SilentWake),
         )
         .expect("session did not open");
-        let child = session.child_pid();
+        let child = session.child_pid().expect("a pid");
         let now = || foreground(ShellParent::Direct, child, &SystemTable);
 
         wait_until("shell not seen in foreground", || now() == Foreground::Idle);
@@ -3299,7 +3302,7 @@ pub(crate) mod tests {
         struct Owner(Mutex<Vec<bool>>);
         impl bt_core::PtyOps for Owner {
             fn resize(&self, _: BorrowedFd<'_>, _: bt_core::PtySize) {}
-            fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
+            fn hangup(&self, _: Option<u32>, _: BorrowedFd<'_>) {}
             fn drop_input(&self, remote: bool) {
                 self.0.lock().expect("a lock").push(remote);
             }

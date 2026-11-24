@@ -2656,6 +2656,14 @@ struct TappedPty {
     /// ([`SessionOptions::shell_marks`]); `take` gives the one-shot.
     /// In the arm written at birth (no wrapper) this is always `None`.
     initial_input: Option<InitialInput>,
+    /// The first input of a stream that starts with a past, which waits for the past to be
+    /// known: written once it turns out empty (the terminal was not there any more and a new
+    /// one was made behind the stream), dropped once it has bytes (a running terminal is not
+    /// typed into) — [`TappedPty::settle_late_input`].
+    late_input: Option<InitialInput>,
+    /// Whether the session has the wrapper's prompt marks ([`SessionOptions::shell_marks`]):
+    /// where the first input is written.
+    marks: bool,
     /// The same slot as [`Session::held_input`]: the bytes held while the
     /// first input is going go **behind it**, in the same lock round and the same send.
     held_input: HeldInput,
@@ -2675,6 +2683,40 @@ struct TappedPty {
 }
 
 impl TappedPty {
+    /// The first input a stream with a past was held back is decided once the past is known —
+    /// before the bytes of this read are scanned, so the prompt in them finds it. Empty past:
+    /// it goes the way it goes in a session born with it (at the prompt, with the user's keys
+    /// held behind it; or at once, where there is no wrapper) — a **ready** line only if
+    /// nothing was typed in the meantime, or it would join what was. A past with bytes: it is
+    /// let go of.
+    fn settle_late_input(&mut self) {
+        if self.late_input.is_none() {
+            return;
+        }
+        let PtyKind::Stream(pty) = &self.pty else {
+            return;
+        };
+        let Some(past) = &pty.silence else {
+            return;
+        };
+        if !past.is_closed() {
+            return;
+        }
+        let Some(line) = self.late_input.take() else {
+            return;
+        };
+        if past.reach() > 0 || (!line.run && self.key_gen.load(Ordering::Acquire) > 0) {
+            return;
+        }
+        if self.marks {
+            *lock(&self.held_input) = Some(Vec::new());
+            self.initial_input = Some(line);
+        } else {
+            self.key_gen.fetch_add(1, Ordering::Release);
+            self.adapter.input(line.into_bytes());
+        }
+    }
+
     /// The stream the parser reads: the next bytes of the PTY.
     fn read_stream(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match &mut self.pty {
@@ -2738,6 +2780,7 @@ impl TappedPty {
 impl io::Read for TappedPty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = self.read_stream(buf)?;
+        self.settle_late_input();
         // A read that continues a sequence (the `_` of an `ESC` the last read
         // ended in) may carry the rest of a command as much as one with `ESC _`
         // in it.
@@ -3010,8 +3053,10 @@ pub struct Stream {
     pub exit: OwnedFd,
     /// How the program ended, written before `exit` is signalled.
     pub status: Arc<StreamExit>,
-    /// The program's process id, as far as it is known (it is on this computer).
-    pub pid: u32,
+    /// The program's process id, as far as it is known (it is on this computer). A terminal
+    /// that is still being started has none yet: its owner sets it when the terminal is there
+    /// ([`ChildPid::set`]), and what asks for it before that is told there is none.
+    pub pid: ChildPid,
     /// What the session asks of the terminal: its size, its end.
     pub ops: Arc<dyn PtyOps>,
     /// The start of the stream, when it is a replay of what the program wrote before this
@@ -3110,26 +3155,126 @@ impl Silence {
     }
 }
 
+/// The process id of a session's child, which a terminal that is still being started does not
+/// have yet: one cell, shared between the owner of the terminal (which sets it when the
+/// terminal is there) and everything that reads it. Never a made-up number: a pid that is not
+/// known is `None`, since what is asked of the process table with it is another process's.
+///
+/// The cell says when the wait is over ([`ChildPid::when_settled`]), so that what shows the wait
+/// does not ask again and again.
+#[derive(Clone, Debug, Default)]
+pub struct ChildPid(Arc<PidCell>);
+
+#[derive(Default)]
+struct PidCell {
+    pid: AtomicU32,
+    settled: AtomicBool,
+    /// What is done once, when the wait is over.
+    hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl std::fmt::Debug for PidCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PidCell")
+            .field("pid", &self.pid.load(Ordering::Relaxed))
+            .field("settled", &self.settled.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChildPid {
+    /// A child whose pid is known.
+    pub fn known(pid: u32) -> Self {
+        let cell = PidCell::default();
+        cell.pid.store(pid, Ordering::Release);
+        cell.settled.store(true, Ordering::Release);
+        Self(Arc::new(cell))
+    }
+
+    /// A child that is not there yet.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// The pid, once it is known. `0` is no process.
+    pub fn get(&self) -> Option<u32> {
+        match self.0.pid.load(Ordering::Acquire) {
+            0 => None,
+            pid => Some(pid),
+        }
+    }
+
+    /// The terminal is there and its program has this pid.
+    pub fn set(&self, pid: u32) {
+        self.0.pid.store(pid, Ordering::Release);
+        self.settle();
+    }
+
+    /// The wait is over without a pid: no program will have one.
+    pub fn settle(&self) {
+        self.0.settled.store(true, Ordering::Release);
+        let hook = lock(&self.0.hook).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Whether the wait is over: the pid is known, or no program will have one.
+    pub fn is_settled(&self) -> bool {
+        self.0.settled.load(Ordering::Acquire)
+    }
+
+    /// `then` is called once when the wait is over ([`ChildPid::set`], [`ChildPid::settle`]) — at
+    /// once, on the caller's thread, when it is over already; else on the thread that ends it.
+    pub fn when_settled(&self, then: impl FnOnce() + Send + 'static) {
+        {
+            let mut hook = lock(&self.0.hook);
+            if !self.0.settled.load(Ordering::Acquire) {
+                *hook = Some(Box::new(then));
+                return;
+            }
+        }
+        then();
+    }
+}
+
 /// How the program of a [`Stream`] ended.
 #[derive(Debug, Default)]
-pub struct StreamExit(Mutex<Option<i32>>);
+pub struct StreamExit {
+    status: Mutex<Option<i32>>,
+    /// The stream's program is an ordinary shell of this process, not a terminal kept for the
+    /// pane ([`StreamExit::made_ordinary`]).
+    ordinary: AtomicBool,
+}
 
 impl StreamExit {
     /// The program called `exit` with `code`.
     pub fn code(&self, code: i32) {
         // A wait status: the exit status in the second byte, no signal in the first.
-        *lock(&self.0) = Some((code & 0xff) << 8);
+        *lock(&self.status) = Some((code & 0xff) << 8);
     }
 
     /// A signal killed the program.
     pub fn signal(&self, signal: i32) {
-        *lock(&self.0) = Some(signal & 0x7f);
+        *lock(&self.status) = Some(signal & 0x7f);
     }
 
     /// How the program ended, once it is written.
     pub fn status(&self) -> Option<std::process::ExitStatus> {
         use std::os::unix::process::ExitStatusExt as _;
-        (*lock(&self.0)).map(std::process::ExitStatus::from_raw)
+        (*lock(&self.status)).map(std::process::ExitStatus::from_raw)
+    }
+
+    /// The terminal the stream was to carry was refused, and its program is an ordinary shell of
+    /// this process now: it does not outlive bateri, and the pane that shows it is not a kept one
+    /// ([`Session::is_kept`]). Said before the first byte of the shell.
+    pub fn made_ordinary(&self) {
+        self.ordinary.store(true, Ordering::Release);
+    }
+
+    /// Whether [`StreamExit::made_ordinary`] was said.
+    pub fn is_ordinary(&self) -> bool {
+        self.ordinary.load(Ordering::Acquire)
     }
 }
 
@@ -3139,7 +3284,7 @@ struct StreamPty {
     master: File,
     exit: OwnedFd,
     status: Arc<StreamExit>,
-    pid: u32,
+    pid: ChildPid,
     ops: Arc<dyn PtyOps>,
     /// The past at the start of the stream ([`Stream::silence`]).
     silence: Option<Arc<Silence>>,
@@ -3217,7 +3362,7 @@ impl Drop for StreamPty {
     /// is the owner's to decide and was said already: ending it is a request of its own (the
     /// user's close, a quit that ends the programs); a stream that is let go of leaves it running.
     fn drop(&mut self) {
-        self.ops.hangup(self.pid, self.exit.as_fd());
+        self.ops.hangup(self.pid.get(), self.exit.as_fd());
     }
 }
 
@@ -3240,8 +3385,9 @@ pub trait PtyOps: Send + Sync {
     fn resize(&self, master: BorrowedFd<'_>, size: PtySize);
     /// The session lets go of the terminal (its pane closed or bateri is going): what becomes
     /// of the terminal is the owner's to decide, and was said already — ending it is a request
-    /// of its own. `pid` is the program's and `exit` the end of the stream that says it is gone.
-    fn hangup(&self, pid: u32, exit: BorrowedFd<'_>);
+    /// of its own. `pid` is the program's — `None` when the terminal was not there yet — and `exit`
+    /// the end of the stream that says it is gone.
+    fn hangup(&self, pid: Option<u32>, exit: BorrowedFd<'_>);
     /// The terminal the program `pid` is on, read from the outside, for a session that has no
     /// master to read it from ([`Session::streamed`]): its modes and its foreground group.
     /// `None` is "cannot be read" (the program is gone, the platform cannot) and the default —
@@ -5562,7 +5708,7 @@ pub struct Session {
     /// The pid of the PTY's child ([`Session::child_pid`]). Taken at birth,
     /// because once the `Pty` is wrapped into [`TappedPty`] it goes to the
     /// reader thread and is no longer seen from this side.
-    child_pid: u32,
+    child_pid: ChildPid,
     /// A copy of the PTY's master (`pty.file().try_clone()`, taken at birth for
     /// `child_pid`'s reason): its terminal modes are the slave's
     /// ([`Session::with_pty_fd`]). `None` if the copy failed —
@@ -5578,6 +5724,9 @@ pub struct Session {
     /// master to read modes from, and its shutdown is a hangup without `wait`
     /// ([`Teardown::HungUp`]).
     streamed: bool,
+    /// How the stream's program ended and whether it is an ordinary shell of this process
+    /// ([`Stream::status`]); `None` for a spawned PTY.
+    stream_status: Option<Arc<StreamExit>>,
     /// The past a stream starts with, when it is a terminal shown again ([`Stream::silence`]).
     past: OnceLock<Arc<Silence>>,
     /// A stream's syscalls ([`Stream::ops`]): the nudge sizes the terminal
@@ -5590,7 +5739,7 @@ pub struct Session {
 /// opened or [`Session::streamed`] was given.
 struct Birth {
     pty: PtyKind,
-    child_pid: u32,
+    child_pid: ChildPid,
     /// The copy behind [`Session::with_pty_fd`].
     master: Option<File>,
     drain_on_exit: bool,
@@ -5599,6 +5748,9 @@ struct Birth {
     replay: Option<Vec<u8>>,
     /// [`Session::ops`].
     ops: Option<Arc<dyn PtyOps>>,
+    /// The first input of a stream with a past, waiting for the past to be known
+    /// ([`TappedPty::settle_late_input`]).
+    late_input: Option<InitialInput>,
 }
 
 impl Session {
@@ -5629,7 +5781,7 @@ impl Session {
             ..Default::default()
         };
         let pty = tty::new(&pty_options, size, 0)?;
-        let child_pid = pty.child().id();
+        let child_pid = ChildPid::known(pty.child().id());
         let master = pty.file().try_clone().ok();
         let replay = options.replay.take();
         let (session, event_loop, at_birth) = Self::assemble(
@@ -5642,6 +5794,7 @@ impl Session {
                 drain_on_exit: pty_options.drain_on_exit,
                 replay,
                 ops: None,
+                late_input: None,
             },
         )?;
         *lock(&session.reader) = Some(event_loop.spawn());
@@ -5682,10 +5835,20 @@ impl Session {
         // of: a text history of an earlier run would be written above it a second time. And its
         // program is running already: the line a new pane types at its first prompt (a remote
         // pane's `ssh host`, ready) would be typed into whatever is in front of the terminal now.
-        let replay = options.replay.take().filter(|_| silence.is_none());
-        if silence.is_some() {
-            options.initial_input = None;
-        }
+        // It waits for the past to be known and is typed only if there is none
+        // ([`TappedPty::settle_late_input`]). The scrollback of an earlier run is kept for the case the past turns out to be empty
+        // — the terminal was not there any more and a new one was made behind the stream —,
+        // and is then written above the new shell's first byte ([`EventLoop::late_replay`]).
+        let (replay, late_replay) = match silence {
+            Some(_) => (None, options.replay.take()),
+            None => (options.replay.take(), None),
+        };
+        let late_input = if silence.is_some() {
+            options.initial_input.take()
+        } else {
+            None
+        };
+        let cluster = options.cluster;
         let (session, mut event_loop, at_birth) = Self::assemble(
             options,
             wake,
@@ -5694,7 +5857,7 @@ impl Session {
                     master: File::from(master),
                     exit,
                     status,
-                    pid,
+                    pid: pid.clone(),
                     ops: Arc::clone(&ops),
                     silence: silence.clone(),
                     taken: 0,
@@ -5707,6 +5870,7 @@ impl Session {
                 drain_on_exit: true,
                 replay,
                 ops: Some(ops),
+                late_input,
             },
         )?;
         if let Some(silence) = silence {
@@ -5715,6 +5879,19 @@ impl Session {
             session.adapter.0.replaying.store(true, Ordering::Release);
             let _ = session.past.set(Arc::clone(&silence));
             event_loop.silence(silence);
+            // Written by the loop above the first live byte, once the past is known to be empty
+            // ([`EventLoop::late_replay`]).
+            if let Some(bytes) = late_replay.filter(|bytes| !bytes.is_empty()) {
+                let adapter = session.adapter.clone();
+                event_loop.late_replay(Box::new(move |term, last_input| {
+                    let mut parser: ansi::Processor = ansi::Processor::new();
+                    parser.advance(
+                        &mut ClusterHandler::new(term, cluster, last_input)
+                            .kept_modes(&adapter.0.modes),
+                        &bytes,
+                    );
+                }));
+            }
         }
         *lock(&session.reader) = Some(event_loop.spawn());
         if let Some(line) = at_birth {
@@ -5741,8 +5918,13 @@ impl Session {
             drain_on_exit,
             replay,
             ops,
+            late_input,
         } = birth;
         let streamed = matches!(pty, PtyKind::Stream(_));
+        let stream_status = match &pty {
+            PtyKind::Stream(stream) => Some(Arc::clone(&stream.status)),
+            PtyKind::Spawned(_) => None,
+        };
         let home = options.home;
         let master = Arc::new(Mutex::new(master));
         // The slot is born **before** the `EventLoop`: one end goes to the
@@ -5779,13 +5961,13 @@ impl Session {
                     Arc::clone(&master),
                     // A stream has no master: its tty is read by its program's pid.
                     ops.clone().filter(|_| streamed),
-                    child_pid,
+                    child_pid.clone(),
                     group.clone(),
                 ),
                 pencere::pane_foreground(
                     Arc::clone(&master),
                     ops.clone().filter(|_| streamed),
-                    child_pid,
+                    child_pid.clone(),
                     group,
                 ),
                 flow.clone(),
@@ -5832,6 +6014,8 @@ impl Session {
             key_gen: Arc::clone(&key_gen),
             wake,
             initial_input: at_prompt,
+            late_input: late_input.filter(|input| !input.line.is_empty()),
+            marks: options.shell_marks,
             held_input: Arc::clone(&held_input),
             adapter: adapter.clone(),
             tail: snapshot::Tail::lean(),
@@ -5985,6 +6169,7 @@ impl Session {
             master,
             past: OnceLock::new(),
             streamed,
+            stream_status,
             ops,
         };
         Ok((session, event_loop, at_birth))
@@ -13293,6 +13478,18 @@ impl Session {
         self.streamed
     }
 
+    /// Whether the terminal the session shows is one kept for it — a kablo terminal that outlives
+    /// bateri — and not an ordinary shell of this process, which a stream carries when its
+    /// terminal was refused ([`StreamExit::made_ordinary`]). What asks whether the pane's
+    /// programs end with bateri asks this, not [`Session::is_streamed`].
+    pub fn is_kept(&self) -> bool {
+        self.streamed
+            && !self
+                .stream_status
+                .as_ref()
+                .is_some_and(|status| status.is_ordinary())
+    }
+
     /// Whether the session was given a terminal that was running already, to show again
     /// ([`Stream::silence`]): its screen is built from the terminal's own past.
     pub fn is_shown_again(&self) -> bool {
@@ -13308,7 +13505,8 @@ impl Session {
     }
 
     /// The pid of the PTY's child — a streamed session's too (the pid it was
-    /// given) — **not the shell's**, at least not always: in
+    /// given, which a terminal that is still being started does not have yet: `None`, and not a
+    /// number that something is then asked about) — **not the shell's**, at least not always: in
     /// an unbounded session the child is `login(1)` and the shell is its child.
     /// The side that
     /// builds the command knows which it is, not this crate.
@@ -13317,8 +13515,14 @@ impl Session {
     /// operating system can give it to another process. The consuming side asks
     /// it together with [`Session::reader_alive`] — the reader thread ends when it
     /// sees the child's exit.
-    pub fn child_pid(&self) -> u32 {
-        self.child_pid
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid.get()
+    }
+
+    /// Whether the wait for the child is over ([`ChildPid::is_settled`]): a terminal that is
+    /// refused ends it with no pid of the terminal's.
+    pub fn child_settled(&self) -> bool {
+        self.child_pid.is_settled()
     }
 
     /// Runs `read` on the PTY master's copy ([`Session::master`]); `None` if
@@ -13343,7 +13547,7 @@ impl Session {
         if !self.streamed || !self.reader_alive() {
             return None;
         }
-        self.ops.as_ref()?.tty(self.child_pid)
+        self.ops.as_ref()?.tty(self.child_pid.get()?)
     }
 
     /// The device number of the terminal the session's program is on, for the one question a
@@ -13353,7 +13557,7 @@ impl Session {
         if !self.streamed || !self.reader_alive() {
             return None;
         }
-        self.ops.as_ref()?.terminal(self.child_pid)
+        self.ops.as_ref()?.terminal(self.child_pid.get()?)
     }
 
     /// The terminal's modes: `modes` read from the master's copy where there is one, the
@@ -14633,7 +14837,7 @@ mod tests {
         fn resize(&self, _master: BorrowedFd<'_>, size: PtySize) {
             lock(&self.sizes).push(size);
         }
-        fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {
+        fn hangup(&self, _pid: Option<u32>, _exit: BorrowedFd<'_>) {
             self.hangups.fetch_add(1, Ordering::SeqCst);
         }
         fn tty(&self, pid: u32) -> Option<TtyReading> {
@@ -14686,7 +14890,7 @@ mod tests {
                 master: OwnedFd::from(master),
                 exit: OwnedFd::from(exit_end),
                 status: Arc::clone(&status),
-                pid: 4242,
+                pid: ChildPid::known(4242),
                 ops: Arc::clone(&ops) as Arc<dyn PtyOps>,
                 silence,
             },
@@ -14707,7 +14911,7 @@ mod tests {
         use std::io::Write as _;
         let mut terminal = streamed();
         assert!(terminal.session.is_streamed());
-        assert_eq!(terminal.session.child_pid(), 4242);
+        assert_eq!(terminal.session.child_pid(), Some(4242));
         terminal
             .terminal
             .write_all(b"hello_stream\r\n")
@@ -14944,6 +15148,134 @@ mod tests {
             }
         }
         typed
+    }
+
+    /// The scrollback of an earlier run, as a restored pane carries it.
+    fn earlier_run() -> SessionOptions {
+        let mut options = test_options(sh("unused"), 40);
+        options.replay = Some(b"EARLIER_RUN\r\n".to_vec());
+        options
+    }
+
+    #[test]
+    fn a_stream_whose_past_turns_out_empty_has_the_earlier_runs_scrollback_above_its_first_byte() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_with(earlier_run(), Some(Arc::clone(&past)));
+        // The terminal was not there any more and a new one was made: no past.
+        past.close();
+        terminal
+            .terminal
+            .write_all(b"fresh_shell\r\n")
+            .expect("written");
+        let text = wait_text(&terminal.session, "fresh_shell");
+        let earlier = text.find("EARLIER_RUN").expect("the scrollback is above");
+        assert!(
+            earlier < text.find("fresh_shell").expect("the shell"),
+            "{text}"
+        );
+        assert!(!terminal.session.replaying());
+    }
+
+    #[test]
+    fn a_stream_with_a_past_leaves_the_earlier_runs_scrollback_out() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_with(earlier_run(), Some(Arc::clone(&past)));
+        past.extend(5);
+        past.close();
+        terminal
+            .terminal
+            .write_all(b"past\r\nlive_one\r\n")
+            .expect("written");
+        let text = wait_text(&terminal.session, "live_one");
+        assert!(!text.contains("EARLIER_RUN"), "{text}");
+    }
+
+    /// The options of a restored remote pane: its target's line, ready.
+    fn restored_remote() -> SessionOptions {
+        let mut options = test_options(sh("unused"), 40);
+        options.initial_input = Some(InitialInput::ready("ssh-prod"));
+        options
+    }
+
+    #[test]
+    fn a_stream_whose_past_turns_out_empty_is_typed_the_first_input_a_new_terminal_has() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_with(restored_remote(), Some(Arc::clone(&past)));
+        // Nothing is typed while the past is not known: the terminal may be a running one.
+        assert!(typed_into(&mut terminal.terminal, 1).is_empty());
+        past.close();
+        terminal
+            .terminal
+            .write_all(b"fresh_shell\r\n")
+            .expect("written");
+        assert_eq!(typed_into(&mut terminal.terminal, 8), b"ssh-prod");
+    }
+
+    #[test]
+    fn a_stream_with_a_past_is_not_typed_the_first_input() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_with(restored_remote(), Some(Arc::clone(&past)));
+        past.extend(5);
+        past.close();
+        terminal
+            .terminal
+            .write_all(b"past\r\nlive_one\r\n")
+            .expect("written");
+        wait_text(&terminal.session, "live_one");
+        assert!(typed_into(&mut terminal.terminal, 1).is_empty());
+    }
+
+    #[test]
+    fn a_ready_first_input_is_not_typed_behind_what_the_pane_typed_while_its_terminal_came() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_with(restored_remote(), Some(Arc::clone(&past)));
+        terminal.session.write(b"git st");
+        assert_eq!(typed_into(&mut terminal.terminal, 6), b"git st");
+        past.close();
+        terminal
+            .terminal
+            .write_all(b"fresh_shell\r\n")
+            .expect("written");
+        wait_text(&terminal.session, "fresh_shell");
+        assert!(typed_into(&mut terminal.terminal, 1).is_empty());
+    }
+
+    #[test]
+    fn a_wait_for_a_child_ends_with_a_pid_or_without_one_and_tells_once() {
+        let told = Arc::new(AtomicU32::new(0));
+        let pid = ChildPid::unknown();
+        assert!(!pid.is_settled() && pid.get().is_none());
+        let counted = Arc::clone(&told);
+        pid.when_settled(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        pid.settle();
+        pid.settle();
+        // Over without a program: nothing has a pid, and the wait is over all the same.
+        assert!(pid.is_settled() && pid.get().is_none());
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        let counted = Arc::clone(&told);
+        pid.when_settled(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(
+            told.load(Ordering::SeqCst),
+            2,
+            "told at once when it is over"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_was_made_ordinary_is_not_a_kept_terminal() {
+        let terminal = streamed();
+        assert!(terminal.session.is_streamed() && terminal.session.is_kept());
+        terminal.status.made_ordinary();
+        assert!(terminal.session.is_streamed() && !terminal.session.is_kept());
     }
 
     #[test]
@@ -32126,7 +32458,7 @@ e\\314\\201.'; sleep 5";
         fn end(&self) {
             // SAFETY: a signal to a process this test started.
             assert_eq!(unsafe { libc::kill(self.reader_pid(), libc::SIGKILL) }, 0);
-            let shell = i32::try_from(self.session.child_pid()).expect("a pid");
+            let shell = i32::try_from(self.session.child_pid().expect("a pid")).expect("a pid");
             wait_until("the shell to hold the tty", Duration::from_secs(10), || {
                 self.session.with_pty_fd(|master| {
                     use std::os::fd::AsRawFd as _;
@@ -33227,7 +33559,11 @@ e\\314\\201.'; sleep 5";
         // The program is told to end from outside, not through the pane: the module takes at
         // once, so that its `bye` is read before it gives up waiting to say it.
         let program = std::process::Command::new("pgrep")
-            .args(["-P", &session.child_pid().to_string(), "demopen"])
+            .args([
+                "-P",
+                &session.child_pid().expect("a pid").to_string(),
+                "demopen",
+            ])
             .output()
             .expect("pgrep");
         let pid: i32 = String::from_utf8_lossy(&program.stdout)
@@ -33276,7 +33612,11 @@ e\\314\\201.'; sleep 5";
         );
 
         let program = std::process::Command::new("pgrep")
-            .args(["-P", &session.child_pid().to_string(), "demopen"])
+            .args([
+                "-P",
+                &session.child_pid().expect("a pid").to_string(),
+                "demopen",
+            ])
             .output()
             .expect("pgrep");
         let pid: i32 = String::from_utf8_lossy(&program.stdout)
@@ -33324,7 +33664,11 @@ e\\314\\201.'; sleep 5";
             },
         );
         let program = std::process::Command::new("pgrep")
-            .args(["-P", &session.child_pid().to_string(), "demopen"])
+            .args([
+                "-P",
+                &session.child_pid().expect("a pid").to_string(),
+                "demopen",
+            ])
             .output()
             .expect("pgrep");
         let pid: i32 = String::from_utf8_lossy(&program.stdout)

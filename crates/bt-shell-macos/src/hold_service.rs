@@ -28,7 +28,8 @@ use bt_shell_common::kablo::ledger::{Ledger, ViewMark, WaitCause};
 use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{
-    Answer, Backend, PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Screen, Service, Setup, Shown, Survey,
+    Answer, Backend, LocalAsk, PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Screen, Service, Setup,
+    Shown, Survey,
 };
 use bt_shell_common::kablo::ssh::SshBackend;
 
@@ -263,7 +264,7 @@ pub(crate) fn shown_local(pane: &PaneUuid) -> Option<Shown> {
 
 /// A program on this Mac started the terminal `terminal` for the pane `pane` is about to be: the
 /// ledger has the pane for it before the pane exists, so that the pane, when it starts, finds
-/// the terminal instead of making one ([`Service::open_local`]).
+/// the terminal instead of making one ([`Service::submit_local`]).
 pub(crate) fn register_local(pane: &PaneUuid, terminal: &SessionId) {
     ledger().shown(local::ACCOUNT, terminal, Some(pane));
 }
@@ -746,16 +747,14 @@ enum Readiness {
 
 static READY: (Mutex<Readiness>, Condvar) = (Mutex::new(Readiness::Never), Condvar::new());
 
-/// How long a pane waits for the service to come up when it is asked for: it is a socket and a
-/// few threads, so this is a bound for a machine that does not answer, not a time anyone waits.
+/// How long [`when_local`] waits for the service to come up: it is a socket and a few threads,
+/// so this is a bound for a machine that does not answer, not a time anyone waits. A pane does not
+/// wait for it at all ([`open_local`]).
 const SERVICE_WAIT: Duration = Duration::from_secs(5);
 
-/// A wait for the service that long is written to the log.
-const SLOW_SERVICE: Duration = Duration::from_secs(2);
-
-/// How long a pane waits for its terminal of this Mac, kablo being put on the machine included:
-/// past this the pane is an ordinary one.
-const LOCAL_WAIT: Duration = Duration::from_secs(10);
+/// The requests of panes that were born while the service was on its way: answered by
+/// [`service_over`], in the order they were made. Taken and pushed with [`READY`] held.
+static QUEUED: Mutex<Vec<LocalAsk>> = Mutex::new(Vec::new());
 
 /// The service is about to be started on a thread ([`serve`]): said **before** the thread, on the thread that
 /// goes on to open the first window, so that the window's pane finds it coming.
@@ -764,10 +763,21 @@ pub(crate) fn expect_service() {
 }
 
 /// What was started by [`expect_service`] is over, whatever became of it: whoever waits for the
-/// service knows now.
+/// service knows now, and the panes that were born meanwhile are handed to it — or, if it did not
+/// come up, refused with that reason (an ordinary shell and a word of it, [`LocalAsk::refuse`]).
 pub(crate) fn service_over() {
-    *READY.0.lock().unwrap_or_else(|e| e.into_inner()) = Readiness::Over;
+    let queued = {
+        let mut state = READY.0.lock().unwrap_or_else(|e| e.into_inner());
+        *state = Readiness::Over;
+        std::mem::take(&mut *QUEUED.lock().unwrap_or_else(|e| e.into_inner()))
+    };
     READY.1.notify_all();
+    for ask in queued {
+        match SERVICE.get() {
+            Some(service) => service.submit_local(ask),
+            None => ask.refuse("the service that makes the terminals of this Mac did not start"),
+        }
+    }
 }
 
 /// The service, once it is up; waits for it if it is coming, and `None` if it will not be.
@@ -782,13 +792,17 @@ fn service() -> Option<&'static Service> {
     SERVICE.get()
 }
 
-/// The terminal of this Mac the pane `pane` is to show, as the ends of the stream its session
-/// reads and writes: kablo's terminal, started with what the pane would have started its shell
-/// with ([`bt_core::SessionOptions::child_launch`]) and `history` rows of scrollback. `None`
-/// when there is no kablo to put it in (a build without the package, a machine kablo is not
-/// built for, a service that did not come up): the pane is an ordinary one. `program` is a
-/// terminal whose child is a program started in a shell's place: it asks the moment it starts,
-/// so its questions are kept for the pane, which attaches a moment later
+/// The terminal of this Mac the pane `pane` is to show, as the stream its session reads and
+/// writes: kablo's terminal, started with what the pane would have started its shell with
+/// ([`bt_core::SessionOptions::child_launch`]) and `history` rows of scrollback. **Nothing waits**:
+/// the stream is the pane's at once and the terminal comes to it when it does — the service is
+/// asked for it (or, while the service is on its way, the request is queued for it, and refused
+/// with a reason if the service does not come up). `None` where no terminal is expected (a build
+/// without the package, a timed run, a process with no home: [`Readiness::Never`]): the pane is an
+/// ordinary one, silently. A pane that is refused its terminal later has an ordinary shell of
+/// this process behind its stream, and says so ([`LocalAsk::refuse`]). `program` is a terminal
+/// whose child is a program started in a shell's place: it asks the moment it starts, so its
+/// questions are kept for the pane, which attaches a moment later
 /// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]), and it is a program somebody asked for
 /// ([`bt_shell_common::open_with::ask_for_program`]).
 pub(crate) fn open_local(
@@ -797,38 +811,42 @@ pub(crate) fn open_local(
     history: u32,
     program: bool,
 ) -> Option<bt_core::Stream> {
-    let began = Instant::now();
-    let found = service();
-    let waited = began.elapsed();
-    let Some(service) = found else {
-        // A pane that is an ordinary one for no kablo to wait for (a timed run) says nothing; one
-        // that waited for a service and had none is told, for the log.
-        let why = match *READY.0.lock().unwrap_or_else(|e| e.into_inner()) {
-            Readiness::Never => return None,
-            Readiness::Coming => format!(
-                "the service did not come up in {:.1} s",
-                waited.as_secs_f64()
-            ),
-            Readiness::Over => "the service did not start".to_owned(),
-        };
-        eprintln!(
-            "bateri: the pane {} is an ordinary one: no terminal of this Mac: {why}",
-            pane.as_str()
-        );
+    let state = READY.0.lock().unwrap_or_else(|e| e.into_inner());
+    let service = SERVICE.get();
+    if service.is_none() && *state == Readiness::Never {
         return None;
-    };
-    if waited >= SLOW_SERVICE {
-        eprintln!(
-            "bateri: the pane {} waited {:.1} s on the main thread for the service of this Mac's terminals to come up",
-            pane.as_str(),
-            waited.as_secs_f64()
-        );
     }
     let (mut spec, size) = local::new_session(launch, history);
     if program {
         bt_shell_common::open_with::ask_for_program(&mut spec);
     }
-    service.open_local(pane, spec, size, LOCAL_WAIT).ok()
+    // A terminal the ledger has for the pane is shown again, and its stream starts with its past.
+    let shown_again = ledger().local_terminal_of(pane).is_some();
+    let (stream, ask) = match LocalAsk::new(pane, spec, size, launch.clone(), shown_again) {
+        Ok(made) => made,
+        Err(error) => {
+            eprintln!(
+                "bateri: the pane {} is an ordinary one: no stream for its terminal: {error}",
+                pane.as_str()
+            );
+            return None;
+        }
+    };
+    match (service, *state) {
+        (Some(service), _) => {
+            drop(state);
+            service.submit_local(ask);
+        }
+        (None, Readiness::Coming) => {
+            QUEUED.lock().unwrap_or_else(|e| e.into_inner()).push(ask);
+            drop(state);
+        }
+        (None, _) => {
+            drop(state);
+            ask.refuse("the service that makes the terminals of this Mac did not start");
+        }
+    }
+    Some(stream)
 }
 
 /// Starts the service in `dir`, the instance's directory. Silent when it cannot
@@ -962,6 +980,59 @@ mod tests {
             !name.trim().is_empty() && !name.chars().any(char::is_control),
             "{name:?}"
         );
+    }
+
+    /// What a pane is given for its terminal in the three states a launch is in: no kablo is
+    /// expected (it is an ordinary pane at once, and says nothing), the service is on its way (the
+    /// pane has its stream at once and nothing waits), and the service did not come (the pane is
+    /// refused with a reason, and has an ordinary shell). The state is the process's: one test.
+    #[test]
+    fn a_pane_has_its_stream_at_once_and_is_refused_only_for_a_service_that_does_not_come() {
+        let launch = bt_core::ChildLaunch {
+            argv: vec!["/bin/sh".to_owned()],
+            env: Vec::new(),
+            cwd: None,
+            size: bt_core::PtySize {
+                cols: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 16,
+            },
+        };
+        let pane = PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("a pane");
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert!(
+            SERVICE.get().is_none(),
+            "no test of this binary starts the service"
+        );
+
+        // No kablo is expected: an ordinary pane, with no stream, line or mark.
+        assert!(open_local(&pane, &launch, 1000, false).is_none());
+
+        // The service is on its way: the stream is the pane's at once, and what asked is queued.
+        expect_service();
+        let began = Instant::now();
+        let stream = open_local(&pane, &launch, 1000, false).expect("a stream at once");
+        assert!(began.elapsed() < Duration::from_secs(1), "nothing waited");
+        assert!(stream.pid.get().is_none() && !stream.status.is_ordinary());
+        assert_eq!(QUEUED.lock().expect("lock").len(), 1);
+
+        // It never rises: the queued pane is refused with a reason, and so is the next.
+        service_over();
+        until("the shell", &|| stream.pid.get().is_some());
+        assert!(stream.status.is_ordinary());
+        assert!(QUEUED.lock().expect("lock").is_empty());
+        let next = open_local(&pane, &launch, 1000, false).expect("a stream");
+        until("its shell", &|| next.pid.get().is_some());
+        assert!(next.status.is_ordinary());
+
+        *READY.0.lock().expect("lock") = Readiness::Never;
     }
 
     #[test]

@@ -279,9 +279,13 @@ pub trait PaneHost {
     /// A terminal of this Mac for the pane `pane` to show instead of a shell of its own: the
     /// stream its session reads and writes ([`bt_core::Session::streamed`]), the terminal
     /// started with what `launch` says and `history` rows of scrollback. `None` — the default,
-    /// an owner that keeps no terminals for its panes — leaves the pane an ordinary one: its
-    /// shell is the session's own child. Asked on the main thread while the pane starts, and
-    /// it may wait there for the terminal. `program` is a terminal whose child is a program
+    /// an owner that keeps no terminals for its panes, or one that expects none — leaves the
+    /// pane an ordinary one: its shell is the session's own child, and nothing is said of it.
+    /// Asked on the main thread while the pane starts, and **answers at once**: the stream
+    /// is the pane's before its terminal is there, and the terminal comes to it when it does
+    /// ([`bt_core::Stream::pid`] is known then). A terminal that is refused is an ordinary
+    /// shell of this process behind the stream, which says so ([`bt_core::StreamExit::is_ordinary`]).
+    /// `program` is a terminal whose child is a program
     /// started in a shell's place: its first questions are kept for this pane
     /// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]).
     fn open_local_terminal(
@@ -694,6 +698,79 @@ impl LinkLabel {
     /// The terminal's own surface ([`paint_surface`]).
     fn paint(&self, theme: &Theme) {
         paint_surface(self, theme);
+    }
+}
+
+/// How far the status labels stand from the pane's corners, points.
+const STATUS_LABEL_MARGIN: f64 = 8.0;
+
+/// How long a pane born without its terminal waits before it says so.
+pub(crate) const WAIT_LINE_AFTER: Duration = Duration::from_secs(2);
+
+/// The two labels of a pane about its terminal of this Mac: the line of the wait and the mark of
+/// a refusal ([`LinkLabel`]'s box, with another corner and another text).
+#[derive(Clone)]
+struct StatusLabels {
+    wait: (Retained<LinkLabel>, Retained<NSTextField>),
+    mark: (Retained<LinkLabel>, Retained<NSTextField>),
+}
+
+impl StatusLabels {
+    fn new(mtm: MainThreadMarker, theme: &Theme) -> Self {
+        let wait = LinkLabel::new(mtm);
+        wait.0.paint(theme);
+        // Anchored to the top: the pane's y is up.
+        wait.0.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMaxXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        let mark = LinkLabel::new(mtm);
+        mark.0.paint(theme);
+        mark.0.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        );
+        Self { wait, mark }
+    }
+
+    fn paint(&self, theme: &Theme) {
+        self.wait.0.paint(theme);
+        self.mark.0.paint(theme);
+    }
+
+    /// `text` in `label`, `corner` of a pane of `bounds`; `None` hides it.
+    fn set(
+        label: &(Retained<LinkLabel>, Retained<NSTextField>),
+        text: Option<&str>,
+        bounds: NSRect,
+        top: bool,
+        right: bool,
+    ) {
+        let (label, field) = label;
+        let Some(text) = text else {
+            label.setHidden(true);
+            return;
+        };
+        field.setStringValue(&NSString::from_str(text));
+        let fit = field.fittingSize();
+        let border = label.borderWidth();
+        let room = bounds.size.width - 2.0 * (STATUS_LABEL_MARGIN + LINK_LABEL_PAD_X + border);
+        let width = fit.width.min(room).max(0.0);
+        label.setFrameFromContentFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(width, fit.height),
+        ));
+        let size = label.frame().size;
+        let x = if right {
+            (bounds.size.width - STATUS_LABEL_MARGIN - size.width).max(0.0)
+        } else {
+            STATUS_LABEL_MARGIN
+        };
+        let y = if top {
+            (bounds.size.height - STATUS_LABEL_MARGIN - size.height).max(0.0)
+        } else {
+            STATUS_LABEL_MARGIN
+        };
+        label.setFrameOrigin(NSPoint::new(x, y));
+        label.setHidden(false);
     }
 }
 
@@ -2290,6 +2367,12 @@ pub struct PaneIvars {
     /// terminal and the search panel, below the dim veil. AppKit's, outside the
     /// frame path; shown by [`TerminalPane::set_link_target`].
     link_label: (Retained<LinkLabel>, Retained<NSTextField>),
+    /// What the pane says of its terminal of this Mac while it is on its way — a dim line in the
+    /// top left corner, shown once, two seconds after the pane was born without it
+    /// ([`TerminalPane::wait_for_terminal`]) — and, for good, that the terminal was refused and the
+    /// pane's shell ends with bateri: a small mark in the bottom right corner
+    /// ([`TerminalPane::terminal_settled`]). AppKit's, outside the frame path, hit-test-less.
+    status_labels: StatusLabels,
     link: OnceCell<DisplayLink>,
     /// What a still of the pane keeps between two ([`TerminalPane::snapshot`]): its frame, its
     /// buffers and the textures the picture is shrunk through. Empty until a card first asks and
@@ -3141,6 +3224,7 @@ impl TerminalPane {
         let card_frame = FrameBox::new(mtm, &theme);
         let link_label = LinkLabel::new(mtm);
         link_label.0.paint(&theme);
+        let status_labels = StatusLabels::new(mtm, &theme);
         let block_tip = BlockTipParts::new(mtm);
         block_tip.paint(&theme);
         let tip = block_tip.tip.clone();
@@ -3180,6 +3264,7 @@ impl TerminalPane {
             card_frame: card_frame.clone(),
             headed: Cell::new(false),
             link_label: link_label.clone(),
+            status_labels: status_labels.clone(),
             link: OnceCell::new(),
             shot: RefCell::new(None),
             session: OnceCell::new(),
@@ -3307,6 +3392,8 @@ impl TerminalPane {
         this.addSubview(&view);
         // The link label under the veil (an unfocused pane gets no hover anyway).
         this.addSubview(&link_label.0);
+        this.addSubview(&status_labels.wait.0);
+        this.addSubview(&status_labels.mark.0);
         // The block tip beside it, under the veil too.
         this.addSubview(&tip);
         // "Jump to latest" too; its button's target is this pane.
@@ -3584,9 +3671,11 @@ impl TerminalPane {
     }
 
     /// Whether the pane's shell runs in a terminal of this Mac that kablo keeps
-    /// ([`Session::streamed`]) and not in a child of this process.
-    pub(crate) fn is_streamed(&self) -> bool {
-        self.session().is_some_and(|session| session.is_streamed())
+    /// ([`Session::streamed`]) — one that is on its way as well — and not in a child of this
+    /// process: not a pane that was refused its terminal and has an ordinary shell behind its
+    /// stream ([`Session::is_kept`]).
+    pub(crate) fn keeps_local_terminal(&self) -> bool {
+        self.session().is_some_and(|session| session.is_kept())
     }
 
     /// The remote session bateri does things on a server for, if the pane has
@@ -4098,10 +4187,94 @@ impl TerminalPane {
             history,
             program,
         )?;
+        self.wait_for_terminal(&stream);
         Some(bt_core::Stream {
             ops: Arc::new(jobs::StreamTty::new(stream.ops, shell_parent)),
             ..stream
         })
+    }
+
+    /// The pane is born over a stream whose terminal has not come: nothing waits for it, and
+    /// the pane says so **once**, [`WAIT_LINE_AFTER`] in, if it is still waiting then — a dim line
+    /// in the corner, not written to the terminal, that goes when the wait is over. What ends the
+    /// wait says so ([`bt_core::ChildPid::when_settled`]): no timer repeats and nothing asks.
+    fn wait_for_terminal(&self, stream: &bt_core::Stream) {
+        let (id, lookup) = (self.id(), self.lookup());
+        let found = stream.silence.is_some();
+        // A stream whose wait is over already (a refusal that gave the pane an ordinary shell
+        // before the pane was built) has no wait to say.
+        let waiting = !stream.pid.is_settled();
+        if waiting && let Ok(when) = DispatchTime::try_from(WAIT_LINE_AFTER) {
+            let _ = DispatchQueue::main().after(when, move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = lookup(mtm, id) {
+                    pane.show_wait_line(found);
+                }
+            });
+        }
+        stream.pid.when_settled(move || {
+            DispatchQueue::main().exec_async(move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = lookup(mtm, id) {
+                    pane.terminal_settled();
+                }
+            });
+        });
+    }
+
+    /// The line of the wait, if the pane still has no terminal.
+    fn show_wait_line(&self, found: bool) {
+        let waiting = self
+            .session()
+            .is_some_and(|session| !session.child_settled());
+        if !waiting {
+            return;
+        }
+        let text = if found {
+            "Bringing the terminal back…"
+        } else {
+            "Starting the terminal…"
+        };
+        StatusLabels::set(
+            &self.ivars().status_labels.wait,
+            Some(text),
+            self.bounds(),
+            true,
+            false,
+        );
+    }
+
+    /// The wait for the terminal is over: the line goes, and a pane that was given an ordinary
+    /// shell instead of its terminal keeps a mark that says so, for as long as it lives.
+    fn terminal_settled(&self) {
+        let labels = &self.ivars().status_labels;
+        StatusLabels::set(&labels.wait, None, self.bounds(), true, false);
+        let ordinary = self
+            .session()
+            .is_some_and(|session| session.is_streamed() && !session.is_kept());
+        if ordinary {
+            StatusLabels::set(&labels.mark, Some("Not kept"), self.bounds(), false, true);
+        }
+    }
+
+    /// The text of the line of the wait, while it shows ([`TerminalPane::show_wait_line`]).
+    pub fn wait_line_text(&self) -> Option<String> {
+        let (label, field) = &self.ivars().status_labels.wait;
+        (!label.isHidden()).then(|| field.stringValue().to_string())
+    }
+
+    /// How many frames the pane's renderer has finished: a host that wants to know whether an
+    /// idle pane draws nothing counts them twice.
+    pub fn frames_drawn(&self) -> u64 {
+        self.renderer().frames()
+    }
+
+    /// The text of the mark of a pane that was refused its terminal, while it shows.
+    pub fn not_kept_mark_text(&self) -> Option<String> {
+        let (label, field) = &self.ivars().status_labels.mark;
+        (!label.isHidden()).then(|| field.stringValue().to_string())
     }
 
     /// Opens the session and attaches the link that drives frames. The order
@@ -4510,13 +4683,9 @@ impl TerminalPane {
         if session.reader_alive()
             && !self.shows_kept_terminal()
             && let Some(&parent) = self.ivars().shell_parent.get()
-            && (!parent.has_shell()
-                || jobs::job_in_foreground(parent, session.child_pid(), &SystemTable))
-            && session.note_program_in_front(jobs::own_directory(
-                parent,
-                session.child_pid(),
-                &SystemTable,
-            ))
+            && let Some(child) = session.child_pid()
+            && (!parent.has_shell() || jobs::job_in_foreground(parent, child, &SystemTable))
+            && session.note_program_in_front(jobs::own_directory(parent, child, &SystemTable))
         {
             self.host().title_changed(self.ivars().id);
         }
@@ -4933,6 +5102,7 @@ impl TerminalPane {
         }
         self.ivars().card_frame.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
+        self.ivars().status_labels.paint(&theme);
         self.ivars().block_tip.paint(&theme);
         self.ivars().jump.paint(&theme);
     }
@@ -5674,10 +5844,14 @@ impl TerminalPane {
         else {
             return Foreground::Idle;
         };
+        // No process yet: the terminal of the pane has not come.
+        let Some(child) = session.child_pid() else {
+            return Foreground::Idle;
+        };
         if !session.reader_alive() {
             return Foreground::Idle;
         }
-        jobs::foreground(parent, session.child_pid(), &SystemTable)
+        jobs::foreground(parent, child, &SystemTable)
     }
 
     /// Whether the pane ends with its program: the terminal is the program's own, started in the
@@ -5727,7 +5901,10 @@ impl TerminalPane {
         let Some(command) = session.running_command() else {
             return settled;
         };
-        match jobs::remote(parent, session.child_pid(), &SystemTable) {
+        let Some(child) = session.child_pid() else {
+            return settled;
+        };
+        match jobs::remote(parent, child, &SystemTable) {
             Probe::Undecided => RemoteProbeOutcome {
                 undecided: true,
                 changed: false,
@@ -5895,6 +6072,9 @@ impl TerminalPane {
         let Some(running) = session.running_command() else {
             return settled;
         };
+        let Some(child) = session.child_pid() else {
+            return settled;
+        };
         let before = self.program_kind();
         let mut memo = self.ivars().program_memo.get();
         if let Some(command) = session
@@ -5913,10 +6093,7 @@ impl TerminalPane {
             && memo.group.map(|(generation, _)| generation) != Some(running)
         {
             let named = memo.line.and_then(|(_, kind)| kind);
-            let (group, wait) = after_table(
-                identity::find(parent, session.child_pid(), &SystemTable),
-                named,
-            );
+            let (group, wait) = after_table(identity::find(parent, child, &SystemTable), named);
             memo.group = group.map(|kind| (running, kind)).or(memo.group);
             let looks = memo
                 .looks
@@ -5971,6 +6148,9 @@ impl TerminalPane {
         else {
             return false;
         };
+        let Some(child) = session.child_pid() else {
+            return false;
+        };
         if !session.reader_alive() || session.running_command().is_none() {
             return false;
         }
@@ -5978,18 +6158,17 @@ impl TerminalPane {
             || !session
                 .tty_modes(jobs::tty_modes)
                 .is_some_and(TtyModes::raw)
-            || !jobs::job_in_foreground(parent, session.child_pid(), &SystemTable)
+            || !jobs::job_in_foreground(parent, child, &SystemTable)
         {
             return true;
         }
         let home = crate::child::home();
-        let program =
-            match program::find(parent, session.child_pid(), &SystemTable, home.as_deref()) {
-                program::Found::Waiting => return true,
-                program::Found::Elevated => return false,
-                program::Found::Unknown => None,
-                program::Found::Program(program) => Some(*program),
-            };
+        let program = match program::find(parent, child, &SystemTable, home.as_deref()) {
+            program::Found::Waiting => return true,
+            program::Found::Elevated => return false,
+            program::Found::Unknown => None,
+            program::Found::Program(program) => Some(*program),
+        };
         let Some(command) = session.note_raw(jobs::tty_modes) else {
             return true;
         };
@@ -8433,7 +8612,7 @@ impl TerminalPane {
         }
         Some((
             *self.ivars().shell_parent.get()?,
-            self.session()?.child_pid(),
+            self.session()?.child_pid()?,
         ))
     }
 
@@ -10071,7 +10250,7 @@ mod tests {
         ] {
             let code = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
             assert!(
-                !code.contains("is_streamed"),
+                !code.contains("keeps_local_terminal"),
                 "{name}: a server surface asks `server_target` or the terminal the pane shows, \
                  never whether the pane's bytes come from a terminal of this Mac"
             );
@@ -10091,7 +10270,7 @@ mod tests {
             "pub(crate) fn opener(",
         ] {
             assert!(
-                !body(signature).contains("is_streamed"),
+                !body(signature).contains("keeps_local_terminal"),
                 "{signature}: the terminal a pane shows is the server's, whatever carries its bytes"
             );
         }

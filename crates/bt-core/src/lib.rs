@@ -64,6 +64,7 @@ mod identity;
 mod input;
 mod link;
 mod notify;
+mod ordinary;
 pub mod pencere;
 mod picture;
 mod png_out;
@@ -98,6 +99,7 @@ pub use input::{
     MouseModifiers, TextKey,
 };
 pub use notify::Notification;
+pub use ordinary::{Ended, Ordinary};
 pub use picture::pictured;
 pub use png_out::encode_png;
 pub use pointer::PointerShape;
@@ -109,9 +111,9 @@ pub use search::{
 };
 pub use session::{
     Activity, Block, BlockHandle, BlockInfo, BlockReport, Blocks, Cell, CellHalf, ChildLaunch,
-    Click, Cursor, DirtyFlag, DockKey, InitialInput, LEAD_CHARS, Leads, LinkHit, LinkHover,
-    LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, Pointer, PtyOps, PtySize,
-    SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint,
+    ChildPid, Click, Cursor, DirtyFlag, DockKey, InitialInput, LEAD_CHARS, Leads, LinkHit,
+    LinkHover, LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, Pointer, PtyOps,
+    PtySize, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint,
     SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Silence, Stream,
     StreamExit, Teardown, TerminalOptions, TrackBlock, TrackMark, TrackMarks, TtyReading,
     UnderlineStyle, Wheel, load_shell, smoke_shell,

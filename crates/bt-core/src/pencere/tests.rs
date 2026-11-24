@@ -1473,7 +1473,7 @@ fn a_shell_that_cannot_be_found_is_not_a_shell_out_of_the_foreground() {
 #[test]
 fn the_group_the_shell_leads_is_the_childs_own_only_where_the_child_is_the_shell() {
     // Where the child is the shell: its pid is its group's.
-    assert_eq!(Shell::new(None, 700).group(), Some(700));
+    assert_eq!(Shell::new(None, ChildPid::known(700)).group(), Some(700));
 
     // Where the child is `login(1)` (macOS): the shell is its child, in a group of its
     // own, and the terminal's foreground group is compared with that, not with `login`'s
@@ -1486,7 +1486,7 @@ fn the_group_the_shell_leads_is_the_childs_own_only_where_the_child_is_the_shell
             // The first time the shell is not forked yet.
             (first_nothing.fetch_add(1, Ordering::AcqRel) > 0).then_some(701)
         })),
-        700,
+        ChildPid::known(700),
     );
     assert_eq!(login.group(), None, "not forked yet: not known");
     assert_eq!(login.group(), Some(701));
@@ -2636,7 +2636,7 @@ struct TtyOps(Mutex<Option<crate::TtyReading>>);
 
 impl PtyOps for TtyOps {
     fn resize(&self, _: BorrowedFd<'_>, _: crate::PtySize) {}
-    fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
+    fn hangup(&self, _: Option<u32>, _: BorrowedFd<'_>) {}
     fn tty(&self, _: u32) -> Option<crate::TtyReading> {
         *lock(&self.0)
     }
@@ -2655,7 +2655,7 @@ fn the_tty_of_a_streamed_pane_is_read_through_its_owner() {
         shell,
         Arc::new(Mutex::new(None)),
         Some(Arc::clone(&ops) as Arc<dyn PtyOps>),
-        4242,
+        ChildPid::known(4242),
         None,
     );
     let unread = observer();
@@ -2685,7 +2685,7 @@ struct DropOps(Mutex<Vec<bool>>);
 
 impl PtyOps for DropOps {
     fn resize(&self, _: BorrowedFd<'_>, _: crate::PtySize) {}
-    fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
+    fn hangup(&self, _: Option<u32>, _: BorrowedFd<'_>) {}
     fn drop_input(&self, remote: bool) {
         lock(&self.0).push(remote);
     }

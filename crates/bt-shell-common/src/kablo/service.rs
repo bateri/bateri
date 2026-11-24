@@ -87,7 +87,7 @@
 //!
 //! **The panes of this Mac.** A pane that shows a terminal of this Mac's own account
 //! ([`super::local`]) has no `ssh-hold` between it and the terminal: the pane's session reads the
-//! terminal's bytes from a socket the service writes ([`Service::open_local`]), types into the
+//! terminal's bytes from a socket the service writes ([`Service::submit_local`]), types into the
 //! same socket, and the hub holds it as a raw holder ([`Hub::open_raw`]). Everything else is a
 //! server pane's — the account's client, the ledger, the ending of the terminal — and it is
 //! **not** a server pane: it is not in [`Service::shown`] and not in the background lists, which
@@ -98,7 +98,7 @@
 //! the user's close ([`Service::end`]), a quit that ends the programs ([`Service::end_all`]), and
 //! the launch after a crash under `keep_running = "update"` (the ledger marks it to end). The
 //! ledger has it with its pane, and the bateri that comes next, asked for a terminal by that pane,
-//! finds it again ([`Service::open_local`]): attached from the first byte the server has, the
+//! finds it again ([`Service::submit_local`]): attached from the first byte the server has, the
 //! stream starts with the terminal's past ([`bt_core::Silence`]) — the bytes the server answered
 //! the questions of, which the pane's session reads without doing again what they asked — and
 //! the process id comes from the server's list. A terminal the server does not have is made again
@@ -113,7 +113,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -122,7 +122,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bt_core::{PaneUuid, PtyOps, PtySize, RemoteTarget, Stream, StreamExit};
+use bt_core::{PaneUuid, RemoteTarget, StreamExit};
 use kablo_proto::v1::stream::Command;
 use kablo_proto::v1::{NewSession, Status};
 
@@ -894,83 +894,24 @@ fn cause_of(error: &io::Error) -> Cause {
     }
 }
 
-/// A pane's request for a terminal of this Mac.
-struct Ask {
-    pane: PaneUuid,
-    spec: NewSession,
-    size: Size,
-    reply: Sender<Result<Stream, Refusal>>,
-    /// What the wait has been through, for the log ([`waiting`]).
-    trace: Arc<waiting::Trace>,
-    /// The name its terminal is to have: the number a program that opened the pane was told
-    /// ([`Service::expect_name`]), or the counter's ([`Core::local_numbered`]).
-    name: Option<SessionId>,
-}
-
-/// A terminal of this Mac that has been asked for and has not been made (or found again): the
-/// pane waits for it with the ends of its stream.
+/// A terminal of this Mac that has been asked for and has not come: the pane is born over its
+/// stream already ([`LocalAsk`]), and what it waits for is the terminal.
 struct Awaiting {
-    reply: Sender<Result<Stream, Refusal>>,
-    trace: Arc<waiting::Trace>,
-    stream: Stream,
-    /// What the pane asked, when the terminal is one found again: it has to be on the server,
-    /// the program's process id comes with the server's word of it, and a terminal that is not
-    /// there is made instead.
-    resumed: Option<Resumed>,
-}
-
-/// A request for a terminal of this Mac that was answered by finding one the ledger had.
-struct Resumed {
-    terminal: SessionId,
-    ask: (PaneUuid, NewSession, Size),
+    parts: Parts,
+    /// The terminal the ledger had for the pane, which is to be found again: it has to be on the
+    /// server, the program's process id comes with the server's word of it, and a terminal that
+    /// is not there is made instead ([`Core::resumed_gone`]).
+    resumed: Option<SessionId>,
+    /// The terminal asked of the server for the pane (a new one, or the one made instead).
+    terminal: Option<SessionId>,
+    /// The pane was closed, or its quit ends its programs, while the terminal was on its way: it
+    /// is ended when it comes.
+    end_asked: bool,
 }
 
 /// How long a refused account of this Mac stays refused: the next pane does not repeat a step
-/// that has just failed.
+/// that has just failed (and is given the same reason, and an ordinary shell, as the first).
 const LOCAL_REFUSAL: Duration = Duration::from_secs(60);
-
-/// What a session of a pane of this Mac asks of its terminal ([`PtyOps`]).
-struct LocalOps {
-    tx: Sender<Msg>,
-    hold: HoldId,
-}
-
-impl PtyOps for LocalOps {
-    fn resize(&self, _master: BorrowedFd<'_>, size: PtySize) {
-        let pixels = |cells: u16, each: u16| u16::try_from(u32::from(cells) * u32::from(each));
-        let _ = self.tx.send(Msg::Resize {
-            hold: self.hold,
-            size: Size {
-                cols: size.cols,
-                rows: size.rows,
-                xpixel: pixels(size.cols, size.cell_width).unwrap_or(0),
-                ypixel: pixels(size.rows, size.cell_height).unwrap_or(0),
-            },
-        });
-    }
-
-    /// The session lets go of its stream, and the terminal lives on: ending it is a request of
-    /// its own (the user's close of the pane, a quit that ends the programs), made before the
-    /// session goes. The stream closing is what the service takes for the pane's being gone
-    /// ([`Msg::HoldEof`]), and the terminal is let go of: detached, and shown again by the next
-    /// bateri that finds it in the ledger.
-    fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {}
-
-    /// The pane's program ended without reading what the pane sent it: the terminal that
-    /// holds it is asked to drop it ([`Client::drop_input`]) — the terminal of this Mac, or,
-    /// when the program ran on a server the pane shows, that server's, **behind what the
-    /// pipe to it had passed on** ([`Core::drop_shown`]). The request is not ordered with the
-    /// bytes the pane wrote a moment before: they reach the service from the stream's reader
-    /// thread and the request from this one, so a byte still on its way follows the request
-    /// and is not dropped. The window is narrow, for the end of the program that triggers the
-    /// request comes back from the terminal after a round trip.
-    fn drop_input(&self, remote: bool) {
-        let _ = self.tx.send(Msg::DropInput {
-            hold: self.hold,
-            remote,
-        });
-    }
-}
 
 /// What the loop is told, from the threads that carry bytes and do the slow
 /// work.
@@ -1027,12 +968,12 @@ enum Msg {
     },
     /// The account of this Mac is wanted ([`Service::open_here`]).
     Here(Pending),
-    /// A pane wants a terminal of this Mac ([`Service::open_local`]).
-    Local(Ask),
+    /// A pane wants a terminal of this Mac ([`Service::submit_local`]).
+    Local(LocalAsk),
     /// The counter was asked for the number of the terminal a pane of this Mac wants
     /// ([`Core::local_numbered`]).
     LocalNumbered {
-        ask: Ask,
+        hold: HoldId,
         number: Option<u64>,
     },
     /// The account of this Mac that the panes waiting for it are for was made, or could not be.
@@ -1524,6 +1465,9 @@ struct Conn {
     /// The holder took nothing for so long that its terminal's stream was stopped
     /// ([`Core::stalled`]); it is started again when the pane has taken what it was owed.
     suspended: bool,
+    /// The pane's terminal does not take input yet ([`Core::open_gates`]): what the pane types
+    /// waits in its stream, in order, and is read when it does.
+    waits_for_input: bool,
 }
 
 /// A bridge that is up.
@@ -1613,9 +1557,8 @@ pub struct Service {
     /// The terminals each account's server lists that are no longer running and that no pane
     /// shows, as the loop last wrote them ([`Service::exited`]).
     exited: Arc<Mutex<BTreeMap<String, Vec<SessionId>>>>,
-    /// When a pane last gave up waiting for a terminal of this Mac ([`Service::open_local`]);
-    /// the loop lifts it once this Mac's account is made.
-    local_gave_up: Arc<Mutex<Option<Instant>>>,
+    /// Where the terminals that have to outlive this process are written down.
+    ledger: Arc<Ledger>,
     /// The names panes of this Mac are to have for their terminals ([`Service::expect_name`]).
     names: Mutex<HashMap<PaneUuid, SessionId>>,
     /// What [`Service::stage_of`] reads.
@@ -1701,13 +1644,12 @@ impl Service {
         let exited = Arc::new(Mutex::new(BTreeMap::new()));
         let stages = Arc::new(Mutex::new(HashMap::new()));
         let queues = Arc::new(Mutex::new(HashMap::new()));
-        let local_gave_up = Arc::new(Mutex::new(None));
+        let kept_ledger = Arc::clone(&ledger);
         let core = Core {
             shared: Arc::new(Shared {
                 backend,
                 tx: tx.clone(),
                 ledger,
-                local_gave_up: Arc::clone(&local_gave_up),
                 stages: Arc::clone(&stages),
                 queues: Arc::clone(&queues),
             }),
@@ -1722,6 +1664,7 @@ impl Service {
             local_when: Vec::new(),
             local_refused: None,
             awaiting: BTreeMap::new(),
+            end_on_arrival: BTreeSet::new(),
             arrived: Vec::new(),
             shown: Arc::clone(&shown),
             local_programs: Arc::clone(&local_programs),
@@ -1766,7 +1709,7 @@ impl Service {
             local_programs,
             background,
             exited,
-            local_gave_up,
+            ledger: kept_ledger,
             names: Mutex::new(HashMap::new()),
             stages,
             queues,
@@ -2075,98 +2018,82 @@ impl Service {
         }
     }
 
-    /// A terminal of this Mac for `pane`, started with `spec` at `size`, as the ends of the
-    /// stream the pane's session reads and writes ([`bt_core::Session::streamed`]): the account
-    /// of this Mac is made first if the service has none (kablo is put below the home directory
-    /// on the way), and the answer is the stream **once the terminal exists**, so its process id
-    /// is known. Waits at most `wait`, on the caller's thread — the pane's opening is what waits;
-    /// a terminal made after the caller gave up is ended. `Err` is no kablo here
-    /// ([`Refusal::plain`]): the pane is an ordinary one.
+    /// The request of a pane for a terminal of this Mac ([`LocalAsk::new`], which gave the pane its
+    /// stream already) is the service's to answer: the account of this Mac is made first if the
+    /// service has none (kablo is put below the home directory on the way), and the terminal comes
+    /// to the stream when it exists, with its process id. Nothing waits here: what the request ends
+    /// in is the terminal, or a reason and an ordinary shell on the stream ([`LocalAsk::refuse`]) —
+    /// never a timer, because a pane that was given an ordinary shell for being slow would have no
+    /// terminal that outlives bateri, and one that comes after would have nobody to show it to.
     ///
     /// The terminal outlives the stream: letting go of it ends nothing. It is ended by the
     /// user's close of the pane ([`Service::end`]) and by a quit that ends the programs
     /// ([`Service::end_all`]), and it is the ledger's otherwise — when the ledger has a terminal
-    /// of this Mac for `pane` that is meant to live (a pane that comes back after an update, a
+    /// of this Mac for the pane that is meant to live (a pane that comes back after an update, a
     /// quit that kept the programs, a crash), that one is found again instead of a new one made:
-    /// the stream starts with its past ([`Stream::silence`]) and the process id is the program's
-    /// there. A terminal the server does not have any more is made again.
-    ///
-    /// A wait that runs out is not paid again at once: the next pane within [`LOCAL_REFUSAL`] is
-    /// an ordinary one without waiting (a kablo that is there and cannot start would otherwise
-    /// hold every window back by the whole wait).
-    pub fn open_local(
+    /// the stream starts with its past ([`Stream::silence`], which the request's pane asked for
+    /// with [`Service::found_again`]) and the process id is the program's there. A terminal the
+    /// server does not have any more is made again, behind the same stream.
+    pub fn submit_local(&self, mut ask: LocalAsk) {
+        ask.handed(Arc::clone(&self.stop), Arc::clone(&self.backend));
+        let name = ask.pane().and_then(|pane| {
+            self.names
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(pane)
+        });
+        ask.named(name);
+        if let Err(unsent) = self.tx.send(Msg::Local(ask))
+            && let Msg::Local(ask) = unsent.0
+        {
+            ask.refuse("the service that makes the terminals of this Mac has stopped");
+        }
+    }
+
+    /// Whether the ledger has a terminal of this Mac for `pane` that is to be found again: the
+    /// pane's stream starts with a past then ([`LocalAsk::new`]).
+    pub fn found_again(&self, pane: &PaneUuid) -> bool {
+        self.ledger.local_terminal_of(pane).is_some()
+    }
+
+    /// A terminal for `pane`, waited for: [`Service::submit_local`] and then until the terminal's
+    /// process id is known on the stream, or the pane was given an ordinary shell instead, or
+    /// `wait` is over. What a test that wants the terminal asks.
+    #[cfg(test)]
+    pub(crate) fn open_local_wait(
         &self,
         pane: &PaneUuid,
         spec: NewSession,
         size: Size,
         wait: Duration,
-    ) -> Result<Stream, Refusal> {
-        let asked = Instant::now();
-        let gave_up = *self.local_gave_up.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ago) = gave_up
-            .map(|at| at.elapsed())
-            .filter(|ago| *ago < LOCAL_REFUSAL)
-        {
-            self.backend.log_line(&format!(
-                "the pane {} is an ordinary one: a pane gave up waiting for a terminal of this Mac {} ago, and the next ones do not wait for {}",
-                pane.as_str(),
-                waiting::seconds(ago),
-                waiting::seconds(LOCAL_REFUSAL)
-            ));
-            return Err(Refusal::plain());
-        }
-        let (reply, answer) = mpsc::channel();
-        let name = self
-            .names
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(pane);
-        let trace = Arc::new(waiting::Trace::new(asked));
-        let ask = Ask {
-            pane: pane.clone(),
-            spec,
-            size,
-            reply,
-            trace: Arc::clone(&trace),
-            name,
+    ) -> Result<bt_core::Stream, Refusal> {
+        let launch = bt_core::ChildLaunch {
+            argv: vec!["/usr/bin/true".to_owned()],
+            env: Vec::new(),
+            cwd: None,
+            size: bt_core::PtySize {
+                cols: size.cols,
+                rows: size.rows,
+                cell_width: 8,
+                cell_height: 16,
+            },
         };
-        if self.tx.send(Msg::Local(ask)).is_err() {
-            self.backend.log_line(&format!(
-                "the pane {} is an ordinary one: the service that makes the terminals of this Mac has stopped",
-                pane.as_str()
-            ));
-            return Err(Refusal::plain());
-        }
-        let outcome = answer.recv_timeout(wait);
-        let now = Instant::now();
-        let (outcome, why) = match outcome {
-            Ok(outcome) => (outcome, None),
-            Err(RecvTimeoutError::Timeout) => {
-                *self.local_gave_up.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
-                (
-                    Err(Refusal::plain()),
-                    Some(format!("no terminal came in {}", waiting::seconds(wait))),
-                )
+        let (stream, ask) = LocalAsk::new(pane, spec, size, launch, self.found_again(pane))
+            .map_err(|_| Refusal::plain())?;
+        self.submit_local(ask);
+        let until = Instant::now() + wait;
+        loop {
+            if stream.status.is_ordinary() {
+                return Err(Refusal::plain());
             }
-            Err(RecvTimeoutError::Disconnected) => (
-                Err(Refusal::plain()),
-                Some("the service dropped the request".to_owned()),
-            ),
-        };
-        let line = match (&outcome, why) {
-            (Ok(_), _) => trace.slow_line(pane.as_str(), self.backend.slow_open(), now),
-            (Err(_), why) => {
-                let why = trace
-                    .refusal()
-                    .or(why)
-                    .unwrap_or_else(|| "the service refused it".to_owned());
-                Some(trace.refused_line(pane.as_str(), &why, now))
+            if stream.pid.get().is_some() {
+                return Ok(stream);
             }
-        };
-        if let Some(line) = line {
-            self.backend.log_line(&line);
+            if Instant::now() >= until {
+                return Err(Refusal::plain());
+            }
+            thread::sleep(Duration::from_millis(5));
         }
-        outcome
     }
 
     /// How many bytes are queued for the holders of `account`'s terminals, which the bridge's
@@ -2183,7 +2110,7 @@ impl Service {
         HIGH_WATER
     }
 
-    /// The next terminal of this Mac `pane` asks for ([`Service::open_local`]) is named `name`,
+    /// The next terminal of this Mac `pane` asks for ([`Service::submit_local`]) is named `name`,
     /// started under it as it is not found again: the pane a program asked for without a
     /// program of its own (`bateri split`), whose number the program was told before there was a
     /// terminal. Without it the terminal is numbered by the counter, as a pane the user opens
@@ -2311,9 +2238,6 @@ struct Shared {
     backend: Arc<dyn Backend>,
     tx: Sender<Msg>,
     ledger: Arc<Ledger>,
-    /// [`Service::open_local`]'s mark of a pane that gave up, lifted when this Mac's account is
-    /// made ([`Core::here_made`]): the panes after it wait for their terminals again.
-    local_gave_up: Arc<Mutex<Option<Instant>>>,
     /// The folder of each server account for a program's files, as it is made
     /// ([`Service::stage_of`]).
     stages: Arc<Mutex<HashMap<String, Staged>>>,
@@ -2384,13 +2308,16 @@ struct Core {
     /// The pane each holder runs in, once it was admitted.
     panes: BTreeMap<HoldId, PaneUuid>,
     /// The panes of this Mac that wait for the account of this Mac to be made.
-    local_waiting: Vec<Ask>,
+    local_waiting: Vec<HoldId>,
     /// Who else waits for it ([`Service::when_local`]).
     local_when: Vec<Box<dyn FnOnce(bool) + Send>>,
     /// When the account of this Mac was last refused, and why.
     local_refused: Option<(Instant, Refusal)>,
     /// The terminals of this Mac that were asked for and have not been made.
     awaiting: BTreeMap<HoldId, Awaiting>,
+    /// The terminals asked for a pane that was closed while they were on their way: ended when
+    /// they come ([`Core::created`]).
+    end_on_arrival: BTreeSet<(String, SessionId)>,
     /// What the bridge's readers have sent the loop that it has taken in and not settled
     /// ([`Queue::settled`]), by the queue the reader counted it in.
     arrived: Vec<(Arc<Queue>, usize)>,
@@ -2516,12 +2443,14 @@ impl Core {
             };
             if let Some(message) = message {
                 if matches!(message, Msg::Stop) {
+                    self.wind_down();
                     return;
                 }
                 self.handle(message);
                 // What else is waiting, before the (costlier) settling.
                 while let Ok(more) = self.rx.try_recv() {
                     if matches!(more, Msg::Stop) {
+                        self.wind_down();
                         return;
                     }
                     self.handle(more);
@@ -2558,7 +2487,6 @@ impl Core {
             .iter()
             .filter(|(hold, conn)| {
                 !conn.suspended
-                    && !self.awaiting.contains_key(hold)
                     && conn.load.stalled(now, HOLD_STALL)
                     && self
                         .hub
@@ -2697,7 +2625,7 @@ impl Core {
         let waiting = self.hub.input_waiting(hold);
         if waiting >= INPUT_HOLD {
             conn.throttle.0.shut();
-        } else if waiting <= INPUT_RESUME {
+        } else if waiting <= INPUT_RESUME && !conn.waits_for_input {
             conn.throttle.0.open();
         }
     }
@@ -2938,14 +2866,11 @@ impl Core {
             }
             Msg::Here(pending) => self.here(pending),
             Msg::Local(ask) => self.local(ask, now),
-            Msg::LocalNumbered { ask, number } => {
-                self.local_open(
-                    Ask {
-                        name: terminal_named(number),
-                        ..ask
-                    },
-                    None,
-                );
+            Msg::LocalNumbered { hold, number } => {
+                if let Some(awaiting) = self.awaiting.get_mut(&hold) {
+                    awaiting.parts.name = terminal_named(number);
+                    self.local_open(hold, None);
+                }
             }
             Msg::LocalAccount(outcome) => self.local_account(&outcome, now),
             Msg::Resize { hold, size } => self.say(hold, |hub| hub.resize(hold, size)),
@@ -2973,7 +2898,7 @@ impl Core {
             return;
         };
         let hold = self.hub.open();
-        self.carry_hold(hold, stream, reader, peer, None);
+        self.carry_hold(hold, stream, reader, peer, None, false);
     }
 
     /// The threads that carry a holder's bytes: one reads what it says, one writes what the hub
@@ -2987,6 +2912,7 @@ impl Core {
         reader: UnixStream,
         peer: Peer,
         local: Option<(Arc<StreamExit>, UnixStream)>,
+        waits_for_input: bool,
     ) {
         let (out, written) = mpsc::channel();
         let (status, after) = match local {
@@ -2994,6 +2920,9 @@ impl Core {
             None => (None, None),
         };
         let gate = Arc::new(Gate::default());
+        if waits_for_input {
+            gate.shut();
+        }
         let throttle = Throttle(Arc::clone(&gate));
         self.conns.insert(
             hold,
@@ -3004,6 +2933,7 @@ impl Core {
                 status,
                 load: Load::new(),
                 suspended: false,
+                waits_for_input,
             },
         );
         let tx = self.shared.tx.clone();
@@ -3031,6 +2961,7 @@ impl Core {
             self.meter(hold);
         }
         self.kill_due(Instant::now());
+        self.open_gates();
         self.finish_surveys(Instant::now());
         self.finish_pictures(Instant::now());
         for _ in 0..64 {
@@ -3064,10 +2995,11 @@ impl Core {
                         }
                     }
                     HubEvent::Gone { hold, showed } => {
-                        // A pane that waited for its terminal is told there is none — or, when
-                        // the terminal was one to be found again, is given a new one.
+                        // A pane that waited for its terminal when its holder went: the pane is
+                        // given an ordinary shell if it has no holder yet, and a terminal that
+                        // was asked for it is ended when it comes.
                         if let Some(awaiting) = self.awaiting.remove(&hold) {
-                            self.resumed_gone(awaiting);
+                            self.local_gone(awaiting);
                         }
                         self.waiting.remove(&hold);
                         // A person who is asked, or whose install is on its way, is asked no
@@ -3711,7 +3643,8 @@ impl Core {
     /// cannot ask; the ledger keeps the request and the next connection to the
     /// account carries it out.
     fn end(&mut self, pane: &PaneUuid, now: Instant) {
-        for (account, terminal) in self.terminals_of(pane) {
+        let (coming, unbound) = self.end_coming(pane);
+        for (account, terminal) in self.terminals_of(pane).into_iter().chain(unbound) {
             // A terminal another computer took is that computer's: closing the dimmed pane that
             // showed it hangs up nothing.
             if self.is_taken(&account, &terminal) {
@@ -3719,7 +3652,9 @@ impl Core {
                 continue;
             }
             self.shared.ledger.end(&account, &terminal);
-            self.finish_off(&account, &terminal, now);
+            if !coming.contains(&terminal) {
+                self.finish_off(&account, &terminal, now);
+            }
         }
     }
 
@@ -3809,12 +3744,16 @@ impl Core {
     fn end_all(&mut self, panes: &[PaneUuid], done: Sender<()>, now: Instant) {
         let mut pending = BTreeSet::new();
         for pane in panes {
-            for (account, terminal) in self.terminals_of(pane) {
+            let (coming, unbound) = self.end_coming(pane);
+            for (account, terminal) in self.terminals_of(pane).into_iter().chain(unbound) {
                 if self.is_taken(&account, &terminal) {
                     self.shared.ledger.gone(&account, &terminal);
                     continue;
                 }
                 self.shared.ledger.end(&account, &terminal);
+                if coming.contains(&terminal) {
+                    continue;
+                }
                 if self.finish_off(&account, &terminal, now) {
                     pending.insert((account, terminal));
                 }
@@ -3966,22 +3905,58 @@ impl Core {
                 let _ = bridge.writer.send(bytes);
             }
         }
+        // The server would not take a terminal: one found again is made again behind the stream,
+        // and a new one is a reason for an ordinary shell on it — or, where a holder carries the
+        // stream already, the hub's own words end the pane as they would anywhere.
+        let ended: Vec<HoldId> = self
+            .awaiting
+            .keys()
+            .filter(|hold| self.hub.said_last_word(**hold))
+            .copied()
+            .collect();
+        for hold in ended {
+            if self
+                .awaiting
+                .get(&hold)
+                .is_some_and(|awaiting| awaiting.resumed.is_some())
+            {
+                self.resumed_gone(hold);
+            } else if self
+                .awaiting
+                .get(&hold)
+                .is_some_and(|awaiting| awaiting.parts.held.is_some())
+            {
+                let said = String::from_utf8_lossy(&self.hub.take_outgoing(hold))
+                    .trim()
+                    .to_owned();
+                let why = if said.is_empty() {
+                    "the server did not take the terminal".to_owned()
+                } else {
+                    format!("the server did not take the terminal: {said}")
+                };
+                self.refuse_local(hold, &why);
+            } else if let Some(awaiting) = self.awaiting.remove(&hold) {
+                let line = awaiting.parts.trace.refused_line(
+                    awaiting.parts.pane.as_str(),
+                    "the server did not keep the terminal",
+                    Instant::now(),
+                );
+                self.shared.backend.log_line(&line);
+                awaiting.parts.pid.settle();
+            }
+        }
         let holds: Vec<HoldId> = self.conns.keys().copied().collect();
         for hold in holds {
             let bytes = self.hub.take_outgoing(hold);
-            // A pane that waits for its stream does not read it yet: what its terminal sends in
-            // the meantime (the past of one found again, which can be many times what the bridge
-            // lets wait) waits for it apart from the account's count. Counted there, it would stop
-            // the bridge before the server's list came — the word the pane waits for — and the
-            // pane would give up, and every pane of the account after it with it.
-            let queue = if self.awaiting.contains_key(&hold) {
-                None
-            } else {
-                self.hub
-                    .terminal_of(hold)
-                    .and_then(|(account, _)| self.accounts.get(account))
-                    .map(|entry| Arc::clone(&entry.queue))
-            };
+            // A pane that waits for its terminal has its stream, and reads it: what its terminal
+            // writes in the meantime (the past of one found again, which can be many times what
+            // the bridge lets wait) is counted as any pane's, and one that reads nothing is let
+            // go of as any is ([`Core::stalled`]).
+            let queue = self
+                .hub
+                .terminal_of(hold)
+                .and_then(|(account, _)| self.accounts.get(account))
+                .map(|entry| Arc::clone(&entry.queue));
             if let Some(conn) = self.conns.get(&hold) {
                 if !bytes.is_empty() {
                     // Counted against the account's queue and the holder's own load, or against
@@ -4351,13 +4326,6 @@ impl Core {
     fn here_made(&mut self, outcome: Result<Installed, Refusal>, pending: &Pending, now: Instant) {
         match outcome {
             Ok(installed) => {
-                // The account is there now: a pane that gave up waiting for it while it was
-                // being made does not turn the next ones away ([`Service::open_local`]).
-                *self
-                    .shared
-                    .local_gave_up
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = None;
                 // A second request that was made while the first was still putting kablo there.
                 if !self.accounts.contains_key(local::ACCOUNT) {
                     let host = local::host();
@@ -4371,29 +4339,77 @@ impl Core {
     }
 
     /// A pane wants a terminal of this Mac: started at once if the account is there, else when
-    /// the account has been made (once, for every pane that waits for it).
-    fn local(&mut self, ask: Ask, now: Instant) {
+    /// the account has been made (once, for every pane that waits for it). The pane has its
+    /// stream already ([`LocalAsk::new`]), and gets the terminal on it when it comes.
+    fn local(&mut self, mut ask: LocalAsk, now: Instant) {
+        let Some(parts) = ask.take() else {
+            return;
+        };
+        let hold = self.hub.open_raw();
+        self.awaiting.insert(
+            hold,
+            Awaiting {
+                parts,
+                resumed: None,
+                terminal: None,
+                end_asked: false,
+            },
+        );
         if self.accounts.contains_key(local::ACCOUNT) {
-            return self.local_start(ask);
+            return self.local_start(hold);
         }
         // A step that has just failed is not repeated for the next pane.
-        if let Some((at, refusal)) = &self.local_refused
+        if let Some((at, _)) = &self.local_refused
             && now.saturating_duration_since(*at) < LOCAL_REFUSAL
         {
-            ask.trace.refuse(format!(
+            let why = format!(
                 "the account of this Mac was refused {} ago, and a refusal is kept for {}",
                 waiting::seconds(now.saturating_duration_since(*at)),
                 waiting::seconds(LOCAL_REFUSAL)
-            ));
-            let _ = ask.reply.send(Err(refusal.clone()));
-            return;
+            );
+            return self.refuse_local(hold, &why);
         }
-        ask.trace.enter(waiting::Step::Account);
+        if let Some(awaiting) = self.awaiting.get(&hold) {
+            awaiting.parts.trace.enter(waiting::Step::Account);
+        }
         let first = self.local_waiting.is_empty() && self.local_when.is_empty();
-        self.local_waiting.push(ask);
+        self.local_waiting.push(hold);
         if first {
             self.make_local();
         }
+    }
+
+    /// The pane that waits for `hold`'s terminal is not given one, for `why`: it is told, and an
+    /// ordinary shell of this process takes its stream ([`ask::refuse`]).
+    fn refuse_local(&mut self, hold: HoldId, why: &str) {
+        let Some(awaiting) = self.awaiting.remove(&hold) else {
+            return;
+        };
+        self.hub.closed(hold);
+        if let Some(Awaiting {
+            terminal: Some(terminal),
+            ..
+        }) = Some(&awaiting)
+        {
+            self.shared.ledger.end(local::ACCOUNT, terminal);
+        }
+        let Awaiting { parts, .. } = awaiting;
+        if parts.held.is_none() {
+            // The stream is carried by a holder already ([`Core::carry_local`]): there is no
+            // shell to put behind it, and the pane's program ends with the reason.
+            parts.status.code(1);
+            parts.pid.settle();
+            self.conns.remove(&hold);
+            self.panes.remove(&hold);
+            parts.trace.refuse(why);
+            let line = parts
+                .trace
+                .refused_line(parts.pane.as_str(), why, Instant::now());
+            self.shared.backend.log_line(&line);
+            return;
+        }
+        let backend = Arc::clone(&self.shared.backend);
+        ask::refuse(parts, why, Some(backend.as_ref()));
     }
 
     /// The account of this Mac is made for the ones that wait for it ([`Core::local_account`]).
@@ -4427,13 +4443,10 @@ impl Core {
 
     fn local_account(&mut self, outcome: &Result<(), Refusal>, now: Instant) {
         self.local_refused = outcome.as_ref().err().map(|refusal| (now, refusal.clone()));
-        for ask in std::mem::take(&mut self.local_waiting) {
+        for hold in std::mem::take(&mut self.local_waiting) {
             match outcome {
-                Ok(()) => self.local_start(ask),
-                Err(refusal) => {
-                    ask.trace.refuse("the account of this Mac was refused");
-                    let _ = ask.reply.send(Err(refusal.clone()));
-                }
+                Ok(()) => self.local_start(hold),
+                Err(_) => self.refuse_local(hold, "the account of this Mac was refused"),
             }
         }
         for done in std::mem::take(&mut self.local_when) {
@@ -4445,20 +4458,41 @@ impl Core {
     /// showed before the bateri that showed it was gone, if that is still on the machine: the
     /// pane that comes back after an update, a quit that kept the programs, or a crash is shown
     /// its terminal where it was left.
-    fn local_start(&mut self, ask: Ask) {
-        // Named by the program that told its number: that terminal is made, not found.
-        if ask.name.is_some() {
-            return self.local_open(ask, None);
+    fn local_start(&mut self, hold: HoldId) {
+        let Some(awaiting) = self.awaiting.get(&hold) else {
+            return;
+        };
+        // The pane let go of its stream while it waited, or was closed: there is nobody to show a
+        // terminal to.
+        if awaiting.parts.ticket.is_gone() || awaiting.end_asked {
+            self.awaiting.remove(&hold);
+            self.hub.closed(hold);
+            return;
         }
-        // Not one a holder shows already: a pane that asks twice is given a second terminal.
-        let resume = self
-            .shared
-            .ledger
-            .local_terminal_of(&ask.pane)
-            .filter(|terminal| self.hub.hold_of(local::ACCOUNT, terminal).is_none());
+        // Named by the program that told its number: that terminal is made, not found.
+        if awaiting.parts.name.is_some() {
+            if let Some(silence) = &awaiting.parts.silence {
+                silence.close();
+            }
+            return self.local_open(hold, None);
+        }
+        // Not one a holder shows already: a pane that asks twice is given a second terminal. A
+        // pane born without a past ([`LocalAsk::new`]) is a new terminal's.
+        let resume = awaiting.parts.silence.as_ref().and_then(|_| {
+            self.shared
+                .ledger
+                .local_terminal_of(&awaiting.parts.pane)
+                .filter(|terminal| self.hub.hold_of(local::ACCOUNT, terminal).is_none())
+        });
         match resume {
-            Some(_) => self.local_open(ask, resume),
-            None => self.local_numbered(ask),
+            Some(_) => self.local_open(hold, resume),
+            None => {
+                // There is no past: what the stream carries is live from its first byte.
+                if let Some(silence) = &awaiting.parts.silence {
+                    silence.close();
+                }
+                self.local_numbered(hold)
+            }
         }
     }
 
@@ -4467,171 +4501,214 @@ impl Core {
     /// find a pane the user opened by its number as they find one a program opened. No number
     /// (the command is not wanted, the counter could not count): the terminal keeps the name it
     /// is made with.
-    fn local_numbered(&mut self, ask: Ask) {
-        ask.trace.enter(waiting::Step::Number);
+    fn local_numbered(&mut self, hold: HoldId) {
+        if let Some(awaiting) = self.awaiting.get(&hold) {
+            awaiting.parts.trace.enter(waiting::Step::Number);
+        }
         let shared = Arc::clone(&self.shared);
         let tx = shared.tx.clone();
-        let sent = Arc::new(Mutex::new(Some(ask)));
-        let handed = Arc::clone(&sent);
         let spawned = thread::Builder::new()
             .name("ssh-hold numbers this Mac".into())
             .spawn(move || {
                 let number = shared.backend.number(&local::host());
-                let ask = handed.lock().unwrap_or_else(|e| e.into_inner()).take();
-                if let Some(ask) = ask {
-                    let _ = tx.send(Msg::LocalNumbered { ask, number });
-                }
+                let _ = tx.send(Msg::LocalNumbered { hold, number });
             });
-        if spawned.is_err()
-            && let Some(ask) = sent.lock().unwrap_or_else(|e| e.into_inner()).take()
-        {
-            self.local_open(ask, None);
+        if spawned.is_err() {
+            self.local_open(hold, None);
         }
     }
 
-    /// [`Core::local_start`] with the terminal chosen: the stream between the pane and the hub is
-    /// made, the terminal is written in the ledger with the pane before anything is asked of the
-    /// server (a crash in between must not leave a terminal nobody can name), and the pane is
-    /// answered when the server says the terminal is there ([`Core::created`], or
-    /// [`Core::found`] for one found again).
-    fn local_open(&mut self, ask: Ask, resume: Option<SessionId>) {
-        let Ask {
-            pane,
-            spec,
-            size,
-            reply,
-            trace,
-            name,
-        } = ask;
-        trace.enter(waiting::Step::Start);
+    /// [`Core::local_start`] with the terminal chosen: the terminal is written in the ledger with
+    /// the pane before anything is asked of the server (a crash in between must not leave a
+    /// terminal nobody can name), and the pane's stream is carried when the terminal is there
+    /// ([`Core::created`]) — at once for one found again, whose past is waiting ([`Core::found`]
+    /// has the server's word of it).
+    fn local_open(&mut self, hold: HoldId, resume: Option<SessionId>) {
+        let Some(mut awaiting) = self.awaiting.remove(&hold) else {
+            return;
+        };
+        awaiting.parts.trace.enter(waiting::Step::Start);
         if resume.is_some() {
-            trace.found_again();
+            awaiting.parts.trace.found_again();
         }
-        let refuse = |why: &str| {
-            trace.refuse(why);
-            let _ = reply.send(Err(Refusal::plain()));
-        };
-        let (Ok((held, pane_end)), Ok((exit_held, exit_end))) =
-            (UnixStream::pair(), UnixStream::pair())
-        else {
-            return refuse("no socket pair for the pane's stream");
-        };
-        let Ok(reader) = held.try_clone() else {
-            return refuse("the pane's stream could not be duplicated");
-        };
-        if pane_end.set_nonblocking(true).is_err() {
-            return refuse("the pane's end of the stream could not be made non-blocking");
+        let (said, gone) = awaiting.parts.ticket.bind(hold, self.shared.tx.clone());
+        if gone || awaiting.end_asked {
+            // The pane let go of its stream while it waited: nothing is started for nobody, and
+            // a terminal found again stays for the next bateri that has a pane for it.
+            self.hub.closed(hold);
+            return;
         }
-        // The stream is read in bursts: a buffer of the system's default size is a wake-up per
-        // eight kilobytes.
-        widen(&held);
-        widen(&pane_end);
-        let hold = self.hub.open_raw();
-        let (terminal, silence) = match &resume {
+        let size = said.unwrap_or(awaiting.parts.size);
+        let account = local::ACCOUNT;
+        let terminal = match &resume {
             Some(terminal) => {
-                match self.hub.resume_raw(
+                let silence = awaiting
+                    .parts
+                    .silence
+                    .clone()
+                    .unwrap_or_else(bt_core::Silence::new);
+                let taken = self.hub.resume_raw(
                     hold,
-                    local::ACCOUNT,
+                    account,
                     terminal.clone(),
                     size,
                     self.shared.backend.shows_past(),
-                ) {
-                    Ok(silence) => (terminal.clone(), Some(silence)),
-                    Err(_) => {
-                        self.hub.closed(hold);
-                        return refuse("the terminal that was shown before could not be taken up");
-                    }
+                    silence,
+                );
+                if taken.is_err() {
+                    self.awaiting.insert(hold, awaiting);
+                    return self.refuse_local(
+                        hold,
+                        "the terminal that was shown before could not be taken up",
+                    );
                 }
+                terminal.clone()
             }
             None => {
-                let Some(terminal) = name.or_else(|| crate::hold::new_terminal_name().ok()) else {
-                    self.hub.closed(hold);
-                    return refuse("no name for the terminal");
+                let Some(terminal) = awaiting
+                    .parts
+                    .name
+                    .clone()
+                    .or_else(|| crate::hold::new_terminal_name().ok())
+                else {
+                    self.awaiting.insert(hold, awaiting);
+                    return self.refuse_local(hold, "no name for the terminal");
                 };
                 if self
                     .hub
-                    .start_raw(hold, local::ACCOUNT, terminal.clone(), spec.clone(), size)
+                    .start_raw(
+                        hold,
+                        account,
+                        terminal.clone(),
+                        awaiting.parts.spec.clone(),
+                        size,
+                    )
                     .is_err()
                 {
-                    self.hub.closed(hold);
-                    return refuse("the bridge would not start the terminal");
+                    self.awaiting.insert(hold, awaiting);
+                    return self.refuse_local(hold, "the bridge would not start the terminal");
                 }
-                (terminal, None)
+                terminal
             }
         };
-        self.remember_account(local::ACCOUNT);
+        self.remember_account(account);
         self.shared
             .ledger
-            .shown(local::ACCOUNT, &terminal, Some(&pane));
-        self.panes.insert(hold, pane.clone());
-        let status = Arc::new(StreamExit::default());
+            .shown(account, &terminal, Some(&awaiting.parts.pane));
+        self.panes.insert(hold, awaiting.parts.pane.clone());
+        awaiting.parts.trace.enter(waiting::Step::Server);
+        awaiting.terminal = Some(terminal);
+        let found = resume.is_some();
+        awaiting.resumed = resume;
+        if found {
+            self.carry_local(hold, &mut awaiting.parts);
+            // A terminal found again is answered by the server's list of its terminals, which has
+            // the process id of its program: the list is asked for now, and again when the
+            // connection comes up.
+            self.relist.insert(account.to_owned());
+        }
+        self.awaiting.insert(hold, awaiting);
+        self.refresh = true;
+    }
+
+    /// The pane's stream is carried by a holder from now on: what the terminal writes goes to it
+    /// and what the pane types goes to the terminal — but not before the terminal takes input
+    /// ([`Core::open_gates`]): what is typed until then waits in the stream, in order.
+    fn carry_local(&mut self, hold: HoldId, parts: &mut Parts) {
+        let (Some(held), Some(exit)) = (parts.held.take(), parts.exit.take()) else {
+            return;
+        };
+        let Ok(reader) = held.try_clone() else {
+            parts.status.code(1);
+            return;
+        };
         let peer = Peer { uid: 0, pid: 0 };
         self.carry_hold(
             hold,
             held,
             reader,
             peer,
-            Some((Arc::clone(&status), exit_held)),
+            Some((Arc::clone(&parts.status), exit)),
+            true,
         );
-        let ops: Arc<dyn PtyOps> = Arc::new(LocalOps {
-            tx: self.shared.tx.clone(),
-            hold,
-        });
-        let stream = Stream {
-            master: pane_end.into(),
-            exit: exit_end.into(),
-            status,
-            pid: 0,
-            ops,
-            silence,
-        };
-        let resumed = resume.map(|terminal| Resumed {
-            terminal,
-            ask: (pane, spec, size),
-        });
-        let found = resumed.is_some();
-        trace.enter(waiting::Step::Server);
-        self.awaiting.insert(
-            hold,
-            Awaiting {
-                reply,
-                trace,
-                stream,
-                resumed,
-            },
-        );
-        // A terminal found again is answered by the server's list of its terminals, which has
-        // the process id of its program: the list is asked for now, and again when the
-        // connection comes up.
-        if found {
-            self.relist.insert(local::ACCOUNT.to_owned());
-        }
-        self.refresh = true;
     }
 
-    /// The server made a terminal: a pane that waits for it has its stream, with the process id
-    /// the terminal's program has.
+    /// Lets the readers of the panes whose terminals take input now read what the panes typed.
+    /// A terminal found again takes none until the server's list has it ([`Core::found`]): until
+    /// then it may be one the server does not have, and what was typed into it would be lost
+    /// with it ([`Core::resumed_gone`] gives the pane a new one, which is typed into).
+    fn open_gates(&mut self) {
+        let waiting: Vec<HoldId> = self
+            .conns
+            .iter()
+            .filter(|(hold, conn)| {
+                conn.waits_for_input
+                    && !self
+                        .awaiting
+                        .get(hold)
+                        .is_some_and(|awaiting| awaiting.resumed.is_some())
+            })
+            .map(|(hold, _)| *hold)
+            .collect();
+        for hold in waiting {
+            if !self.hub.accepts_input(hold) {
+                continue;
+            }
+            if let Some(conn) = self.conns.get_mut(&hold) {
+                conn.waits_for_input = false;
+                conn.throttle.0.open();
+            }
+        }
+    }
+
+    /// The server made a terminal: the pane that waits for it has it on its stream, with the
+    /// process id the terminal's program has.
     fn created(&mut self, account: &str, status: &Status, now: Instant) {
+        // The pane was closed while the terminal was on its way: it is ended as it comes.
+        if self
+            .end_on_arrival
+            .remove(&(account.to_owned(), status.id.clone()))
+        {
+            self.finish_off(account, &status.id, now);
+            return;
+        }
         let Some(hold) = self.hub.hold_of(account, &status.id) else {
             return;
         };
-        let Some(Awaiting {
-            reply, mut stream, ..
-        }) = self.awaiting.remove(&hold)
-        else {
+        if self
+            .awaiting
+            .get(&hold)
+            .is_none_or(|awaiting| awaiting.resumed.is_some())
+        {
+            return;
+        }
+        let Some(mut awaiting) = self.awaiting.remove(&hold) else {
             return;
         };
-        stream.pid = status.pid;
-        if reply.send(Ok(stream)).is_err() {
-            // The pane gave up waiting: nobody will show this terminal.
+        if awaiting.parts.ticket.is_gone() || awaiting.end_asked {
+            // Nobody will show this terminal: the pane let go of its stream, or its close asked
+            // for the terminal's end while it was on its way.
             self.shared.ledger.end(account, &status.id);
             self.finish_off(account, &status.id, now);
+            self.hub.closed(hold);
+            return;
         }
+        let line = awaiting.parts.trace.slow_line(
+            awaiting.parts.pane.as_str(),
+            self.shared.backend.slow_open(),
+            now,
+        );
+        if let Some(line) = line {
+            self.shared.backend.log_line(&line);
+        }
+        // After the line: whoever sees the process id can read what the log says of the wait.
+        awaiting.parts.pid.set(status.pid);
+        self.carry_local(hold, &mut awaiting.parts);
     }
 
-    /// The server listed its terminals: the panes that wait for one found again are answered
-    /// with the process id of its program, and one the server does not have is let go of — the
-    /// pane gets a new terminal ([`Core::resumed_gone`]).
+    /// The server listed its terminals: the panes that wait for one found again have the process
+    /// id of its program, and one the server does not have is let go of — the pane gets a new
+    /// terminal on its stream ([`Core::resumed_gone`]).
     fn found(&mut self, account: &str, list: &[Status]) {
         if !local::is_account(account) {
             return;
@@ -4643,7 +4720,7 @@ impl Core {
                 awaiting
                     .resumed
                     .as_ref()
-                    .map(|resumed| (*hold, resumed.terminal.clone()))
+                    .map(|terminal| (*hold, terminal.clone()))
             })
             .collect();
         for (hold, terminal) in waiting {
@@ -4655,52 +4732,114 @@ impl Core {
                 .iter()
                 .find(|status| status.id == terminal && status.exit.is_none())
             else {
-                self.hub.closed(hold);
+                self.resumed_gone(hold);
                 continue;
             };
-            let Some(Awaiting {
-                reply, mut stream, ..
-            }) = self.awaiting.remove(&hold)
-            else {
+            let Some(awaiting) = self.awaiting.remove(&hold) else {
                 continue;
             };
-            stream.pid = status.pid;
-            if reply.send(Ok(stream)).is_err() {
-                // The pane gave up waiting: the terminal is not ended for it, the next bateri
-                // that has a pane for it shows it. Its stream is let go of.
-                self.hub.closed(hold);
+            let line = awaiting.parts.trace.slow_line(
+                awaiting.parts.pane.as_str(),
+                self.shared.backend.slow_open(),
+                Instant::now(),
+            );
+            if let Some(line) = line {
+                self.shared.backend.log_line(&line);
             }
+            awaiting.parts.pid.set(status.pid);
         }
+        self.open_gates();
     }
 
     /// The terminal a pane was to be shown again is not there (the server does not list it, or
-    /// refused it): it is marked to end, and the pane is given a new one as if it had asked for
-    /// none.
-    fn resumed_gone(&mut self, awaiting: Awaiting) {
+    /// refused it): it is marked to end, and the pane is given a new one on the stream it has,
+    /// as if it had asked for none — with what the earlier run left above it, if the pane has it
+    /// ([`bt_core::Stream::silence`]).
+    fn resumed_gone(&mut self, hold: HoldId) {
+        let Some(awaiting) = self.awaiting.get_mut(&hold) else {
+            return;
+        };
+        let Some(terminal) = awaiting.resumed.take() else {
+            return;
+        };
+        awaiting.terminal = None;
+        if let Some(silence) = &awaiting.parts.silence {
+            silence.close();
+        }
+        self.shared.ledger.end(local::ACCOUNT, &terminal);
+        self.hub.let_go_raw(hold);
+        if let Some(conn) = self.conns.get_mut(&hold) {
+            conn.waits_for_input = true;
+            conn.throttle.0.shut();
+        }
+        self.local_numbered(hold);
+    }
+
+    /// The holder of a pane that waited for its terminal is gone (the pane let go of its stream, or
+    /// the hub closed it): a pane that has no holder yet is given an ordinary shell, and a terminal
+    /// that was asked for it and has not come is ended when it does.
+    fn local_gone(&mut self, awaiting: Awaiting) {
         let Awaiting {
-            reply,
-            trace,
+            parts,
             resumed,
+            terminal,
             ..
         } = awaiting;
-        match resumed {
-            Some(Resumed {
-                terminal,
-                ask: (pane, spec, size),
-            }) => {
-                self.shared.ledger.end(local::ACCOUNT, &terminal);
-                self.local_numbered(Ask {
-                    pane,
-                    spec,
-                    size,
-                    reply,
-                    trace,
-                    name: None,
-                });
+        if let Some(terminal) = &terminal
+            && resumed.is_none()
+        {
+            self.shared.ledger.end(local::ACCOUNT, terminal);
+            // Nobody shows it when it comes: it is ended as it does.
+            self.end_on_arrival
+                .insert((local::ACCOUNT.to_owned(), terminal.clone()));
+        }
+        if parts.held.is_some() {
+            let backend = Arc::clone(&self.shared.backend);
+            ask::refuse(
+                parts,
+                "the holder of the terminal was closed before it came",
+                Some(backend.as_ref()),
+            );
+        }
+    }
+
+    /// What `pane`'s close (or a quit that ends the programs) finds that is not shown yet: the
+    /// terminals asked for that have not come — ended when they do ([`Core::created`]), and no
+    /// quit waits for an end the server cannot say yet — and the terminal the ledger has for a
+    /// pane that waits to find it again before anything was asked: marked to end like any other
+    /// of the pane's, and ended by the connection that comes.
+    fn end_coming(&mut self, pane: &PaneUuid) -> (BTreeSet<SessionId>, Vec<(String, SessionId)>) {
+        let mut coming = BTreeSet::new();
+        let mut unbound = Vec::new();
+        for awaiting in self.awaiting.values_mut() {
+            if awaiting.parts.pane != *pane {
+                continue;
             }
-            None => {
-                trace.refuse("the server did not take the terminal");
-                let _ = reply.send(Err(Refusal::plain()));
+            awaiting.end_asked = true;
+            if awaiting.resumed.is_some() {
+                continue;
+            }
+            if let Some(terminal) = &awaiting.terminal {
+                coming.insert(terminal.clone());
+            } else if awaiting.parts.silence.is_some()
+                && awaiting.parts.name.is_none()
+                && let Some(terminal) = self.shared.ledger.local_terminal_of(pane)
+                && self.hub.hold_of(local::ACCOUNT, &terminal).is_none()
+            {
+                unbound.push((local::ACCOUNT.to_owned(), terminal));
+            }
+        }
+        (coming, unbound)
+    }
+
+    /// The terminals this service asked for that no pane has shown end with it: the ledger does
+    /// not keep a row of a terminal whose shell nobody saw.
+    fn wind_down(&mut self) {
+        for awaiting in self.awaiting.values() {
+            if let Some(terminal) = &awaiting.terminal
+                && awaiting.resumed.is_none()
+            {
+                self.shared.ledger.end(local::ACCOUNT, terminal);
             }
         }
     }
@@ -5437,9 +5576,13 @@ fn bridge_writer(mut writer: Box<dyn Write + Send>, written: &Receiver<Vec<u8>>)
     }
 }
 
+mod ask;
 mod pipes;
 pub use pipes::Streams;
 pub(super) mod waiting;
+
+pub use ask::LocalAsk;
+use ask::Parts;
 #[cfg(test)]
 pub(crate) use pipes::fake as fake_streams;
 

@@ -1172,13 +1172,13 @@ printf 'READY\n'; stty size; pixels; read line; printf 'GOT:%s\n' "$line"; stty 
     );
     let pane = options.pane_uuid.clone().expect("a pane");
     let stream = service
-        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
         .expect("a terminal of this Mac");
     // The terminal is the Mac's, in the ledger with the pane, and the program's id is known.
     let id = ledger.terminals_of(ACCOUNT).remove(0);
     ground.kept = Some(PathBuf::from(kablo));
     ground.made.push(id.clone());
-    assert!(stream.pid > 1);
+    assert!(stream.pid.get().is_some_and(|pid| pid > 1));
 
     let ends = Arc::new(Ends::default());
     let session =
@@ -1376,7 +1376,7 @@ exit 7
 
         let pane = options.pane_uuid.clone().expect("a pane");
         let stream = service
-            .open_local(&pane, spec, size, Duration::from_secs(30))
+            .open_local_wait(&pane, spec, size, Duration::from_secs(30))
             .expect("a terminal of this Mac");
         for id in ledger.terminals_of(ACCOUNT) {
             if !ground.made.contains(&id) {
@@ -1384,7 +1384,7 @@ exit 7
             }
         }
         ground.kept = Some(PathBuf::from(&kablo));
-        assert!(stream.pid > 1, "{way}");
+        assert!(stream.pid.get().is_some_and(|pid| pid > 1), "{way}");
         let ends = Arc::new(Ends::default());
         let session = bt_core::Session::streamed(
             options,
@@ -1536,7 +1536,7 @@ exit 5
             "a program that was asked for says so"
         );
         let pane = options.pane_uuid.clone().expect("a pane");
-        let stream = service.open_local(&pane, asked, size, Duration::from_secs(30));
+        let stream = service.open_local_wait(&pane, asked, size, Duration::from_secs(30));
         for id in ledger.terminals_of(ACCOUNT) {
             if !ground.made.contains(&id) {
                 ground.made.push(id);
@@ -1736,7 +1736,7 @@ fn a_pane_over_a_real_kablo_is_found_and_read_by_its_childs_pid_behind_login_too
     let (spec, size) = new_session(&options.child_launch(), 100);
     let pane = options.pane_uuid.clone().expect("a pane");
     let mut stream = service
-        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
         .expect("a terminal of this Mac");
     let id = ledger.terminals_of(ACCOUNT).remove(0);
     ground.kept = Some(PathBuf::from(kablo));
@@ -1748,7 +1748,7 @@ fn a_pane_over_a_real_kablo_is_found_and_read_by_its_childs_pid_behind_login_too
         .expect("a session over the stream");
     waits_for("the program's first words", || shows(&session, "READY"));
 
-    let pid = session.child_pid();
+    let pid = session.child_pid().expect("a pid");
     // What kablo says the pid is: the process `login` runs, the one the pane's shell is the
     // child of — or, where there is no login, the program itself.
     if cfg!(target_os = "macos") {
@@ -1982,8 +1982,8 @@ fn at_end(master: &mut std::fs::File) -> bool {
 }
 
 /// A pane that reads nothing of the terminal it shows, beside panes that do. The bridge's
-/// stream, which every terminal of this Mac shares, was held back by it (Phase 1 of this set
-/// measured that: no tick of the pane beside it in 3 s, no second terminal in 6 s): the program
+/// stream, which every terminal of this Mac shares, was held back by it (measured: no tick of the
+/// pane beside it in 3 s, no second terminal in 6 s): the program
 /// never stops writing, the pane never takes a byte, and the account's queue is watched until it
 /// is past [`Service::high_water`] — what stops the reading of the bridge — before anything
 /// else is asked for: that it is past it is the premise, and the test fails without it, since a
@@ -2778,7 +2778,7 @@ impl HeldMac {
         options.pane_uuid = bt_core::PaneUuid::parse(uuid);
         let pane = options.pane_uuid.clone().expect("a pane");
         let (spec, size) = new_session(&options.child_launch(), 100);
-        self.service.open_local(&pane, spec, size, wait)
+        self.service.open_local_wait(&pane, spec, size, wait)
     }
 
     /// The terminals that exist now are the ones the ground ends when it goes.
@@ -2915,7 +2915,7 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
     let (spec, size) = new_session(&options.child_launch(), 1000);
     let pane = options.pane_uuid.clone().expect("a pane");
     let stream = service
-        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
         .expect("a terminal of this Mac");
     assert!(stream.silence.is_none(), "a terminal just made has no past");
     let id = ledger.terminals_of(ACCOUNT).remove(0);
@@ -2946,9 +2946,9 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
     options.initial_input = Some(bt_core::InitialInput::run("injected"));
     let (spec, size) = new_session(&options.child_launch(), 1000);
     let stream = service
-        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
         .expect("its terminal");
-    assert!(stream.pid > 1);
+    assert!(stream.pid.get().is_some_and(|pid| pid > 1));
     assert!(stream.silence.is_some(), "a terminal that has a past");
     assert_eq!(ledger.terminals_of(ACCOUNT), std::slice::from_ref(&id));
     let ends = Arc::new(Ends::default());
@@ -3104,7 +3104,7 @@ fn a_program_started_with_its_terminal_is_answered_by_the_pane_that_attaches_lat
     asked.env = spec.env;
     let pane = options.pane_uuid.clone().expect("a pane");
     let stream = service
-        .open_local(&pane, asked, size, Duration::from_secs(30))
+        .open_local_wait(&pane, asked, size, Duration::from_secs(30))
         .expect("a terminal of this Mac");
     ground.made.push(ledger.terminals_of(ACCOUNT).remove(0));
     ground.kept = Some(PathBuf::from(kablo));
@@ -3294,7 +3294,7 @@ fn a_program_a_command_started_here_shows_its_view_in_the_pane_that_is_placed() 
     ledger.shown(ACCOUNT, &id, Some(&pane));
     let (spec, size) = new_session(&options.child_launch(), 1000);
     let stream = service
-        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
         .expect("the terminal of this Mac that was started");
     assert_eq!(ledger.terminals_of(ACCOUNT), [id], "found, not made again");
     let wake = PaneFlag::default();
@@ -3511,7 +3511,7 @@ fn measure_file_receive_direct_pty_and_kablo() {
         let (spec, term_size) = new_session(&options.child_launch(), 1000);
         let pane = options.pane_uuid.clone().expect("a pane");
         let stream = service
-            .open_local(&pane, spec, term_size, Duration::from_secs(30))
+            .open_local_wait(&pane, spec, term_size, Duration::from_secs(30))
             .expect("a terminal of this Mac");
         let id = ledger.terminals_of(ACCOUNT).remove(0);
         ground.kept = Some(PathBuf::from(kablo));
@@ -3800,7 +3800,7 @@ fn measure_file_receive_over_ssh() {
     spec.cwd = Some(dir.clone().into_bytes());
     let pane = options.pane_uuid.clone().expect("a pane");
     let stream = service
-        .open_local(&pane, spec, term_size, Duration::from_secs(60))
+        .open_local_wait(&pane, spec, term_size, Duration::from_secs(60))
         .expect("a terminal on the server");
     let id = ledger.terminals_of(ACCOUNT).remove(0);
     rasp.lock().expect("lock").made.push(id);
@@ -4022,7 +4022,7 @@ impl Here {
         let (spec, size) = new_session(&options.child_launch(), 1000);
         let pane = options.pane_uuid.clone().expect("a pane");
         let terminal = service
-            .open_local(&pane, spec, size, Duration::from_secs(30))
+            .open_local_wait(&pane, spec, size, Duration::from_secs(30))
             .expect("a terminal of this Mac");
         let id = ledger.terminals_of(ACCOUNT).remove(0);
         ground.kept = Some(PathBuf::from(kablo));
@@ -5270,7 +5270,7 @@ mod relayed {
         spec.env.push((b"PATH".to_vec(), b"/usr/bin:/bin".to_vec()));
         let pane = options.pane_uuid.clone().expect("a pane");
         let _terminal = service
-            .open_local(&pane, spec, size, Duration::from_secs(60))
+            .open_local_wait(&pane, spec, size, Duration::from_secs(60))
             .expect("a terminal on the server");
         let served = |relay: &Relay, gone: &Gone| {
             serve(
@@ -5537,7 +5537,7 @@ fn a_program_whose_marks_went_with_its_relay_is_a_command_once_the_owner_says_so
     let (spec, size) = new_session(&options.child_launch(), 1000);
     let pane = options.pane_uuid.clone().expect("a pane");
     let stream = service
-        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
         .expect("a terminal of this computer");
     let id = ledger.terminals_of(ACCOUNT).remove(0);
     ground.kept = Some(PathBuf::from(kablo));
@@ -5577,7 +5577,7 @@ fn a_program_whose_marks_went_with_its_relay_is_a_command_once_the_owner_says_so
     let options = plain_options(script, &ground.home);
     let (spec, size) = new_session(&options.child_launch(), 1000);
     let stream = service
-        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
         .expect("its terminal");
     let session = bt_core::Session::streamed(
         options,

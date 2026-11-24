@@ -451,7 +451,15 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     draining: bool,
     /// The past a stream starts with ([`EventLoop::silence`]); `None`: none.
     silence: Option<Arc<Silence>>,
+    /// An earlier run's scrollback for a stream with a past: written into the screen above the
+    /// first live byte when the past turns out to be empty, dropped when it is not
+    /// ([`EventLoop::late_replay`]).
+    late: Option<LateReplay<U>>,
 }
+
+/// Writes the scrollback of an earlier run into the terminal, as the parser of the loop writes
+/// what a program says (the flag is the loop's mark of what the user typed last).
+pub(crate) type LateReplay<U> = Box<dyn FnOnce(&mut Term<U>, &mut bool) + Send>;
 
 impl<T, U> EventLoop<T, U>
 where
@@ -482,6 +490,7 @@ where
             backlog: None,
             draining: false,
             silence: None,
+            late: None,
         })
     }
 
@@ -577,6 +586,34 @@ where
     /// reads of live bytes are not held to it.
     pub(crate) fn silence(&mut self, silence: Arc<Silence>) {
         self.silence = Some(silence);
+    }
+
+    /// A scrollback a stream with a past may still be given. The stream's past is the screen when
+    /// it has bytes; when it is closed with none (the terminal was not there any more, and a new
+    /// one was made behind the stream) the scrollback is written above the first live byte, under
+    /// the terminal's lock the loop holds for the parse — never from the thread that reads, which
+    /// holds the lease the lock waits for.
+    pub(crate) fn late_replay(&mut self, replay: LateReplay<U>) {
+        self.late = Some(replay);
+    }
+
+    /// The scrollback to write before the bytes just read are parsed, if the past is known to be
+    /// empty now; one whose past has bytes is let go of. `closed` is read **before** `reach`:
+    /// the feeder says where the past ends before it closes it.
+    fn late_due(
+        silence: &Option<Arc<Silence>>,
+        late: &mut Option<LateReplay<U>>,
+    ) -> Option<LateReplay<U>> {
+        let past = silence.as_ref()?;
+        late.as_ref()?;
+        if !past.is_closed() {
+            return None;
+        }
+        if past.reach() > 0 {
+            *late = None;
+            return None;
+        }
+        late.take()
     }
 
     /// The DEC 2026 timeout: the parser's buffer applied, through the wrapper
@@ -699,6 +736,12 @@ where
                     None => continue,
                     locked => locked,
                 };
+            }
+
+            // A scrollback an empty past leaves to the first live byte goes in before it.
+            if let Some(apply) = Self::late_due(&self.silence, &mut self.late) {
+                let guard = terminal.get_or_insert_with(|| fair.lock_unfair());
+                apply(&mut **guard, &mut state.last_input);
             }
 
             // Parse the incoming bytes — into `Term` through the wrapper.

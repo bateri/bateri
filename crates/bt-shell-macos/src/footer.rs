@@ -304,7 +304,10 @@ impl TerminalPane {
         }
         // The server's ports ride the same edges, on their own throttle.
         self.request_remote_ports();
-        let child = session.child_pid();
+        // A pane whose terminal has not come has no process to look at yet.
+        let Some(child) = session.child_pid() else {
+            return;
+        };
         let (id, lookup) = (self.id(), self.lookup());
         scan_queue().exec_async(move || {
             let found = ports::pane_listeners(parent, child, &SystemTable);
