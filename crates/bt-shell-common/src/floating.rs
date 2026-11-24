@@ -30,6 +30,10 @@ use crate::split::{Direction, Layout, Rect, Removal, Room, Size, Spacing, Tree, 
 /// A design constant.
 pub const NEW_SHARE: (f64, f64) = (0.55, 0.60);
 
+/// How much of the content area a tool's card takes beside the pane it looks at: 38% wide and 80%
+/// tall. A design constant.
+pub const BESIDE_SHARE: (f64, f64) = (0.38, 0.80);
+
 /// How much of the place it stood in a pane that floats takes: four fifths of it each way, in
 /// its middle. A design constant.
 pub const FLOATED_SHARE: f64 = 0.80;
@@ -207,6 +211,22 @@ impl Area {
     /// Where a new floating pane opens ([`NEW_SHARE`]).
     pub fn opening() -> Self {
         Self::centred(NEW_SHARE.0, NEW_SHARE.1)
+    }
+
+    /// Where a card opens beside `place`, the area of the pane it is about ([`BESIDE_SHARE`]): on
+    /// its right side where there is room for it there, else on its left, else — the pane is as
+    /// wide as the tab — over its right edge. Level with its top.
+    pub fn beside(place: Area) -> Self {
+        let (width, height) = BESIDE_SHARE;
+        let right = place.x + place.width;
+        let x = if right + width <= 1.0 + EPSILON {
+            right
+        } else if place.x - width >= -EPSILON {
+            place.x - width
+        } else {
+            1.0 - width
+        };
+        Self::new(x, place.y, width, height).within((width, height))
     }
 
     /// Where a pane that stood in `place` floats to: [`FLOATED_SHARE`] of it, in its middle.
@@ -824,6 +844,13 @@ impl Layers {
         self.cards
             .iter()
             .position(|card| card.tree.leaves().contains(&pane))
+    }
+
+    /// The share of the tab's content area `pane`'s place takes: its card's, or the whole where
+    /// it is in the flat area.
+    pub fn area_of(&self, pane: u64) -> Area {
+        self.card_of(pane)
+            .map_or(Area::WHOLE, |index| self.cards[index].area)
     }
 
     /// Whether `pane` is in a card.
@@ -2882,5 +2909,36 @@ mod tests {
         assert!(near(frames[0].x, 792.0 - 80.0 - capsule::GAP - 100.0));
         assert!(frames.iter().all(|frame| near(frame.y, 38.0)));
         assert!(capsule::row(CapsulePlace::TopRight, area, false, 30.0, &[]).is_empty());
+    }
+
+    /// A tool's card opens by the pane it looks at: on its right where there is room, else on its
+    /// left, else over its right edge; level with its top, and always inside the tab.
+    #[test]
+    fn a_card_opens_beside_the_place_it_is_about() {
+        let (width, height) = BESIDE_SHARE;
+        // A card at the left: the new one is on its right, touching it.
+        let left = Area::new(0.05, 0.1, 0.4, 0.5);
+        let beside = Area::beside(left);
+        assert!(near(beside.x, 0.45) && near(beside.y, 0.1));
+        assert!(near(beside.width, width) && near(beside.height, height));
+        // A card at the right: there is no room on its right, so it is on its left.
+        let right = Area::new(0.55, 0.0, 0.4, 0.5);
+        let beside = Area::beside(right);
+        assert!(near(beside.x, 0.55 - width) && near(beside.y, 0.0));
+        // The whole tab (the flat area): over its right edge.
+        let beside = Area::beside(Area::WHOLE);
+        assert!(near(beside.x, 1.0 - width) && near(beside.y, 0.0));
+        // Inside the tab whichever way it falls: a card low in the tab does not fall off it.
+        let low = Area::beside(Area::new(0.0, 0.7, 0.3, 0.3));
+        assert!(low.y + low.height <= 1.0 + 1e-9, "{low:?}");
+    }
+
+    /// The place of a pane is its card's, or the whole of the tab where it is in the flat area.
+    #[test]
+    fn the_place_of_a_pane_is_its_cards_or_the_whole_tab() {
+        let layers = with_cards(vec![card(7)]);
+        assert!(same(layers.area_of(1), Area::WHOLE));
+        assert!(same(layers.area_of(7), layers.cards[0].area));
+        assert!(same(layers.area_of(99), Area::WHOLE));
     }
 }

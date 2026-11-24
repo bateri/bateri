@@ -248,6 +248,9 @@ pub trait PaneHost {
     /// Opens the program for a ⌘-click on a path in a floating pane of the tab `from` is in, with
     /// its own terminal. The default is an owner that does not.
     fn open_program(&self, _from: &TerminalPane, _open: crate::launch::OpenProgram) {}
+    /// Opens the page inspector of `from` in a floating pane beside it, or closes the one that is
+    /// open. The default is an owner that has none.
+    fn open_inspector(&self, _from: &TerminalPane) {}
     /// Opens a web address ⌘-clicked in the pane `from`: beside the terminal, in the program the
     /// person chose, or in the system's browser, and says it did. The default is an owner that
     /// does not decide (`false`): the address goes to the system.
@@ -2365,6 +2368,11 @@ pub struct PaneIvars {
     /// program opened: whose it is, the handle its input goes by, the filter's text field, the
     /// pointer's tracking area (`crate::native_page`).
     page_up: RefCell<Option<crate::native_page::Page>>,
+    /// What bateri made the pane for when it is one of its own tools ([`Tool`]), from its birth.
+    tool: Option<crate::launch::Tool>,
+    /// What an inspector's page is answered by, while the page is up
+    /// ([`TerminalPane::start_inspector`]).
+    inspector: RefCell<Option<crate::inspector::Inspecting>>,
     /// How many points the text of the page that is up is larger (or smaller) than the terminal's:
     /// what the page said by `text_size` (`pencere_drive::Host::text_size`), 0 for a page that
     /// said none. The terminal's own text does not change by it: it is the page's alone, and
@@ -2944,12 +2952,23 @@ define_class!(
             self.toggle_container_demo();
         }
 
+        /// View ▸ Inspect Page: the page inspector of this pane's page beside it, or closed again
+        /// where it is open (`crate::inspector`).
+        #[unsafe(method(inspectPage:))]
+        fn inspect_page_sent(&self, _sender: Option<&AnyObject>) {
+            self.host().open_inspector(self);
+        }
+
         /// The header's button over a page of the kit's own: the page comes down and the
-        /// terminal is the pane's again.
-        #[cfg(debug_assertions)]
+        /// terminal is the pane's again — and over the inspector's, which is all the pane has,
+        /// the pane closes.
         #[unsafe(method(closeUiPage:))]
         fn close_ui_page_sent(&self, _sender: Option<&AnyObject>) {
-            self.take_page_down();
+            if self.inspector_up() {
+                self.end_tool();
+            } else {
+                self.take_page_down();
+            }
         }
 
         /// Shell ▸ Show Folder in Finder (grey in a remote session).
@@ -3085,6 +3104,7 @@ impl TerminalPane {
             .is_some()
             .then(|| ProgramWait::new(mtm, &theme, reduce_motion));
         // And says in its header what is on its way, in the words its view will stand under.
+        let tool = launch.tool;
         let wait_words = launch.program.as_ref().map(|program| {
             let opens = &program.opens;
             let strip = view_strip::strip(
@@ -3192,6 +3212,8 @@ impl TerminalPane {
             stage: RefCell::new(None),
             page_words: RefCell::new(None),
             page_up: RefCell::new(None),
+            tool,
+            inspector: RefCell::new(None),
             page_text_size: Cell::new(0),
             look_base: Cell::new(look_base),
             look: LookSlot::new(look_base),
@@ -4018,7 +4040,12 @@ impl TerminalPane {
         let Some(grid) = self.sync_geometry() else {
             return Err(std::io::Error::other("pane is not attached to a window"));
         };
-        self.start_session(mtm, grid, birth)
+        self.start_session(mtm, grid, birth)?;
+        // A tool's face is a page of its own, up from the pane's first moment.
+        if let Some(crate::launch::Tool::Inspector { target }) = self.ivars().tool {
+            self.start_inspector(target);
+        }
+        Ok(())
     }
 
     /// The terminal of this Mac the pane's first program runs in: kablo's, started with what
@@ -4041,7 +4068,9 @@ impl TerminalPane {
         shell_parent: ShellParent,
         program: bool,
     ) -> Option<bt_core::Stream> {
-        if self.ivars().run.is_some() {
+        // A tool's process is the pane's own and ends with it: no terminal of kablo's, which
+        // would keep it past bateri, and no row for it in the ledger.
+        if self.ivars().run.is_some() || self.ivars().tool.is_some() {
             return None;
         }
         let history = u32::try_from(options.terminal.scrollback).unwrap_or(u32::MAX);
@@ -4087,6 +4116,7 @@ impl TerminalPane {
             held,
             runs,
             program,
+            tool: _,
         } = launch;
         // Whether the pipe is started or a terminal shown again goes on, the pane is the
         // program's it was asked for by: the pipe has the flag on its own command line, and
@@ -5587,6 +5617,10 @@ impl TerminalPane {
     /// Idle if there is no session or the reader thread has finished: the
     /// shell is gone and `child_pid` may be stale, a stale pid is not asked.
     pub fn foreground(&self) -> Foreground {
+        // A tool's process is bateri's own and holds no work: closing it asks nothing.
+        if self.ivars().tool.is_some() {
+            return Foreground::Idle;
+        }
         // A pane that shows a terminal a server keeps: the job in front is the
         // server's, which the process table here cannot see (it shows the pipe).
         if let Some(kept) = self.host().kept_terminal(self.uuid()) {
@@ -6247,6 +6281,10 @@ impl TerminalPane {
         // A program's view goes with the pane (no teardown to ask: its program
         // is hung up on next, or left running, and meets a pane with no view).
         self.drop_view();
+        // An inspector no longer looks at what it did, and the ones that look at this pane
+        // go with it.
+        crate::inspector::unwatch(self.id());
+        crate::inspector::target_closing(self.mtm(), self.id());
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
         // a no-op if it is not registered.
@@ -6571,11 +6609,13 @@ impl TerminalPane {
         link.set_page(Some(page));
         // The header says the demo's words.
         self.host().program_changed(ivars.id);
+        self.page_changed();
     }
 
     /// Takes the page down, whichever it is: its header's words and field with it, and the
     /// terminal's frames come back.
     fn take_page_down(&self) {
+        let had_page = self.ivars().page_up.borrow().is_some();
         if let Some(link) = self.link() {
             link.set_page(None);
         }
@@ -6606,6 +6646,122 @@ impl TerminalPane {
                 }
             }
         }
+        if had_page {
+            self.page_changed();
+        }
+    }
+
+    /// The pane's page came up or went down: the inspectors that look at it read it again.
+    fn page_changed(&self) {
+        crate::inspector::target_changed(self.mtm(), self.id());
+    }
+
+    /// Whether the pane is one of bateri's own tools.
+    pub(crate) fn is_tool(&self) -> bool {
+        self.ivars().tool.is_some()
+    }
+
+    /// Whether the page that is up is an inspector's.
+    pub(crate) fn inspector_up(&self) -> bool {
+        self.page_owner() == Some(crate::native_page::Owner::Inspector)
+    }
+
+    /// The pane this one inspects, when it is an inspector.
+    pub(crate) fn inspected(&self) -> Option<u64> {
+        self.ivars()
+            .tool
+            .map(|crate::launch::Tool::Inspector { target }| target)
+    }
+
+    /// The inspector's page, over the pane: it asks what it shows of the responder
+    /// ([`crate::inspector`]) and looks at the pane `target`. The pane waits under its cover for
+    /// the page's first frame, as a program's page does.
+    fn start_inspector(&self, target: u64) {
+        let Some(link) = self.link() else {
+            return;
+        };
+        let Some(session) = self.session() else {
+            return;
+        };
+        let theme = session.theme();
+        let ivars = self.ivars();
+        ivars.page_words.replace(Some(crate::inspector::words()));
+        let family = ivars.font.borrow().family.clone();
+        // No program opened it: nothing holds it to a flow.
+        let opening = self.page_opening(family.clone(), None);
+        let (page, handle) =
+            bt_shell_common::native_view::inspector_page(opening, self.page_wake());
+        let fields = self.page_fields(&handle, &theme, family, None);
+        let area = crate::native_page::pointer_area(self.view());
+        self.wait_for_page();
+        ivars
+            .inspector
+            .replace(Some(crate::inspector::Inspecting::new(self.mtm(), target)));
+        ivars.page_up.replace(Some(crate::native_page::Page {
+            owner: crate::native_page::Owner::Inspector,
+            handle,
+            fields,
+            area,
+            files: None,
+            browsers: None,
+        }));
+        crate::inspector::watch(self.id(), target);
+        link.set_page(Some(page));
+        self.host().program_changed(ivars.id);
+    }
+
+    /// What the inspector's page said, answered: what the responder says back is told to the page,
+    /// and where the page asked to close, the pane does.
+    fn inspector_heard(&self, message: &str) {
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        let (replies, closing) = {
+            let mut inspecting = self.ivars().inspector.borrow_mut();
+            let Some(inspecting) = inspecting.as_mut() else {
+                return;
+            };
+            (
+                inspecting.responder.hear(message),
+                inspecting.responder.closing(),
+            )
+        };
+        bt_shell_common::native_view::tell(&handle, &replies);
+        if closing {
+            self.end_tool();
+        }
+    }
+
+    /// The pane the inspector looks at changed what it shows: the page is told if what it says of
+    /// it is not what it was told.
+    pub(crate) fn refresh_inspector(&self) {
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        let replies = {
+            let Ok(mut inspecting) = self.ivars().inspector.try_borrow_mut() else {
+                return;
+            };
+            match inspecting.as_mut() {
+                Some(inspecting) => inspecting.responder.refresh(),
+                None => return,
+            }
+        };
+        bt_shell_common::native_view::tell(&handle, &replies);
+    }
+
+    /// The tool's pane ends, as a pane does when its program is gone: the owner closes it, from
+    /// the main queue — this is asked from inside the page's own turn, which the pane's closing
+    /// takes the page out from under.
+    pub(crate) fn end_tool(&self) {
+        let (id, lookup) = (self.id(), self.ivars().lookup);
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.host().shell_exited(id);
+            }
+        });
     }
 
     /// What a page of the kit is opened with in this pane: the terminal's face, no room kept over
@@ -7866,6 +8022,7 @@ impl TerminalPane {
         link.set_page(Some(page));
         // The mark of what runs in the pane (the tab's tile).
         self.host().program_changed(ivars.id);
+        self.page_changed();
         // And the terminal that carries the pane's bytes remembers it, as for a web view: a
         // bateri that finds the terminal again offers the program a restart of its view.
         self.host().view_changed(self.uuid(), true);
@@ -9253,6 +9410,9 @@ impl PageDriveHost for PageHost<'_> {
             && let Some(session) = pane.session()
         {
             session.module_message(&message);
+        } else if pane.inspector_up() {
+            // The inspector asks nobody's program: what it says is answered in this process.
+            pane.inspector_heard(&message);
         }
     }
 
@@ -9261,7 +9421,10 @@ impl PageDriveHost for PageHost<'_> {
     /// wish to close is not carried: a key the page reads for itself does not end what the program
     /// put there.
     fn close(&mut self) {
-        if self.up() && !self.0.program_page_up() {
+        if self.up() && self.0.inspector_up() {
+            // The inspector is the pane's only face: its closing is the pane's.
+            self.0.end_tool();
+        } else if self.up() && !self.0.program_page_up() {
             self.0.take_page_down();
         }
     }
@@ -11550,6 +11713,105 @@ mod tests {
         assert!(
             body(pane, "    pub(crate) fn takes_carry(")
                 .contains("!self.page_is_up() && !self.shows_web_view()")
+        );
+    }
+
+    /// A tool's pane is born in this process: its process is the pane's own and ends with it, so
+    /// the terminal of kablo's, which would keep it past bateri, is never asked for, and what a
+    /// close asks about running jobs is nothing. A source scan, because a pane needs a window
+    /// server.
+    #[test]
+    fn a_tool_is_born_here_and_asks_kablo_for_no_terminal() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |name: &str| {
+            let at = pane.find(name).unwrap_or_else(|| panic!("{name}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        // The terminal of kablo's is asked for only after the tool's own is ruled out.
+        let local = body_of("    fn local_terminal(");
+        let place = |word: &str| local.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(
+            place("self.ivars().tool.is_some()") < place("self.host().open_local_terminal("),
+            "{local}"
+        );
+        // The page comes up once the session does, in the pane's first moment.
+        let start = body_of("    pub fn start(");
+        let place = |word: &str| start.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(
+            place("self.start_session(mtm, grid, birth)?;")
+                < place("self.start_inspector(target);"),
+            "{start}"
+        );
+        // Closing a tool asks nothing, whatever its process is.
+        let foreground = body_of("    pub fn foreground(");
+        let place = |word: &str| foreground.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(
+            place("self.ivars().tool.is_some()") < place("self.host().kept_terminal("),
+            "{foreground}"
+        );
+        // And its process is no saved terminal: nothing of a tool is written for the next launch.
+        assert!(
+            !body_of(" fn saved(").contains("tool"),
+            "a tool is left out of the layout by the tab, not by the pane"
+        );
+    }
+
+    /// What the inspector's page says is answered in this process and never reaches a program's
+    /// session; the page's wish to close, and the header's button, close the pane; the pane's page
+    /// coming and going, and the pane itself closing, reach the inspectors that look at it.
+    #[test]
+    fn the_inspectors_page_is_answered_here_and_its_closing_is_the_panes() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |name: &str| {
+            let at = pane.find(name).unwrap_or_else(|| panic!("{name}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let host = &pane[pane
+            .find("impl PageDriveHost for PageHost")
+            .expect("the page's host")..];
+        let send =
+            &host[host.find("fn send(").expect("send")..host.find("fn close(").expect("close")];
+        let program = send
+            .find("session.module_message(&message);")
+            .expect("the program's");
+        let inspector = send
+            .find("pane.inspector_heard(&message);")
+            .expect("the inspector's");
+        assert!(program < inspector, "{send}");
+        assert!(
+            !send[inspector..].contains("module_message"),
+            "an inspector's words are not a program's"
+        );
+        let close =
+            &host[host.find("fn close(").expect("close")..host.find("fn redraw(").expect("redraw")];
+        assert!(
+            close.contains("self.0.inspector_up()") && close.contains("self.0.end_tool();"),
+            "{close}"
+        );
+        // The header's button and the pane's own end: through the owner, from the main queue.
+        let end = body_of("    pub(crate) fn end_tool(");
+        assert!(end.contains("DispatchQueue::main().exec_async"), "{end}");
+        assert!(end.contains("pane.host().shell_exited(id);"), "{end}");
+        let button = body_of("        fn close_ui_page_sent(");
+        assert!(button.contains("self.end_tool();") && button.contains("self.take_page_down();"));
+        // The page up and down are told to the inspectors; the pane closing is too.
+        for name in [
+            "    pub(crate) fn toggle_container_demo(",
+            "    fn start_native_view(",
+            "    fn take_page_down(",
+        ] {
+            assert!(body_of(name).contains("self.page_changed();"), "{name}");
+        }
+        let quiesce = body_of("    fn quiesce(");
+        assert!(
+            quiesce.contains("crate::inspector::unwatch(self.id());"),
+            "{quiesce}"
+        );
+        assert!(
+            quiesce.contains("crate::inspector::target_closing(self.mtm(), self.id());"),
+            "{quiesce}"
         );
     }
 }

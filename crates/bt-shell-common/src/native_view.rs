@@ -43,6 +43,7 @@ use bt_gpu::{
 pub mod ax;
 mod containers;
 mod files;
+mod inspector;
 mod look;
 mod page;
 #[cfg(test)]
@@ -53,6 +54,7 @@ pub use files::{
     DropWay, FILE_SCHEME, GivenFile, Outcomes, Quarantine, ViewFiles, drop_way, entries_given,
     place_saved,
 };
+pub use inspector::{Responder, Subject, Target, inspector_page, tell};
 pub use look::{LookSlot, caret_width_pt, terminal_look};
 pub use page::{MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, script_page};
 pub use pencere_drive::{

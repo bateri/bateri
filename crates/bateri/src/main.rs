@@ -35,6 +35,11 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::ssh_hold() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    // The program of a pane that is one of bateri's own tools: `bateri tool-hold`, started as the
+    // pane's process. It says nothing, has no window and ends with its terminal.
+    if let Some(code) = bt_shell_macos::tool_hold() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // The focus query: `bateri focus [--pid P] bateri://tab/<UUID>`,
     // asked by an outside process at the moment of an event — the same
     // reasons: only the token line reaches standard output, any session.

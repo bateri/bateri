@@ -1114,6 +1114,11 @@ pub(super) mod tests {
                 .unwrap_or_default()
         }
 
+        /// Every run of text the last frame drew, in the order it drew them.
+        pub(in crate::native_view) fn words(&self) -> Vec<String> {
+            drawn(&self.list)
+        }
+
         /// How many boxes the last frame drew.
         pub(in crate::native_view) fn quads(&self) -> usize {
             self.list

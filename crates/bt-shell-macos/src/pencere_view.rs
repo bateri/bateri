@@ -241,8 +241,8 @@ pub(crate) fn content_size(bounds: NSRect) -> ViewSize {
 pub enum Exit {
     /// ⌃C to the program, as the key (`quitProgram:`): a program's view.
     Quit,
-    /// The page comes down (`closeUiPage:`): a debug build's demo page, which no program holds.
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    /// The page comes down (`closeUiPage:`): a page no program holds, a debug build's demo page
+    /// or the page inspector.
     Close,
 }
 

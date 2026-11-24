@@ -490,6 +490,7 @@ impl<'a> World<'a> {
                 uuid: uuid.clone(),
                 runs: message::runs(place),
                 program: None,
+                tool: None,
             }
         } else {
             if !pipe_installed(&app.shell_integration().env) {
@@ -520,6 +521,7 @@ impl<'a> World<'a> {
                 uuid: None,
                 runs: PaneRuns::UserShell,
                 program: None,
+                tool: None,
             }
         };
         let incoming = app.next_id();
@@ -1404,7 +1406,12 @@ fn windows_of(
             if typing.is_none() && focused.is_active() {
                 typing.clone_from(&own);
             }
-            let layers = tab.container().layers();
+            // A tool of bateri's (the page inspector) is no pane of the person's: the picture of
+            // the tab has nothing of it, as the saved layout has nothing.
+            let mut layers = tab.container().layers();
+            for tool in panes.iter().filter(|pane| pane.is_tool()) {
+                let _ = layers.remove(tool.id());
+            }
             tabs.push(Tab {
                 id: tab.number(),
                 group: groups

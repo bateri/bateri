@@ -497,6 +497,20 @@ pub(crate) struct Launch {
     /// The program the pane was opened for, run in place of a shell ([`ProgramStart`]); `None` →
     /// the pane's first program is a shell, or the pipe to a terminal.
     pub(crate) program: Option<ProgramStart>,
+    /// What bateri made the pane for, when it is one of bateri's own tools and no terminal of the
+    /// person's ([`Tool`]); `None` → an ordinary pane.
+    pub(crate) tool: Option<Tool>,
+}
+
+/// A pane that is one of bateri's own tools. It has a process, as every pane has, but the process
+/// is `bateri tool-hold` and says nothing: the pane's face is a page bateri draws. A tool is
+/// the application's and not the person's work, so it is not a pane of the person's terminals in
+/// any way that matters later: it is not kept in kablo, it is not saved with the layout and it
+/// does not come back, and closing it asks nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tool {
+    /// The page inspector of the pane with this id: it shows the page that pane draws.
+    Inspector { target: u64 },
 }
 
 /// A ⌘-click on a file or a folder, which the program the person chose opens in a floating pane

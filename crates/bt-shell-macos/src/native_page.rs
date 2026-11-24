@@ -85,6 +85,9 @@ pub(crate) enum Owner {
     /// A program's view: the program ends it (⌃C reaches the program, its `closed` or `bye`
     /// brings the page down), and what the page says goes to the program.
     Program,
+    /// The page inspector's, which is all its pane has: no program holds it, what the page says is
+    /// answered in this process ([`crate::inspector`]) and its closing is the pane's.
+    Inspector,
 }
 
 /// What is up while a page of the kit is: the handle the pane's input goes to the page by, the

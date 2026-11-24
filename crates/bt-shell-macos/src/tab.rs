@@ -202,6 +202,12 @@ impl PaneHost for TabHost {
         }
     }
 
+    fn open_inspector(&self, from: &TerminalPane) {
+        if let (Some(app), Some(tab)) = (app::delegate(Self::mtm()), self.tab()) {
+            let _ = app.open_inspector(&tab, from);
+        }
+    }
+
     fn open_web_address(&self, from: &TerminalPane, url: &str) -> bool {
         match (app::delegate(Self::mtm()), self.tab()) {
             (Some(app), Some(tab)) => {
@@ -1713,6 +1719,13 @@ impl TerminalTab {
         let Some(pane) = container.pane(id) else {
             return;
         };
+        // The inspectors of the pane go first, before it leaves its place: a card of theirs that
+        // stood beside the last pane of the flat area would take the area when it went.
+        for inspector in crate::inspector::inspectors_of(id) {
+            if container.pane(inspector).is_some() {
+                self.close_pane(inspector);
+            }
+        }
         let handover = self.handover(id);
         let floating = container.floating(id);
         match container.remove_pane(id) {
@@ -2092,15 +2105,20 @@ impl TerminalTab {
         let ended = matches!(indicator, Some(Indicator::Finished | Indicator::Failed))
             .then(|| self.ivars().unseen.get().kind())
             .flatten();
+        // The keyboard in a tool of bateri's (the page inspector) is the tab's still: the chip says
+        // what the pane the tool looks at runs, and the tool is no card of the deck.
+        let focused = self.focused_pane();
+        let shown = focused
+            .inspected()
+            .and_then(|id| self.ivars().container.pane(id))
+            .unwrap_or(focused);
+        let panes = self.panes().iter().filter(|pane| !pane.is_tool()).count();
         Emblem {
-            kind: ended.unwrap_or_else(|| self.focused_pane().program_kind()),
-            edges: tabs::deck_edges(self.panes().len()),
+            kind: ended.unwrap_or_else(|| shown.program_kind()),
+            edges: tabs::deck_edges(panes),
             // The program's own icon while its view is up: the program, not the process that
             // runs it. An ended command's mark is the command's.
-            face: ended
-                .is_none()
-                .then(|| self.focused_pane().view_face())
-                .flatten(),
+            face: ended.is_none().then(|| shown.view_face()).flatten(),
         }
     }
 
@@ -2609,7 +2627,11 @@ impl TerminalTab {
     /// pane has nothing live to save ([`TerminalPane::saved`]): a tab whose
     /// tree would not match its panes is not saved at all.
     pub(crate) fn saved_tab(&self, with_history: bool) -> Option<(SavedTab, Histories)> {
-        let panes = self.panes();
+        // A tool of bateri's (the page inspector) is no pane of the person's: it is not saved and
+        // does not come back, and the panes beside it are saved as they were.
+        let (tools, panes): (Vec<_>, Vec<_>) =
+            self.panes().into_iter().partition(|pane| pane.is_tool());
+        let tools: Vec<u64> = tools.iter().map(|pane| pane.id()).collect();
         let mut saved = Vec::with_capacity(panes.len());
         let mut histories = Vec::new();
         for pane in &panes {
@@ -2620,13 +2642,17 @@ impl TerminalTab {
             saved.push(entry);
         }
         let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
-        let (shape, cards) = SavedTab::shapes(&self.ivars().container.layers(), &ids)?;
+        let (shape, cards) =
+            SavedTab::shapes_without(&self.ivars().container.layers(), &ids, &tools)?;
         let position = |id: u64| ids.iter().position(|candidate| *candidate == id);
+        // The keyboard was in the inspector: it comes back in the pane it looked at.
+        let focused = self.focused_pane();
+        let focused = focused.inspected().unwrap_or_else(|| focused.id());
         let tab = SavedTab {
             shape,
             panes: saved,
             cards,
-            focused: position(self.focused_pane().id()).unwrap_or(0),
+            focused: position(focused).unwrap_or(0),
             zoomed: self.ivars().container.zoomed().and_then(position),
             name: self.name(),
             // The window knows the groups: it says which one the tab is in.
@@ -2634,6 +2660,12 @@ impl TerminalTab {
             id: Some(self.number()),
         };
         Some((tab, histories))
+    }
+
+    /// The share of the tab's content area the place of the pane `pane` takes: its card's, or the
+    /// whole of the tab where it is in the flat area.
+    pub(crate) fn area_of(&self, pane: u64) -> bt_shell_common::floating::Area {
+        self.ivars().container.layers().area_of(pane)
     }
 
     /// The tabs that hold `ids` opened together in this tab's room ([`SplitView::arranged`]).
@@ -3040,5 +3072,27 @@ mod tests {
             let visible = body.find("container.apply_visibility(").expect(body);
             assert!(detached < visible, "{name}");
         }
+    }
+
+    /// The inspectors of a pane close before it leaves its place (a card that stood beside the last
+    /// pane of the flat area would take the area when the pane went), and the tab is saved without
+    /// the tools in it. A source scan, because a tab needs a window server.
+    #[test]
+    fn a_pane_takes_its_inspectors_with_it_and_a_tab_is_saved_without_its_tools() {
+        let tab = include_str!("tab.rs");
+        let tab = &tab[..tab.find("#[cfg(test)]").unwrap_or(tab.len())];
+        let body_of = |name: &str| {
+            let at = tab.find(name).unwrap_or_else(|| panic!("{name}"));
+            &tab[at..at + tab[at..].find("\n    }\n").expect("its end")]
+        };
+        let close = body_of("    pub(crate) fn close_pane(");
+        let place = |word: &str| close.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(
+            place("crate::inspector::inspectors_of(id)") < place("container.remove_pane(id)"),
+            "{close}"
+        );
+        let saved = body_of("    pub(crate) fn saved_tab(");
+        assert!(saved.contains("SavedTab::shapes_without("), "{saved}");
+        assert!(!saved.contains("SavedTab::shapes("), "{saved}");
     }
 }

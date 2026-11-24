@@ -59,6 +59,7 @@ pub mod embed;
 mod footer;
 mod hold_service;
 mod hyperlink;
+mod inspector;
 mod keychain;
 mod launch;
 mod leaving;
@@ -319,6 +320,19 @@ pub fn ssh_hold() -> Option<i32> {
     Some(bt_shell_common::hold::execute(
         bt_shell_common::hold::hold_main(&argv, &env),
     ))
+}
+
+/// `bateri tool-hold`: the program of a pane that is one of bateri's own tools
+/// ([`launch::Tool`]), which says nothing and ends with its terminal. `Some(exit code)` when the
+/// process was started as the subcommand, `None` otherwise. `main` calls it before the
+/// window-server check: the pane's own session runs it, it has no window and it must not open
+/// one. The body is [`bt_shell_common::tool_hold::hold_main`].
+pub fn tool_hold() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != bt_shell_common::tool_hold::SUBCOMMAND {
+        return None;
+    }
+    Some(bt_shell_common::tool_hold::hold_main())
 }
 
 /// `bateri focus [--pid P] bateri://tab/<UUID>`: `Some(exit code)`
@@ -620,6 +634,7 @@ mod subcommand_tests {
             &["ssh-fell-back", "--rc", "1", "--", "prod"],
             &["ssh-hold", "--", "prod"],
             &["focus"],
+            &["tool-hold"],
             &["ssh"],
         ] {
             assert_eq!(call(words), None, "{words:?}");
@@ -634,7 +649,7 @@ mod subcommand_tests {
     fn the_subcommands_are_dispatched_before_the_unknown_subcommand_rule() {
         let main = include_str!("../../bateri/src/main.rs");
         let rule = main.find("is_unknown_subcommand(&arg)").expect("the rule");
-        for call in ["ssh_argv()", "ssh_fell_back()", "ssh_hold()"] {
+        for call in ["ssh_argv()", "ssh_fell_back()", "ssh_hold()", "tool_hold()"] {
             let at = main.find(call).unwrap_or_else(|| panic!("{call}"));
             assert!(at < rule, "{call} is dispatched before the rule");
         }
