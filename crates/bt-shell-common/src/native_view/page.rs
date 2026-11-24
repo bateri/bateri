@@ -36,6 +36,7 @@
 //! is its own too (`Page::wake_unseen`).
 
 use std::cell::{Cell, RefCell, RefMut};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -281,6 +282,34 @@ struct PageDrawing {
 
 impl UiPage for PageDrawing {
     fn build(&mut self, cx: &UiContext<'_>) -> UiList {
+        // The page's frame is the one place the page's code runs on the display link's own turn:
+        // what goes wrong in it (a panic, an Objective-C exception raised under it) is the page's
+        // failure and no more ([`PageHandle::guard`]); the frame is an empty one, and the pane
+        // takes the page down once nothing of it is on the stack.
+        let handle = self.handle.clone();
+        handle
+            .guard("a frame", || self.build_frame(cx))
+            .unwrap_or_default()
+    }
+
+    fn animating(&self) -> bool {
+        !self.handle.failed() && self.handle.page.borrow().animating()
+    }
+
+    fn wake_at(&self) -> Option<f64> {
+        if self.handle.failed() {
+            return None;
+        }
+        self.handle.page.borrow().wake_at()
+    }
+}
+
+impl PageDrawing {
+    fn build_frame(&mut self, cx: &UiContext<'_>) -> UiList {
+        let probe = self.handle.on_frame.borrow().clone();
+        if let Some(probe) = probe {
+            probe();
+        }
         // A page whose words keep changing does not collect every line it ever said: the cache
         // starts again, before the frame measures with it.
         {
@@ -325,14 +354,6 @@ impl UiPage for PageDrawing {
         self.handle.tell_frame(&mut painted);
         list
     }
-
-    fn animating(&self) -> bool {
-        self.handle.page.borrow().animating()
-    }
-
-    fn wake_at(&self) -> Option<f64> {
-        self.handle.page.borrow().wake_at()
-    }
 }
 
 /// What is called when a page's outline changes ([`PageHandle::watch_outline`]).
@@ -340,6 +361,12 @@ type OnOutline = Rc<dyn Fn(&Outline)>;
 
 /// What is called with what a frame brings besides its outline ([`PageHandle::watch_held`]).
 type OnHeld = Rc<dyn Fn(&mut Painted)>;
+
+/// What is called at the start of each frame ([`PageHandle::watch_frame`]).
+type OnFrame = Rc<dyn Fn()>;
+
+/// What is called once at a page's failure, with what was said of it ([`PageHandle::watch_failure`]).
+type OnFailure = Rc<dyn Fn(&str)>;
 
 /// The pane's handle on a page of the kit: the drive's page, which the link's frames of it share.
 /// Cloned freely; all of it on the main thread.
@@ -354,17 +381,86 @@ pub struct PageHandle {
     on_held: Rc<RefCell<Option<OnHeld>>>,
     /// The pictures of the page's browsers, if the shell shows any.
     surfaces: Rc<RefCell<Option<Arc<dyn Surfaces>>>>,
+    /// What the page's failure is, once there is one ([`PageHandle::guard`]).
+    failure: Rc<Failure>,
+    /// Called at the start of each frame the link builds ([`PageHandle::watch_frame`]).
+    on_frame: Rc<RefCell<Option<OnFrame>>>,
+}
+
+/// A page that failed: what was said of it, and who is told.
+#[derive(Default)]
+struct Failure {
+    said: RefCell<Option<String>>,
+    told: RefCell<Option<OnFailure>>,
+}
+
+/// The words a panic's payload carries.
+fn words_of(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|words| (*words).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with no words".to_owned())
 }
 
 impl PageHandle {
     fn new(page: Page) -> Self {
         Self {
+            failure: Rc::new(Failure::default()),
+            on_frame: Rc::new(RefCell::new(None)),
             page: Rc::new(RefCell::new(page)),
             told: Rc::new(Cell::new(Mods::default())),
             on_outline: Rc::new(RefCell::new(None)),
             on_held: Rc::new(RefCell::new(None)),
             surfaces: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Runs `call`, which is the page's own code or a host's on the page's behalf, in the page's
+    /// error boundary: a panic in it is the page's failure and goes no further, and so is an
+    /// Objective-C exception raised under it where the shell makes those panics (the shell's
+    /// objc2 `catch-all`). Answers what `call` answered, or `None` where it failed — or where the
+    /// page had failed already, in which case nothing of it runs any more.
+    ///
+    /// The failure only says so ([`PageHandle::watch_failure`]): the page is not taken down here,
+    /// where its code, its borrows and its AppKit views may be on the stack.
+    pub fn guard<R>(&self, what: &str, call: impl FnOnce() -> R) -> Option<R> {
+        if self.failed() {
+            return None;
+        }
+        match catch_unwind(AssertUnwindSafe(call)) {
+            Ok(answer) => Some(answer),
+            Err(payload) => {
+                let words = format!("{what}: {}", words_of(payload.as_ref()));
+                eprintln!("bateri: a page failed in {words}");
+                *self.failure.said.borrow_mut() = Some(words.clone());
+                let told = self.failure.told.borrow().clone();
+                if let Some(told) = told {
+                    told(&words);
+                }
+                None
+            }
+        }
+    }
+
+    /// `told` is called at the start of each frame the link builds, inside the page's error
+    /// boundary and with nothing of the page borrowed: a shell that looks at frames (a development
+    /// copy's fault injector) hangs here, and what goes wrong in it is the page's failure.
+    pub fn watch_frame(&self, told: Box<dyn Fn()>) {
+        self.on_frame.replace(Some(Rc::from(told)));
+    }
+
+    /// Whether the page failed ([`PageHandle::guard`]): it draws nothing and is told nothing, and
+    /// is waiting to be taken down.
+    pub fn failed(&self) -> bool {
+        self.failure.said.borrow().is_some()
+    }
+
+    /// `told` is called once, at the page's first failure, with what was said of it, where the
+    /// failure was caught (nothing of the page is borrowed that was not before): it is to put the
+    /// page's taking down on a later turn.
+    pub fn watch_failure(&self, told: Box<dyn Fn(&str)>) {
+        self.failure.told.replace(Some(Rc::from(told)));
     }
 
     /// The drive's page, for one call: what the pane tells it (`text`, `focus`, `pick`, `command`,
@@ -389,6 +485,10 @@ impl PageHandle {
     /// of), and the pointer's leaving makes the drive forget them (so does the keyboard's leaving,
     /// [`PageHandle::set_active`]).
     pub fn input(&self, input: Input, held: Mods) {
+        self.guard("an input", || self.input_unguarded(input, held));
+    }
+
+    fn input_unguarded(&self, input: Input, held: Mods) {
         if matches!(
             input,
             Input::Move { .. } | Input::Press { .. } | Input::Release { .. } | Input::Extra { .. }
@@ -415,45 +515,51 @@ impl PageHandle {
     /// The wheel or the trackpad over the page: the modifiers are caught up first, as for the
     /// pointer ([`PageHandle::input`]). `precise` says a trackpad's points, not a wheel's steps.
     pub fn wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase, precise: bool, held: Mods) {
-        self.catch_up(held);
-        self.page().wheel(at, dx, dy, phase, precise);
+        self.guard("a wheel", || {
+            self.catch_up(held);
+            self.page().wheel(at, dx, dy, phase, precise);
+        });
     }
 
     /// The fingers of a pinch over the page: the content is to be `1 + by` times as large as it
     /// was at the gesture's last event. The modifiers are caught up first, as for the wheel (the
     /// drive tells the page the ones it last heard).
     pub fn magnify(&self, at: Point, by: f32, phase: GesturePhase, held: Mods) {
-        self.catch_up(held);
-        self.page().magnify(at, by, phase);
+        self.guard("a pinch", || {
+            self.catch_up(held);
+            self.page().magnify(at, by, phase);
+        });
     }
 
     /// The fingers of a rotation over the page, by `degrees` (counter-clockwise is positive) since
     /// the gesture's last event; the modifiers caught up as for a pinch.
     pub fn rotate(&self, at: Point, degrees: f32, phase: GesturePhase, held: Mods) {
-        self.catch_up(held);
-        self.page().rotate(at, degrees, phase);
+        self.guard("a rotation", || {
+            self.catch_up(held);
+            self.page().rotate(at, degrees, phase);
+        });
     }
 
     /// A double tap with two fingers over the page.
     pub fn smart_magnify(&self, at: Point) {
-        self.page().smart_magnify(at);
+        self.guard("a double tap", || self.page().smart_magnify(at));
     }
 
     /// A swipe of three fingers, one step (`dx`, `dy`: −1, 0 or 1; right and down are 1).
     pub fn swipe(&self, dx: i32, dy: i32) {
-        self.page().swipe(dx, dy);
+        self.guard("a swipe", || self.page().swipe(dx, dy));
     }
 
     /// The force of a press on a trackpad that feels it, over the page.
     pub fn pressure(&self, at: Point, stage: u8, pressure: f32) {
-        self.page().pressure(at, stage, pressure);
+        self.guard("a press", || self.page().pressure(at, stage, pressure));
     }
 
     /// A key went up while the page has the keyboard: the drive takes its modifiers as it takes a
     /// key's.
     pub fn key_up(&self, key: Key, mods: Mods) {
         self.told.set(mods);
-        self.page().key_up(key, mods);
+        self.guard("a key", || self.page().key_up(key, mods));
     }
 
     /// Whether the host's keyboard is in the page: an editor's caret is drawn, and blinks, only
@@ -463,7 +569,7 @@ impl PageHandle {
         if !active {
             self.told.set(Mods::default());
         }
-        self.page().set_active(active);
+        self.guard("the keyboard", || self.page().set_active(active));
     }
 
     /// The person picked entry `index` of `shown`, the menu the pane popped up. A line the host
@@ -486,7 +592,9 @@ impl PageHandle {
             allowed: editor.is_some(),
             read: pasteboard,
         };
-        self.page().pick(shown.serial, index, &mut host);
+        self.guard("a menu's pick", || {
+            self.page().pick(shown.serial, index, &mut host);
+        });
     }
 
     /// The page is told `held` if that is not what it last heard.
@@ -538,8 +646,10 @@ impl PageHandle {
     /// built; what the layout would draw is let go, never made into a list, presented or counted as
     /// a frame. A pane that is seen has its frames and is not laid out by this.
     pub fn lay_out_unseen(&self, at: FrameAt) {
-        let mut painted = self.page().frame(at);
-        self.tell_frame(&mut painted);
+        self.guard("a layout", || {
+            let mut painted = self.page().frame(at);
+            self.tell_frame(&mut painted);
+        });
     }
 
     /// A frame's outline if it changed, then what the drive held for its fields: the order a pane
@@ -1172,10 +1282,19 @@ pub(super) mod tests {
         let source = &source[..source
             .find("pub(super) mod tests")
             .expect("the tests follow")];
-        let build = &source[source
+        // The page's frame is built inside the page's error boundary.
+        let wrapper = &source[source
             .find("    fn build(&mut self, cx: &UiContext<'_>)")
             .expect("build")..];
-        let build = &build[..build.find("    fn animating(").expect("its end")];
+        let wrapper = &wrapper[..wrapper.find("    fn animating(").expect("its end")];
+        assert!(
+            wrapper.contains("handle\n            .guard(\"a frame\", || self.build_frame(cx))"),
+            "{wrapper}"
+        );
+        let build = &source[source
+            .find("    fn build_frame(&mut self, cx: &UiContext<'_>)")
+            .expect("the frame")..];
+        let build = &build[..build.find("\n    }\n").expect("its end")];
         let told = build
             .find("self.handle.tell_frame(&mut painted)")
             .expect(build);
@@ -1193,6 +1312,54 @@ pub(super) mod tests {
             "the outline makes the fields first: {frame}"
         );
         assert!(frame.contains("painted.held.is_empty()"), "{frame}");
+    }
+
+    /// What runs for a page in its error boundary: a panic is the page's failure, said once to the
+    /// one who watches for it, and nothing of the page runs after — the person's input included —
+    /// while the pane takes it down. A call that does not fail answers as it does.
+    #[test]
+    fn a_panic_in_what_runs_for_a_page_is_its_failure_and_nothing_of_it_runs_after() {
+        let rig = PaneRig::open("");
+        let handle = rig.handle.clone();
+        let said = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = Rc::clone(&said);
+        handle.watch_failure(Box::new(move |words| {
+            sink.borrow_mut().push(words.to_owned())
+        }));
+        assert_eq!(handle.guard("a thing", || 7), Some(7));
+        assert!(!handle.failed() && said.borrow().is_empty());
+
+        // The page is borrowed when it panics, as a page's code is: the borrow is let go of.
+        let failing = handle.guard("a thing", || {
+            let _page = handle.page();
+            panic!("boom");
+        });
+        assert_eq!(failing, None::<()>);
+        assert!(handle.failed());
+        assert_eq!(said.borrow().len(), 1);
+        assert!(
+            said.borrow()[0].contains("a thing: boom"),
+            "{:?}",
+            said.borrow()
+        );
+        assert!(
+            handle.page.try_borrow_mut().is_ok(),
+            "the page is not left borrowed"
+        );
+
+        // Nothing runs for it now, and it says nothing more.
+        let ran = Cell::new(false);
+        assert_eq!(
+            handle.guard("again", || {
+                ran.set(true);
+                1
+            }),
+            None
+        );
+        handle.set_active(true);
+        handle.swipe(1, 0);
+        assert!(!ran.get());
+        assert_eq!(said.borrow().len(), 1, "told once");
     }
 
     /// The time of day a page reads is the system's with the person's offset from UTC as the system

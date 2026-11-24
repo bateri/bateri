@@ -739,6 +739,8 @@ impl PageFields {
         let Some(window) = pane.window() else {
             return;
         };
+        // A development copy told to fail the keyboard's handover does it here.
+        crate::dev_fault::keyboard_handed(pane.view_program_name().as_deref());
         self.moving.set(true);
         match to.and_then(|id| self.field(id)) {
             Some(field) => {
@@ -899,6 +901,24 @@ pub(crate) struct PageTextFieldIvars {
     one_line: Cell<bool>,
 }
 
+/// Runs `body`, which is the part of a field's method that reaches the page or AppKit's views of
+/// it, in the page's error boundary: AppKit calls these methods, and a panic (or an exception
+/// objc2 made one) that unwound out of them would unwind through AppKit's frames. A failure is the
+/// page's and no more ([`bt_shell_common::native_view::PageHandle::guard`]); the answer is
+/// `otherwise` then. Where the page is down already there is nothing to guard.
+fn guarded<R>(ivars: &PageTextFieldIvars, what: &str, otherwise: R, body: impl FnOnce() -> R) -> R {
+    let handle = ivars
+        .fields
+        .borrow()
+        .upgrade()
+        .and_then(|fields| fields.pane.load())
+        .and_then(|pane| pane.page_handle());
+    match handle {
+        Some(handle) => handle.guard(what, body).unwrap_or(otherwise),
+        None => body(),
+    }
+}
+
 /// The keyboard came to a field (the person clicked into it, or the page sent it) and AppKit's own
 /// `becomeFirstResponder` says whether it `took` it: the page's fields are told which.
 fn keyboard_came(ivars: &PageTextFieldIvars, took: bool) {
@@ -976,7 +996,9 @@ macro_rules! page_field_class {
                         self.ivars().given_by_press.set(press);
                         self.ivars().asked.set(None);
                     }
-                    keyboard_came(self.ivars(), took);
+                    guarded(self.ivars(), "a field's keyboard", (), || {
+                        keyboard_came(self.ivars(), took);
+                    });
                     took
                 }
 
@@ -998,7 +1020,9 @@ macro_rules! page_field_class {
                     // the press until the button is up.
                     let _: () = unsafe { msg_send![super(self), mouseDown: event] };
                     if !had_the_keyboard {
-                        keep_asked_selection(self, self.ivars(), down);
+                        guarded(self.ivars(), "a press in a field", (), || {
+                            keep_asked_selection(self, self.ivars(), down);
+                        });
                     }
                 }
 

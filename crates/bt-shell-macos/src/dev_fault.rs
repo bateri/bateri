@@ -3,12 +3,19 @@
 //! tried with, in a copy that has the terminals of its own ([`crate::profile`], `make dev`).
 //!
 //! `BATERI_DEV_FAULT=<program>:<kind>[:<milliseconds>]` in the copy's environment (`open --env`):
-//! the program is the name its view says it has (`*` is any), the kind is `exit` (the process
-//! ends as a killed one does, as nothing catches: [`view_opened`], after the milliseconds),
-//! `panic` (a Rust panic where the page is built) or `exception` (an Objective-C exception where
-//! the keyboard is handed to the page); the last two are the places the page's boundary stands
-//! ([`fires`]). **Only a copy whose profile is named `dev…` reads it:** the application itself
-//! has no such door, whatever its environment says.
+//! the program is the name its view says it has (`*` is any), the kind is
+//!
+//! - `exit`: the process ends as a killed one does, as nothing catches ([`view_opened`], after the
+//!   milliseconds) — the failure the page's boundary cannot meet, and the one the loop is tried
+//!   with;
+//! - `panic`: a Rust panic where the page's frame is built ([`page_delivered`]);
+//! - `exception`: an Objective-C exception raised there (objc2 makes it a panic where it is
+//!   raised, `catch-all`);
+//! - `keyboard`: the same exception where the keyboard is handed to a field of the page
+//!   ([`keyboard_handed`]), the chain of the failure that closed bateri on 2026-11-23.
+//!
+//! **Only a copy whose profile is named `dev…` reads it:** the application itself has no such
+//! door, whatever its environment says.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -23,10 +30,12 @@ const VARIABLE: &str = "BATERI_DEV_FAULT";
 pub(crate) enum Kind {
     /// The process ends at once, with nothing run: a crash nothing catches.
     Exit,
-    /// A panic where the page is built.
+    /// A panic where the page's frame is built.
     Panic,
-    /// An Objective-C exception where the keyboard is handed to the page.
+    /// An Objective-C exception where the page's frame is built.
     Exception,
+    /// An Objective-C exception where the keyboard is handed to a field of the page.
+    Keyboard,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,6 +53,7 @@ fn parse(text: &str) -> Option<Plan> {
         "exit" => Kind::Exit,
         "panic" => Kind::Panic,
         "exception" => Kind::Exception,
+        "keyboard" => Kind::Keyboard,
         _ => return None,
     };
     let delay = match parts.next() {
@@ -74,28 +84,45 @@ fn plan() -> Option<&'static Plan> {
     .as_ref()
 }
 
+/// Whether this copy was told to fail a view at all: nothing is hung on the frames otherwise.
+pub(crate) fn armed() -> bool {
+    plan().is_some_and(|plan| plan.kind != Kind::Exit)
+}
+
 /// Whether the view of `program` is to fail as `kind` says, where the code that fails it stands.
 fn fires(kind: Kind, program: Option<&str>) -> bool {
     plan().is_some_and(|plan| plan.kind == kind && matches(plan, program))
 }
 
-/// What a page's frame hands the pane to deliver (what the page asked of it: the keyboard, a
-/// text, a copy), from the frame's own turn on the main thread — where the chain of the failure
-/// that closed bateri on 2026-11-23 stood. A panic or an Objective-C exception is raised here
-/// when the plan says one for this program.
+/// The page's frame is being built for the view of `program`, on the display link's turn on the
+/// main thread: a panic or an Objective-C exception is raised here when the plan says one.
 pub(crate) fn page_delivered(program: Option<&str>) {
     if fires(Kind::Panic, program) {
-        panic!("dev fault: a panic where a page's frame is delivered");
+        panic!("dev fault: a panic where a page's frame is built");
     }
     if fires(Kind::Exception, program) {
-        eprintln!("bateri: dev fault: an Objective-C exception where a page's frame is delivered");
-        let name = NSString::from_str("BateriDevFault");
-        let reason = NSString::from_str("a fault the development copy was asked for");
-        // SAFETY: raising is the point: the exception unwinds through Rust frames as AppKit's
-        // own would and nothing catches it, which is what this copy is for.
-        unsafe {
-            NSException::exceptionWithName_reason_userInfo(&name, Some(&reason), None).raise();
-        }
+        eprintln!("bateri: dev fault: an Objective-C exception where a page's frame is built");
+        raise();
+    }
+}
+
+/// The keyboard is being handed to a field of the page of `program`: the exception of the chain of
+/// 2026-11-23, raised in `makeFirstResponder`'s place, when the plan says one.
+pub(crate) fn keyboard_handed(program: Option<&str>) {
+    if fires(Kind::Keyboard, program) {
+        eprintln!("bateri: dev fault: an Objective-C exception where the keyboard is handed over");
+        raise();
+    }
+}
+
+/// An `NSException`, raised as AppKit's own are: it unwinds through whatever Rust frames are on
+/// the stack, unless the message send that raises it was one objc2 wraps (`catch-all`).
+fn raise() {
+    let name = NSString::from_str("BateriDevFault");
+    let reason = NSString::from_str("a fault the development copy was asked for");
+    // SAFETY: raising is the point; it is the exception a failing page would raise.
+    unsafe {
+        NSException::exceptionWithName_reason_userInfo(&name, Some(&reason), None).raise();
     }
 }
 
@@ -136,6 +163,10 @@ mod tests {
         );
         assert_eq!(parse("*:panic").map(|plan| plan.kind), Some(Kind::Panic));
         assert_eq!(
+            parse("pickpen:keyboard").map(|plan| plan.kind),
+            Some(Kind::Keyboard)
+        );
+        assert_eq!(
             parse(" demopen:exception ").map(|plan| plan.delay),
             Some(Duration::ZERO)
         );
@@ -152,6 +183,24 @@ mod tests {
         assert!(!matches(&named, None));
         let any = parse("*:exit").expect("plan");
         assert!(matches(&any, None) && matches(&any, Some("anything")));
+    }
+
+    /// The boundary of a page meets what AppKit raises because objc2 makes it a panic where a
+    /// message send raises it (`catch-all`): were it not on, the exception would unwind through
+    /// Rust frames, which Rust cannot catch, and the process would end here.
+    #[test]
+    fn an_exception_raised_under_a_message_send_is_a_panic_a_boundary_catches() {
+        let caught = std::panic::catch_unwind(raise);
+        assert!(caught.is_err());
+        // The same where Rust frames lie between the raise and the catch, as in a page's frame.
+        fn deep(depth: u32) {
+            if depth == 0 {
+                raise();
+            } else {
+                deep(depth - 1);
+            }
+        }
+        assert!(std::panic::catch_unwind(|| deep(5)).is_err());
     }
 
     #[test]

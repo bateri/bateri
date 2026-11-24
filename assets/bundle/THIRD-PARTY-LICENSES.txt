@@ -3424,6 +3424,10 @@ objc2-encode 4.1.0
   Copyright (c) Mads Marquart
   https://github.com/madsmtm/objc2
 
+objc2-exception-helper 0.1.1
+  Copyright (c) the objc2-exception-helper developers
+  https://github.com/madsmtm/objc2
+
 objc2-foundation 0.3.2
   Copyright (c) the objc2-foundation developers
   https://github.com/madsmtm/objc2

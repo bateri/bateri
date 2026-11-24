@@ -2397,6 +2397,8 @@ pub struct PaneIvars {
     /// program opened: whose it is, the handle its input goes by, the filter's text field, the
     /// pointer's tracking area (`crate::native_page`).
     page_up: RefCell<Option<crate::native_page::Page>>,
+    /// The page that is up failed and waits to be taken down ([`TerminalPane::page_failed`]).
+    page_failure: Cell<bool>,
     /// How many points the text of the page that is up is larger (or smaller) than the terminal's:
     /// what the page said by `text_size` (`pencere_drive::Host::text_size`), 0 for a page that
     /// said none. The terminal's own text does not change by it: it is the page's alone, and
@@ -3234,6 +3236,7 @@ impl TerminalPane {
             stage: RefCell::new(None),
             page_words: RefCell::new(None),
             page_up: RefCell::new(None),
+            page_failure: Cell::new(false),
             page_text_size: Cell::new(0),
             look_base: Cell::new(look_base),
             look: LookSlot::new(look_base),
@@ -4641,7 +4644,6 @@ impl TerminalPane {
     /// (`PageFields::apply`, told before this). A page that went down meanwhile is not the pane's
     /// to do anything for ([`PageHost`] does each part only while the page is up).
     fn deliver_held(&self, painted: &mut bt_shell_common::native_view::Painted) {
-        crate::dev_fault::page_delivered(self.ivars().view_program.borrow().as_deref());
         // While an agent's request is carried out, what the frame holds for the fields (a copy, the
         // keyboard) is told as the rest of what the page says is: held back from the person's pane.
         if self.agent_active()
@@ -4711,6 +4713,25 @@ impl TerminalPane {
             handle.watch_held(Box::new(move |painted| {
                 if let Some(pane) = pane.load() {
                     pane.deliver_held(painted);
+                }
+            }));
+        }
+        {
+            // A failure of the page's code, caught where it ran, takes the page down on a later
+            // turn ([`Self::page_failed`]).
+            let pane = WeakId::new(self);
+            handle.watch_failure(Box::new(move |words| {
+                if let Some(pane) = pane.load() {
+                    pane.page_failed(words);
+                }
+            }));
+        }
+        // A development copy told to fail a program's view does it at the frame.
+        if crate::dev_fault::armed() {
+            let pane = WeakId::new(self);
+            handle.watch_frame(Box::new(move || {
+                if let Some(pane) = pane.load() {
+                    crate::dev_fault::page_delivered(pane.view_program_name().as_deref());
                 }
             }));
         }
@@ -4849,7 +4870,7 @@ impl TerminalPane {
             self.note_keyboard_came();
         }
         if let Some(handle) = self.page_handle() {
-            handle.page().focus(field);
+            handle.guard("the keyboard", || handle.page().focus(field));
             self.drain_page();
         }
     }
@@ -7376,23 +7397,28 @@ impl TerminalPane {
         let Some(handle) = self.page_handle() else {
             return;
         };
-        // Taken first, the page let go of: what is done with it calls back into the pane, which
-        // may tell the page more (a menu picked from, the keyboard put in a field).
-        let drained = handle.page().drain();
-        // While an agent's request is carried out, the page's replies are told through `Held`: a
-        // copy is not written to the pasteboard, a link is not opened, a panel is not shown, a menu
-        // is not popped up (it would hold the main thread until somebody picks) and the system's
-        // keyboard is not moved. Told to the pane's own host in every other case.
-        if self.agent_active() {
-            let session = self.agent_session();
-            let mut host = PageHost(self);
-            drained.deliver(&mut Held::new(&mut host, &session, &handle));
-        } else {
-            drained.deliver(&mut PageHost(self));
-        }
-        // A pane that waited for this view's first page has it now, if the module handed it out.
-        self.page_drew();
-        self.wake_unseen_page();
+        // In the page's error boundary: what the page said is done here, with AppKit's help, and
+        // what goes wrong in it is the page's failure and no more.
+        handle.guard("what the page said", || {
+            // Taken first, the page let go of: what is done with it calls back into the pane,
+            // which may tell the page more (a menu picked from, the keyboard put in a field).
+            let drained = handle.page().drain();
+            // While an agent's request is carried out, the page's replies are told through `Held`:
+            // a copy is not written to the pasteboard, a link is not opened, a panel is not shown,
+            // a menu is not popped up (it would hold the main thread until somebody picks) and the
+            // system's keyboard is not moved. Told to the pane's own host in every other case.
+            if self.agent_active() {
+                let session = self.agent_session();
+                let mut host = PageHost(self);
+                drained.deliver(&mut Held::new(&mut host, &session, &handle));
+            } else {
+                drained.deliver(&mut PageHost(self));
+            }
+            // A pane that waited for this view's first page has it now, if the module handed it
+            // out.
+            self.page_drew();
+            self.wake_unseen_page();
+        });
     }
 
     /// A pane that is not seen draws no frames, so the page up is woken from here instead: at the
@@ -7632,7 +7658,7 @@ impl TerminalPane {
             .and_then(|page| page.fields.field(id))
             .map(|field| field.stringValue().to_string())
             .unwrap_or_default();
-        handle.page().text(id, &text);
+        handle.guard("a field's text", || handle.page().text(id, &text));
         self.drain_page();
     }
 
@@ -7707,7 +7733,7 @@ impl TerminalPane {
             && self.program_page_up()
             && let Some(handle) = self.page_handle()
         {
-            handle.page().room();
+            handle.guard("the room", || handle.page().room());
         }
         for action in session.take_view_actions() {
             match action {
@@ -7715,7 +7741,7 @@ impl TerminalPane {
                 Action::ToView(message) => {
                     if self.program_page_up() {
                         if let Some(handle) = self.page_handle() {
-                            handle.page().message(&message);
+                            handle.guard("a message", || handle.page().message(&message));
                         }
                     } else {
                         if let Some(host) = self.view_host() {
@@ -8001,13 +8027,10 @@ impl TerminalPane {
     /// keyboard), and the terminal's frames come back — it is drawn again, with
     /// the screen the program left.
     fn end_view(&self) {
-        // A view that waits has no page to take down; its conversation ending (the program's
-        // command ended) is its program gone.
-        if self.ivars().view_hold.borrow().is_some()
-            && self
-                .session()
-                .is_some_and(|session| matches!(session.view_state(), None | Some(State::Ended)))
-        {
+        // A view that waits has no page to take down (the answer to its card takes the hold first,
+        // so what ends the view then is the restart's own): its conversation ending, the program
+        // closing it or the command ending, is its program gone.
+        if self.ivars().view_hold.borrow().is_some() {
             self.end_view_hold();
         }
         self.ivars().view_program.replace(None);
@@ -8173,9 +8196,11 @@ impl TerminalPane {
     }
 
     /// A waiting view's program is gone while its card is up: a shell is in front of the terminal
-    /// again (the server's word, or kablo's of this Mac's terminal), or its view's conversation
-    /// ended. Called where those are told ([`Self::server_program_changed`], the shell speaking
-    /// ([`PaneHost::activity_changed`]), a view destroyed ([`Self::end_view`])).
+    /// again, as the news of it says ([`Self::server_program_changed`]: the server's word, or
+    /// kablo's of this Mac's terminal). Only the news: what kablo last said of this Mac's terminal
+    /// is not known to be newer than the view's own start (a program that has just started is
+    /// still "zsh" for a moment), and a card that went because of a stale word leaves a view
+    /// nobody opens again.
     pub(crate) fn check_view_hold(&self) {
         if !self
             .ivars()
@@ -8198,6 +8223,71 @@ impl TerminalPane {
         if gone {
             self.end_view_hold();
         }
+    }
+
+    /// What the program that opened the view up calls itself.
+    pub(crate) fn view_program_name(&self) -> Option<String> {
+        self.ivars().view_program.borrow().clone()
+    }
+
+    /// The page that is up failed ([`PageHandle::guard`]: a panic, or an Objective-C exception that
+    /// became one, in the page's code or in what runs for it). Said from where it was caught, the
+    /// page's code and its borrows and AppKit's own frames on the stack: nothing is taken down
+    /// here, on that stack. The page goes on a later turn of the main queue.
+    fn page_failed(&self, words: &str) {
+        if self.ivars().page_failure.replace(true) {
+            return;
+        }
+        eprintln!(
+            "bateri: the view of {:?} stopped: {words}",
+            self.view_program_name()
+        );
+        let (id, lookup) = (self.ivars().id, self.ivars().lookup);
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.take_failed_page_down();
+            }
+        });
+    }
+
+    /// The page that failed is taken down, nothing of it on the stack now: its AppKit views are
+    /// let go of — never used again, whatever state a caught exception left them in — and the
+    /// terminal is the pane's again. A program's view is the program's still: it was not told
+    /// anything (no `closed`), the ledger still says its view is open, and the pane holds it
+    /// behind the card that says it stopped, as it holds one after an unexpected quit
+    /// ([`TerminalPane::reopen_view`] opens it again). What the program says to the view meanwhile
+    /// is taken and not answered ([`TerminalPane::drain_views`]).
+    fn take_failed_page_down(&self) {
+        self.ivars().page_failure.set(false);
+        if self.is_closed() || self.ivars().page_up.borrow().is_none() {
+            return;
+        }
+        let program = self.program_page_up();
+        let name = self.view_program_name();
+        // Taking down is AppKit's work on views that failed once: it is guarded too, and what it
+        // cannot let go of is left, not given to the process to die of.
+        let down = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if program {
+                self.view_gone();
+            }
+            self.take_page_down();
+        }));
+        if down.is_err() {
+            eprintln!("bateri: the page that failed could not be taken down whole");
+        }
+        if !program {
+            return;
+        }
+        self.hold_view(name, Why::Stopped, false);
+        if let Some(hold) = self.ivars().view_hold.borrow_mut().as_mut() {
+            hold.held_back = true;
+        }
+        if let Some(hold) = self.ivars().view_hold.borrow().as_ref() {
+            self.want_view_card(hold);
+        }
+        self.host().program_changed(self.ivars().id);
     }
 
     /// A view opens: nothing waits any more, and the card goes. The ledger is told by the opening
@@ -10495,6 +10585,73 @@ mod tests {
         for start in ["    fn start_native_view(", "    fn start_view("] {
             assert!(body_of(start).contains("self.drop_view_hold()"), "{start}");
         }
+    }
+
+    /// A page that fails is the page's alone: what runs for it is in its error boundary, the
+    /// failure only says so where it was caught, and the page comes down on a later turn — as a
+    /// view that waits behind its card, which the program is not told of (`closed`) and the ledger
+    /// still says is open. A source scan: it needs a window server and a page that fails.
+    #[test]
+    fn a_page_that_fails_comes_down_later_and_waits_behind_its_card_and_the_program_is_not_told() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |signature: &str| {
+            let at = pane
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        // The entries that run the page's code or what it said, on the main thread.
+        for (signature, guard) in [
+            (
+                "    pub(crate) fn drain_page(",
+                "handle.guard(\"what the page said\"",
+            ),
+            (
+                "    fn page_field_changed(",
+                "handle.guard(\"a field's text\"",
+            ),
+            (
+                "    pub(crate) fn page_field_focused(",
+                "handle.guard(\"the keyboard\"",
+            ),
+            (
+                "    pub(crate) fn drain_views(",
+                "handle.guard(\"a message\"",
+            ),
+            (
+                "    pub(crate) fn drain_views(",
+                "handle.guard(\"the room\"",
+            ),
+        ] {
+            assert!(body_of(signature).contains(guard), "{signature}: {guard}");
+        }
+        // Registered where every page is: the debug page's and the program's.
+        let fields = body_of("    fn page_fields(");
+        assert!(fields.contains("handle.watch_failure("), "{fields}");
+        // Said where it was caught, nothing taken down there: a block on the main queue does it.
+        let said = body_of("    fn page_failed(");
+        assert!(said.contains("exec_async("), "{said}");
+        assert!(!said.contains("take_page_down"), "{said}");
+        let down = body_of("    fn take_failed_page_down(");
+        // The program is told nothing and the ledger keeps the view: no failure to the session
+        // (`view_failed` closes the program's view with an error), no end of the view.
+        for told in [
+            "view_failed(",
+            "end_view()",
+            "view_changed(",
+            "restart_view",
+        ] {
+            assert!(!down.contains(told), "{told}: {down}");
+        }
+        assert!(down.contains("self.take_page_down()"), "{down}");
+        assert!(down.contains("catch_unwind"), "{down}");
+        assert!(
+            down.contains("self.hold_view(name, Why::Stopped, false)"),
+            "{down}"
+        );
+        assert!(down.contains("hold.held_back = true"), "{down}");
+        assert!(down.contains("self.want_view_card(hold)"), "{down}");
     }
 
     #[test]

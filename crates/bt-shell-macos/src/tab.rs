@@ -394,15 +394,6 @@ impl PaneHost for TabHost {
         if let Some(tab) = self.tab() {
             tab.activity_changed();
         }
-        // The shell spoke: the program a view waited for may be the one that ended.
-        if let Some(tab) = self.tab()
-            && let Some(pane) = tab
-                .panes()
-                .into_iter()
-                .find(|candidate| candidate.id() == pane)
-        {
-            pane.check_view_hold();
-        }
         // The shell spoke, so it is past its opening moment: a server's card may come over it.
         crate::apps_card::prompted(Self::mtm(), pane);
     }

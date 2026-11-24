@@ -17,7 +17,7 @@ license = "GPL-3.0-or-later"
 
 # External crate versions from one place; members say `{ workspace = true }`.
 [workspace.dependencies]
-objc2 = "0.6"
+objc2 = { version = "0.6", features = ["catch-all"] }
 objc2-foundation = "0.3"
 # Framework crates enable every header by default; the ones used are counted.
 # Trimming is here because per-member `default-features = false` cannot
