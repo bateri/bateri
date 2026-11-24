@@ -750,6 +750,9 @@ static READY: (Mutex<Readiness>, Condvar) = (Mutex::new(Readiness::Never), Condv
 /// few threads, so this is a bound for a machine that does not answer, not a time anyone waits.
 const SERVICE_WAIT: Duration = Duration::from_secs(5);
 
+/// A wait for the service that long is written to the log.
+const SLOW_SERVICE: Duration = Duration::from_secs(2);
+
 /// How long a pane waits for its terminal of this Mac, kablo being put on the machine included:
 /// past this the pane is an ordinary one.
 const LOCAL_WAIT: Duration = Duration::from_secs(10);
@@ -794,7 +797,33 @@ pub(crate) fn open_local(
     history: u32,
     program: bool,
 ) -> Option<bt_core::Stream> {
-    let service = service()?;
+    let began = Instant::now();
+    let found = service();
+    let waited = began.elapsed();
+    let Some(service) = found else {
+        // A pane that is an ordinary one for no kablo to wait for (a timed run) says nothing; one
+        // that waited for a service and had none is told, for the log.
+        let why = match *READY.0.lock().unwrap_or_else(|e| e.into_inner()) {
+            Readiness::Never => return None,
+            Readiness::Coming => format!(
+                "the service did not come up in {:.1} s",
+                waited.as_secs_f64()
+            ),
+            Readiness::Over => "the service did not start".to_owned(),
+        };
+        eprintln!(
+            "bateri: the pane {} is an ordinary one: no terminal of this Mac: {why}",
+            pane.as_str()
+        );
+        return None;
+    };
+    if waited >= SLOW_SERVICE {
+        eprintln!(
+            "bateri: the pane {} waited {:.1} s on the main thread for the service of this Mac's terminals to come up",
+            pane.as_str(),
+            waited.as_secs_f64()
+        );
+    }
     let (mut spec, size) = local::new_session(launch, history);
     if program {
         bt_shell_common::open_with::ask_for_program(&mut spec);

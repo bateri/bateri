@@ -882,8 +882,19 @@ fn version_dir(dir: &str) -> Option<(&'static str, &str)> {
 
 /// The script that removes the version directories `dirs` (each one [`unused_versions`] gave, a
 /// directory that can only be one version's directly under a root) that were not written in the
-/// last [`PRUNE_AGE_MINUTES`] minutes, and the former root itself when that leaves it empty
-/// (`rmdir` leaves one that holds anything). One line of `sh`, like the others.
+/// last [`PRUNE_AGE_MINUTES`] minutes and that no process on the machine runs a `kablo` from, and
+/// the former root itself when that leaves it empty (`rmdir` leaves one that holds anything). One
+/// line of `sh`, like the others.
+///
+/// The census says which terminals run from a version, but only the ones of the socket
+/// directory it was asked in: a build of bateri that has a socket directory of its own and the
+/// real home (a development copy) sees none of the others' terminals and would take their
+/// versions away from under them. So the last look is at the machine's processes, made for each
+/// directory just before it goes, whichever socket directory its terminals are in: a directory
+/// whose `kablo` any process runs (`/<dir>/kablo` in its arguments, and so also `/<dir>/kablo-…`)
+/// stays. `ps -A -o args=` is what every `sh` machine has; one that fails removes nothing, and
+/// `COLUMNS` keeps a narrow one from cutting a path. The arguments are held in a variable and
+/// read by the shell's own `case`: a `grep` of the path would find its own arguments.
 pub fn prune_script(dirs: &[String]) -> Option<String> {
     let dirs: Vec<&str> = dirs
         .iter()
@@ -901,7 +912,7 @@ pub fn prune_script(dirs: &[String]) -> Option<String> {
     };
     (!dirs.is_empty()).then(|| {
         format!(
-            "for v in {}; do [ -z \"$(find $v -maxdepth 0 -mmin -{PRUNE_AGE_MINUTES})\" ] && rm -rf $v; done;{tidy} :",
+            "for v in {}; do [ -z \"$(find $v -maxdepth 0 -mmin -{PRUNE_AGE_MINUTES})\" ] || continue; p=$(COLUMNS=100000 ps -A -o args= 2>/dev/null) || continue; case \"$p\" in *\"/$v/kablo\"*) continue;; esac; rm -rf $v; done;{tidy} :",
             dirs.join(" ")
         )
     })

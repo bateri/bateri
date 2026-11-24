@@ -1334,6 +1334,114 @@ fn the_versions_nothing_runs_are_removed_and_the_ones_something_runs_stay() {
     );
 }
 
+/// A process that runs from a version's `kablo` until it is let go of: the stand-in is the
+/// `kablo` of the directory, so that the machine's process table shows its path as it shows a
+/// relay's or a warden's.
+struct Standing(Option<std::process::Child>);
+
+impl Standing {
+    fn from(home: &Home, place: &str) -> Standing {
+        let dir = home.dir.join(place);
+        crate::child::tests::write_program(&dir.join("kablo"), "#!/bin/sh\nread line\n");
+        // The directory is as old as the last entry made in it: the stand-in's source was one.
+        let status = Command::new("touch")
+            .args(["-t", "202001010000"])
+            .arg(&dir)
+            .status()
+            .expect("touch");
+        assert!(status.success());
+        let child = Command::new(dir.join("kablo"))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("a process that runs from the version");
+        Standing(Some(child))
+    }
+
+    /// Lets it go and waits until it is gone.
+    fn end(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            drop(child.stdin.take());
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for Standing {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+        }
+        self.end();
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_version_a_process_runs_from_stays_whatever_the_census_says() {
+    // Versions of their own: the check goes by the path of the `kablo` in the process table of
+    // the whole machine, and the other tests that run in parallel remove `0.1.0`.
+    let root = TempRoot::new("kablo-prune-running");
+    let (mut home, installed) = home_with(
+        &root.0,
+        &[("0.7.7", true), ("0.7.8", true)],
+        &[("0.7.7", true)],
+    );
+    // A listing that names nothing but the version that stays: the terminals of another socket
+    // directory are not in it, and that is the case the check is for.
+    std::fs::write(
+        home.installed("0.2.0").with_file_name("listing"),
+        listing(&[("0.2.0", "0.2.0")]),
+    )
+    .expect("terminals");
+    let mut current_run = Standing::from(&home, &current("0.7.7"));
+    let mut former_run = Standing::from(&home, &former("0.7.7"));
+    // The path is deep and the machine's `ps` is told a narrow screen: a path that is cut short
+    // is no path.
+    home.prefix = "COLUMNS=40; export COLUMNS; ";
+
+    let asked = prune_versions(&home, &installed);
+    assert_eq!(
+        asked,
+        [current("0.7.7"), current("0.7.8"), former("0.7.7")],
+        "nothing is in the listing: all three are asked to go"
+    );
+    assert!(kept(&home, "0.7.7"), "a process runs from it");
+    assert!(
+        kept_in_the_former_root(&home, "0.7.7"),
+        "a process runs from the copy in the former root"
+    );
+    assert!(!kept(&home, "0.7.8"), "nothing runs from it");
+
+    // Let go of, they are nobody's, and they go.
+    current_run.end();
+    former_run.end();
+    assert_eq!(prune_versions(&home, &installed).len(), 2);
+    assert!(!kept(&home, "0.7.7"));
+    assert!(!kept_in_the_former_root(&home, "0.7.7"));
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn nothing_is_removed_when_the_machines_processes_could_not_be_listed() {
+    let root = TempRoot::new("kablo-prune-no-ps");
+    let (mut home, installed) = home_with(&root.0, &[("0.7.9", true)], &[("0.7.9", true)]);
+    std::fs::write(
+        home.installed("0.2.0").with_file_name("listing"),
+        listing(&[("0.2.0", "0.2.0")]),
+    )
+    .expect("terminals");
+    // A `ps` that fails: what runs is not known, so nothing is taken away.
+    home.prefix = "ps() { return 1; }; ";
+    assert_eq!(prune_versions(&home, &installed).len(), 2, "asked to go");
+    assert!(kept(&home, "0.7.9"));
+    assert!(kept_in_the_former_root(&home, "0.7.9"));
+    // And a `ps` that works lets them go.
+    home.prefix = "";
+    prune_versions(&home, &installed);
+    assert!(!kept(&home, "0.7.9"));
+    assert!(!kept_in_the_former_root(&home, "0.7.9"));
+}
+
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn nothing_is_removed_when_the_machines_terminals_could_not_be_listed() {

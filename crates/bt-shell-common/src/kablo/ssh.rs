@@ -369,13 +369,33 @@ impl SshBackend {
     /// kablo for this Mac ([`install::ensure_here`]); a failure is no kablo here, for now: the
     /// Mac is not a server that is remembered as one kablo cannot be kept on.
     fn install_here(&self, live: &[SessionId]) -> Result<Installed, Refusal> {
-        let (bundle, home) = self.here().ok_or_else(Refusal::plain)?;
+        // Every refusal says why in the log: the pane that is made an ordinary one by it says
+        // only that this Mac's account was refused.
+        let Some((bundle, home)) = self.here() else {
+            let why = if self.bundle.is_none() {
+                "this build has no kablo package to put there"
+            } else {
+                "there is no home directory to put it in"
+            };
+            eprintln!("bateri: kablo cannot be put on this Mac: {why}");
+            return Err(Refusal::plain());
+        };
         let channel = LocalChannel::new(home.to_owned());
+        let began = Instant::now();
         let installed = install::ensure_here(&channel, bundle, self.wants(&local::host()))
-            .map_err(|_| Refusal::plain())?;
+            .map_err(|failure| {
+                eprintln!("bateri: kablo could not be put on this Mac: {failure:?}");
+                Refusal::plain()
+            })?;
+        let looking = began.elapsed();
         // Terminals this user has here may run an earlier one, whether or not the binary was
         // there.
         let census = settle(&here_channel(home), &installed, live);
+        if let Some(line) =
+            super::service::waiting::slow_account_line(looking, began.elapsed() - looking)
+        {
+            eprintln!("bateri: {line}");
+        }
         Ok(Installed {
             census,
             ..installed

@@ -531,6 +531,19 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Where a line about a pane's wait for its terminal of this Mac goes: a wait that was slow
+    /// ([`Backend::slow_open`]), and every pane that was not given a terminal, with the step it was
+    /// stuck in or the reason. The default is the log (`bateri.log` is the standard error of the
+    /// application).
+    fn log_line(&self, line: &str) {
+        eprintln!("bateri: {line}");
+    }
+
+    /// How long a pane's wait for its terminal is before it is told ([`Backend::log_line`]).
+    fn slow_open(&self) -> Duration {
+        waiting::SLOW_OPEN
+    }
+
     /// Writes the files the shells of a new terminal are set up from to the server, for an account
     /// the ledger brought back: `install` does it with the look for kablo, and a recalled account
     /// is not looked at (kablo is where the ledger says), so without this its new terminals would
@@ -887,6 +900,8 @@ struct Ask {
     spec: NewSession,
     size: Size,
     reply: Sender<Result<Stream, Refusal>>,
+    /// What the wait has been through, for the log ([`waiting`]).
+    trace: Arc<waiting::Trace>,
     /// The name its terminal is to have: the number a program that opened the pane was told
     /// ([`Service::expect_name`]), or the counter's ([`Core::local_numbered`]).
     name: Option<SessionId>,
@@ -896,6 +911,7 @@ struct Ask {
 /// pane waits for it with the ends of its stream.
 struct Awaiting {
     reply: Sender<Result<Stream, Refusal>>,
+    trace: Arc<waiting::Trace>,
     stream: Stream,
     /// What the pane asked, when the terminal is one found again: it has to be on the server,
     /// the program's process id comes with the server's word of it, and a terminal that is not
@@ -1332,6 +1348,9 @@ pub struct Service {
     names: Mutex<HashMap<PaneUuid, SessionId>>,
     /// What [`Service::stage_of`] reads.
     stages: Arc<Mutex<HashMap<String, Staged>>>,
+    /// What each account has queued for its holders, as the loop made the account
+    /// ([`Service::queued`]).
+    queues: Arc<Mutex<HashMap<String, Arc<AtomicUsize>>>>,
     /// What the service asks of the world around it, for what a program asks that is not a
     /// terminal's ([`Service::backend`]).
     backend: Arc<dyn Backend>,
@@ -1409,6 +1428,7 @@ impl Service {
         let background = Arc::new(Mutex::new(BTreeMap::new()));
         let exited = Arc::new(Mutex::new(BTreeMap::new()));
         let stages = Arc::new(Mutex::new(HashMap::new()));
+        let queues = Arc::new(Mutex::new(HashMap::new()));
         let local_gave_up = Arc::new(Mutex::new(None));
         let core = Core {
             shared: Arc::new(Shared {
@@ -1417,6 +1437,7 @@ impl Service {
                 ledger,
                 local_gave_up: Arc::clone(&local_gave_up),
                 stages: Arc::clone(&stages),
+                queues: Arc::clone(&queues),
             }),
             hub: Hub::new(),
             conns: BTreeMap::new(),
@@ -1475,6 +1496,7 @@ impl Service {
             local_gave_up,
             names: Mutex::new(HashMap::new()),
             stages,
+            queues,
             backend: kept_backend,
         })
     }
@@ -1806,8 +1828,18 @@ impl Service {
         size: Size,
         wait: Duration,
     ) -> Result<Stream, Refusal> {
+        let asked = Instant::now();
         let gave_up = *self.local_gave_up.lock().unwrap_or_else(|e| e.into_inner());
-        if gave_up.is_some_and(|at| at.elapsed() < LOCAL_REFUSAL) {
+        if let Some(ago) = gave_up
+            .map(|at| at.elapsed())
+            .filter(|ago| *ago < LOCAL_REFUSAL)
+        {
+            self.backend.log_line(&format!(
+                "the pane {} is an ordinary one: a pane gave up waiting for a terminal of this Mac {} ago, and the next ones do not wait for {}",
+                pane.as_str(),
+                waiting::seconds(ago),
+                waiting::seconds(LOCAL_REFUSAL)
+            ));
             return Err(Refusal::plain());
         }
         let (reply, answer) = mpsc::channel();
@@ -1816,26 +1848,67 @@ impl Service {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(pane);
+        let trace = Arc::new(waiting::Trace::new(asked));
         let ask = Ask {
             pane: pane.clone(),
             spec,
             size,
             reply,
+            trace: Arc::clone(&trace),
             name,
         };
-        self.tx
-            .send(Msg::Local(ask))
-            .map_err(|_| Refusal::plain())?;
-        match answer.recv_timeout(wait) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if error == RecvTimeoutError::Timeout {
-                    *self.local_gave_up.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(Instant::now());
-                }
-                Err(Refusal::plain())
-            }
+        if self.tx.send(Msg::Local(ask)).is_err() {
+            self.backend.log_line(&format!(
+                "the pane {} is an ordinary one: the service that makes the terminals of this Mac has stopped",
+                pane.as_str()
+            ));
+            return Err(Refusal::plain());
         }
+        let outcome = answer.recv_timeout(wait);
+        let now = Instant::now();
+        let (outcome, why) = match outcome {
+            Ok(outcome) => (outcome, None),
+            Err(RecvTimeoutError::Timeout) => {
+                *self.local_gave_up.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+                (
+                    Err(Refusal::plain()),
+                    Some(format!("no terminal came in {}", waiting::seconds(wait))),
+                )
+            }
+            Err(RecvTimeoutError::Disconnected) => (
+                Err(Refusal::plain()),
+                Some("the service dropped the request".to_owned()),
+            ),
+        };
+        let line = match (&outcome, why) {
+            (Ok(_), _) => trace.slow_line(pane.as_str(), self.backend.slow_open(), now),
+            (Err(_), why) => {
+                let why = trace
+                    .refusal()
+                    .or(why)
+                    .unwrap_or_else(|| "the service refused it".to_owned());
+                Some(trace.refused_line(pane.as_str(), &why, now))
+            }
+        };
+        if let Some(line) = line {
+            self.backend.log_line(&line);
+        }
+        outcome
+    }
+
+    /// How many bytes are queued for the holders of `account`'s terminals, which the bridge's
+    /// stream is not read past ([`HIGH_WATER`], at the most a chunk more): what the panes of the
+    /// account have not taken. `None` before the account is made. For a test and a measurement.
+    pub fn queued(&self, account: &str) -> Option<usize> {
+        let queues = self.queues.lock().unwrap_or_else(PoisonError::into_inner);
+        queues
+            .get(account)
+            .map(|queued| queued.load(Ordering::SeqCst))
+    }
+
+    /// What [`Service::queued`] is held to before the bridge's stream is no longer read.
+    pub const fn high_water() -> usize {
+        HIGH_WATER
     }
 
     /// The next terminal of this Mac `pane` asks for ([`Service::open_local`]) is named `name`,
@@ -1963,6 +2036,8 @@ struct Shared {
     /// The folder of each server account for a program's files, as it is made
     /// ([`Service::stage_of`]).
     stages: Arc<Mutex<HashMap<String, Staged>>>,
+    /// [`Service::queued`]'s counters, one per account.
+    queues: Arc<Mutex<HashMap<String, Arc<AtomicUsize>>>>,
 }
 
 /// An account's folder for a program's files.
@@ -3827,9 +3902,15 @@ impl Core {
         if let Some((at, refusal)) = &self.local_refused
             && now.saturating_duration_since(*at) < LOCAL_REFUSAL
         {
+            ask.trace.refuse(format!(
+                "the account of this Mac was refused {} ago, and a refusal is kept for {}",
+                waiting::seconds(now.saturating_duration_since(*at)),
+                waiting::seconds(LOCAL_REFUSAL)
+            ));
             let _ = ask.reply.send(Err(refusal.clone()));
             return;
         }
+        ask.trace.enter(waiting::Step::Account);
         let first = self.local_waiting.is_empty() && self.local_when.is_empty();
         self.local_waiting.push(ask);
         if first {
@@ -3872,6 +3953,7 @@ impl Core {
             match outcome {
                 Ok(()) => self.local_start(ask),
                 Err(refusal) => {
+                    ask.trace.refuse("the account of this Mac was refused");
                     let _ = ask.reply.send(Err(refusal.clone()));
                 }
             }
@@ -3908,6 +3990,7 @@ impl Core {
     /// (the command is not wanted, the counter could not count): the terminal keeps the name it
     /// is made with.
     fn local_numbered(&mut self, ask: Ask) {
+        ask.trace.enter(waiting::Step::Number);
         let shared = Arc::clone(&self.shared);
         let tx = shared.tx.clone();
         let sent = Arc::new(Mutex::new(Some(ask)));
@@ -3939,21 +4022,27 @@ impl Core {
             spec,
             size,
             reply,
+            trace,
             name,
         } = ask;
-        let refuse = |reply: &Sender<Result<Stream, Refusal>>| {
+        trace.enter(waiting::Step::Start);
+        if resume.is_some() {
+            trace.found_again();
+        }
+        let refuse = |why: &str| {
+            trace.refuse(why);
             let _ = reply.send(Err(Refusal::plain()));
         };
         let (Ok((held, pane_end)), Ok((exit_held, exit_end))) =
             (UnixStream::pair(), UnixStream::pair())
         else {
-            return refuse(&reply);
+            return refuse("no socket pair for the pane's stream");
         };
         let Ok(reader) = held.try_clone() else {
-            return refuse(&reply);
+            return refuse("the pane's stream could not be duplicated");
         };
         if pane_end.set_nonblocking(true).is_err() {
-            return refuse(&reply);
+            return refuse("the pane's end of the stream could not be made non-blocking");
         }
         // The stream is read in bursts: a buffer of the system's default size is a wake-up per
         // eight kilobytes.
@@ -3972,14 +4061,14 @@ impl Core {
                     Ok(silence) => (terminal.clone(), Some(silence)),
                     Err(_) => {
                         self.hub.closed(hold);
-                        return refuse(&reply);
+                        return refuse("the terminal that was shown before could not be taken up");
                     }
                 }
             }
             None => {
                 let Some(terminal) = name.or_else(|| crate::hold::new_terminal_name().ok()) else {
                     self.hub.closed(hold);
-                    return refuse(&reply);
+                    return refuse("no name for the terminal");
                 };
                 if self
                     .hub
@@ -3987,7 +4076,7 @@ impl Core {
                     .is_err()
                 {
                     self.hub.closed(hold);
-                    return refuse(&reply);
+                    return refuse("the bridge would not start the terminal");
                 }
                 (terminal, None)
             }
@@ -4023,10 +4112,12 @@ impl Core {
             ask: (pane, spec, size),
         });
         let found = resumed.is_some();
+        trace.enter(waiting::Step::Server);
         self.awaiting.insert(
             hold,
             Awaiting {
                 reply,
+                trace,
                 stream,
                 resumed,
             },
@@ -4108,7 +4199,12 @@ impl Core {
     /// refused it): it is marked to end, and the pane is given a new one as if it had asked for
     /// none.
     fn resumed_gone(&mut self, awaiting: Awaiting) {
-        let Awaiting { reply, resumed, .. } = awaiting;
+        let Awaiting {
+            reply,
+            trace,
+            resumed,
+            ..
+        } = awaiting;
         match resumed {
             Some(Resumed {
                 terminal,
@@ -4120,10 +4216,12 @@ impl Core {
                     spec,
                     size,
                     reply,
+                    trace,
                     name: None,
                 });
             }
             None => {
+                trace.refuse("the server did not take the terminal");
                 let _ = reply.send(Err(Refusal::plain()));
             }
         }
@@ -4161,6 +4259,12 @@ impl Core {
             client.take_tickets();
         }
         self.hub.add_client(&key, client);
+        let queued = Arc::new(AtomicUsize::new(0));
+        self.shared
+            .queues
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone(), Arc::clone(&queued));
         self.accounts.insert(
             key,
             Account {
@@ -4172,7 +4276,7 @@ impl Core {
                 bridge: None,
                 dialing: false,
                 missed: 0,
-                queued: Arc::new(AtomicUsize::new(0)),
+                queued,
                 purged: false,
                 files,
                 writing: Arc::new(Mutex::new(())),
@@ -4830,6 +4934,7 @@ fn bridge_writer(mut writer: Box<dyn Write + Send>, written: &Receiver<Vec<u8>>)
 
 mod pipes;
 pub use pipes::Streams;
+pub(super) mod waiting;
 #[cfg(test)]
 pub(crate) use pipes::fake as fake_streams;
 

@@ -166,6 +166,10 @@ struct Fake {
     /// kablo had been made N times, `ready` for the application told it is made. Apart from
     /// [`Fake::log`], which says what a terminal's start waits for: the folder is not it.
     staged: Mutex<Vec<String>>,
+    /// The lines about a pane's wait the service wrote to the log ([`Backend::log_line`]).
+    lines: Mutex<Vec<String>>,
+    /// How long a wait is before it is told, in milliseconds; 0 is the service's own.
+    slow_open_millis: AtomicU64,
 }
 
 impl Fake {
@@ -212,6 +216,8 @@ impl Fake {
             number_takes: Mutex::new(Duration::ZERO),
             stages: AtomicBool::new(true),
             staged: Mutex::new(Vec::new()),
+            lines: Mutex::new(Vec::new()),
+            slow_open_millis: AtomicU64::new(0),
         })
     }
 
@@ -591,6 +597,17 @@ impl Backend for Fake {
 
     fn stage_ready(&self, _: &str) {
         self.staged.lock().expect("lock").push("ready".into());
+    }
+
+    fn log_line(&self, line: &str) {
+        self.lines.lock().expect("lock").push(line.to_owned());
+    }
+
+    fn slow_open(&self) -> Duration {
+        match self.slow_open_millis.load(Ordering::SeqCst) {
+            0 => waiting::SLOW_OPEN,
+            millis => Duration::from_millis(millis),
+        }
     }
 
     fn number(&self, _: &KabloHost) -> Option<u64> {
@@ -4945,6 +4962,119 @@ fn a_pane_that_gave_up_on_a_slow_account_does_not_turn_away_the_panes_after_it_i
     assert!(stream.silence.is_none());
 }
 
+/// The seconds a step of a line about a wait says it took (`account 0.6 s`).
+fn took(line: &str, step: &str) -> f64 {
+    let after = line
+        .split(&format!("{step} "))
+        .nth(1)
+        .unwrap_or_else(|| panic!("{step} in {line}"));
+    after
+        .split(' ')
+        .next()
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("a number after {step} in {line}"))
+}
+
+#[test]
+fn a_terminal_that_came_slowly_is_told_in_the_log_with_the_steps_it_waited_in() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_millis.store(700, Ordering::SeqCst);
+    world.next_number.store(7, Ordering::SeqCst);
+    *world.number_takes.lock().expect("lock") = Duration::from_millis(300);
+    world.slow_open_millis.store(500, Ordering::SeqCst);
+    let rig = Rig::kept("local-slow-line", world.clone(), ledger, END_GRACE);
+    let pane = a_pane();
+
+    let _stream = open_local(&rig, &pane).expect("a terminal");
+    let lines = world.lines.lock().expect("lock").clone();
+    assert_eq!(lines.len(), 1, "one line for the wait: {lines:?}");
+    let line = &lines[0];
+    assert!(line.contains(pane.as_str()), "{line}");
+    assert!(line.contains("(new) came after"), "{line}");
+    // Where the time went: the account, then the number, and not the loop or the start.
+    assert!(took(line, "account") >= 0.6, "{line}");
+    assert!(took(line, "number") >= 0.2, "{line}");
+    assert!(took(line, "queue") < 0.3, "{line}");
+    assert!(took(line, "start") < 0.3, "{line}");
+    let order: Vec<usize> = ["queue", "account", "number", "start", "server"]
+        .iter()
+        .map(|step| {
+            line.find(step)
+                .unwrap_or_else(|| panic!("{step} in {line}"))
+        })
+        .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{line}");
+
+    // The next one finds the account made and is not told: it was not slow (the counter is not
+    // either, or the threshold would need a margin the parallel gate does not give).
+    *world.number_takes.lock().expect("lock") = Duration::ZERO;
+    let before = world.lines.lock().expect("lock").len();
+    let _second = open_local(&rig, &a_pane()).expect("a terminal");
+    assert_eq!(world.lines.lock().expect("lock").len(), before);
+}
+
+#[test]
+fn a_pane_that_is_not_given_a_terminal_is_told_in_the_log_with_why_or_where_it_waited() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_millis.store(1500, Ordering::SeqCst);
+    let rig = Rig::kept("local-refused-line", world.clone(), ledger, END_GRACE);
+
+    // It gave up: the line says which step it was in, and for how long.
+    let (first, second) = (a_pane(), a_pane());
+    let wait = Duration::from_millis(300);
+    assert!(
+        rig.service
+            .open_local(&first, a_shell(), MAC, wait)
+            .is_err()
+    );
+    // And the next one, turned away without waiting, says that.
+    assert!(
+        rig.service
+            .open_local(&second, a_shell(), MAC, wait)
+            .is_err()
+    );
+    let lines = world.lines.lock().expect("lock").clone();
+    assert_eq!(lines.len(), 2, "one line each: {lines:?}");
+    assert!(lines[0].contains(first.as_str()), "{}", lines[0]);
+    assert!(
+        lines[0].contains("no terminal came in 0.3 s"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].contains("`account`"), "{}", lines[0]);
+    assert!(lines[1].contains(second.as_str()), "{}", lines[1]);
+    assert!(lines[1].contains("gave up waiting"), "{}", lines[1]);
+
+    // A refusal the service gives says why, and no step.
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_refuses.store(true, Ordering::SeqCst);
+    let rig = Rig::kept(
+        "local-refused-line-2",
+        world.clone(),
+        Arc::new(Ledger::memory()),
+        END_GRACE,
+    );
+    let pane = a_pane();
+    assert_eq!(open_local(&rig, &pane).err(), Some(Refusal::plain()));
+    let lines = world.lines.lock().expect("lock").clone();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains(pane.as_str()), "{}", lines[0]);
+    assert!(
+        lines[0].contains("the account of this Mac was refused"),
+        "{}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("the wait was in"), "{}", lines[0]);
+    // The same refusal, a moment later, is kept and says so.
+    let again = a_pane();
+    assert!(open_local(&rig, &again).is_err());
+    let lines = world.lines.lock().expect("lock").clone();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[1].contains("was refused 0."), "{}", lines[1]);
+}
+
 #[test]
 fn a_terminal_is_this_macs_by_its_account_alone() {
     let shown = |account: &str| Shown {
@@ -5426,6 +5556,7 @@ fn panes_that_wait_for_the_account_of_this_mac_share_the_making_of_it() {
                 spec: a_shell(),
                 size: MAC,
                 reply,
+                trace: Arc::new(waiting::Trace::new(Instant::now())),
                 name: None,
             };
             rig.service.tx.send(Msg::Local(ask)).expect("sent");
