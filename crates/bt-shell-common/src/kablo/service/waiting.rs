@@ -152,6 +152,20 @@ impl Trace {
         })
     }
 
+    /// The line for a wait that has not ended, at `now`: the step it is in and for how long, and
+    /// the steps it has been through. Written when the pane says it is still waiting.
+    pub(super) fn waiting_line(&self, pane: &str, now: Instant) -> String {
+        let (step, in_step) = self.current(now);
+        format!(
+            "the pane {pane} still has no terminal of this Mac ({}) after {}: the wait is in `{}` for {}; {}",
+            self.kind(),
+            seconds(self.total(now)),
+            step.name(),
+            seconds(in_step),
+            self.steps(now)
+        )
+    }
+
     /// The line for a wait that ended without a terminal, for the reason `why` (the loop's own,
     /// when it gave one) after `now - asked`.
     pub(super) fn refused_line(&self, pane: &str, why: &str, now: Instant) -> String {
@@ -236,6 +250,27 @@ mod tests {
         assert_eq!(
             slow_account_line(Duration::from_millis(100), Duration::from_millis(1_800)),
             None
+        );
+    }
+
+    #[test]
+    fn a_wait_that_has_not_ended_says_the_step_it_is_in() {
+        let start = Instant::now();
+        let trace = Trace::new(start);
+        {
+            let mut marks = trace.marks();
+            marks.entered.push((Step::Account, at(start, 100)));
+            marks.entered.push((Step::Start, at(start, 1_500)));
+            marks.entered.push((Step::Server, at(start, 1_510)));
+        }
+        let line = trace.waiting_line("P1", at(start, 2_010));
+        assert!(line.contains("pane P1 still has no terminal"), "{line}");
+        assert!(line.contains("(new)"), "{line}");
+        assert!(line.contains("after 2.0 s"), "{line}");
+        assert!(line.contains("in `server` for 0.5 s"), "{line}");
+        assert!(
+            line.ends_with("queue 0.1 s, account 1.4 s, start 0.0 s, server 0.5 s"),
+            "{line}"
         );
     }
 

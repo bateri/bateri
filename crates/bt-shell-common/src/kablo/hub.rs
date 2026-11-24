@@ -1097,6 +1097,19 @@ impl Hub {
             .unwrap_or(false)
     }
 
+    /// Whether the server has said the terminal of a holder is there ([`Client::is_attached`]).
+    pub fn is_attached(&self, hold: HoldId) -> bool {
+        self.holds
+            .get(&hold)
+            .and_then(|entry| entry.bound.as_ref())
+            .and_then(|binding| {
+                self.clients
+                    .get(&binding.account)
+                    .map(|client| client.is_attached(&binding.terminal))
+            })
+            .unwrap_or(false)
+    }
+
     /// How the terminal's program ended, for a holder the hub has said its last word to.
     pub fn exit_of(&self, hold: HoldId) -> Option<Exit> {
         self.holds.get(&hold).and_then(|entry| entry.exit)

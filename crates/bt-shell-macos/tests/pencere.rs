@@ -1481,9 +1481,18 @@ fn born_without_its_terminal(
             pids: RefCell::new(Vec::new()),
         })
     };
-    let open = |id: u64, host: Rc<Born>, theme: Theme| -> Retained<TerminalPane> {
+    // `rc` is what the pane's shell reads first; `rect` the pane's frame.
+    let open_at = |id: u64,
+                   host: Rc<Born>,
+                   theme: Theme,
+                   rect: NSRect,
+                   rc: Option<&str>|
+     -> Retained<TerminalPane> {
         let folder = dir.join(format!("born-{id}"));
         fs::create_dir_all(folder.join("zdot")).expect("the pane's folder");
+        if let Some(rc) = rc {
+            fs::write(folder.join("zdot").join(".zshrc"), rc).expect("the shell's rc");
+        }
         let identity = Rc::new(Identity {
             app_name: "pencere-test".to_owned(),
             helper: None,
@@ -1499,7 +1508,7 @@ fn born_without_its_terminal(
             ),
             ("PS1".to_owned(), "% ".to_owned()),
         ];
-        let pane = embed::open(mtm, frame_rect, config).expect("the pane opens");
+        let pane = embed::open(mtm, rect, config).expect("the pane opens");
         window
             .contentView()
             .expect("a window has a content view")
@@ -1508,6 +1517,7 @@ fn born_without_its_terminal(
         pane.start(mtm).expect("the pane starts");
         pane
     };
+    let open = |id: u64, host: Rc<Born>, theme: Theme| open_at(id, host, theme, frame_rect, None);
     for (look, theme, appearance) in [
         ("dark", Theme::BATERI, "NSAppearanceNameDarkAqua"),
         ("light", Theme::BATERI_LIGHT, "NSAppearanceNameAqua"),
@@ -1584,7 +1594,64 @@ fn born_without_its_terminal(
             let png = picture_of(&pane, 2.0).expect("a picture");
             fs::write(shots.join(format!("refused-{look}.png")), png).expect("written");
         }
+        // The mark is not a control: a click on it reaches the pane, and no cursor or hover is
+        // asked of it.
+        let mark = pane.not_kept_mark_frame().expect("the mark's frame");
+        let centre = NSPoint::new(
+            mark.origin.x + mark.size.width / 2.0,
+            mark.origin.y + mark.size.height / 2.0,
+        );
+        // SAFETY: the pane is in a window's view tree on the main thread.
+        let hit = unsafe { pane.superview() }.and_then(|container| {
+            container.hitTest(pane.convertPoint_toView(centre, Some(&container)))
+        });
+        let named = hit.map(|view| view.class().name().to_string_lossy().into_owned());
+        println!("pencere: a click on the mark reaches {named:?}");
+        assert_ne!(named.as_deref(), Some("BateriLinkLabel"));
+        assert_ne!(named.as_deref(), Some("NSBox"));
         pane.close();
+
+        // The mark and the text under it: a last row that is full across, in a pane as wide as
+        // the window and in a narrow one. What the mark covers is measured and written, and
+        // the pictures are kept.
+        let rc = "setopt promptsubst\nPROMPT='${(l:$((COLUMNS-1))::W:)}'\nprecmd() { echo $COLUMNS > \"$ZDOTDIR/cols\" }\n";
+        for (kind, width) in [("wide", frame_rect.size.width), ("narrow", 220.0)] {
+            let mut rect = frame_rect;
+            rect.size.width = width;
+            let id = base + 4 + if kind == "wide" { 0 } else { 1 };
+            let pane = open_at(
+                id,
+                host(
+                    Some("the service that makes the terminals of this Mac did not start"),
+                    false,
+                ),
+                theme,
+                rect,
+                Some(rc),
+            );
+            until("the mark", || pane.not_kept_mark_text().is_some());
+            let cols_file = dir.join(format!("born-{id}")).join("zdot").join("cols");
+            until("the shell's width", || cols_file.exists());
+            spin_for(1.0);
+            let cols: f64 = fs::read_to_string(&cols_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+                .expect("the shell said its width");
+            let mark = pane.not_kept_mark_frame().expect("the mark's frame");
+            let covered = (mark.size.width / rect.size.width * cols).ceil();
+            println!(
+                "pencere: mark ({kind}, {look}): {:.0}x{:.0} pt in a pane {:.0} pt wide of {cols} columns covers {covered} columns of the last row, which is {:.0}% of its width",
+                mark.size.width,
+                mark.size.height,
+                rect.size.width,
+                covered / cols * 100.0
+            );
+            if let Some(shots) = &shots {
+                let png = picture_of(&pane, 2.0).expect("a picture");
+                fs::write(shots.join(format!("mark-{kind}-{look}.png")), png).expect("written");
+            }
+            pane.close();
+        }
     }
     window.setAppearance(None);
 }

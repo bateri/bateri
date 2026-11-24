@@ -48,6 +48,8 @@ struct TicketState {
     gone: bool,
     /// The terminal was refused and an ordinary shell of this process carries the stream.
     ordinary: Option<Arc<Ordinary>>,
+    /// Where the service writes its log, once the request is handed to it.
+    log: Option<Arc<dyn Backend>>,
 }
 
 impl Ticket {
@@ -73,6 +75,9 @@ impl Ticket {
 /// What a pane of this Mac asks of its terminal ([`PtyOps`]).
 pub(super) struct LocalOps {
     pub(super) ticket: Arc<Ticket>,
+    pub(super) trace: Arc<waiting::Trace>,
+    pub(super) pane: PaneUuid,
+    pub(super) pid: ChildPid,
 }
 
 impl PtyOps for LocalOps {
@@ -106,6 +111,20 @@ impl PtyOps for LocalOps {
     /// that was already asked for when it comes.
     fn hangup(&self, _pid: Option<u32>, _exit: BorrowedFd<'_>) {
         self.ticket.state().gone = true;
+    }
+
+    /// The pane has waited long enough to say so, and the terminal has not come: one line to the
+    /// log with the step the wait is in and the ones it has been through — what is known of a
+    /// terminal that never comes, which no other line is written for.
+    fn still_waiting(&self) {
+        if self.pid.is_settled() {
+            return;
+        }
+        let line = self.trace.waiting_line(self.pane.as_str(), Instant::now());
+        match self.ticket.state().log.clone() {
+            Some(backend) => backend.log_line(&line),
+            None => eprintln!("bateri: {line}"),
+        }
     }
 
     /// The pane's program ended without reading what the pane sent it: the terminal that
@@ -181,6 +200,7 @@ impl LocalAsk {
         let status = Arc::new(StreamExit::default());
         let pid = ChildPid::unknown();
         let silence = shown_again.then(Silence::new);
+        let trace = Arc::new(waiting::Trace::new(Instant::now()));
         let stream = Stream {
             master: pane_end.into(),
             exit: exit_end.into(),
@@ -188,6 +208,9 @@ impl LocalAsk {
             pid: pid.clone(),
             ops: Arc::new(LocalOps {
                 ticket: Arc::clone(&ticket),
+                trace: Arc::clone(&trace),
+                pane: pane.clone(),
+                pid: pid.clone(),
             }),
             silence: silence.clone(),
         };
@@ -202,7 +225,7 @@ impl LocalAsk {
             pid,
             silence,
             ticket,
-            trace: Arc::new(waiting::Trace::new(Instant::now())),
+            trace,
             name: None,
         };
         Ok((
@@ -216,6 +239,9 @@ impl LocalAsk {
 
     /// The service takes the request: it is refused with the service's words if it is dropped.
     pub(super) fn handed(&mut self, stop: Arc<AtomicBool>, backend: Arc<dyn Backend>) {
+        if let Some(parts) = &self.parts {
+            parts.ticket.state().log = Some(Arc::clone(&backend));
+        }
         self.handed = Some((stop, backend));
     }
 

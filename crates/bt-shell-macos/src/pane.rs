@@ -704,6 +704,25 @@ impl LinkLabel {
 /// How far the status labels stand from the pane's corners, points.
 const STATUS_LABEL_MARGIN: f64 = 8.0;
 
+/// What a layout saved while a pane waits for its terminal keeps of the pane: the session has
+/// said nothing yet (no directory, no remote line), so what the pane was born with stands for
+/// what it has not said — the directory it starts in and the line it types first. Once the
+/// terminal is there, or when the session has said it, the session's words are the pane's.
+fn saved_while_waiting(
+    dir: Option<std::path::PathBuf>,
+    remote_line: Option<String>,
+    waiting: bool,
+    born_with: &(Option<std::path::PathBuf>, Option<String>),
+) -> (Option<std::path::PathBuf>, Option<String>) {
+    if !waiting {
+        return (dir, remote_line);
+    }
+    (
+        dir.or_else(|| born_with.0.clone()),
+        remote_line.or_else(|| born_with.1.clone()),
+    )
+}
+
 /// How long a pane born without its terminal waits before it says so.
 pub(crate) const WAIT_LINE_AFTER: Duration = Duration::from_secs(2);
 
@@ -2373,6 +2392,9 @@ pub struct PaneIvars {
     /// pane's shell ends with bateri: a small mark in the bottom right corner
     /// ([`TerminalPane::terminal_settled`]). AppKit's, outside the frame path, hit-test-less.
     status_labels: StatusLabels,
+    /// What the pane was born with that its session cannot say until its terminal has come: the
+    /// directory it starts in and the line it types first ([`saved_while_waiting`]).
+    born_with: RefCell<(Option<std::path::PathBuf>, Option<String>)>,
     link: OnceCell<DisplayLink>,
     /// What a still of the pane keeps between two ([`TerminalPane::snapshot`]): its frame, its
     /// buffers and the textures the picture is shrunk through. Empty until a card first asks and
@@ -3265,6 +3287,7 @@ impl TerminalPane {
             headed: Cell::new(false),
             link_label: link_label.clone(),
             status_labels: status_labels.clone(),
+            born_with: RefCell::new((None, None)),
             link: OnceCell::new(),
             shot: RefCell::new(None),
             session: OnceCell::new(),
@@ -3600,11 +3623,17 @@ impl TerminalPane {
         let history = with_history
             .then(|| session.final_history())
             .filter(|bytes| !bytes.is_empty());
+        let (dir, remote_line) = saved_while_waiting(
+            session.working_directory(),
+            session.remote_line(),
+            !session.child_settled(),
+            &self.ivars().born_with.borrow(),
+        );
         let pane = SavedPane {
             uuid: self.ivars().uuid.clone(),
-            dir: session.working_directory(),
+            dir,
             zoom_steps: self.zoom().steps(),
-            remote_line: session.remote_line(),
+            remote_line,
             kept: self.saved_kept(),
             history: history.is_some(),
             runs: self.ivars().runs.borrow().clone(),
@@ -4187,6 +4216,13 @@ impl TerminalPane {
             history,
             program,
         )?;
+        *self.ivars().born_with.borrow_mut() = (
+            options.working_directory.clone(),
+            options
+                .initial_input
+                .as_ref()
+                .map(|input| input.line.clone()),
+        );
         self.wait_for_terminal(&stream);
         Some(bt_core::Stream {
             ops: Arc::new(jobs::StreamTty::new(stream.ops, shell_parent)),
@@ -4204,12 +4240,16 @@ impl TerminalPane {
         // A stream whose wait is over already (a refusal that gave the pane an ordinary shell
         // before the pane was built) has no wait to say.
         let waiting = !stream.pid.is_settled();
+        let ops = Arc::clone(&stream.ops);
         if waiting && let Ok(when) = DispatchTime::try_from(WAIT_LINE_AFTER) {
             let _ = DispatchQueue::main().after(when, move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(pane) = lookup(mtm, id) {
                     pane.show_wait_line(found);
+                    // The same moment says it to the log, with the step the wait is in: a
+                    // terminal that never comes is written nowhere else.
+                    ops.still_waiting();
                 }
             });
         }
@@ -4269,6 +4309,12 @@ impl TerminalPane {
     /// idle pane draws nothing counts them twice.
     pub fn frames_drawn(&self) -> u64 {
         self.renderer().frames()
+    }
+
+    /// Where the mark of a pane that was refused its terminal is, in the pane's own coordinates.
+    pub fn not_kept_mark_frame(&self) -> Option<NSRect> {
+        let (label, _) = &self.ivars().status_labels.mark;
+        (!label.isHidden()).then(|| label.frame())
     }
 
     /// The text of the mark of a pane that was refused its terminal, while it shows.
@@ -9967,6 +10013,31 @@ impl PageDriveHost for PageHost<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::saved_while_waiting;
+    use std::path::PathBuf;
+
+    /// A pane whose terminal has not come has said nothing yet — no directory, no remote line —
+    /// and what a layout saved then keeps is what the pane was born with, or the pane would come
+    /// back from it as a plain shell at home. Once the terminal is there the session says it.
+    #[test]
+    fn a_pane_that_waits_for_its_terminal_is_saved_with_what_it_was_born_with() {
+        let born = (
+            Some(PathBuf::from("/work/app")),
+            Some("ssh prod".to_owned()),
+        );
+        let (dir, line) = saved_while_waiting(None, None, true, &born);
+        assert_eq!(dir, Some(PathBuf::from("/work/app")));
+        assert_eq!(line.as_deref(), Some("ssh prod"));
+        // What the session says, when it says it, is what is saved, and an ssh that ended is not
+        // brought back from what the pane was born with.
+        let (dir, line) = saved_while_waiting(Some(PathBuf::from("/tmp")), None, false, &born);
+        assert_eq!(dir, Some(PathBuf::from("/tmp")));
+        assert_eq!(line, None);
+        // Waiting and already told: what it says stands.
+        let (dir, _) = saved_while_waiting(Some(PathBuf::from("/tmp")), None, true, &born);
+        assert_eq!(dir, Some(PathBuf::from("/tmp")));
+    }
+
     /// A pane's surface whose first configuration wgpu refused (here a width no GPU has; on a busy
     /// machine, a GPU that does not come idle in time) fails a frame, which the frame policy tries
     /// again, instead of ending the process: wgpu panics in `get_current_texture` for a surface it

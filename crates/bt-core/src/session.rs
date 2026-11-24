@@ -3408,6 +3408,10 @@ pub trait PtyOps: Send + Sync {
     /// in the terminal the stream carries. Nothing else is touched, and what is typed after
     /// the owner has the request is kept. The default does nothing.
     fn drop_input(&self, _remote: bool) {}
+    /// The pane has waited long enough for its terminal to say so on its screen
+    /// ([`ChildPid::is_settled`] is `false` still): the owner writes what it knows of the wait
+    /// where it keeps its own account of it. The default does nothing.
+    fn still_waiting(&self) {}
 }
 
 /// What the terminal a streamed session's program is on says: the two readings the pane's

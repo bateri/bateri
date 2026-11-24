@@ -1492,6 +1492,10 @@ impl bt_core::PtyOps for StreamTty {
     fn drop_input(&self, remote: bool) {
         self.inner.drop_input(remote);
     }
+
+    fn still_waiting(&self) {
+        self.inner.still_waiting();
+    }
 }
 
 /// The uid and pid of the process at the other end of `stream`.

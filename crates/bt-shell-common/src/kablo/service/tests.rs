@@ -5011,6 +5011,60 @@ fn a_terminal_that_came_slowly_is_told_in_the_log_with_the_steps_it_waited_in() 
     assert_eq!(world.lines.lock().expect("lock").len(), before);
 }
 
+/// A terminal that never comes is written nowhere else: the pane, when it says it is still
+/// waiting (the wait line of its screen), has the service write one line with the step the wait is
+/// in — the server's here, which was asked and has not said — and the steps it has been through.
+/// A pane whose terminal has come says nothing.
+#[test]
+fn a_pane_that_says_it_still_waits_has_the_step_it_is_stuck_in_written_to_the_log() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-still-waiting",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    world.bridge().hold_created();
+    let pane = a_pane();
+    let stream = ask_local(&rig, &pane);
+    // The loop has started the terminal on the bridge and waits for the server's word.
+    until("the terminal asked for", || {
+        ledger
+            .local_terminal_of(&pane)
+            .is_some_and(|terminal| world.bridge().has(&terminal))
+    });
+    stream.ops.still_waiting();
+    let lines = world.lines.lock().expect("lock").clone();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains(pane.as_str()), "{}", lines[0]);
+    assert!(lines[0].contains("still has no terminal"), "{}", lines[0]);
+    assert!(lines[0].contains("in `server`"), "{}", lines[0]);
+
+    // The terminal comes: the wait is over, and a pane that says it waits (the line was due
+    // when it came) writes nothing.
+    world.bridge().release_created();
+    until("the pid", || stream.pid.is_settled());
+    let before = world.lines.lock().expect("lock").len();
+    stream.ops.still_waiting();
+    assert_eq!(world.lines.lock().expect("lock").len(), before);
+}
+
+/// The same line for a wait that is in the account: the step is the one named, with its time.
+#[test]
+fn a_pane_that_waits_for_the_account_says_so_in_the_log() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_millis.store(600, Ordering::SeqCst);
+    let rig = Rig::over("local-still-account", world.clone());
+    let stream = ask_local(&rig, &a_pane());
+    thread::sleep(Duration::from_millis(200));
+    stream.ops.still_waiting();
+    let lines = world.lines.lock().expect("lock").clone();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("in `account`"), "{}", lines[0]);
+    until("the terminal", || stream.pid.is_settled());
+}
+
 #[test]
 fn a_pane_that_is_not_given_a_terminal_is_told_in_the_log_with_why() {
     // A refusal the service gives says why, and no step.

@@ -4634,24 +4634,30 @@ impl Core {
     }
 
     /// Lets the readers of the panes whose terminals take input now read what the panes typed.
-    /// A terminal found again takes none until the server's list has it ([`Core::found`]): until
-    /// then it may be one the server does not have, and what was typed into it would be lost
-    /// with it ([`Core::resumed_gone`] gives the pane a new one, which is typed into).
+    /// A terminal found again takes none until the server has said it is there — its list has it
+    /// ([`Core::found`]) or it attached it: until then it may be one the server does not have,
+    /// and what was typed into it would be lost with it ([`Core::resumed_gone`] gives the pane a
+    /// new one, which is typed into).
     fn open_gates(&mut self) {
-        let waiting: Vec<HoldId> = self
+        let waiting: Vec<(HoldId, bool)> = self
             .conns
             .iter()
-            .filter(|(hold, conn)| {
-                conn.waits_for_input
-                    && !self
-                        .awaiting
-                        .get(hold)
-                        .is_some_and(|awaiting| awaiting.resumed.is_some())
+            .filter(|(_, conn)| conn.waits_for_input)
+            .map(|(hold, _)| {
+                let found_again = self
+                    .awaiting
+                    .get(hold)
+                    .is_some_and(|awaiting| awaiting.resumed.is_some());
+                (*hold, found_again)
             })
-            .map(|(hold, _)| *hold)
             .collect();
-        for hold in waiting {
-            if !self.hub.accepts_input(hold) {
+        for (hold, found_again) in waiting {
+            let takes = if found_again {
+                self.hub.is_attached(hold)
+            } else {
+                self.hub.accepts_input(hold)
+            };
+            if !takes {
                 continue;
             }
             if let Some(conn) = self.conns.get_mut(&hold) {
