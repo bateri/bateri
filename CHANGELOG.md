@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **A program's page can keep what it asks of its program.** The page library has `@pencere/query`, which remembers each answer and whether it is loading, stale or given up, so a program's page no longer writes that bookkeeping itself.
+
 ## [0.33.0] - 2026-11-24
 
 ### Added
