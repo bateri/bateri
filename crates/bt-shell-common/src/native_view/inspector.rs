@@ -8,23 +8,39 @@
 //! tool that is meant to look at it.
 //!
 //! The responder is a table of calls of the drive's own ([`Calls`]: it reads and answers the
-//! messages as the program library does) with the topics and methods the inspector has. What it
-//! reads of the pane it looks at comes from a [`Subject`], which the platform's pane gives.
+//! messages as the program library does). What it reads of the pane it looks at comes from a
+//! [`Subject`], which the platform's pane gives, and what it says is:
 //!
-//! - `target` (topic): `{ pane, page, gone }`, pushed when the page subscribes and whenever
-//!   what it says changes ([`Responder::refresh`]);
+//! - `target` (topic): `{ pane, page, gone, stamp }`, when the page subscribes and whenever what
+//!   it says changes. The `stamp` is how many pages the target's script has made: **the page
+//!   asks again what it asked under another stamp**, and the stamp changes at most four times a
+//!   second ([`INTERVAL`]), however often the target draws, and once more where it comes to rest;
+//! - `costs` (topic): what the target's last frames cost, pushed after the target drew a frame
+//!   and never otherwise;
+//! - `children(path)`, `node(path)` (calls): an element's children, which are asked one level at a
+//!   time (a large page's whole tree is more than a message may carry), and one element's box,
+//!   room, border, style and what a screen reader says of it;
+//! - `select(path)` (call): the element whose box the target shows, which is followed by its
+//!   name where it has one and by its place where it has none;
 //! - `close` (call): the page asks to be closed ([`Responder::closing`]).
 //!
-//! What it says is no program's: it never reaches a terminal or a wire, and what it says of the
-//! pane looked at is a name and two booleans.
+//! **The inspector is the one reader of the target's page**, on the main thread where the target's
+//! frames are built too: it never takes the page where something else has it ([`PageHandle::try_page`])
+//! and what it was asked meanwhile waits for the next turn ([`Responder::poll`]). The target's page
+//! measures while the inspector is open and is let go of when it closes ([`Responder::end`]).
+//! What it says is no program's: it never reaches a terminal or a wire.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use pencere_drive::headless::{Calls, Failure, Peer, Value};
-
-use super::{Opening, PageHandle, script_page};
+use pencere_drive::{Cost, Inspection, Item};
 use pencere_sandbox::{ModuleLimits, Script};
+use pencere_view::Placing;
+
+use super::{Opening, PageHandle, Rect, script_page};
 
 /// The page's script.
 pub const SCRIPT: &str = include_str!("inspector.lua");
@@ -32,8 +48,20 @@ pub const SCRIPT: &str = include_str!("inspector.lua");
 /// The topic the page hears what it looks at by.
 const TARGET: &str = "target";
 
+/// The topic the page hears what the target's frames cost by.
+const COSTS: &str = "costs";
+
 /// The call that asks the pane to close.
 const CLOSE: &str = "close";
+
+/// The least time between two things the page is told of the target's frames, in seconds: a
+/// target that draws on every frame (a drag, a live chart) is told of at most four times a second,
+/// since each telling has the page ask for what it shows again, in the same thread the target is
+/// drawn in.
+pub const INTERVAL: f64 = 0.25;
+
+/// How many of the target's last frames the page is told the cost of.
+const FRAMES_TOLD: usize = 4;
 
 /// What the inspector reads of the pane it looks at, as it is now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,12 +78,10 @@ pub struct Target {
 pub trait Subject {
     /// What the pane is now.
     fn target(&self) -> Target;
-}
-
-impl<F: Fn() -> Target> Subject for F {
-    fn target(&self) -> Target {
-        self()
-    }
+    /// The pane's page, if it shows one.
+    fn page(&self) -> Option<PageHandle>;
+    /// The box to show over the pane, in its points (`None`: none), where the element chosen is.
+    fn highlight(&self, rect: Option<Rect>);
 }
 
 /// The inspector's page, for a pane to draw (the kit's page of the script) and drive by its
@@ -76,6 +102,47 @@ pub fn inspector_page(
     )
 }
 
+/// What the page was last told of its target: the pane, and the stamp of its page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Told {
+    target: Target,
+    stamp: u64,
+}
+
+/// The element the page chose: the name it has, where it has one, and the place it stood in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Chosen {
+    id: Option<u64>,
+    path: Vec<usize>,
+}
+
+/// What reading the target's page came to.
+enum Read {
+    /// The pane has no page.
+    Absent,
+    /// The page is in use: a frame is being built or a call is in it.
+    Busy,
+    /// The page has not drawn a frame yet.
+    Unseen,
+    /// The page as its last frame left it, and the stamp it has.
+    Model(u64, Rc<Inspection>),
+}
+
+/// Why a call is not answered now.
+enum Held {
+    /// The page is in use: asked again at the next turn.
+    Busy,
+    /// Refused, as the protocol has it.
+    Refused(Failure),
+}
+
+fn refused(code: &str, message: &str) -> Held {
+    Held::Refused(Failure {
+        code: code.to_owned(),
+        message: message.to_owned(),
+    })
+}
+
 /// What the page says is answered here, and what the page is to be told is said here.
 pub struct Responder {
     calls: Calls,
@@ -83,13 +150,26 @@ pub struct Responder {
     /// The page asked to be closed.
     closing: Rc<Cell<bool>>,
     /// What the live subscriptions of the target were last told.
-    told: Option<Target>,
+    told: Option<Told>,
     /// How many of the page's subscriptions have been looked at.
     seen: usize,
+    /// The element the page chose.
+    chosen: Option<Chosen>,
+    /// The box shown over the pane now.
+    shown: Option<Rect>,
+    /// The target drew frames that the page has not been told of.
+    pending: bool,
+    /// When the page was last told of the target's frames.
+    published_at: Option<f64>,
+    /// The target's page as its last frame left it, kept until the next frame.
+    cache: Option<(u64, Rc<Inspection>)>,
+    /// The inspector is over: the target is not measured any more.
+    ended: bool,
 }
 
 impl Responder {
-    /// A responder for the page of the inspector of `subject`.
+    /// A responder for the page of the inspector of `subject`, which starts measuring the page
+    /// the pane has.
     pub fn new(subject: Rc<dyn Subject>) -> Self {
         let closing = Rc::new(Cell::new(false));
         let asked = Rc::clone(&closing);
@@ -97,13 +177,21 @@ impl Responder {
             asked.set(true);
             Ok(Value::Object(Default::default()))
         });
-        Self {
+        let responder = Self {
             calls,
             subject,
             closing,
             told: None,
             seen: 0,
-        }
+            chosen: None,
+            shown: None,
+            pending: false,
+            published_at: None,
+            cache: None,
+            ended: false,
+        };
+        responder.measure();
+        responder
     }
 
     /// The page said `message` to its program: what the responder says back, in order.
@@ -111,29 +199,68 @@ impl Responder {
         self.calls.heard(message);
         self.refuse_unknown_calls();
         self.answer_new_subscriptions();
+        self.serve();
         self.calls.said()
     }
 
-    /// What the pane looked at is may have changed: the page is told it if it is not what it was
-    /// told last, as the pane's page comes and goes. Nothing where it is the same, or where the
-    /// page hears no `target`.
+    /// What the pane looked at shows changed (its page came up or went down): the page is told it
+    /// if it is not what it was told last, and the target's page is measured if it is a new one.
+    /// Nothing where it is the same, or where the page hears no `target`.
     pub fn refresh(&mut self) -> Vec<String> {
-        let now = self.subject.target();
-        if self.told.as_ref() != Some(&now) {
-            let value = value_of(&now);
-            let ids: Vec<u64> = self
-                .calls
-                .subscriptions()
-                .iter()
-                .filter(|subscription| subscription.live && subscription.topic == TARGET)
-                .map(|subscription| subscription.id)
-                .collect();
-            for id in ids {
-                self.calls.say(&push(id, &value));
-            }
-            self.told = Some(now);
+        self.measure();
+        self.cache = None;
+        self.tell_target();
+        if !self.subject.target().page {
+            self.chosen = None;
         }
+        self.place_highlight();
+        self.serve();
         self.calls.said()
+    }
+
+    /// The target drew a frame, `now` on the clock the pane keeps. The page is told of it, if the
+    /// last telling was [`INTERVAL`] ago or more; otherwise at the end of the interval
+    /// ([`Responder::due`]), once, however many frames come before.
+    pub fn drew(&mut self, now: f64) -> Vec<String> {
+        self.cache = None;
+        self.place_highlight();
+        if self.published_at.is_none_or(|at| now - at >= INTERVAL) {
+            self.publish(now);
+        } else {
+            self.pending = true;
+        }
+        self.serve();
+        self.calls.said()
+    }
+
+    /// When the frames the page has not been told of are due to be, on the pane's clock, if
+    /// there are.
+    pub fn due(&self) -> Option<f64> {
+        let at = self.published_at?;
+        self.pending.then_some(at + INTERVAL)
+    }
+
+    /// `now` has come: the frames that were waiting are told if their time is.
+    pub fn tick(&mut self, now: f64) -> Vec<String> {
+        if self.due().is_some_and(|due| now >= due) {
+            self.publish(now);
+        }
+        self.serve();
+        self.calls.said()
+    }
+
+    /// What the page asked while the target's page was in use is answered now if the page is not.
+    pub fn poll(&mut self) -> Vec<String> {
+        self.serve();
+        self.calls.said()
+    }
+
+    /// Whether what the page asked is still waiting for the target's page to be free.
+    pub fn waiting(&self) -> bool {
+        self.calls
+            .waiting()
+            .iter()
+            .any(|call| matches!(call.method.as_str(), "children" | "node" | "select"))
     }
 
     /// The page asked for its pane to be closed.
@@ -141,25 +268,135 @@ impl Responder {
         self.closing.get()
     }
 
+    /// The inspector is over: the target's page is let go of, and no box is shown over it. Once.
+    pub fn end(&mut self) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        self.chosen = None;
+        self.place_highlight();
+        if let Some(handle) = self.subject.page()
+            && let Some(mut page) = handle.try_page()
+        {
+            page.inspect(false);
+        }
+    }
+
+    /// The target's page measures from now on, where it does not.
+    fn measure(&self) {
+        if self.ended {
+            return;
+        }
+        if let Some(handle) = self.subject.page()
+            && let Some(mut page) = handle.try_page()
+            && !page.inspecting()
+        {
+            page.inspect(true);
+        }
+    }
+
+    /// The target's page as its last frame left it.
+    fn read(&mut self) -> Read {
+        let Some(handle) = self.subject.page() else {
+            return Read::Absent;
+        };
+        let Some(mut page) = handle.try_page() else {
+            return Read::Busy;
+        };
+        if !self.ended && !page.inspecting() {
+            page.inspect(true);
+        }
+        let stamp = page.module().renders();
+        if let Some((kept, model)) = &self.cache
+            && *kept == stamp
+        {
+            return Read::Model(stamp, Rc::clone(model));
+        }
+        match page.inspection() {
+            Some(inspection) => {
+                let model = Rc::new(inspection);
+                self.cache = Some((stamp, Rc::clone(&model)));
+                Read::Model(stamp, model)
+            }
+            None => Read::Unseen,
+        }
+    }
+
+    /// How many pages the target's script has made, where its page is free to ask.
+    fn stamp(&self) -> u64 {
+        self.subject
+            .page()
+            .and_then(|handle| handle.try_page().map(|page| page.module().renders()))
+            .or_else(|| self.told.as_ref().map(|told| told.stamp))
+            .unwrap_or(0)
+    }
+
+    /// The target's frames were drawn since the page was last told: it is told now.
+    fn publish(&mut self, now: f64) {
+        self.pending = false;
+        self.published_at = Some(now);
+        self.tell_target();
+        let Read::Model(stamp, model) = self.read() else {
+            return;
+        };
+        let value = costs_of(stamp, &model);
+        let ids = self.subscribed(COSTS);
+        for id in ids {
+            self.calls.say(&push(id, &value));
+        }
+    }
+
+    /// The page is told what it looks at if that is not what it was told.
+    fn tell_target(&mut self) {
+        let now = Told {
+            target: self.subject.target(),
+            stamp: self.stamp(),
+        };
+        if self.told.as_ref() == Some(&now) {
+            return;
+        }
+        let value = value_of(&now);
+        for id in self.subscribed(TARGET) {
+            self.calls.say(&push(id, &value));
+        }
+        self.told = Some(now);
+    }
+
+    /// The live subscriptions of `topic`.
+    fn subscribed(&self, topic: &str) -> Vec<u64> {
+        self.calls
+            .subscriptions()
+            .iter()
+            .filter(|subscription| subscription.live && subscription.topic == topic)
+            .map(|subscription| subscription.id)
+            .collect()
+    }
+
     /// A call the responder has no method for is refused as the protocol has it (`not-found`),
     /// not left waiting as a slow program's would be.
     fn refuse_unknown_calls(&mut self) {
-        while let Some(method) = self.calls.waiting().first().map(|call| call.method.clone()) {
-            let refused = self.calls.answer(
+        let unknown: Vec<String> = self
+            .calls
+            .waiting()
+            .iter()
+            .map(|call| call.method.as_str())
+            .filter(|method| !matches!(*method, "children" | "node" | "select"))
+            .map(str::to_owned)
+            .collect();
+        for method in unknown {
+            let _ = self.calls.answer(
                 &method,
                 Err(Failure {
                     code: "not-found".to_owned(),
                     message: "the inspector has no such method".to_owned(),
                 }),
             );
-            if !refused {
-                break;
-            }
         }
     }
 
-    /// A subscription the page made since the last time: the target is told what it is now; any
-    /// other topic is refused as the protocol has it.
+    /// A subscription the page made since the last time: what it hears is told it as it is now,
+    /// and any other topic is refused as the protocol has it.
     fn answer_new_subscriptions(&mut self) {
         let fresh: Vec<(u64, String, bool)> = self
             .calls
@@ -176,26 +413,427 @@ impl Responder {
             .collect();
         self.seen += fresh.len();
         for (id, topic, live) in fresh {
-            if topic != TARGET {
-                self.calls.say(&refusal(id));
-            } else if live {
-                let now = self.subject.target();
-                self.calls.say(&push(id, &value_of(&now)));
-                self.told = Some(now);
+            match topic.as_str() {
+                TARGET if live => {
+                    let now = Told {
+                        target: self.subject.target(),
+                        stamp: self.stamp(),
+                    };
+                    self.calls.say(&push(id, &value_of(&now)));
+                    self.told = Some(now);
+                }
+                // What the frames cost is told after a frame; what the frames already drawn
+                // cost is told to the page that comes after them.
+                COSTS if live => {
+                    if let Read::Model(stamp, model) = self.read()
+                        && !model.frames.is_empty()
+                    {
+                        self.calls.say(&push(id, &costs_of(stamp, &model)));
+                    }
+                }
+                TARGET | COSTS => {}
+                _ => self.calls.say(&refusal(id)),
             }
+        }
+    }
+
+    /// What the page asked of the target's page, answered where the page is free; each method's
+    /// calls in the order they were asked.
+    fn serve(&mut self) {
+        let mut blocked: Vec<String> = Vec::new();
+        let asked: Vec<(String, Value)> = self
+            .calls
+            .waiting()
+            .iter()
+            .filter(|call| matches!(call.method.as_str(), "children" | "node" | "select"))
+            .map(|call| (call.method.clone(), call.params.clone()))
+            .collect();
+        for (method, params) in asked {
+            if blocked.contains(&method) {
+                continue;
+            }
+            match self.answer(&method, &params) {
+                Err(Held::Busy) => blocked.push(method),
+                Err(Held::Refused(failure)) => {
+                    let _ = self.calls.answer(&method, Err(failure));
+                }
+                Ok(result) => {
+                    let _ = self.calls.answer(&method, Ok(result));
+                }
+            }
+        }
+    }
+
+    /// The answer to the call `method` with `params`.
+    fn answer(&mut self, method: &str, params: &Value) -> Result<Value, Held> {
+        let (stamp, model) = self.model()?;
+        match method {
+            "children" => {
+                let path = path_of(params)?.unwrap_or_default();
+                children_of(stamp, &model, &path)
+            }
+            "node" => {
+                let path =
+                    path_of(params)?.ok_or_else(|| refused("invalid", "node asks for a path"))?;
+                node_of(stamp, &model, &path)
+            }
+            _ => {
+                match path_of(params)? {
+                    None => self.chosen = None,
+                    Some(path) => {
+                        let item = item_at(&model, &path)
+                            .ok_or_else(|| refused("not-found", "no element at that place"))?;
+                        self.chosen = Some(Chosen {
+                            id: item.element.id.map(|id| id.number()),
+                            path,
+                        });
+                    }
+                }
+                self.place_highlight_in(&model);
+                Ok(Value::Object(Default::default()))
+            }
+        }
+    }
+
+    /// The target's page, or why it is not to be had.
+    fn model(&mut self) -> Result<(u64, Rc<Inspection>), Held> {
+        match self.read() {
+            Read::Model(stamp, model) => Ok((stamp, model)),
+            Read::Busy => Err(Held::Busy),
+            Read::Absent => Err(refused("unavailable", "the pane shows no page")),
+            Read::Unseen => Err(refused("unavailable", "the page has not been drawn yet")),
+        }
+    }
+
+    /// The box over the pane is where the element the page chose is now, after the page the
+    /// target draws changed: it follows the element's name where it has one, its place where it
+    /// has none.
+    fn place_highlight(&mut self) {
+        if self.chosen.is_none() {
+            self.show(None);
+            return;
+        }
+        if let Read::Model(_, model) = self.read() {
+            self.place_highlight_in(&model);
+        }
+    }
+
+    fn place_highlight_in(&mut self, model: &Inspection) {
+        let found = self.chosen.as_ref().and_then(|chosen| {
+            let by_name = chosen.id.and_then(|id| {
+                model
+                    .items
+                    .iter()
+                    .find(|item| item.element.id.map(|name| name.number()) == Some(id))
+            });
+            by_name.or_else(|| item_at(model, &chosen.path))
+        });
+        if let (Some(chosen), Some(item)) = (self.chosen.as_mut(), found)
+            && let Some(path) = &item.element.path
+        {
+            chosen.path.clone_from(path);
+        }
+        self.show(found.and_then(|item| shown_box(&item.element)));
+    }
+
+    fn show(&mut self, rect: Option<Rect>) {
+        if self.shown != rect {
+            self.shown = rect;
+            self.subject.highlight(rect);
         }
     }
 }
 
-/// What the page is told of the pane it looks at.
-fn value_of(target: &Target) -> Value {
-    [
-        ("pane", Value::from(target.name.as_str())),
-        ("page", Value::from(target.page)),
-        ("gone", Value::from(target.gone)),
-    ]
-    .into_iter()
-    .collect()
+impl Drop for Responder {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// Where the part of `element`'s box that shows is, in the host's points: its box within what the
+/// elements around it let be drawn. `None` for what nothing of is drawn.
+pub fn shown_box(element: &pencere_view::Inspected) -> Option<Rect> {
+    if element.hidden || element.exiting {
+        return None;
+    }
+    let (rect, clip) = (element.rect, element.clip);
+    let left = rect.x.max(clip.x);
+    let top = rect.y.max(clip.y);
+    let right = (rect.x + rect.w).min(clip.x + clip.w);
+    let bottom = (rect.y + rect.h).min(clip.y + clip.h);
+    (right > left && bottom > top).then(|| Rect::new(left, top, right - left, bottom - top))
+}
+
+/// The element at the place `path` in the page's tree.
+fn item_at<'a>(model: &'a Inspection, path: &[usize]) -> Option<&'a Item> {
+    model
+        .items
+        .iter()
+        .find(|item| item.element.path.as_deref() == Some(path))
+}
+
+/// The place a call names (`{ path = { 1, 2 } }`): `None` where it names none (no `path`, or
+/// `null`).
+fn path_of(params: &Value) -> Result<Option<Vec<usize>>, Held> {
+    let Some(path) = params.get("path").filter(|path| !path.is_null()) else {
+        return Ok(None);
+    };
+    let places = path
+        .as_array()
+        .ok_or_else(|| refused("invalid", "a path is a list of places"))?;
+    places
+        .iter()
+        .map(|place| {
+            place
+                .as_u64()
+                .and_then(|place| usize::try_from(place).ok())
+                .ok_or_else(|| refused("invalid", "a place of a path is a whole number"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+/// What the page is told of an element among the others: where it stands, what it is, its name
+/// and how many children it has.
+fn child_of(item: &Item, children: usize) -> Value {
+    let element = &item.element;
+    object([
+        ("path", places(element.path.as_deref().unwrap_or_default())),
+        ("shape", Value::from(element.shape.name())),
+        ("id", id_of(element)),
+        ("name", name_of(item)),
+        ("count", Value::from(children)),
+        ("hidden", Value::from(element.hidden)),
+        ("overlay", Value::from(element.overlay)),
+    ])
+}
+
+/// The elements of the page one step below `path`, each with how many are below it.
+fn children_of(stamp: u64, model: &Inspection, path: &[usize]) -> Result<Value, Held> {
+    if item_at(model, path).is_none() {
+        return Err(refused("not-found", "no element at that place"));
+    }
+    let mut counts: HashMap<&[usize], usize> = HashMap::new();
+    for item in &model.items {
+        if let Some(own) = item.element.path.as_deref()
+            && let Some((_, parent)) = own.split_last()
+        {
+            *counts.entry(parent).or_insert(0) += 1;
+        }
+    }
+    let below: Vec<Value> = model
+        .items
+        .iter()
+        .filter(|item| {
+            item.element
+                .path
+                .as_deref()
+                .is_some_and(|own| own.len() == path.len() + 1 && own.starts_with(path))
+        })
+        .map(|item| {
+            let own = item.element.path.as_deref().unwrap_or_default();
+            child_of(item, counts.get(own).copied().unwrap_or(0))
+        })
+        .collect();
+    Ok(object([
+        ("stamp", Value::from(stamp)),
+        ("path", places(path)),
+        ("children", Value::Array(below)),
+    ]))
+}
+
+/// One element: its box, its room inside, its border, how it is placed and what a screen reader says
+/// of it.
+fn node_of(stamp: u64, model: &Inspection, path: &[usize]) -> Result<Value, Held> {
+    let item =
+        item_at(model, path).ok_or_else(|| refused("not-found", "no element at that place"))?;
+    let element = &item.element;
+    let side = |room: [f32; 4]| Value::Array(room.iter().map(|side| number(*side)).collect());
+    let said: Vec<Value> = item
+        .said
+        .iter()
+        .map(|said| {
+            object([
+                ("role", Value::from(said.role.as_str())),
+                ("words", Value::from(said.words.as_str())),
+                ("state", Value::from(said.state.as_str())),
+                ("pressable", Value::from(said.pressable)),
+            ])
+        })
+        .collect();
+    Ok(object([
+        ("stamp", Value::from(stamp)),
+        ("path", places(path)),
+        ("shape", Value::from(element.shape.name())),
+        ("id", id_of(element)),
+        ("name", name_of(item)),
+        (
+            "field",
+            Value::from(element.field.map(|field| format!("{field:?}"))),
+        ),
+        ("rect", rect_of(element.rect)),
+        ("clip", rect_of(element.clip)),
+        ("padding", side(element.padding)),
+        (
+            "border",
+            element.border.map_or(Value::Null, |border| {
+                object([("width", number(border.width))])
+            }),
+        ),
+        (
+            "scroll",
+            if element.content.is_some() {
+                object([
+                    ("x", number(element.scroll.0)),
+                    ("y", number(element.scroll.1)),
+                ])
+            } else {
+                Value::Null
+            },
+        ),
+        (
+            "content",
+            element.content.map_or(Value::Null, |content| {
+                object([("w", number(content.w)), ("h", number(content.h))])
+            }),
+        ),
+        ("hidden", Value::from(element.hidden)),
+        ("overlay", Value::from(element.overlay)),
+        ("exiting", Value::from(element.exiting)),
+        (
+            "placing",
+            element.placing.as_ref().map_or(Value::Null, placing_of),
+        ),
+        ("said", Value::Array(said)),
+    ]))
+}
+
+/// How an element is placed, as the page wrote it, each part as a short word or a few numbers.
+fn placing_of(placing: &Placing) -> Value {
+    let free = |inset: Option<f32>| inset.map_or(Value::Null, number);
+    let length = |length: &pencere_view::Length| match length {
+        pencere_view::Length::Auto => "auto".to_owned(),
+        pencere_view::Length::Px(points) => format!("{}px", trim(*points)),
+        pencere_view::Length::Percent(share) => format!("{}%", trim(*share)),
+    };
+    let side = |room: [f32; 4]| Value::Array(room.iter().map(|side| number(*side)).collect());
+    object([
+        ("display", Value::from(format!("{:?}", placing.display))),
+        ("direction", Value::from(format!("{:?}", placing.direction))),
+        ("wrap", Value::from(placing.wrap)),
+        ("absolute", Value::from(placing.absolute)),
+        ("overlay", Value::from(placing.overlay)),
+        ("inset", Value::Array(placing.inset.map(free).to_vec())),
+        ("width", Value::from(length(&placing.width))),
+        ("height", Value::from(length(&placing.height))),
+        ("min_width", Value::from(length(&placing.min_width))),
+        ("min_height", Value::from(length(&placing.min_height))),
+        ("max_width", Value::from(length(&placing.max_width))),
+        ("max_height", Value::from(length(&placing.max_height))),
+        ("padding", side(placing.padding)),
+        ("margin", side(placing.margin)),
+        (
+            "gap",
+            Value::Array(vec![number(placing.gap.0), number(placing.gap.1)]),
+        ),
+        ("grow", number(placing.grow)),
+        ("shrink", placing.shrink.map_or(Value::Null, number)),
+        (
+            "items",
+            Value::from(placing.items.map(|items| format!("{items:?}"))),
+        ),
+        (
+            "justify",
+            Value::from(placing.justify.map(|justify| format!("{justify:?}"))),
+        ),
+        ("columns", Value::from(format!("{:?}", placing.columns))),
+        ("rows", Value::from(format!("{:?}", placing.rows))),
+        ("column_span", Value::from(placing.column_span)),
+        ("overflow", Value::from(format!("{:?}", placing.overflow))),
+    ])
+}
+
+/// What the target's last frames cost.
+fn costs_of(stamp: u64, model: &Inspection) -> Value {
+    let kept = model.frames.len().saturating_sub(FRAMES_TOLD);
+    let frames: Vec<Value> = model.frames[kept..].iter().map(frame_of).collect();
+    object([
+        ("stamp", Value::from(stamp)),
+        ("elements", Value::from(model.elements)),
+        ("frames", Value::Array(frames)),
+    ])
+}
+
+fn frame_of(cost: &Cost) -> Value {
+    let script: Duration = cost.script.iter().map(|call| call.took).sum();
+    object([
+        ("elements", Value::from(cost.elements)),
+        ("renders", Value::from(cost.renders)),
+        ("calls", Value::from(cost.script.len())),
+        ("layouts", Value::from(cost.layouts)),
+        ("script_ms", millis(script)),
+        ("layout_ms", millis(cost.layout)),
+        ("paint_ms", millis(cost.paint)),
+    ])
+}
+
+/// What the page is told of its target.
+fn value_of(told: &Told) -> Value {
+    object([
+        ("pane", Value::from(told.target.name.as_str())),
+        ("page", Value::from(told.target.page)),
+        ("gone", Value::from(told.target.gone)),
+        ("stamp", Value::from(told.stamp)),
+    ])
+}
+
+/// An object of `members`, in the order given.
+fn object<const N: usize>(members: [(&str, Value); N]) -> Value {
+    members.into_iter().collect()
+}
+
+/// A place in the tree, as a list.
+fn places(path: &[usize]) -> Value {
+    Value::Array(path.iter().map(|place| Value::from(*place)).collect())
+}
+
+/// The name an element was given, in hex: a number of 64 bits is more than a page's number holds.
+fn id_of(element: &pencere_view::Inspected) -> Value {
+    element
+        .id
+        .map_or(Value::Null, |id| Value::from(format!("{:x}", id.number())))
+}
+
+/// What a screen reader first says of the element, where it says anything.
+fn name_of(item: &Item) -> Value {
+    item.said
+        .iter()
+        .map(|said| said.words.as_str())
+        .find(|words| !words.is_empty())
+        .map_or(Value::Null, Value::from)
+}
+
+fn rect_of(rect: Rect) -> Value {
+    object([
+        ("x", number(rect.x)),
+        ("y", number(rect.y)),
+        ("w", number(rect.w)),
+        ("h", number(rect.h)),
+    ])
+}
+
+/// A length in points, to hundredths: what the page was given is not what a reader needs the
+/// float's digits of.
+fn number(points: f32) -> Value {
+    Value::from((f64::from(points) * 100.0).round() / 100.0)
+}
+
+fn trim(points: f32) -> String {
+    format!("{}", (f64::from(points) * 100.0).round() / 100.0)
+}
+
+fn millis(time: Duration) -> Value {
+    Value::from((time.as_secs_f64() * 100_000.0).round() / 100.0)
 }
 
 /// A value of the subscription `id`.
@@ -218,171 +856,4 @@ pub fn tell(handle: &PageHandle, replies: &[String]) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::native_view::pane_tests::PaneRig;
-    use pencere_view::{Key, Mods};
-    use std::cell::RefCell;
-
-    fn target(page: bool) -> Target {
-        Target {
-            name: "p3".to_owned(),
-            page,
-            gone: false,
-        }
-    }
-
-    /// The inspector's page in a rig, the responder that answers it, and the pane it looks at,
-    /// which a scenario changes.
-    struct Bench {
-        rig: PaneRig,
-        responder: Responder,
-        subject: Rc<RefCell<Target>>,
-    }
-
-    impl Bench {
-        fn open() -> Self {
-            let subject = Rc::new(RefCell::new(target(true)));
-            let read = Rc::clone(&subject);
-            let responder = Responder::new(Rc::new(move || read.borrow().clone()));
-            let mut bench = Self {
-                rig: PaneRig::open(SCRIPT),
-                responder,
-                subject,
-            };
-            bench.rig.frame(0.0);
-            bench.settle();
-            bench
-        }
-
-        /// The page said what it said and the responder answered, until neither has more.
-        fn settle(&mut self) {
-            for _ in 0..20 {
-                self.rig.settle(0.0);
-                let said: Vec<String> = self
-                    .rig
-                    .lines()
-                    .into_iter()
-                    .filter_map(|line| line.strip_prefix("send ").map(str::to_owned))
-                    .collect();
-                if said.is_empty() {
-                    return;
-                }
-                for message in said {
-                    let replies = self.responder.hear(&message);
-                    tell(self.rig.handle(), &replies);
-                }
-            }
-            panic!("the page and the responder never came to rest");
-        }
-
-        /// The pane looked at is as `target` now; the page is told it if it changed.
-        fn becomes(&mut self, target: Target) {
-            *self.subject.borrow_mut() = target;
-            let replies = self.responder.refresh();
-            tell(self.rig.handle(), &replies);
-            self.settle();
-        }
-
-        fn says(&self, words: &str) -> bool {
-            self.rig.words().iter().any(|line| line == words)
-        }
-    }
-
-    /// The page is the kit's own: it requires `@pencere/ui` and `@pencere/query`, which a script of
-    /// no bundle can reach, and it is drawn by a host with no screen.
-    #[test]
-    fn the_page_requires_the_kits_library_and_is_drawn_headless() {
-        let bench = Bench::open();
-        assert!(bench.says("Page inspector"), "{:?}", bench.rig.words());
-    }
-
-    /// The page hears the pane it looks at the moment it subscribes, and again whenever the
-    /// pane's page goes and comes back.
-    #[test]
-    fn the_page_is_told_the_target_first_and_again_when_its_page_goes_and_comes_back() {
-        let mut bench = Bench::open();
-        assert!(
-            bench.says("Reading the page of p3."),
-            "{:?}",
-            bench.rig.words()
-        );
-        bench.becomes(target(false));
-        assert!(bench.says("No page in p3."), "{:?}", bench.rig.words());
-        bench.becomes(target(true));
-        assert!(
-            bench.says("Reading the page of p3."),
-            "{:?}",
-            bench.rig.words()
-        );
-        bench.becomes(Target {
-            name: "p3".to_owned(),
-            page: false,
-            gone: true,
-        });
-        assert!(bench.says("The pane is gone."), "{:?}", bench.rig.words());
-    }
-
-    /// What has not changed is not told again: the page asks no frame for it.
-    #[test]
-    fn what_is_the_same_is_not_told_again() {
-        let mut bench = Bench::open();
-        assert!(bench.responder.refresh().is_empty());
-        bench.becomes(target(false));
-        assert!(bench.responder.refresh().is_empty());
-    }
-
-    /// Esc is the page's key to close itself: a call the responder takes as the pane's close.
-    #[test]
-    fn escape_asks_the_pane_to_close() {
-        let mut bench = Bench::open();
-        assert!(!bench.responder.closing());
-        bench.rig.key(Key::Escape, Mods::default());
-        bench.settle();
-        assert!(bench.responder.closing());
-    }
-
-    /// A method and a topic the responder has none of are refused as the protocol has it, not
-    /// left waiting.
-    #[test]
-    fn a_method_and_a_topic_it_has_none_of_are_refused() {
-        let subject = Rc::new(|| target(true));
-        let mut responder = Responder::new(subject);
-        let replies = responder.hear(r#"{"call":{"id":4,"method":"nothing"}}"#);
-        assert_eq!(
-            replies,
-            [
-                r#"{"response":{"id":4,"error":{"code":"not-found","message":"the inspector has no such method"}}}"#
-            ]
-        );
-        let replies = responder.hear(r#"{"subscribe":{"id":5,"topic":"nothing"}}"#);
-        assert_eq!(
-            replies,
-            [
-                r#"{"response":{"id":5,"error":{"code":"not-found","message":"the inspector has no such topic"}}}"#
-            ]
-        );
-        assert!(!responder.closing());
-    }
-
-    /// A page that stops hearing the target is told nothing more; one that hears it twice is told
-    /// twice.
-    #[test]
-    fn a_subscription_that_was_cancelled_is_told_nothing() {
-        let current = Rc::new(RefCell::new(target(true)));
-        let read = Rc::clone(&current);
-        let mut responder = Responder::new(Rc::new(move || read.borrow().clone()));
-        let first = responder.hear(r#"{"subscribe":{"id":1,"topic":"target"}}"#);
-        assert_eq!(
-            first,
-            [r#"{"push":{"id":1,"value":{"gone":false,"page":true,"pane":"p3"}}}"#]
-        );
-        let second = responder.hear(r#"{"subscribe":{"id":2,"topic":"target"}}"#);
-        assert_eq!(second.len(), 1);
-        responder.hear(r#"{"cancel":{"id":1}}"#);
-        *current.borrow_mut() = target(false);
-        let changed = responder.refresh();
-        assert_eq!(changed.len(), 1);
-        assert!(changed[0].contains(r#""id":2"#), "{changed:?}");
-    }
-}
+mod tests;

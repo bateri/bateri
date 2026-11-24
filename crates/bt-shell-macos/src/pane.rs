@@ -464,6 +464,10 @@ const MIN_PANE_ROWS: u16 = 5;
 /// and the dimmed pane's text is still readable. Tuned by eye.
 const DIM_ALPHA: f64 = 0.3;
 
+/// How long an inspector waits to ask again for what it asked while the page it looks at was in use,
+/// in seconds. A design constant.
+const INSPECTOR_RETRY: f64 = 0.05;
+
 /// Opacity of the veil over a grid that is no longer live: a terminal the
 /// server keeps while the connection to it is gone, and the pane shows its last
 /// screen. Stronger than [`DIM_ALPHA`] on purpose and a separate constant: an
@@ -2373,6 +2377,13 @@ pub struct PaneIvars {
     /// What an inspector's page is answered by, while the page is up
     /// ([`TerminalPane::start_inspector`]).
     inspector: RefCell<Option<crate::inspector::Inspecting>>,
+    /// The box an inspector shows over the pane's page, where the element it chose is: a veil of
+    /// no fill that no click stops at ([`TerminalPane::set_spotlight`]). Made when it is first
+    /// asked for.
+    spotlight: RefCell<Option<Retained<DimOverlay>>>,
+    /// Which wait of the inspector's responder is the one that is armed
+    /// ([`TerminalPane::schedule_inspector`]).
+    inspector_clock: Cell<u64>,
     /// How many points the text of the page that is up is larger (or smaller) than the terminal's:
     /// what the page said by `text_size` (`pencere_drive::Host::text_size`), 0 for a page that
     /// said none. The terminal's own text does not change by it: it is the page's alone, and
@@ -3214,6 +3225,8 @@ impl TerminalPane {
             page_up: RefCell::new(None),
             tool,
             inspector: RefCell::new(None),
+            spotlight: RefCell::new(None),
+            inspector_clock: Cell::new(0),
             page_text_size: Cell::new(0),
             look_base: Cell::new(look_base),
             look: LookSlot::new(look_base),
@@ -6283,7 +6296,15 @@ impl TerminalPane {
         self.drop_view();
         // An inspector no longer looks at what it did, and the ones that look at this pane
         // go with it.
+        let looked_at = self.inspected();
+        if let Some(mut inspecting) = self.ivars().inspector.take() {
+            // The page it looked at is let go of, and no box is left over it.
+            inspecting.responder.end();
+        }
         crate::inspector::unwatch(self.id());
+        if let Some(looked_at) = looked_at.and_then(|id| crate::embed::pane(self.mtm(), id)) {
+            looked_at.sync_frame_watch();
+        }
         crate::inspector::target_closing(self.mtm(), self.id());
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
@@ -6708,6 +6729,10 @@ impl TerminalPane {
         crate::inspector::watch(self.id(), target);
         link.set_page(Some(page));
         self.host().program_changed(ivars.id);
+        // The pane it looks at tells it of its frames from now on.
+        if let Some(looked_at) = crate::embed::pane(self.mtm(), target) {
+            looked_at.sync_frame_watch();
+        }
     }
 
     /// What the inspector's page said, answered: what the responder says back is told to the page,
@@ -6730,6 +6755,7 @@ impl TerminalPane {
         if closing {
             self.end_tool();
         }
+        self.schedule_inspector();
     }
 
     /// The pane the inspector looks at changed what it shows: the page is told if what it says of
@@ -6748,6 +6774,123 @@ impl TerminalPane {
             }
         };
         bt_shell_common::native_view::tell(&handle, &replies);
+        self.schedule_inspector();
+    }
+
+    /// The pane the inspector looks at drew a frame: the page is told, if its time is, and what
+    /// the box over the pane shows is where the element is now.
+    pub(crate) fn inspector_drew(&self) {
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        let now = frames_clock();
+        let replies = {
+            let Ok(mut inspecting) = self.ivars().inspector.try_borrow_mut() else {
+                return;
+            };
+            match inspecting.as_mut() {
+                Some(inspecting) => inspecting.responder.drew(now),
+                None => return,
+            }
+        };
+        bt_shell_common::native_view::tell(&handle, &replies);
+        self.schedule_inspector();
+    }
+
+    /// The wait the responder asked for ran out: what it kept back is told or answered, and the
+    /// next wait armed.
+    fn inspector_due(&self, number: u64) {
+        if self.ivars().inspector_clock.get() != number {
+            return;
+        }
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        let now = frames_clock();
+        let replies = {
+            let Ok(mut inspecting) = self.ivars().inspector.try_borrow_mut() else {
+                return;
+            };
+            match inspecting.as_mut() {
+                Some(inspecting) => inspecting.responder.tick(now),
+                None => return,
+            }
+        };
+        bt_shell_common::native_view::tell(&handle, &replies);
+        self.schedule_inspector();
+    }
+
+    /// One wait, for the soonest thing the responder holds back: the frames the page is not yet
+    /// told of, and what it asked while the target's page was in use. None while it holds nothing
+    /// back: an inspector over a target that is idle costs no wake.
+    fn schedule_inspector(&self) {
+        let (due, waiting) = {
+            let Ok(inspecting) = self.ivars().inspector.try_borrow() else {
+                return;
+            };
+            let Some(inspecting) = inspecting.as_ref() else {
+                return;
+            };
+            (inspecting.responder.due(), inspecting.responder.waiting())
+        };
+        let now = frames_clock();
+        let retry = now + INSPECTOR_RETRY;
+        let at = match (due, waiting) {
+            (Some(due), true) => due.min(retry),
+            (Some(due), false) => due,
+            (None, true) => retry,
+            (None, false) => return,
+        };
+        let number = self.ivars().inspector_clock.get().wrapping_add(1);
+        self.ivars().inspector_clock.set(number);
+        let delay = Duration::try_from_secs_f64((at - now).max(0.0)).unwrap_or_default();
+        self.after_on_main(number, delay, Self::inspector_due);
+    }
+
+    /// The pane's page tells the inspectors that look at it of its frames while there are any, and
+    /// nobody otherwise: the frame's own path has one empty slot to look at.
+    pub(crate) fn sync_frame_watch(&self) {
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        if crate::inspector::inspectors_of(self.id()).is_empty() {
+            handle.watch_frames(None);
+        } else {
+            let id = self.id();
+            handle.watch_frames(Some(Box::new(move || crate::inspector::target_drew(id))));
+        }
+    }
+
+    /// Shows a box over the pane where `rect` is, in the page's points, or none: the element an
+    /// inspector chose. The pane's picture and its tab's card are the renderer's, and this is
+    /// a view over them, so it is in neither.
+    pub(crate) fn set_spotlight(&self, rect: Option<bt_shell_common::native_view::Rect>) {
+        let Some(rect) = rect else {
+            if let Some(spot) = self.ivars().spotlight.borrow().as_ref() {
+                spot.setHidden(true);
+            }
+            return;
+        };
+        let spot = {
+            let mut slot = self.ivars().spotlight.borrow_mut();
+            Retained::clone(slot.get_or_insert_with(|| {
+                let spot = DimOverlay::new(self.mtm());
+                let accent = NSColor::controlAccentColor();
+                spot.setBorderColor(&accent);
+                spot.setBorderWidth(2.0);
+                spot.setCornerRadius(2.0);
+                spot.setFillColor(&accent.colorWithAlphaComponent(0.12));
+                self.addSubview(&spot);
+                spot
+            }))
+        };
+        // The page's points are from the pane's top, the pane's frames from its bottom.
+        let height = self.bounds().size.height;
+        spot.setFrame(NSRect::new(
+            NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
+            NSSize::new(f64::from(rect.w), f64::from(rect.h)),
+        ));
+        spot.setHidden(false);
     }
 
     /// The tool's pane ends, as a pane does when its program is gone: the owner closes it, from
@@ -7089,6 +7232,9 @@ impl TerminalPane {
             Some(pencere_view::INTERRUPT) => {
                 if self.program_page_up() {
                     self.interrupt_program();
+                } else if self.inspector_up() {
+                    // The inspector is all its pane has: ⌃C closes the pane.
+                    self.end_tool();
                 } else {
                     self.take_page_down();
                 }
@@ -11812,6 +11958,51 @@ mod tests {
         assert!(
             quiesce.contains("crate::inspector::target_closing(self.mtm(), self.id());"),
             "{quiesce}"
+        );
+    }
+
+    /// An inspector is told of the frames of the pane it looks at while it looks, from a slot the
+    /// frame's path only looks into; the box over the pane and the page measured go with the
+    /// inspector. A source scan, because a pane needs a window server.
+    #[test]
+    fn a_target_tells_its_frames_only_while_an_inspector_looks_at_it() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |name: &str| {
+            let at = pane.find(name).unwrap_or_else(|| panic!("{name}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let watch = body_of("    pub(crate) fn sync_frame_watch(");
+        let place = |word: &str| watch.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(
+            place("inspectors_of(self.id()).is_empty()") < place("handle.watch_frames(None);"),
+            "{watch}"
+        );
+        assert!(
+            watch.contains("crate::inspector::target_drew(id)"),
+            "{watch}"
+        );
+        // The inspector's closing lets the page go and the target's slot empty, in that order.
+        let quiesce = body_of("    fn quiesce(");
+        let place = |word: &str| quiesce.find(word).unwrap_or_else(|| panic!("{word}"));
+        assert!(
+            place("inspecting.responder.end();") < place("crate::inspector::unwatch(self.id());"),
+            "{quiesce}"
+        );
+        assert!(
+            place("crate::inspector::unwatch(self.id());") < place("looked_at.sync_frame_watch();"),
+            "{quiesce}"
+        );
+        // What the frame's path does is write the pane down; the telling is from the main queue.
+        let inspector = include_str!("inspector.rs");
+        let drew = &inspector[inspector
+            .find("pub(crate) fn target_drew(")
+            .expect("target_drew")..];
+        let drew = &drew[..drew.find("\n}\n").expect("its end")];
+        assert!(drew.contains("DispatchQueue::main().exec_async"), "{drew}");
+        assert!(
+            drew.find("drew.push(target)").expect(drew) < drew.find("exec_async").expect(drew),
+            "{drew}"
         );
     }
 }

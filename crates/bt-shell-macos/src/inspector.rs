@@ -12,8 +12,9 @@
 
 use std::cell::RefCell;
 
-use bt_shell_common::native_view::{Responder, Subject, Target};
+use bt_shell_common::native_view::{PageHandle, Rect, Responder, Subject, Target};
 use bt_shell_common::view_strip::Strip;
+use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 
 use crate::embed;
@@ -23,6 +24,9 @@ thread_local! {
     /// Each inspector's pane and the pane it looks at, as `(inspector, target)`: the panes live on
     /// the main thread and so does this.
     static WATCHING: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
+    /// The panes that drew a frame since the main queue last looked: told to their inspectors
+    /// once, however many frames came.
+    static DREW: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The inspector `inspector` looks at the pane `target` from now on.
@@ -55,9 +59,40 @@ pub(crate) fn inspectors_of(target: u64) -> Vec<u64> {
     })
 }
 
-/// What the pane `target` shows changed (its page came up or went down): the inspectors that
-/// look at it read it again.
+/// The pane `target` drew a frame of its page. Called from the frame's own path, so it does
+/// nothing there but write the pane down: the inspectors are told from the main queue, after the
+/// frame, one telling for all the frames that came meanwhile.
+pub(crate) fn target_drew(target: u64) {
+    let first = DREW.with(|drew| {
+        let mut drew = drew.borrow_mut();
+        let first = drew.is_empty();
+        if !drew.contains(&target) {
+            drew.push(target);
+        }
+        first
+    });
+    if !first {
+        return;
+    }
+    DispatchQueue::main().exec_async(|| {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        for target in DREW.take() {
+            for inspector in inspectors_of(target) {
+                if let Some(pane) = embed::pane(mtm, inspector) {
+                    pane.inspector_drew();
+                }
+            }
+        }
+    });
+}
+
+/// What the pane `target` shows changed (its page came up or went down): its frames are told to
+/// its inspectors while it has any, and they read it again.
 pub(crate) fn target_changed(mtm: MainThreadMarker, target: u64) {
+    if let Some(pane) = embed::pane(mtm, target) {
+        pane.sync_frame_watch();
+    }
     for inspector in inspectors_of(target) {
         if let Some(pane) = embed::pane(mtm, inspector) {
             pane.refresh_inspector();
@@ -111,6 +146,16 @@ struct Watched {
 }
 
 impl Subject for Watched {
+    fn page(&self) -> Option<PageHandle> {
+        embed::pane(self.mtm, self.id)?.page_handle()
+    }
+
+    fn highlight(&self, rect: Option<Rect>) {
+        if let Some(pane) = embed::pane(self.mtm, self.id) {
+            pane.set_spotlight(rect);
+        }
+    }
+
     fn target(&self) -> Target {
         match embed::pane(self.mtm, self.id) {
             Some(pane) => Target {

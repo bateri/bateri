@@ -341,6 +341,9 @@ type OnOutline = Rc<dyn Fn(&Outline)>;
 /// What is called with what a frame brings besides its outline ([`PageHandle::watch_held`]).
 type OnHeld = Rc<dyn Fn(&mut Painted)>;
 
+/// What is called when a frame of the page was drawn ([`PageHandle::watch_frames`]).
+type OnFrame = Rc<dyn Fn()>;
+
 /// The pane's handle on a page of the kit: the drive's page, which the link's frames of it share.
 /// Cloned freely; all of it on the main thread.
 #[derive(Clone)]
@@ -352,6 +355,8 @@ pub struct PageHandle {
     told: Rc<Cell<Mods>>,
     on_outline: Rc<RefCell<Option<OnOutline>>>,
     on_held: Rc<RefCell<Option<OnHeld>>>,
+    /// Told after each frame the page draws, while somebody watches them.
+    on_frame: Rc<RefCell<Option<OnFrame>>>,
     /// The pictures of the page's browsers, if the shell shows any.
     surfaces: Rc<RefCell<Option<Arc<dyn Surfaces>>>>,
 }
@@ -363,6 +368,7 @@ impl PageHandle {
             told: Rc::new(Cell::new(Mods::default())),
             on_outline: Rc::new(RefCell::new(None)),
             on_held: Rc::new(RefCell::new(None)),
+            on_frame: Rc::new(RefCell::new(None)),
             surfaces: Rc::new(RefCell::new(None)),
         }
     }
@@ -376,6 +382,14 @@ impl PageHandle {
     /// pane, which may call the page again).
     pub fn page(&self) -> RefMut<'_, Page> {
         self.page.borrow_mut()
+    }
+
+    /// The drive's page where nothing else has it: `None` while a frame is being built or a call
+    /// is in it. For a reader that is not the pane (the inspector, which looks at another pane's
+    /// page from a call of its own that a frame of that page may have caused): it asks again
+    /// later, and never a second borrow, which would bring every pane down.
+    pub fn try_page(&self) -> Option<RefMut<'_, Page>> {
+        self.page.try_borrow_mut().ok()
     }
 
     /// Tells the page what the person did, with `held` the modifiers the system holds now. The
@@ -545,6 +559,10 @@ impl PageHandle {
     /// A frame's outline if it changed, then what the drive held for its fields: the order a pane
     /// needs, for a field is the pane's only once the outline was told. The page is not borrowed.
     fn tell_frame(&self, painted: &mut Painted) {
+        let watched = self.on_frame.borrow().clone();
+        if let Some(watched) = watched {
+            watched();
+        }
         if let Some(outline) = painted.outline.take() {
             self.tell_outline(&outline);
         }
@@ -555,6 +573,14 @@ impl PageHandle {
         if let Some(told) = told {
             told(painted);
         }
+    }
+
+    /// `told` is called, on the thread that builds the frame, after each frame the page draws, with
+    /// the page not borrowed; `None` stops it. Nothing is read or kept for it: a page that is not
+    /// watched pays a look at an empty slot. It is for a reader that wants to know that the page
+    /// was drawn (the inspector), and it does its work later, not in the frame's path.
+    pub fn watch_frames(&self, told: Option<Box<dyn Fn()>>) {
+        self.on_frame.replace(told.map(Rc::from));
     }
 
     /// The page's editors, as the pane's keys, input method, pasteboard and screen reader reach
