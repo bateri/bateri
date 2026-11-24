@@ -1605,8 +1605,15 @@ fn born_without_its_terminal(
         let hit = unsafe { pane.superview() }.and_then(|container| {
             container.hitTest(pane.convertPoint_toView(centre, Some(&container)))
         });
-        let named = hit.map(|view| view.class().name().to_string_lossy().into_owned());
+        let named = hit
+            .as_ref()
+            .map(|view| view.class().name().to_string_lossy().into_owned());
         println!("pencere: a click on the mark reaches {named:?}");
+        let hit = hit.expect("a click on the mark reaches a view");
+        assert!(
+            hit.isDescendantOf(&pane),
+            "the click is the pane's, not the label's: {named:?}"
+        );
         assert_ne!(named.as_deref(), Some("BateriLinkLabel"));
         assert_ne!(named.as_deref(), Some("NSBox"));
         pane.close();

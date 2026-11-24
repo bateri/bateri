@@ -1485,7 +1485,8 @@ impl Drop for Bridge {
 }
 
 /// How many attempts in a row to reach a server may fail before the panes that wait for a new
-/// terminal there fall back to a plain `ssh`.
+/// terminal there are let go of: a holder of a server falls back to a plain `ssh`, a pane of this
+/// Mac is given an ordinary shell and told why.
 const GIVE_UP_AFTER: u32 = 3;
 
 /// A server the service has a client for.
@@ -4137,17 +4138,22 @@ impl Core {
     }
 
     /// The panes that wait for a new terminal of an account that cannot be reached, or whose
-    /// kablo cannot be written again, are let fall back to a plain `ssh`, which says what is the
-    /// matter itself: a pane that waits and is told nothing is the worse of the two.
+    /// kablo cannot be written again, are let go of: a pane that waits and is told nothing is the
+    /// worse of the two. A holder of a server falls back to a plain `ssh`, which says what is the
+    /// matter itself; a pane of this Mac is given an ordinary shell of this process and is told
+    /// why in a line of its own ([`Core::refuse_local`]), and the terminal it asked for, which
+    /// the server may have made, is ended by the connection that comes up (the ledger has it
+    /// marked to end) — no shell runs that nobody sees.
     fn give_up_if_hopeless(&mut self, account: &str) {
-        if !self.gives_up(account) {
+        if !self.gives_up(account) && !self.local_stuck(account) {
             return;
         }
         let why = self.why_given_up(account);
         let awaiting = &self.awaiting;
         // A pane of this Mac that has not taken a stream of a terminal yet has an ordinary shell
-        // to be given. One that has — a terminal found again, whose program may live — is not
-        // let go of: it waits for kablo, as the terminal does.
+        // to be given. One that has — a terminal found again, whose program may live, or the
+        // new one made instead of a found one that was not there — is not let go of: it waits
+        // for kablo, as the terminal does.
         let given_up = self.hub.give_up_new(account, |hold| {
             awaiting
                 .get(&hold)
@@ -4156,7 +4162,7 @@ impl Core {
         let mut plain = false;
         for given in &given_up {
             if given.raw {
-                self.give_up_local(given.hold, &given.terminal, &why);
+                self.refuse_local(given.hold, &why);
                 continue;
             }
             // The row `started` wrote for this pane. If the request had reached the server the
@@ -4170,9 +4176,12 @@ impl Core {
         }
     }
 
-    /// What a pane of this Mac that is let go of is told: how the account was not reached, in the
-    /// words of the server panes' `could not connect`.
+    /// What a pane of this Mac that is let go of is told, in the words of the server panes'
+    /// `could not connect`.
     fn why_given_up(&self, account: &str) -> String {
+        if self.local_stuck(account) {
+            return "kablo on this Mac could not be run: it is not allowed to".to_owned();
+        }
         let missed = self.accounts.get(account).map_or(0, |entry| entry.missed);
         if missed >= 2 {
             return "kablo on this Mac could not be run".to_owned();
@@ -4183,14 +4192,15 @@ impl Core {
         )
     }
 
-    /// The pane of this Mac that waits for a new terminal is let go of, for `why` ([`Core::refuse_local`]
-    /// gives it an ordinary shell and tells it). The request may have reached the server: the
-    /// terminal it made is ended when its word comes, or by the connection that comes up (the
-    /// ledger has it marked to end), so no shell runs on that nobody sees.
-    fn give_up_local(&mut self, hold: HoldId, terminal: &SessionId, why: &str) {
-        self.end_on_arrival
-            .insert((local::ACCOUNT.to_owned(), terminal.clone()));
-        self.refuse_local(hold, why);
+    /// Whether the kablo of this Mac cannot be run for want of permission, which the connection
+    /// takes for a login it waits for: nobody is there to log in to this Mac's own bridge, and
+    /// waiting does not mend it. (An account that is over is let go of by [`Core::over`].)
+    fn local_stuck(&self, account: &str) -> bool {
+        local::is_account(account)
+            && matches!(
+                self.hub.client(account).map(Client::link),
+                Some(Link::NeedsLogin)
+            )
     }
 
     /// Whether a new terminal on `account` is not worth waiting for: the account waits for its
@@ -4644,10 +4654,15 @@ impl Core {
             self.relist.insert(account.to_owned());
         }
         self.awaiting.insert(hold, awaiting);
-        // A pane that asks is a reason to look at kablo again: if it is back, the pane is given
-        // its terminal now and not after the pause the last attempt left, and if it is not, the
-        // attempt that fails is one more of those that let the pane go ([`Core::gives_up`]).
-        if let Some(client) = self.hub.client_mut(account) {
+        // A pane that asks of a kablo that was given up on is a reason to look at it again: if it
+        // is back, the pane is given its terminal now and not after the long pause the last
+        // attempts left, and if it is not, the attempt that fails lets the pane go at once. One
+        // that asks of a kablo that is only slow does not make the attempts come faster than
+        // their own pauses: three panes opened in a second would use up the ones a short outage
+        // is given ([`Core::gives_up`]).
+        if (self.gives_up(account) || self.local_stuck(account))
+            && let Some(client) = self.hub.client_mut(account)
+        {
             client.retry_now(Instant::now());
         }
         self.refresh = true;

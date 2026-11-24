@@ -121,7 +121,9 @@ impl PtyOps for LocalOps {
             return;
         }
         let line = self.trace.waiting_line(self.pane.as_str(), Instant::now());
-        match self.ticket.state().log.clone() {
+        // The ticket's lock is not held while the line is written.
+        let log = self.ticket.state().log.clone();
+        match log {
             Some(backend) => backend.log_line(&line),
             None => eprintln!("bateri: {line}"),
         }

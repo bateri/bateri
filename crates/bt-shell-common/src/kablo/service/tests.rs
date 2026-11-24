@@ -5057,7 +5057,9 @@ fn a_pane_that_waits_for_the_account_says_so_in_the_log() {
     world.install_millis.store(600, Ordering::SeqCst);
     let rig = Rig::over("local-still-account", world.clone());
     let stream = ask_local(&rig, &a_pane());
-    thread::sleep(Duration::from_millis(200));
+    // The account is being made (the step is entered before the install is asked), and it takes
+    // longer than this test needs.
+    until("the account is being made", || world.count("install") >= 1);
     stream.ops.still_waiting();
     let lines = world.lines.lock().expect("lock").clone();
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -5805,6 +5807,51 @@ fn a_new_pane_whose_kablo_cannot_be_reached_is_an_ordinary_shell_that_says_why()
     );
 }
 
+/// A kablo that is not allowed to run (the bridge cannot be started for want of permission) is not
+/// one that waits for a person to log in — the account of this Mac has none — and not one that
+/// comes with time: the pane is given an ordinary shell at once, and says why, and the pane after
+/// it is given its terminal when the kablo can be run again.
+#[test]
+fn a_new_pane_whose_kablo_is_not_allowed_to_run_is_an_ordinary_shell_that_says_why() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.carry_fails_with(Some(io::ErrorKind::PermissionDenied));
+    let rig = Rig::kept(
+        "local-denied",
+        world.clone(),
+        Arc::new(Ledger::memory()),
+        END_GRACE,
+    );
+
+    let stream = ask_local(&rig, &a_pane());
+    until("a shell instead", || stream.pid.get().is_some());
+    assert!(stream.status.is_ordinary());
+    let mut mac = Pane::of(stream);
+    let told = String::from_utf8_lossy(&mac.reads(b"ordinary shell")).into_owned();
+    assert!(
+        told.contains("kablo on this Mac could not be run"),
+        "{told}"
+    );
+    drop(mac);
+
+    // The next pane asks again, and is let go of in its turn while kablo cannot be run.
+    let second = ask_local(
+        &rig,
+        &PaneUuid::parse("6B2F3E4D-5C6B-7A89-98A7-B6C5D4E3F2A1").expect("a pane"),
+    );
+    until("a shell instead", || second.pid.get().is_some());
+    assert!(second.status.is_ordinary());
+
+    // kablo can be run again: the next one is given its terminal.
+    world.carry_fails_with(None);
+    let third = ask_local(
+        &rig,
+        &PaneUuid::parse("7C3A4F5E-6D7C-8B9A-A9B8-C7D6E5F4A3B2").expect("a pane"),
+    );
+    until("its terminal", || third.pid.get().is_some());
+    assert!(!third.status.is_ordinary());
+    assert_eq!(third.pid.get(), Some(crate::kablo::fake::FAKE_PID));
+}
+
 /// A pane that was let go of because kablo could not be reached has asked for a terminal that
 /// may have been made: when the server's word comes late, or the connection that comes up finds
 /// it, it is ended, and the ledger has no row for it — no shell runs where nobody sees it.
@@ -5873,7 +5920,8 @@ fn a_pane_that_waits_through_one_broken_connection_or_one_missing_kablo_is_given
     let third = PaneUuid::parse("7C3A4F5E-6D7C-8B9A-A9B8-C7D6E5F4A3B2").expect("a pane");
     let stream = ask_local(&rig, &third);
     let dials = world.count("carry");
-    redial_until(&rig, "the missing kablo", || world.count("carry") > dials);
+    // Not asked to dial faster: a second kablo that cannot be run in a row is a pane let go of.
+    until("the missing kablo", || world.count("carry") > dials);
     assert!(!stream.pid.is_settled(), "waiting still");
     world.carry_fails_with(None);
     redial_until(&rig, "the terminal", || stream.pid.get().is_some());
