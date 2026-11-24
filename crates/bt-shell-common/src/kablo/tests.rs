@@ -1242,6 +1242,49 @@ fn a_lost_connection_forgets_what_was_on_the_way_and_what_waited() {
     assert_eq!(questions(&rig, &terminal), asked + 1, "asked on its own");
 }
 
+/// What was typed for a terminal that is stopped for now ([`Client::suspend`]) is kept, with the
+/// answers that open the window; it goes when the terminal streams again, in order, behind the
+/// attach. A terminal that is let go of ([`Client::detach`]) is not typed into any more.
+#[test]
+fn what_was_typed_for_a_suspended_terminal_waits_and_goes_when_it_streams_again() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    let paste: Vec<u8> = (0..2 * WINDOW).map(|n| (n % 251) as u8).collect();
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), WINDOW);
+
+    rig.client.suspend(&terminal);
+    rig.pump();
+    assert!(!rig.bridge.is_attached(&terminal));
+    assert_eq!(rig.client.input_waiting(&terminal), WINDOW, "kept");
+    assert!(!rig.client.input_ready(&terminal), "the window is shut");
+    // The terminal takes what was sent: the window is open, and nothing goes to a terminal that
+    // is not attached (the server would refuse it).
+    rig.bridge.take(1);
+    rig.pump();
+    assert!(rig.client.input_ready(&terminal));
+    assert_eq!(rig.client.input_waiting(&terminal), WINDOW, "kept");
+    assert_eq!(typed_so_far(&rig, &terminal), WINDOW);
+
+    assert!(rig.client.resume(&terminal));
+    rig.pump();
+    assert!(rig.bridge.is_attached(&terminal));
+    assert_eq!(typed_so_far(&rig, &terminal), 2 * WINDOW);
+    assert_eq!(rig.client.input_waiting(&terminal), 0);
+    rig.bridge.take(1);
+    rig.pump();
+    assert_eq!(rig.bridge.typed(&terminal), paste, "all of it, in order");
+
+    // Let go of, not suspended: what waits is not typed late to whoever shows it next.
+    rig.bridge.stall();
+    assert!(rig.client.input(&terminal, &vec![b'y'; 2 * WINDOW]));
+    rig.pump();
+    assert!(rig.client.input_waiting(&terminal) > 0);
+    rig.client.detach(&terminal);
+    assert_eq!(rig.client.input_waiting(&terminal), 0);
+}
+
 #[test]
 fn an_answer_that_is_not_one_of_ours_gives_the_window_nothing() {
     let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
@@ -1476,6 +1519,41 @@ fn a_terminal_that_was_detached_is_streamed_again_from_the_byte_owed_with_what_i
         }
     }
     assert_eq!(output, b"def");
+}
+
+/// A terminal that was attached again after the owner had it shown from its past (the first
+/// attach holds the answers back itself) is not shown a question the server answered since, when
+/// it is streamed again: the view says so as an attach after a first one that was served does.
+/// What the view says besides is what it said.
+#[test]
+fn a_terminal_that_replayed_is_streamed_again_without_the_questions_answered_since() {
+    let mut rig = Rig::new(Age::Current);
+    let terminal = id("t1");
+    rig.connect();
+    rig.client
+        .new_terminal(
+            terminal.clone(),
+            NewSession::default(),
+            Attach::new(SIZE).every_byte().replaying(),
+        )
+        .expect("a request");
+    rig.pump();
+    rig.take();
+    rig.client.suspend(&terminal);
+    rig.pump();
+    assert!(rig.client.resume(&terminal));
+    rig.pump();
+    let attaches = attaches(&rig.bridge, &terminal);
+    let (first, again) = (attaches[0].1, attaches[1].1);
+    assert!(
+        !first.picture_if_answered,
+        "the premise: it holds answers back"
+    );
+    assert!(
+        again.picture_if_answered,
+        "a question answered since is not replayed"
+    );
+    assert!(again.every_byte && again.keep_after_end);
 }
 
 #[test]

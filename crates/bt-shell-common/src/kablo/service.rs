@@ -1223,6 +1223,15 @@ enum Out {
 /// for before it reads more of the account's stream.
 #[derive(Default)]
 struct Queue {
+    /// The panes that hold the account back can be let go of ([`Core::stalled`]): the account is
+    /// this Mac's, whose panes are the terminals' holders themselves. A server's account has
+    /// none that can — the pane's holder is the pipe to a terminal, which the server's own flow
+    /// control already waits for — so no clock runs for it ([`Queue::wait`]), and nothing
+    /// looks again and again at what it cannot change.
+    stallable: bool,
+    /// The service has stopped: nobody is left to be told what the reader reads, and a reader
+    /// that waits for the count to go down stops waiting ([`Waited::Closed`]).
+    closed: AtomicBool,
     /// Bytes the holders' writers have been given and have not put in the panes' sockets.
     bytes: AtomicUsize,
     /// Bytes the bridge's reader has sent the loop that the loop has not settled yet: they are
@@ -1238,11 +1247,21 @@ struct Queue {
 /// that hold it are to be looked at.
 enum Waited {
     Open,
+    /// The service is gone: the reader is to end.
+    Closed,
     /// The count has been past the mark for [`HOLD_STALL`] without a break.
     Stalled,
 }
 
 impl Queue {
+    /// The queue of an account whose stalled panes can be let go of when `stallable`.
+    fn new(stallable: bool) -> Queue {
+        Queue {
+            stallable,
+            ..Queue::default()
+        }
+    }
+
     fn bytes(&self) -> usize {
         self.bytes.load(Ordering::SeqCst)
     }
@@ -1279,6 +1298,12 @@ impl Queue {
         self.bump();
     }
 
+    /// The service is stopped: whoever waits for the count to go down is woken, and ends.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.bump();
+    }
+
     /// Wakes whoever waits for the count to go down.
     fn bump(&self) {
         drop(lock(&self.wait_here));
@@ -1290,13 +1315,21 @@ impl Queue {
     /// is held back, and it counts from when it was first held back, whatever goes down since:
     /// that a pane takes something does not say that the one beside it does, so after
     /// [`HOLD_STALL`] it says so ([`Waited::Stalled`]) and the panes are looked at one by one
-    /// ([`Core::stalled`]). An account that is not held back has no timer.
+    /// ([`Core::stalled`]). An account that is not held back has no timer, and nor has one whose
+    /// panes cannot be let go of ([`Queue::stallable`]): it waits until the count goes down.
     fn wait(&self) -> Waited {
         let mut here = lock(&self.wait_here);
         let mut since = None;
         loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return Waited::Closed;
+            }
             if self.pending() <= HIGH_WATER {
                 return Waited::Open;
+            }
+            if !self.stallable {
+                here = self.wake.wait(here).unwrap_or_else(PoisonError::into_inner);
+                continue;
             }
             let began = *since.get_or_insert_with(Instant::now);
             let left = HOLD_STALL.saturating_sub(began.elapsed());
@@ -2206,6 +2239,15 @@ impl Service {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.tx.send(Msg::Stop);
+        // The readers of the bridges that wait for what is queued to go down have nobody to tell.
+        for queue in self
+            .queues
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+        {
+            queue.close();
+        }
         let threads = std::mem::take(&mut *self.threads.lock().unwrap_or_else(|e| e.into_inner()));
         for thread in threads {
             let _ = thread.join();
@@ -2554,12 +2596,96 @@ impl Core {
         let Some(conn) = self.conns.get_mut(&hold) else {
             return;
         };
+        if conn.suspended {
+            self.awaken(hold);
+        } else {
+            // Streaming and not counted ([`Core::awaken_to_end`]): it counts again.
+            conn.load.recount();
+        }
+    }
+
+    /// A pane that was let go of ([`Core::stalled`]) is streamed to again: the terminal is
+    /// attached from the byte after the last the pane was given, and what the pane is owed counts
+    /// against the account again (it has taken all it was owed: [`Core::drained`]).
+    fn awaken(&mut self, hold: HoldId) {
+        let Some(conn) = self.conns.get_mut(&hold) else {
+            return;
+        };
         if !conn.suspended {
             return;
         }
         conn.suspended = false;
         conn.load.recount();
         self.hub.awake(hold);
+    }
+
+    /// Says `say` to the terminal of `hold`. A pane that was let go of ([`Core::stalled`]) has
+    /// something to say all the same — a key, a size, a request about its past or the input its
+    /// program left unread —, and the server serves what a client says about a terminal only
+    /// while it is attached: its stream is asked for, `say` is said behind the attach, and the
+    /// stream is stopped again at once, in that order on the one connection, so the server
+    /// serves them in it. Nothing counts against the account and nothing streams to a pane that
+    /// reads nothing: what the server sends between the attach and the stop is not taken
+    /// ([`Client::suspend`]) and is sent again from the byte owed when the pane reads. What the
+    /// pane typed and the server has not taken is kept, and goes the same way when the answers
+    /// that open its window come ([`Core::pump_suspended`]).
+    fn say(&mut self, hold: HoldId, say: impl FnOnce(&mut Hub)) {
+        let let_go = self.conns.get(&hold).is_some_and(|conn| conn.suspended);
+        if !let_go || !self.hub.awake_to_say(hold) {
+            // Said as it is: the connection is down, and what cannot be said is told as always.
+            say(&mut self.hub);
+            return;
+        }
+        say(&mut self.hub);
+        self.hub.suspend(hold);
+    }
+
+    /// [`Core::say`] for the holder that shows `terminal` of `account`, if one does.
+    fn say_to_terminal(&mut self, account: &str, terminal: &SessionId, say: impl FnOnce(&mut Hub)) {
+        match self.hub.hold_of(account, terminal) {
+            Some(hold) => self.say(hold, say),
+            None => say(&mut self.hub),
+        }
+    }
+
+    /// The terminal of `account` is to end ([`Core::finish_off`]) and the pane that shows it is
+    /// to be told when it has, whether the pane reads or not: the terminal streams to it, and
+    /// what the pane is owed does not count against the account — a pane that took nothing could
+    /// otherwise hold back the very stream that carries the end of its terminal, and be let go of
+    /// again before the end came. It counts again when the pane has taken all it was owed.
+    fn awaken_to_end(&mut self, account: &str, terminal: &SessionId) {
+        let Some(hold) = self.hub.hold_of(account, terminal) else {
+            return;
+        };
+        let Some(conn) = self.conns.get_mut(&hold) else {
+            return;
+        };
+        let nothing_owed = conn.load.uncount();
+        if std::mem::take(&mut conn.suspended) {
+            self.hub.awake(hold);
+        }
+        if nothing_owed {
+            self.drained(hold);
+        }
+    }
+
+    /// The panes of `account` that are let go of and have typed bytes waiting for the window,
+    /// which the server's answers have opened since: the next of it is sent ([`Core::say`]).
+    fn pump_suspended(&mut self, account: &str) {
+        let ready: Vec<HoldId> = self
+            .conns
+            .iter()
+            .filter(|(hold, conn)| conn.suspended && self.hub.input_ready(**hold))
+            .map(|(hold, _)| *hold)
+            .filter(|hold| {
+                self.hub
+                    .terminal_of(*hold)
+                    .is_some_and(|(of, _)| of == account)
+            })
+            .collect();
+        for hold in ready {
+            self.say(hold, |_| {});
+        }
     }
 
     /// Shuts a holder's connection to reading while too much of what it typed waits for the
@@ -2613,7 +2739,7 @@ impl Core {
         match message {
             Msg::Accepted(stream, peer) => self.accepted(stream, peer),
             Msg::Hold(hold, bytes) => {
-                self.hub.push(hold, &bytes);
+                self.say(hold, |hub| hub.push(hold, &bytes));
                 self.meter(hold);
             }
             Msg::HoldEof(hold) => {
@@ -2685,9 +2811,11 @@ impl Core {
             Msg::WhenLocal(done) => self.when_local(done, now),
             Msg::Forget(pane) => {
                 for (account, terminal) in self.terminals_of(&pane) {
-                    if let Some(client) = self.hub.client_mut(&account) {
-                        client.forget_past(&terminal);
-                    }
+                    self.say_to_terminal(&account, &terminal, |hub| {
+                        if let Some(client) = hub.client_mut(&account) {
+                            client.forget_past(&terminal);
+                        }
+                    });
                 }
                 self.refresh = true;
             }
@@ -2728,6 +2856,8 @@ impl Core {
                     && let Some(client) = self.hub.client_mut(&account)
                 {
                     client.push(&bytes, now);
+                    // The answers that open the window of what a pane let go of typed.
+                    self.pump_suspended(&account);
                 }
             }
             Msg::Stalled {
@@ -2818,7 +2948,7 @@ impl Core {
                 );
             }
             Msg::LocalAccount(outcome) => self.local_account(&outcome, now),
-            Msg::Resize { hold, size } => self.hub.resize(hold, size),
+            Msg::Resize { hold, size } => self.say(hold, |hub| hub.resize(hold, size)),
             Msg::DropInput { hold, remote } => self.drop_input(hold, remote),
             Msg::DropShown(pane) => self.drop_shown(&pane),
             Msg::HereMade { outcome, pending } => self.here_made(outcome, &pending, now),
@@ -3550,10 +3680,12 @@ impl Core {
             .hub
             .terminal_of(hold)
             .map(|(account, terminal)| (account.to_owned(), terminal.clone()));
-        if let Some((account, terminal)) = local
-            && let Some(client) = self.hub.client_mut(&account)
-        {
-            client.drop_input(&terminal);
+        if let Some((account, terminal)) = local {
+            self.say(hold, |hub| {
+                if let Some(client) = hub.client_mut(&account) {
+                    client.drop_input(&terminal);
+                }
+            });
         }
     }
 
@@ -3707,6 +3839,11 @@ impl Core {
         if !client.link().is_live() {
             return false;
         }
+        // A pane that is let go of is told when its terminal has ended like any other.
+        self.awaken_to_end(account, terminal);
+        let Some(client) = self.hub.client_mut(account) else {
+            return false;
+        };
         if !shown && !client.is_attached(terminal) {
             client.attach(terminal.clone(), Attach::new(END_SIZE).from_now());
         }
@@ -4600,7 +4737,7 @@ impl Core {
             client.take_tickets();
         }
         self.hub.add_client(&key, client);
-        let queue = Arc::new(Queue::default());
+        let queue = Arc::new(Queue::new(local::is_account(&key)));
         self.shared
             .queues
             .lock()
@@ -5252,6 +5389,7 @@ fn bridge_reader(
         // let go of the ones that stand in the way.
         match queue.wait() {
             Waited::Open => {}
+            Waited::Closed => return,
             Waited::Stalled => {
                 let told = tx.send(Msg::Stalled {
                     account: account.clone(),

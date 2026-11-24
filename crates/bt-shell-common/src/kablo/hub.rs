@@ -45,6 +45,12 @@
 //! the server gives a picture of the screen in place of bytes its ring no longer has, as it does
 //! for any client that fell behind it. A holder that takes anything is not let go of.
 //!
+//! A pane that is let go of can still say what it says: the server serves a key, a size, a
+//! request about the past or the unread input only to a terminal that is attached, so the owner
+//! asks for the stream ([`Hub::awake_to_say`]), says it behind the attach, and stops the stream
+//! again ([`Hub::suspend`]). What the pane typed and the server has not taken is kept when the
+//! stream is stopped ([`Client::suspend`]) and goes behind the next attach.
+//!
 //! **A raw holder** ([`Hub::open_raw`]) is the pane itself, not a program in it: a pane that
 //! shows a terminal of this Mac reads the terminal's bytes as they are (no frames, nothing to
 //! greet or ask) and types into it as they are. It is bound to the terminal the moment the
@@ -711,11 +717,43 @@ impl Hub {
         let Some(client) = self.clients.get_mut(&binding.account) else {
             return false;
         };
-        if !client.is_attached(&binding.terminal) {
+        // Asked as well: the answer to the attach is in the bridge's stream, which is not read
+        // while the account is held back, and the stream has to be stopped for it to be.
+        if !client.is_streaming(&binding.terminal) {
             return false;
         }
-        client.detach(&binding.terminal);
+        client.suspend(&binding.terminal);
         true
+    }
+
+    /// Whether bytes the holder typed wait for the window and it is open ([`Client::input_ready`]).
+    pub fn input_ready(&self, hold: HoldId) -> bool {
+        self.holds
+            .get(&hold)
+            .and_then(|entry| entry.bound.as_ref())
+            .and_then(|binding| {
+                self.clients
+                    .get(&binding.account)
+                    .map(|client| client.input_ready(&binding.terminal))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Asks for the stream of the terminal of a holder [`Hub::suspend`] stopped, to say something
+    /// to it before it is stopped again: `false`, and nothing asked, when the connection is not
+    /// up (what is said to a terminal that is not streaming is told as it always is).
+    pub fn awake_to_say(&mut self, hold: HoldId) -> bool {
+        let Some(binding) = self.holds.get(&hold).and_then(|entry| entry.bound.as_ref()) else {
+            return false;
+        };
+        let Some(client) = self.clients.get_mut(&binding.account) else {
+            return false;
+        };
+        if !client.link().is_live() {
+            return false;
+        }
+        client.resume(&binding.terminal);
+        client.is_streaming(&binding.terminal)
     }
 
     /// Streams the terminal of a holder [`Hub::suspend`] stopped again, from the byte after the

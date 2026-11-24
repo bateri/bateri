@@ -1965,8 +1965,13 @@ fn numbers_in(bytes: &[u8]) -> Vec<u64> {
 /// A program that writes `lines` numbered lines, a thousand at a time, and ends: all of it fits
 /// in the ring of the terminal many times over for a pane that does not read for some seconds.
 fn paced_lines(lines: u32) -> String {
+    format!("exec {}", paced_awk(lines))
+}
+
+/// [`paced_lines`] as a command that ends, for a script that goes on.
+fn paced_awk(lines: u32) -> String {
     format!(
-        r#"exec awk 'BEGIN {{ for (i = 0; i < {lines}; i++) {{ printf "L%09d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n", i; if (i % 1000 == 999) system("sleep 0.02") }} }}'"#
+        r#"awk 'BEGIN {{ for (i = 0; i < {lines}; i++) {{ printf "L%09d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n", i; if (i % 1000 == 999) system("sleep 0.02") }} }}'"#
     )
 }
 
@@ -2265,7 +2270,23 @@ fn a_pane_that_takes_nothing_for_some_seconds_is_given_all_its_program_wrote_and
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_that_takes_nothing_is_let_go_of_beside_one_that_reads_slowly_and_loses_nothing() {
-    let Some(mut mac) = HeldMac::start("stuck-and-slow") else {
+    stuck_and_slow("stuck-and-slow", false);
+}
+
+/// The same, and a key typed into the pane that takes nothing every 50 ms the whole time: what
+/// it says is said behind a stream that is asked for and stopped again, and holds nothing back —
+/// the slow pane is given no picture and the one beside it its ticks, as when the stuck pane is
+/// not typed into.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_takes_nothing_and_is_typed_into_holds_back_none_of_the_ones_beside_it() {
+    stuck_and_slow("stuck-and-typed", true);
+}
+
+/// A pane that takes nothing, one that reads slowly and one that is read, for ten seconds; the
+/// one that takes nothing is typed into when `types`.
+fn stuck_and_slow(name: &str, types: bool) {
+    let Some(mut mac) = HeldMac::start(name) else {
         eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
         return;
     };
@@ -2291,6 +2312,25 @@ fn a_pane_that_takes_nothing_is_let_go_of_beside_one_that_reads_slowly_and_loses
         )
         .expect("the pane that is read");
     mac.keep_count();
+    let typing = types.then(|| {
+        let mut keys =
+            std::os::unix::net::UnixStream::from(stuck.master.try_clone().expect("a clone"));
+        keys.set_nonblocking(false).expect("blocking");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut typed = 0u32;
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                if keys.write_all(b"x").is_err() {
+                    break;
+                }
+                typed += 1;
+                thread::sleep(Duration::from_millis(50));
+            }
+            typed
+        });
+        (stop, thread)
+    });
     let mut slow_master = std::fs::File::from(slow.master.try_clone().expect("a clone"));
     let mut beside_master = std::fs::File::from(beside.master.try_clone().expect("a clone"));
     let mut numbered = Numbered::default();
@@ -2312,8 +2352,12 @@ fn a_pane_that_takes_nothing_is_let_go_of_beside_one_that_reads_slowly_and_loses
         ticks.take(&mut beside_master);
         thread::sleep(Duration::from_millis(50));
     }
+    let typed = typing.map(|(stop, thread)| {
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        thread.join().expect("the typist")
+    });
     eprintln!(
-        "MEASURE stuck-and-slow: the slow pane took {bytes} bytes, {} whole lines in order; {} ticks beside, queue {}",
+        "MEASURE {name}: {typed:?} keys typed into the stuck pane; the slow pane took {bytes} bytes, {} whole lines in order; {} ticks beside, queue {}",
         numbered.next,
         ticks.next,
         mac.service.queued(ACCOUNT).unwrap_or(0)
@@ -2322,6 +2366,370 @@ fn a_pane_that_takes_nothing_is_let_go_of_beside_one_that_reads_slowly_and_loses
     assert!(ticks.next >= 60, "only {} ticks in 10 s", ticks.next);
     drop((slow_master, beside_master));
     drop((slow, stuck, beside));
+    mac.service.stop();
+}
+
+/// A pane of this Mac whose program does `before`, writes 60 000 lines the pane never reads (3.9 MB,
+/// below half the ring so that the terminal's relay never waits for it), says that it has
+/// (`ready` is made) and then does `after`. Returns the pane's stream once it has been let go of
+/// for taking nothing: the account's queue went past the mark and came down below it, and the
+/// program is done with its lines. What the program does with what the pane says to it is
+/// told by files below the ground's directory.
+fn a_pane_let_go_of(
+    mac: &mut HeldMac,
+    uuid: &str,
+    before: &str,
+    after: &str,
+    ready: &std::path::Path,
+) -> bt_core::Stream {
+    let script = format!(
+        "{before}; {}; : > '{}'; {after}",
+        paced_awk(60_000),
+        ready.display()
+    );
+    let stream = mac
+        .open(&script, uuid, Duration::from_secs(30))
+        .expect("the pane that takes nothing");
+    mac.keep_count();
+    let high = Service::high_water();
+    let began = Instant::now();
+    while mac.service.queued(ACCOUNT).unwrap_or(0) <= high {
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "the queue never went past the high-water mark"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    while mac.service.queued(ACCOUNT).unwrap_or(0) > high || !ready.exists() {
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "the pane was not let go of: queue {:?}",
+            mac.service.queued(ACCOUNT)
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    // Past one more look of the service's, so that what was owed no longer counts.
+    thread::sleep(Duration::from_millis(500));
+    assert!(mac.service.queued(ACCOUNT).unwrap_or(0) <= high);
+    stream
+}
+
+/// Waits for a file the program writes, up to `seconds`.
+fn file_within(path: &std::path::Path, seconds: u64) -> Option<Vec<u8>> {
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(seconds) {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some(bytes);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+/// A pane that was let go of, that never reads again, types ⌃C: it reaches the program, which
+/// ends. (A pane that is let go of is not one with nothing to say: what it types, said to a
+/// stream that is stopped, is kept until it reads and then sent, does not end the program of a
+/// pane that never does.)
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_is_let_go_of_and_never_reads_again_ends_its_program_with_control_c() {
+    let Some(mut mac) = HeldMac::start("let-go-int") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let (marker, ready) = (mac.ground.root.join("int"), mac.ground.root.join("ready"));
+    let stream = a_pane_let_go_of(
+        &mut mac,
+        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F1",
+        &format!(
+            "trap 'echo INT > {0}.tmp; mv {0}.tmp {0}; exit 130' INT",
+            marker.display()
+        ),
+        "while :; do sleep 0.1; done",
+        &ready,
+    );
+    assert!(!marker.exists());
+    let mut master = std::fs::File::from(stream.master.try_clone().expect("a clone"));
+    master.write_all(&[0x03]).expect("typed");
+    // The pane reads nothing from here on: the program has the key all the same.
+    assert_eq!(
+        file_within(&marker, 20),
+        Some(b"INT\n".to_vec()),
+        "⌃C did not reach the program of a pane that takes nothing"
+    );
+    drop((master, stream));
+    mac.service.stop();
+}
+
+/// A paste of two megabytes — four windows of what the server holds for a terminal — into a pane
+/// that is let go of and never reads: the program has every byte of it, in order.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_paste_into_a_pane_that_is_let_go_of_and_never_reads_again_is_whole_and_in_order() {
+    let Some(mut mac) = HeldMac::start("let-go-paste") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let (kept, ready) = (
+        mac.ground.root.join("pasted"),
+        mac.ground.root.join("ready"),
+    );
+    let stream = a_pane_let_go_of(
+        &mut mac,
+        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F2",
+        "stty raw -echo",
+        &format!(
+            "head -c 2097152 > {0}.tmp; mv {0}.tmp {0}; sleep 30",
+            kept.display()
+        ),
+        &ready,
+    );
+    let paste: Vec<u8> = (0..2 * 1024 * 1024usize)
+        .map(|at| u8::try_from(at % 251 + 1).expect("a byte"))
+        .collect();
+    let began = Instant::now();
+    // The pane's end waits when the service does not take what it writes: it is the pane's own
+    // writer that is held, and it is held for as long as the paste takes to go.
+    let mut master =
+        std::os::unix::net::UnixStream::from(stream.master.try_clone().expect("a clone"));
+    master.set_nonblocking(false).expect("blocking");
+    let writer = {
+        let paste = paste.clone();
+        thread::spawn(move || master.write_all(&paste).expect("pasted"))
+    };
+    let got = file_within(&kept, 60).expect("the program never had all of the paste");
+    writer.join().expect("the writer");
+    eprintln!("MEASURE paste: 2 MiB in {:?}", began.elapsed());
+    assert!(
+        got == paste,
+        "the program has {} bytes, not what was pasted",
+        got.len()
+    );
+    drop(stream);
+    mac.service.stop();
+}
+
+/// The pane's size changes while it is let go of: its program is told, and `stty size` in it says
+/// the new one.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_is_let_go_of_and_never_reads_again_has_its_program_told_its_size() {
+    let Some(mut mac) = HeldMac::start("let-go-size") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let (marker, ready) = (mac.ground.root.join("size"), mac.ground.root.join("ready"));
+    let stream = a_pane_let_go_of(
+        &mut mac,
+        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F3",
+        &format!(
+            "trap 'stty size > {0}.tmp; mv {0}.tmp {0}' WINCH",
+            marker.display()
+        ),
+        "while :; do sleep 0.1; done",
+        &ready,
+    );
+    stream.ops.resize(
+        std::os::fd::AsFd::as_fd(&stream.master),
+        bt_core::PtySize {
+            cols: 91,
+            rows: 33,
+            cell_width: 8,
+            cell_height: 16,
+        },
+    );
+    assert_eq!(
+        file_within(&marker, 20),
+        Some(b"33 91\n".to_vec()),
+        "the program was not told the pane's size"
+    );
+    drop(stream);
+    mac.service.stop();
+}
+
+/// Closing a pane that is let go of ends its terminal, and so does the quit that ends the programs;
+/// each is told that the terminal has ended and neither waits out its time for it.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn closing_a_pane_that_is_let_go_of_ends_its_terminal_and_so_does_the_quit_that_ends_programs() {
+    let Some(mut mac) = HeldMac::start("let-go-end") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let hangs = |name: &str| {
+        let marker = mac.ground.root.join(name);
+        let before = format!(
+            "trap 'echo HUP > {0}.tmp; mv {0}.tmp {0}; exit 129' HUP",
+            marker.display()
+        );
+        (marker, before)
+    };
+    let (closed, before_closed) = hangs("closed");
+    let (quit, before_quit) = hangs("quit");
+    let ready = mac.ground.root.join("ready-1");
+    let first = a_pane_let_go_of(
+        &mut mac,
+        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F4",
+        &before_closed,
+        "while :; do sleep 0.1; done",
+        &ready,
+    );
+    let ready = mac.ground.root.join("ready-2");
+    let second = a_pane_let_go_of(
+        &mut mac,
+        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F5",
+        &before_quit,
+        "while :; do sleep 0.1; done",
+        &ready,
+    );
+    assert_eq!(mac.ledger.terminals_of(ACCOUNT).len(), 2);
+
+    // The pane is closed.
+    let pane = bt_core::PaneUuid::parse("6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F4").expect("a pane");
+    mac.service.end(&pane);
+    assert_eq!(
+        file_within(&closed, 20),
+        Some(b"HUP\n".to_vec()),
+        "the program of the closed pane was not hung up"
+    );
+    let began = Instant::now();
+    while mac.ledger.terminals_of(ACCOUNT).len() != 1 {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the terminal was not told to have ended: {:?}",
+            mac.ledger.terminals_of(ACCOUNT)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // The quit that ends the programs.
+    let pane = bt_core::PaneUuid::parse("6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F5").expect("a pane");
+    let asked = Instant::now();
+    mac.service
+        .end_all(std::slice::from_ref(&pane), Duration::from_secs(30));
+    assert!(
+        asked.elapsed() < Duration::from_secs(20),
+        "the quit waited out its time: {:?}",
+        asked.elapsed()
+    );
+    assert_eq!(file_within(&quit, 5), Some(b"HUP\n".to_vec()));
+    assert!(mac.ledger.terminals_of(ACCOUNT).is_empty());
+    drop((first, second));
+    mac.service.stop();
+}
+
+/// The quit that keeps the programs asks nothing of the terminal of a pane that is let go of: its
+/// program runs on, and the ledger keeps the terminal for the next launch.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_quit_that_keeps_programs_leaves_the_terminal_of_a_pane_that_is_let_go_of_running() {
+    let Some(mut mac) = HeldMac::start("let-go-keep") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let (beat, ready) = (mac.ground.root.join("beat"), mac.ground.root.join("ready"));
+    let stream = a_pane_let_go_of(
+        &mut mac,
+        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F6",
+        ":",
+        &format!(
+            "i=0; while :; do i=$((i+1)); echo $i > {0}.tmp; mv {0}.tmp {0}; sleep 0.1; done",
+            beat.display()
+        ),
+        &ready,
+    );
+    let count = |path: &std::path::Path| -> u64 {
+        String::from_utf8_lossy(&file_within(path, 10).expect("the program's beat"))
+            .trim()
+            .parse()
+            .expect("a count")
+    };
+    drop(stream);
+    mac.service.stop();
+    let before = count(&beat);
+    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        count(&beat) > before + 5,
+        "the program stopped with the service: {before} then {}",
+        count(&beat)
+    );
+    assert_eq!(mac.ledger.terminals_of(ACCOUNT).len(), 1);
+}
+
+/// A question the terminal asks while the pane is let go of is answered once, by the server's
+/// screen (nobody attached to answer it), and the pane that comes back to read is not shown the
+/// question to answer it again: the program is answered once, not twice and not never.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_question_the_terminal_asks_while_its_pane_is_let_go_of_is_answered_once() {
+    let Some(mut mac) = HeldMac::start("let-go-asked") else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let (answers, ready) = (
+        mac.ground.root.join("answers"),
+        mac.ground.root.join("ready"),
+    );
+    // The program asks "is the terminal all right?" once its lines are written and the pane has
+    // been let go of, waits for what comes back, and says what it found.
+    let stream = a_pane_let_go_of(
+        &mut mac,
+        "6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F2F7",
+        "stty raw -echo min 0 time 1",
+        &format!(
+            "sleep 2; printf '\\033[5n'; sleep 3; dd bs=4096 count=1 2>/dev/null > {0}.tmp; mv {0}.tmp {0}; sleep 30",
+            answers.display()
+        ),
+        &ready,
+    );
+    let mut master = std::fs::File::from(stream.master.try_clone().expect("a clone"));
+    // The terminal's own: wait out the question and the answer, with the pane taking nothing.
+    assert!(
+        file_within(&answers, 30).is_some(),
+        "the program found no answer at all"
+    );
+    // The pane reads on, as the emulator of a pane does: every question it is shown it answers.
+    // What it is given after the lines it was owed is a picture of the screen (it has an escape
+    // in it, where the program's lines have none) in place of the stretch of the stream that
+    // held the question.
+    let (mut seen, mut asked) = (0usize, 0usize);
+    let mut tail = Vec::new();
+    let mut picture_at = None;
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(90)
+        && picture_at.is_none_or(|at: Instant| at.elapsed() < Duration::from_secs(3))
+    {
+        let mut chunk = Vec::new();
+        take_now(&mut master, &mut chunk, 1 << 20);
+        seen += chunk.len();
+        if picture_at.is_none() && chunk.contains(&0x1b) {
+            picture_at = Some(Instant::now());
+        }
+        tail.extend_from_slice(&chunk);
+        while let Some(at) = tail.windows(4).position(|w| w == b"\x1b[5n") {
+            asked += 1;
+            tail.drain(..at + 4);
+            master.write_all(b"\x1b[0n").expect("answered");
+        }
+        let keep = tail.len().saturating_sub(3);
+        tail.drain(..keep);
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        picture_at.is_some(),
+        "the pane read {seen} bytes and was given no picture in place of the stretch with the question"
+    );
+    eprintln!("MEASURE asked: the pane read {seen} bytes and was shown the question {asked} times");
+    let found = file_within(&answers, 5).expect("the program's answers");
+    assert_eq!(
+        found, b"\x1b[0n",
+        "the program was not answered exactly once"
+    );
+    assert_eq!(
+        asked, 0,
+        "the pane was shown a question that was answered already"
+    );
+    drop((master, stream));
     mac.service.stop();
 }
 

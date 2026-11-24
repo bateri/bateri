@@ -32790,6 +32790,74 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
+    /// A pane whose program runs but whose view waits for the person behind a card (the pane was
+    /// shown again and the program is not offered its view's restart until the card is answered):
+    /// the conversation has no view open, so what the program says for one is dropped where it is
+    /// read — it is not counted as waiting for a module, which nothing would take, and so does not
+    /// shut the reader at the bound ([`crate::INBOX_LIMIT`]). The program that says a lot is read
+    /// all the same and goes on, and the card's one instruction, ⌃C, ends it. (The wait that comes
+    /// of a page that failed has a view open and no module: what is said is taken and dropped,
+    /// where the pane takes the session's actions, as the test above has the module do.)
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_program_that_says_a_lot_to_a_view_that_waits_is_read_on_and_an_interrupt_ends_it() {
+        // 2500 messages of about 245 bytes: more than twice the bound on what waits for a module.
+        let flood = r#"awk 'BEGIN { pad = sprintf("%200s", ""); gsub(/ /, "x", pad); for (i = 1; i <= 2500; i++) printf "\033_pencere;msg;id=%d;{\"v\":\"%s\"}\033\\", i, pad }'"#;
+        let script =
+            format!("{flood}; echo FLOODED; trap 'exit 130' INT; while :; do sleep 0.1; done");
+        // The premise: what the program writes is frames of the protocol, 2500 messages, past
+        // the bound on what waits for a module — a test that says garbage would measure nothing.
+        let said = std::process::Command::new("/bin/sh")
+            .args(["-c", flood])
+            .output()
+            .expect("the flood");
+        let mut events = Vec::new();
+        ::pencere_host::frame::StreamDecoder::new(::pencere_host::frame::Direction::ToHost)
+            .feed(&said.stdout, &mut events);
+        let messages = events
+            .iter()
+            .filter(|event| matches!(event, ::pencere_host::frame::Event::Message(_)))
+            .count();
+        assert_eq!(
+            messages,
+            2500,
+            "{} bytes, {} events",
+            said.stdout.len(),
+            events.len()
+        );
+        assert!(said.stdout.len() > 2 * crate::INBOX_LIMIT);
+        let mut options = test_options(("/bin/sh".into(), vec!["-c".into(), script]), 80);
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.native_entry_limit = None;
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        let flow = session.flow();
+
+        // The program wrote all it had to say and went on to the next thing: the reader read it.
+        wait_until(
+            "the program to get past what it said",
+            Duration::from_secs(30),
+            || the_screen(&session).contains("FLOODED"),
+        );
+        assert_eq!(flow.inbox(), 0, "what was dropped was counted as waiting");
+        assert!(session.take_view_actions().is_empty());
+
+        // The card's instruction reaches the program and ends it.
+        session.write(&[0x03]);
+        let mut left = None;
+        wait_until(
+            "the program to end at ⌃C",
+            Duration::from_secs(20),
+            || {
+                left = wake.wait_exit(Duration::from_millis(10));
+                left.is_some()
+            },
+        );
+        assert_eq!(left, Some(Some(130)));
+        session.shutdown();
+    }
+
     /// A program that floods a module that is slow but there gets everything it pushes, and the
     /// module never has more waiting for it than the bound and a read.
     #[test]

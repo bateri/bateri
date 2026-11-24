@@ -542,6 +542,8 @@ struct Terminal {
     every_byte: bool,
     /// What is typed into it and has not got to the program yet.
     input: Input,
+    /// The view the last attach was sent with, as it was sent ([`Client::resume`] sends it again).
+    view: Option<View>,
 }
 
 /// The input of one terminal in the client's care: how much is on the way, and what waits for
@@ -581,6 +583,7 @@ impl Terminal {
             replay_wanted: attach.replaying,
             every_byte: attach.every_byte,
             input: Input::default(),
+            view: None,
         }
     }
 }
@@ -936,8 +939,22 @@ impl Client {
             .and_then(|t| t.taken_by.as_deref())
     }
 
-    /// Stops the stream of a terminal; it lives on, on the server.
+    /// Stops the stream of a terminal; it lives on, on the server. What was typed into it and
+    /// has not been taken is let go of: whoever stops showing a terminal is not typing into it.
     pub fn detach(&mut self, id: &SessionId) {
+        self.stop(id, false);
+    }
+
+    /// Stops the stream of a terminal whose owner is still there but does not read it
+    /// ([`Client::resume`] starts it again): the same as [`Client::detach`], except that what
+    /// was typed into it and has not been taken is **kept**, and the answers to what was asked
+    /// about it ([`Client::input`]'s window) go on being taken. An owner that types more
+    /// resumes the stream first; the bytes that wait go with it.
+    pub fn suspend(&mut self, id: &SessionId) {
+        self.stop(id, true);
+    }
+
+    fn stop(&mut self, id: &SessionId, keep_input: bool) {
         let attached = self
             .terminals
             .get(id)
@@ -947,7 +964,9 @@ impl Client {
                 terminal.phase = Phase::Detached;
             }
             terminal.retry = None;
-            terminal.input = Input::default();
+            if !keep_input {
+                terminal.input = Input::default();
+            }
         }
         if attached && self.link.is_live() {
             self.queue(Packet::about(id.clone(), Message::Detach));
@@ -956,8 +975,12 @@ impl Client {
 
     /// Streams a terminal again that [`Client::detach`] stopped, from the byte owed: the next
     /// after the last it gave, which the server has still or gives a picture of the screen in place
-    /// of. Its size and what it asked for (every byte, to be told how the program ended) are
-    /// as they were. `false` when the terminal was not detached.
+    /// of. **The view is the one the last attach was sent with**, as it was sent — not one made
+    /// again flag by flag, which would leave out a field added to the view later, as kablo's own
+    /// bridge, which sends the view it had when its connection comes back, does not — with the
+    /// terminal's size as it is now and none of what only a first attach does (a picture, a take:
+    /// a second take would let go whoever came after the first). `false` when the terminal was not
+    /// detached.
     pub fn resume(&mut self, id: &SessionId) -> bool {
         let Some(terminal) = self.terminals.get_mut(id) else {
             return false;
@@ -973,9 +996,20 @@ impl Client {
         terminal.replay_wanted = false;
         terminal.state_fresh = false;
         if self.link.is_live() {
-            self.send_attach(id);
+            self.send_attach_again(id);
+            // What was typed and waited: behind the attach, in the order it was typed.
+            self.send_input(id);
         }
         true
+    }
+
+    /// Whether bytes typed into a terminal wait and the window lets some go: the answers that
+    /// bring it back have come while the terminal was not streaming ([`Client::suspend`]), and
+    /// what waits goes once it streams again ([`Client::resume`]).
+    pub fn input_ready(&self, id: &SessionId) -> bool {
+        self.terminals
+            .get(id)
+            .is_some_and(|t| !t.input.waiting.is_empty() && t.input.in_flight < INPUT_WINDOW)
     }
 
     /// Types `bytes` into the program, exactly as they are. `false` when they
@@ -1021,7 +1055,10 @@ impl Client {
             return;
         };
         if !matches!(terminal.phase, Phase::Asked | Phase::Attached) {
-            terminal.input = Input::default();
+            // A terminal that is not streaming for now ([`Client::suspend`]) keeps what waits.
+            if terminal.phase != Phase::Detached {
+                terminal.input = Input::default();
+            }
             return;
         }
         let input = &mut terminal.input;
@@ -1163,7 +1200,12 @@ impl Client {
     /// `false` when nothing was asked: the connection is not live or the terminal is not
     /// attached. A server from before the message skips it.
     pub fn forget_past(&mut self, id: &SessionId) -> bool {
-        if !self.link.is_live() || !self.is_attached(id) {
+        // Attached, or asked to be: the server serves it behind the attach it was sent.
+        let streaming = self
+            .terminals
+            .get(id)
+            .is_some_and(|t| matches!(t.phase, Phase::Asked | Phase::Attached));
+        if !self.link.is_live() || !streaming {
             return false;
         }
         self.queue(Packet::about(id.clone(), Message::Forget));
@@ -1230,6 +1272,14 @@ impl Client {
         self.terminals
             .get(id)
             .is_some_and(|t| t.phase == Phase::Creating)
+    }
+
+    /// Whether the terminal is attached or the server has been asked to attach it (its answer
+    /// has not been read yet): what is typed into it goes, and what it says is served.
+    pub fn is_streaming(&self, id: &SessionId) -> bool {
+        self.terminals
+            .get(id)
+            .is_some_and(|t| matches!(t.phase, Phase::Asked | Phase::Attached))
     }
 
     /// Whether output of the terminal is flowing.
@@ -1405,6 +1455,38 @@ impl Client {
         view.every_byte = terminal.every_byte;
         view.take = terminal.take_wanted;
         view.name = self.name;
+        terminal.view = Some(view);
+        let offset = terminal.next;
+        terminal.phase = Phase::Asked;
+        terminal.retry = None;
+        self.queue(Packet::about(
+            id.clone(),
+            Message::Attach {
+                offset,
+                view: Some(view),
+            },
+        ));
+    }
+
+    /// An attach with the view the last one was sent with ([`Client::resume`]): the size is the
+    /// terminal's now, a picture and a take are not asked again, and everything else — what the
+    /// view has today and what it will have — is as it was sent. A terminal that never had an
+    /// attach sent is attached the ordinary way.
+    fn send_attach_again(&mut self, id: &SessionId) {
+        let Some(terminal) = self.terminals.get_mut(id) else {
+            return;
+        };
+        let Some(mut view) = terminal.view else {
+            self.send_attach(id);
+            return;
+        };
+        view.size = terminal.size;
+        view.picture = false;
+        view.take = false;
+        // The first attach was served, and what it was shown was answered by the owner: a
+        // question the server answered since is not shown again (`replay_wanted` is down).
+        view.picture_if_answered = !terminal.replay_wanted;
+        terminal.view = Some(view);
         let offset = terminal.next;
         terminal.phase = Phase::Asked;
         terminal.retry = None;

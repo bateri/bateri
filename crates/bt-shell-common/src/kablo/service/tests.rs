@@ -5679,9 +5679,330 @@ fn a_pane_that_takes_nothing_is_let_go_of_so_the_ones_beside_it_go_on_and_it_is_
     drop(third);
 }
 
+/// A pane of this Mac, `uuid`, that took nothing of what its terminal wrote (three times what the
+/// bridge lets wait) and has been let go of for it: its terminal's stream is stopped. Returns the
+/// pane and its terminal.
+fn a_pane_let_go_of(rig: &Rig, ledger: &Ledger, uuid: &str) -> (Pane, PaneUuid, SessionId) {
+    let pane = PaneUuid::parse(uuid).expect("a pane");
+    let stuck = Pane::of(open_local(rig, &pane).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    until("its terminal streams to it", || {
+        rig.world.bridge().is_attached(&id)
+    });
+    for number in 0..3 * HIGH_WATER / 1024 {
+        rig.world.bridge().write(&id, &kib_line(number));
+    }
+    until("the pane let go of", || {
+        !rig.world.bridge().is_attached(&id)
+    });
+    (stuck, pane, id)
+}
+
+/// Waits until the terminal is let go of again after something said to it brought its stream
+/// back: what was said has been served, which only an attached terminal does.
+fn let_go_of_again(rig: &Rig, id: &SessionId) {
+    until("let go of again", || !rig.world.bridge().is_attached(id));
+}
+
+/// A pane that is let go of for not reading what its terminal wrote is not one that has nothing
+/// to say: its keys, its size, the request to clear its past and to drop what its program left
+/// unread, and its closing all reach the terminal — which only a terminal that streams is told
+/// of — however long it takes nothing. The stream comes back for each, with the view the first
+/// attach had and none of what only a first attach does, and stops again when the pane is still
+/// taking nothing.
+#[test]
+fn a_pane_that_is_let_go_of_still_types_sizes_and_asks_of_its_terminal() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-let-go-says",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let (stuck, pane, id) = a_pane_let_go_of(&rig, &ledger, "5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A1");
+    let mut master = stuck.master.try_clone().expect("a clone");
+
+    // ⌃C: typed to the terminal, in a stream that comes back for it, with the view it had.
+    master.write_all(&[0x03]).expect("typed");
+    until("⌃C typed", || world.bridge().typed(&id) == [0x03]);
+    let attaches = world.bridge().attaches(&id);
+    assert_eq!(attaches.len(), 2, "{attaches:?}");
+    let (first, again) = (
+        attaches[0].1.expect("a view"),
+        attaches[1].1.expect("a view"),
+    );
+    assert!(
+        first.every_byte,
+        "the premise: the pane asks for every byte"
+    );
+    let mut sent_again = first;
+    sent_again.picture = false;
+    sent_again.take = false;
+    assert_eq!(
+        again, sent_again,
+        "the view it had, field by field, as it was sent"
+    );
+    let_go_of_again(&rig, &id);
+
+    // Its size.
+    stuck.ops.resize(
+        stuck.master.as_fd(),
+        PtySize {
+            cols: 120,
+            rows: 40,
+            cell_width: 8,
+            cell_height: 16,
+        },
+    );
+    until("the size", || {
+        world.bridge().size_of(&id)
+            == Some(Size {
+                cols: 120,
+                rows: 40,
+                xpixel: 960,
+                ypixel: 640,
+            })
+    });
+    let_go_of_again(&rig, &id);
+
+    // Clearing its history, and what its program left unread.
+    rig.service.forget_past(&pane);
+    until("the past forgotten", || world.bridge().forgotten(&id) == 1);
+    let_go_of_again(&rig, &id);
+    stuck.ops.drop_input(false);
+    until("the input dropped", || {
+        world.bridge().input_dropped(&id).len() == 1
+    });
+    let_go_of_again(&rig, &id);
+    assert_eq!(world.bridge().typed(&id), [0x03], "nothing else was typed");
+
+    // Closing it ends its terminal, and it is told that it has: it streams for that.
+    rig.service.end(&pane);
+    until("the hang-up", || {
+        world.bridge().terminated(&id) == Some(false)
+    });
+    until("the terminal forgotten once it ended", || {
+        ledger.terminals_of(local::ACCOUNT).is_empty()
+    });
+}
+
+/// A quit that ends the programs ends the terminal of a pane that is let go of and waits to be
+/// told that it has; one that keeps them leaves it running, in the ledger for the next launch.
+#[test]
+fn a_quit_ends_the_terminal_of_a_pane_that_is_let_go_of_and_the_one_that_keeps_leaves_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-let-go-quits",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let (_ended, ends, ending) =
+        a_pane_let_go_of(&rig, &ledger, "5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A2");
+    let started = Instant::now();
+    rig.service
+        .end_all(std::slice::from_ref(&ends), Duration::from_secs(10));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "it was told that its terminal ended, and did not wait out the quit's time"
+    );
+    assert_eq!(world.bridge().terminated(&ending), Some(false));
+    assert!(ledger.terminals_of(local::ACCOUNT).is_empty());
+
+    // The quit that keeps the programs asks nothing of the terminal of a pane that is let go of.
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-let-go-keeps",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let (_kept, _pane, kept) =
+        a_pane_let_go_of(&rig, &ledger, "5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A3");
+    rig.service.stop();
+    assert_eq!(world.bridge().terminated(&kept), None);
+    assert!(world.bridge().has(&kept));
+    assert_eq!(ledger.terminals_of(local::ACCOUNT), [kept]);
+}
+
+/// A paste that is more than the window of what the server holds for a terminal goes into a
+/// pane that is let go of whole and in order: the stream comes back for the first of it, the
+/// server's answers that open the window are taken while the stream is stopped and bring it back
+/// for the next, however many times that takes.
+#[test]
+fn a_paste_that_is_more_than_the_window_goes_whole_into_a_pane_that_is_let_go_of() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-let-go-paste",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let (stuck, _pane, id) =
+        a_pane_let_go_of(&rig, &ledger, "5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A4");
+    let paste: Vec<u8> = (0..2 * 1024 * 1024usize)
+        .map(|at| u8::try_from(at % 251 + 1).expect("a byte"))
+        .collect();
+    let writer = {
+        let mut master = stuck.master.try_clone().expect("a clone");
+        let paste = paste.clone();
+        thread::spawn(move || master.write_all(&paste).expect("pasted"))
+    };
+    let began = Instant::now();
+    while world.bridge().typed(&id).len() < paste.len() {
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "only {} of {} bytes came",
+            world.bridge().typed(&id).len(),
+            paste.len()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    writer.join().expect("the writer");
+    assert!(
+        world.bridge().typed(&id) == paste,
+        "what came is not what was pasted"
+    );
+    eprintln!(
+        "MEASURE paste: {} bytes into a pane that takes nothing, in {:?}, {} attaches",
+        paste.len(),
+        began.elapsed(),
+        world.bridge().attaches(&id).len()
+    );
+}
+
+/// An account whose panes cannot be let go of runs no clock while it is held back: the reader of
+/// its bridge waits for the count to go down and nothing looks again and again at what it cannot
+/// change. This Mac's account runs one.
+#[test]
+fn an_account_whose_panes_cannot_be_let_go_of_has_no_clock_while_it_is_held_back() {
+    let queue = Arc::new(Queue::new(false));
+    queue.raise(HIGH_WATER + 1);
+    let (told, heard) = mpsc::channel();
+    let waiting = {
+        let queue = Arc::clone(&queue);
+        thread::spawn(move || {
+            let _ = told.send(matches!(queue.wait(), Waited::Open));
+        })
+    };
+    assert!(
+        heard.recv_timeout(3 * HOLD_STALL).is_err(),
+        "it said something before the count went down"
+    );
+    queue.lower(2);
+    assert_eq!(heard.recv_timeout(Duration::from_secs(5)), Ok(true));
+    waiting.join().expect("the waiter");
+
+    // And the service's stopping ends the wait: nobody is left to be told.
+    let queue = Arc::new(Queue::new(false));
+    queue.raise(HIGH_WATER + 1);
+    let (told, heard) = mpsc::channel();
+    let waiting = {
+        let queue = Arc::clone(&queue);
+        thread::spawn(move || {
+            let _ = told.send(matches!(queue.wait(), Waited::Closed));
+        })
+    };
+    assert!(heard.recv_timeout(HOLD_STALL).is_err());
+    queue.close();
+    assert_eq!(heard.recv_timeout(Duration::from_secs(5)), Ok(true));
+    waiting.join().expect("the waiter");
+
+    // Which account's is which.
+    let rig = Rig::new("clocks");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let ledger = Arc::new(Ledger::memory());
+    let here = Rig::kept(
+        "clocks-here",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger,
+        END_GRACE,
+    );
+    let _mac = open_local(&here, &a_pane()).expect("a terminal");
+    let queues = |rig: &Rig, account: &str| {
+        let queues = rig
+            .service
+            .queues
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        queues.get(account).map(|queue| queue.stallable)
+    };
+    assert_eq!(queues(&here, local::ACCOUNT), Some(true));
+    assert_eq!(queues(&rig, "u@rasp:22"), Some(false));
+}
+
+/// The relay of a terminal stops waiting for a client that stands still after a second
+/// (`STALL_LIMIT` in kablo's `relay.rs`), and what this takes to let go of a pane that takes
+/// nothing must come well before that ([`HOLD_STALL`]'s documentation): the stuck pane's terminal
+/// and the slow one beside it share the bridge, which stands still while the stuck one is not
+/// let go of. The limit is read from kablo's source at the revision bateri pins; that this finds
+/// nothing, or a limit this is not well under, fails, so that a kablo that changes it does not
+/// pass unseen.
+#[test]
+fn the_time_a_pane_may_take_nothing_is_well_under_the_time_the_relay_waits_for_a_client() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = std::fs::read_to_string(manifest.join("../../Cargo.toml")).expect("Cargo.toml");
+    let rev = workspace
+        .lines()
+        .find(|line| line.starts_with("kablo-proto"))
+        .and_then(|line| line.split("rev = \"").nth(1))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the revision of kablo that bateri pins");
+    let cargo_home = std::env::var_os("CARGO_HOME").map_or_else(
+        || std::path::PathBuf::from(std::env::var_os("HOME").expect("a home")).join(".cargo"),
+        std::path::PathBuf::from,
+    );
+    let mut sources = Vec::new();
+    if let Ok(checkouts) = std::fs::read_dir(cargo_home.join("git/checkouts")) {
+        for repository in checkouts.flatten() {
+            if repository
+                .file_name()
+                .to_string_lossy()
+                .starts_with("kablo-")
+                && let Ok(revisions) = std::fs::read_dir(repository.path())
+            {
+                for checkout in revisions.flatten() {
+                    if rev.starts_with(&*checkout.file_name().to_string_lossy()) {
+                        sources.push(checkout.path().join("crates/kablo/src/relay.rs"));
+                    }
+                }
+            }
+        }
+    }
+    let relay = sources
+        .iter()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| panic!("kablo's relay.rs at {rev} is in none of {sources:?}"));
+    let text = std::fs::read_to_string(relay).expect("relay.rs");
+    let limit = text
+        .lines()
+        .find(|line| line.starts_with("const STALL_LIMIT: Duration"))
+        .unwrap_or_else(|| panic!("{} names no STALL_LIMIT", relay.display()));
+    let number = |after: &str| {
+        limit
+            .split(after)
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .and_then(|digits| digits.trim().parse::<u64>().ok())
+    };
+    let limit = number("from_secs(")
+        .map(Duration::from_secs)
+        .or_else(|| number("from_millis(").map(Duration::from_millis))
+        .unwrap_or_else(|| panic!("a STALL_LIMIT this cannot read: {limit}"));
+    assert!(
+        3 * HOLD_STALL <= limit,
+        "HOLD_STALL is {HOLD_STALL:?} and kablo's relay waits for a client {limit:?}: at 1.1 s against a second the slow pane beside a stuck one was given a picture three times in three"
+    );
+}
+
 #[test]
 fn the_bridge_is_held_while_what_is_queued_is_past_the_mark_and_a_clock_runs_only_then() {
-    let queue = Queue::default();
+    let queue = Queue::new(true);
     // Below the mark nothing is waited for and nothing is timed.
     assert!(matches!(queue.wait(), Waited::Open));
     // Past it, the wait ends when what is queued goes down...
@@ -5725,7 +6046,9 @@ fn what_a_holder_is_owed_counts_until_it_is_let_go_of_and_what_it_takes_moves_it
     assert!(!load.wrote(40));
     assert_eq!(queue.bytes(), 60);
     let now = Instant::now();
-    assert!(!load.stalled(now, Duration::from_millis(1)));
+    // Just moved: not stalled for a second (a limit of a millisecond fails when this thread is
+    // not run for that long between the write above and here).
+    assert!(!load.stalled(now, Duration::from_secs(1)));
     assert!(load.stalled(now + Duration::from_secs(2), Duration::from_secs(1)));
     // Let go of: what it is owed stops counting, and it is told when it has taken all.
     load.uncount();
