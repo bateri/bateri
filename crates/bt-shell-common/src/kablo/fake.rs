@@ -231,6 +231,9 @@ pub struct Bridge {
     /// The server makes the terminals it is asked for and says so only when told to
     /// ([`Bridge::hold_created`]): what is made is there, the word of it waits.
     created_held: Option<Vec<Packet>>,
+    /// The server answers a request for its list only when told to ([`Bridge::hold_lists`]): how
+    /// many requests wait.
+    lists_held: Option<u32>,
     /// The `pong`s that wait.
     held: VecDeque<Packet>,
     /// How many connections have been greeted.
@@ -269,6 +272,7 @@ impl Bridge {
             stubborn: false,
             stalled: false,
             created_held: None,
+            lists_held: None,
             held: VecDeque::new(),
             connections: 0,
             received: Vec::new(),
@@ -295,6 +299,29 @@ impl Bridge {
         for packet in self.created_held.take().unwrap_or_default() {
             self.send(&packet);
         }
+    }
+
+    /// The answers to the requests for the list of terminals wait from now on until
+    /// [`Bridge::release_lists`]: a server that is slow to say what it has.
+    pub fn hold_lists(&mut self) {
+        self.lists_held.get_or_insert(0);
+    }
+
+    /// Every request for the list since [`Bridge::hold_lists`] is answered, with what the server
+    /// has now, and the next ones at once.
+    pub fn release_lists(&mut self) {
+        for _ in 0..self.lists_held.take().unwrap_or(0) {
+            self.send_list();
+        }
+    }
+
+    fn send_list(&mut self) {
+        let all: Vec<Status> = self
+            .sessions
+            .keys()
+            .filter_map(|id| self.status(id))
+            .collect();
+        self.send(&Packet::connection(Message::ListReply(all)));
     }
 
     /// The programs take what the oldest `pings` pings were after: their `pong`s are sent.
@@ -860,14 +887,10 @@ impl Bridge {
         let Packet { session, message } = packet;
         match message {
             Message::New(spec) => self.make(session, spec),
-            Message::List => {
-                let all: Vec<Status> = self
-                    .sessions
-                    .keys()
-                    .filter_map(|id| self.status(id))
-                    .collect();
-                self.send(&Packet::connection(Message::ListReply(all)));
-            }
+            Message::List => match &mut self.lists_held {
+                Some(waiting) => *waiting += 1,
+                None => self.send_list(),
+            },
             Message::Ping(bytes) => {
                 let pong = Packet {
                     session,

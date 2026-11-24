@@ -10,7 +10,6 @@
 
 use std::time::Duration;
 
-use super::super::ledger::ViewMark;
 use super::waiting::seconds;
 
 /// How a pane that was let go of is streamed to again.
@@ -22,16 +21,13 @@ pub(super) enum Back {
     ToEnd,
 }
 
-/// What a pane shows, in the words of a line: a plain terminal, or the view a program opened
-/// over it, with the name the program gave itself when the ledger has it.
-pub(super) fn shows(view: Option<&ViewMark>) -> String {
+/// What a pane shows, in the words of a line: a plain terminal (`None`), or the view a program
+/// opened over it, with the name the program gave itself when it gave one.
+pub(super) fn shows(view: Option<Option<&str>>) -> String {
     match view {
         None => "a plain terminal".to_owned(),
-        Some(ViewMark {
-            program: Some(name),
-            ..
-        }) => format!("the view of the program {name:?}"),
-        Some(ViewMark { program: None, .. }) => "the view of a program".to_owned(),
+        Some(Some(name)) => format!("the view of the program {name:?}"),
+        Some(None) => "the view of a program".to_owned(),
     }
 }
 
@@ -60,21 +56,14 @@ pub(super) fn taken_back_line(pane: &str, shows: &str, away: Duration, how: Back
 mod tests {
     use super::*;
 
-    fn mark(program: Option<&str>) -> ViewMark {
-        ViewMark {
-            program: program.map(str::to_owned),
-            waits: None,
-        }
-    }
-
     #[test]
     fn a_pane_shows_a_plain_terminal_or_the_view_of_a_program_by_its_name() {
         assert_eq!(shows(None), "a plain terminal");
         assert_eq!(
-            shows(Some(&mark(Some("claude")))),
+            shows(Some(Some("claude"))),
             "the view of the program \"claude\""
         );
-        assert_eq!(shows(Some(&mark(None))), "the view of a program");
+        assert_eq!(shows(Some(None)), "the view of a program");
     }
 
     #[test]

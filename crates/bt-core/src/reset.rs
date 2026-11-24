@@ -43,6 +43,13 @@ pub(crate) const KEYBOARD_STACK_DEPTH: u16 = 4096;
 /// The tab stop spacing of a new terminal (alacritty's `INITIAL_TABSTOPS`).
 const TAB_STOP_EVERY: u16 = 8;
 
+/// The modes a new terminal starts in: cursor keys and keypad normal, auto-wrap on, cursor shown,
+/// no mouse reporting or encoding, no focus reports, alternate scroll on, urgency hints on, no
+/// bracketed paste, replace mode and line feed without a carriage return. (`?3` is left out: it
+/// clears the screen and `?12` is the cursor style's.)
+const NEW_MODES: &str = "\x1b[?1l\x1b>\x1b[?7h\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\
+     \x1b[?1005l\x1b[?1006l\x1b[?1007h\x1b[?1042h\x1b[?2004l\x1b[4l\x1b[20l";
+
 /// The bytes that bring a terminal of `columns` columns to what `RIS` leaves
 /// it as, except for its history: the screen that was showing is pushed into
 /// the history first (the erase of `ED 2` does it on the main screen, as on
@@ -96,15 +103,8 @@ pub fn keeping_history(columns: u16) -> Vec<u8> {
     // DECSET 1016 and 2048 are kept by the stream's wrapper, not by `Term`.
     out.push_str("\x1b[?1016l\x1b[?2048l");
 
-    // The modes a new terminal starts in: cursor keys and keypad normal,
-    // auto-wrap on, cursor shown, no mouse reporting or encoding, no focus
-    // reports, alternate scroll on, urgency hints on, no bracketed paste,
-    // replace mode and line feed without a carriage return. (`?3` is left
-    // out: it clears the screen and `?12` is the cursor style's, below.)
-    out.push_str(
-        "\x1b[?1l\x1b>\x1b[?7h\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\
-         \x1b[?1005l\x1b[?1006l\x1b[?1007h\x1b[?1042h\x1b[?2004l\x1b[4l\x1b[20l",
-    );
+    // The modes a new terminal starts in (the cursor style's is below).
+    out.push_str(NEW_MODES);
 
     // The cursor style the application chose: none.
     out.push_str("\x1b[0 q");
@@ -124,6 +124,24 @@ pub fn keeping_history(columns: u16) -> Vec<u8> {
     // stops moved it).
     out.push_str("\x1b[H");
 
+    out.into_bytes()
+}
+
+/// What a pane's terminal needs before a shell of this process takes the pane over from a
+/// program it was shown ([`crate::Ordinary`]): off the alternate screen, a plain pen and no link
+/// open, the whole screen to scroll in (no origin mode, no region), the main screen's kitty
+/// keyboard stack and pointer shapes emptied, DECSET 1016 and 2048 off and the modes a new
+/// terminal starts in — so that the shell is not left in a full-screen program's screen,
+/// reporting the mouse or wrapping its pastes. Unlike [`keeping_history`] nothing is erased and
+/// the cursor stays where it was (the region's reset homes it, so it is saved around that): what
+/// the pane showed stays above the shell.
+#[must_use]
+pub fn modes_only() -> Vec<u8> {
+    let mut out = String::from("\x1b[?1049l\x1b[0m\x1b]8;;\x1b\\\x1b7\x1b[?6l\x1b[r\x1b8");
+    keyboard_and_pointer(&mut out);
+    out.push_str("\x1b[?1016l\x1b[?2048l");
+    out.push_str(NEW_MODES);
+    out.push_str("\x1b[0 q");
     out.into_bytes()
 }
 

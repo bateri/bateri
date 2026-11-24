@@ -6309,6 +6309,96 @@ fn a_pane_that_takes_nothing_is_let_go_of_so_the_ones_beside_it_go_on_and_it_is_
     drop(third);
 }
 
+/// The lines of a pane that is let go of and of its return say what the pane shows from what the
+/// service was told, and read nothing of the ledger's file: the loop would read and parse it under
+/// the ledger's lock for every such line, while the panes it is for wait.
+#[test]
+fn the_lines_of_a_pane_let_go_of_and_of_its_return_read_nothing_of_the_ledgers_file() {
+    let dir = scratch("local-stuck-file");
+    let ledger = Arc::new(Ledger::open(dir.join("ledger")));
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-stuck-file-svc",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1B8").expect("a pane");
+    let mut stuck = Pane::of(open_local(&rig, &pane).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    // A program in it opened a view: the application writes it in the ledger for the next
+    // bateri, and tells the service.
+    ledger.set_view(local::ACCOUNT, &id, true, Some("demo"));
+    rig.service.view_changed(&id, true, Some("demo"));
+
+    let lines = 3 * HIGH_WATER / 1024;
+    for number in 0..lines {
+        world.bridge().write(&id, &kib_line(number));
+    }
+    let read_before = ledger.loads();
+    until("the line of the pane let go of", || {
+        !let_go_lines(&world).is_empty()
+    });
+    let said = let_go_lines(&world);
+    assert!(
+        said[0].contains("showing the view of the program \"demo\""),
+        "{}",
+        said[0]
+    );
+    reads_kib_lines(&mut stuck, 0, lines - 1);
+    until("the line of its return", || {
+        !taken_back_lines(&world).is_empty()
+    });
+    assert!(
+        taken_back_lines(&world)[0].contains("the view of the program \"demo\""),
+        "{:?}",
+        taken_back_lines(&world)
+    );
+    assert_eq!(
+        ledger.loads(),
+        read_before,
+        "the ledger's file was read for the lines"
+    );
+    // The view closes: the next line says a plain terminal.
+    rig.service.view_changed(&id, false, None);
+    drop(stuck);
+    rig.service.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A terminal found again whose pane had a program's view open, as the bateri before wrote it in
+/// the ledger: the line of the pane that is let go of names that program, though the application
+/// has not said anything of a view yet.
+#[test]
+fn the_line_of_a_pane_let_go_of_names_the_view_the_ledger_had_for_its_terminal_found_again() {
+    let back = Comeback::leaves("local-stuck-found-view", b"x\r\n");
+    back.ledger
+        .set_view(local::ACCOUNT, &back.terminal, true, Some("pen"));
+    let second = back.arrives();
+    let stuck = Pane::of(
+        second
+            .open_local_wait(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+            .expect("its terminal"),
+    );
+    until("its terminal streams to it", || {
+        back.world.bridge().is_attached(&back.terminal)
+    });
+    for number in 0..3 * HIGH_WATER / 1024 {
+        back.world.bridge().write(&back.terminal, &kib_line(number));
+    }
+    until("the line of the pane let go of", || {
+        !let_go_lines(&back.world).is_empty()
+    });
+    let said = let_go_lines(&back.world);
+    assert!(
+        said[0].contains("showing the view of the program \"pen\""),
+        "{}",
+        said[0]
+    );
+    drop(stuck);
+    second.stop();
+}
+
 /// The lines of the log that say a pane was let go of.
 fn let_go_lines(world: &Fake) -> Vec<String> {
     let lines = world.lines.lock().expect("lock");
@@ -6356,8 +6446,11 @@ fn a_pane_let_go_of_showing(
     let pane = PaneUuid::parse(uuid).expect("a pane");
     let stuck = Pane::of(open_local(rig, &pane).expect("a terminal"));
     let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    // A program's view in it: the application writes it in the ledger and tells the service, as
+    // `hold_service::view_changed` does.
     if let Some(program) = view {
         ledger.set_view(local::ACCOUNT, &id, true, Some(program));
+        rig.service.view_changed(&id, true, Some(program));
     }
     until("its terminal streams to it", || {
         rig.world.bridge().is_attached(&id)
@@ -7318,6 +7411,306 @@ fn an_ordinary_shell_chosen_for_the_new_terminal_that_took_the_place_of_a_found_
     });
     assert!(back.world.bridge().typed(&made).is_empty());
     second.stop();
+}
+
+/// The lines of the log that say a pane is an ordinary one: one per wait that ended so.
+fn ordinary_lines(world: &Fake) -> Vec<String> {
+    let lines = world.lines.lock().expect("lock");
+    lines
+        .iter()
+        .filter(|line| line.contains("is an ordinary one"))
+        .cloned()
+        .collect()
+}
+
+/// The choice is made while a new terminal is on its way: its row is ended at once, so that a
+/// bateri that is gone before the terminal comes leaves no row a pane would find again, and the
+/// server's refusal of it that comes after the choice says nothing more — the wait ended with the
+/// person's choice, once.
+#[test]
+fn an_ordinary_shell_chosen_for_a_new_terminal_ends_its_row_at_once_and_a_refusal_after_it_is_no_second_line()
+ {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-chose-row", world.clone(), ledger.clone(), END_GRACE);
+    world.bridge().hold_created();
+    let stream = ask_local(&rig, &a_pane());
+    until("its terminal asked for", || {
+        ledger.terminals_of(local::ACCOUNT).len() == 1
+    });
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+    assert_eq!(
+        ledger.local_terminal_of(&a_pane()),
+        None,
+        "the row stays until the terminal comes"
+    );
+    assert_eq!(ordinary_lines(&world).len(), 1);
+
+    // The server says it could not start the terminal.
+    world.bridge().inject(&kablo_proto::v1::Packet::about(
+        id.clone(),
+        kablo_proto::v1::Message::Error {
+            code: kablo_proto::v1::ErrorCode::BAD_REQUEST,
+            text: "no such shell".to_owned(),
+        },
+    ));
+    thread::sleep(Duration::from_millis(400));
+    let said = ordinary_lines(&world);
+    assert_eq!(said.len(), 1, "{said:?}");
+    let mut mac = Pane::of(stream);
+    mac.master
+        .write_all(b"echo shell_said_$((6*7))\n")
+        .expect("typed");
+    mac.reads(b"shell_said_42");
+    rig.service.stop();
+}
+
+/// The choice is made while the account of this Mac is still being made, for a pane that was to
+/// find its terminal again: the terminal stays in the ledger for the next launch, and is neither
+/// shown in a tab of its own when the account is there nor said to be the pane's.
+#[test]
+fn a_terminal_left_running_while_the_account_was_made_is_not_shown_in_a_tab_nor_named_for_the_pane()
+{
+    let back = Comeback::leaves("local-chose-found-early", b"x\r\n");
+    back.world.install_millis.store(1500, Ordering::SeqCst);
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    thread::sleep(Duration::from_millis(100));
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+    assert!(stream.status.is_ordinary());
+    // The account comes.
+    let ready = Arc::new(AtomicBool::new(false));
+    second.when_local({
+        let ready = Arc::clone(&ready);
+        move |made| ready.store(made, Ordering::SeqCst)
+    });
+    until("the account of this Mac", || ready.load(Ordering::SeqCst));
+    assert_eq!(
+        back.ledger.local_terminal_of(&back.pane),
+        Some(back.terminal.clone()),
+        "kept for the next launch"
+    );
+    assert_eq!(
+        second.unshown_local(&[]),
+        Vec::<SessionId>::new(),
+        "shown in a tab of its own beside the pane"
+    );
+    assert_eq!(
+        second.local_terminal(&back.pane),
+        None,
+        "the pane is named by the terminal it does not show"
+    );
+    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
+    drop(stream);
+    second.stop();
+}
+
+/// A terminal found again that the pane left running for an ordinary shell is not the pane's to
+/// anything that asks the application about the pane: a program's `send` and `capture` do not
+/// reach it through the pane, and the pane is not named by it.
+#[test]
+fn a_terminal_found_again_and_left_running_is_not_named_for_the_pane_that_has_a_shell() {
+    let back = Comeback::leaves("local-chose-found-named", b"x\r\n");
+    back.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    let carries = back.world.count("carry");
+    until("an attempt", || back.world.count("carry") > carries);
+    assert_eq!(
+        second.local_terminal(&back.pane),
+        Some(back.terminal.clone()),
+        "the pane's while it waits for it"
+    );
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+    assert_eq!(second.local_terminal(&back.pane), None);
+    assert_eq!(
+        back.ledger.local_terminal_of(&back.pane),
+        Some(back.terminal.clone())
+    );
+    drop(stream);
+    second.stop();
+}
+
+/// The terminal found again is attached, and the server has not said what runs in it yet, when
+/// the person's choice comes: it has come, and the choice is not taken — what was typed before it
+/// went to the terminal, which is not hidden behind a shell; what is typed after goes there too.
+#[test]
+fn a_choice_that_comes_after_the_terminal_found_again_was_attached_is_not_taken() {
+    let back = Comeback::leaves("local-chose-late", b"x\r\n");
+    back.world.bridge().hold_lists();
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    until("the terminal attached", || {
+        back.world.bridge().is_attached(&back.terminal)
+    });
+    assert!(!stream.pid.is_settled(), "its list has not come");
+    let pid = stream.pid.clone();
+    let status = Arc::clone(&stream.status);
+    let ops = Arc::clone(&stream.ops);
+    let mut mac = Pane::of(stream);
+    mac.master.write_all(b"before\r").expect("typed");
+    until("typed into the terminal", || {
+        back.world.bridge().typed(&back.terminal) == b"before\r"
+    });
+
+    ops.ordinary_instead();
+    thread::sleep(Duration::from_millis(300));
+    back.world.bridge().release_lists();
+    until("the terminal's program", || pid.get().is_some());
+    assert!(!status.is_ordinary(), "a shell took the pane");
+    assert_eq!(pid.get(), Some(crate::kablo::fake::FAKE_PID));
+    mac.master.write_all(b"after\r").expect("typed");
+    until("typed into the terminal after the click", || {
+        back.world.bridge().typed(&back.terminal) == b"before\rafter\r"
+    });
+    assert_eq!(
+        second.local_terminal(&back.pane),
+        Some(back.terminal.clone())
+    );
+    drop(mac);
+    second.stop();
+}
+
+/// A shell that takes over a stream a holder carries sets the pane's terminal back to a new
+/// terminal's modes before anything else: whatever the pane was shown, it is not left on the
+/// alternate screen, reporting the mouse or wrapping pastes.
+#[test]
+fn an_ordinary_shell_that_takes_over_a_carried_stream_sets_the_modes_back_first() {
+    let back = Comeback::leaves("local-chose-modes", b"x\r\n");
+    back.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    let carries = back.world.count("carry");
+    until("an attempt", || back.world.count("carry") > carries);
+    // Typed while it waits: the shell has it.
+    let ops = Arc::clone(&stream.ops);
+    let mut mac = Pane::of(stream);
+    mac.master
+        .write_all(b"echo early_$((2*3))\n")
+        .expect("typed");
+    ops.ordinary_instead();
+    let told = mac.reads(b"ordinary shell");
+    let line = told
+        .windows(b"ordinary shell".len())
+        .position(|window| window == b"ordinary shell")
+        .expect("the line");
+    let before = &told[..line];
+    for mode in [
+        &b"\x1b[?1049l"[..],
+        b"\x1b[?1000l",
+        b"\x1b[?1006l",
+        b"\x1b[?2004l",
+    ] {
+        assert!(
+            before.windows(mode.len()).any(|window| window == mode),
+            "{} is not set back before the line: {:?}",
+            String::from_utf8_lossy(mode),
+            String::from_utf8_lossy(before)
+        );
+    }
+    mac.reads(b"early_6");
+    assert!(back.world.bridge().typed(&back.terminal).is_empty());
+    second.stop();
+}
+
+/// The shell carried over a holder's stream writes no faster than its pane reads: what it has
+/// written and the pane has not taken is bounded, and the shell waits for the pane, as a program
+/// waits for a pane that reads slowly anywhere. Then every byte comes, in order.
+#[test]
+fn an_ordinary_shell_over_a_carried_stream_waits_for_a_pane_that_reads_nothing() {
+    let back = Comeback::leaves("local-chose-flood", b"x\r\n");
+    back.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    let carries = back.world.count("carry");
+    until("an attempt", || back.world.count("carry") > carries);
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+    let mut mac = Pane::of(stream);
+    mac.reads(b"ordinary shell");
+    let dir = scratch("local-chose-flood-marks");
+    let done = dir.join("done");
+    // Far more than a pane is let fall behind by, and then a mark that it was all written.
+    let total: usize = 48 << 20;
+    mac.master
+        .write_all(
+            format!(
+                "head -c {total} /dev/zero | tr '\\0' x; echo; echo wrote > {}; echo ALL_$((1+1))\n",
+                done.display()
+            )
+            .as_bytes(),
+        )
+        .expect("typed");
+    // The pane reads nothing for a while: the shell cannot have written it all.
+    thread::sleep(Duration::from_secs(3));
+    assert!(
+        !done.exists(),
+        "the shell wrote {total} bytes into a pane that read none of them"
+    );
+    // It reads: everything comes, and the shell is done.
+    let mut xs = 0usize;
+    let mut tail: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    while !tail.windows(5).any(|window| window == b"ALL_2") {
+        let n = mac.master.read(&mut chunk).expect("the shell's bytes");
+        assert_ne!(n, 0, "the stream ended");
+        xs += chunk[..n].iter().filter(|byte| **byte == b'x').count();
+        tail.extend_from_slice(&chunk[..n]);
+        let keep = tail.len().saturating_sub(16);
+        tail.drain(..keep);
+    }
+    assert!(xs >= total, "{xs} of {total} came");
+    until("the mark", || done.exists());
+    drop(mac);
+    second.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -63,9 +63,74 @@ pub(crate) fn asks_notification_permission(before: Option<KeepRunning>, now: Kee
     now == KeepRunning::Quit && before != Some(KeepRunning::Quit)
 }
 
+/// What a pane has that a quit ends, as [`told_of_the_end`] asks it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PaneKeeps {
+    /// It shows a terminal a server keeps.
+    pub(crate) shown: bool,
+    /// Its shell runs in a terminal of this Mac that kablo keeps.
+    pub(crate) local: bool,
+    /// It chose an ordinary shell over a terminal of this Mac it found again, which runs on
+    /// unseen ([`crate::hold_service::left_running`]).
+    pub(crate) left_running: bool,
+}
+
+/// Whether a quit tells the service of `pane` before its program is signalled: a quit that ends
+/// the programs (`ends`, by [`bt_shell_common::kablo::quit::fate`]: Quit and End Programs, and ⌘Q
+/// under `"update"` and `"crash"`) ends every terminal the pane has — the one a pane left running
+/// when it chose an ordinary shell too, whose program the quit did not ask to outlive it.
+pub(crate) fn told_of_the_end(ends: bool, pane: PaneKeeps) -> bool {
+    ends && (pane.shown || pane.local || pane.left_running)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pane that left the terminal it found again running for an ordinary shell is told of the
+    /// end by every quit that ends the programs — Quit and End Programs whatever the setting, ⌘Q
+    /// under `"update"` and `"crash"` — so that its terminal ends with the rest; by no other.
+    #[test]
+    fn a_quit_that_ends_the_programs_ends_the_terminal_a_pane_left_running() {
+        use bt_shell_common::kablo::quit::{Fate, fate};
+        let left = PaneKeeps {
+            left_running: true,
+            ..PaneKeeps::default()
+        };
+        for keep in VALUES {
+            for kind in [QuitKind::Quit, QuitKind::EndPrograms, QuitKind::Relaunch] {
+                let ends = fate(keep, kind.event()) == Fate::Ends;
+                assert_eq!(told_of_the_end(ends, left), ends, "{keep:?} {kind:?}");
+            }
+        }
+        assert!(told_of_the_end(
+            fate(KeepRunning::Update, QuitKind::Quit.event()) == Fate::Ends,
+            left
+        ));
+        assert!(told_of_the_end(
+            fate(KeepRunning::Crash, QuitKind::Quit.event()) == Fate::Ends,
+            left
+        ));
+        assert!(told_of_the_end(
+            fate(KeepRunning::Quit, QuitKind::EndPrograms.event()) == Fate::Ends,
+            left
+        ));
+        // A pane with nothing kept is not told; one with a terminal is, as before.
+        assert!(!told_of_the_end(true, PaneKeeps::default()));
+        for pane in [
+            PaneKeeps {
+                shown: true,
+                ..PaneKeeps::default()
+            },
+            PaneKeeps {
+                local: true,
+                ..PaneKeeps::default()
+            },
+        ] {
+            assert!(told_of_the_end(true, pane));
+            assert!(!told_of_the_end(false, pane));
+        }
+    }
 
     const VALUES: [KeepRunning; 3] = [KeepRunning::Update, KeepRunning::Crash, KeepRunning::Quit];
 

@@ -505,3 +505,54 @@ fn a_pane_with_no_width_gets_the_reset_without_tab_stops() {
     assert!(!reset.contains("\x1b[3g"));
     assert!(reset.contains("\x1b[2J"));
 }
+
+/// A shell that takes a pane over sets the modes back and erases nothing: off the alternate
+/// screen, every mode of a new terminal, the keyboard flags and the pointer shapes gone, and the
+/// main screen and its history as they were (nothing moved into the history either).
+#[test]
+fn the_modes_alone_are_set_back_and_the_screen_and_history_are_kept() {
+    let mut fresh = Pane::new(COLUMNS);
+    let fresh_mode = *fresh.term.mode();
+    let fresh_kept = outcome(&mut fresh).kept;
+    for alternate in [false, true] {
+        let mut pane = before(COLUMNS, alternate);
+        // What the main screen showed, and the history, before.
+        let mut main = before(COLUMNS, false);
+        let screen: Vec<String> = (0..ROWS as i32)
+            .map(|line| text(&main.term, line))
+            .collect();
+        let history = main.history();
+        pane.feed(modes_only());
+        assert_eq!(
+            *pane.term.mode(),
+            fresh_mode,
+            "alternate={alternate}: the modes of a new terminal"
+        );
+        let kept: Vec<String> = (0..ROWS as i32)
+            .map(|line| text(&pane.term, line))
+            .collect();
+        assert_eq!(kept, screen, "alternate={alternate}: the main screen");
+        assert_eq!(
+            pane.history(),
+            history,
+            "alternate={alternate}: the history"
+        );
+        let after = outcome(&mut pane);
+        assert_eq!(
+            after.kept, fresh_kept,
+            "alternate={alternate}: 1016 and 2048"
+        );
+        assert_eq!(
+            after.pointer, None,
+            "alternate={alternate}: the pointer shapes"
+        );
+        assert!(
+            after.probed.keyboard[0].is_empty(),
+            "alternate={alternate}: the keyboard stack"
+        );
+        // The pen a shell writes its first byte with is a plain one.
+        main.feed(modes_only());
+        main.feed("p");
+        assert!(!row(&main.term, 3).contains("31"), "{}", row(&main.term, 3));
+    }
+}

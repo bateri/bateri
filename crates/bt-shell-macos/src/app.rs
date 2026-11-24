@@ -7864,7 +7864,16 @@ impl AppDelegate {
         let panes: Vec<_> = self
             .all_panes()
             .iter()
-            .filter(|pane| ends_kept && (pane.shows_kept_terminal() || pane.keeps_local_terminal()))
+            .filter(|pane| {
+                crate::leaving::told_of_the_end(
+                    ends_kept,
+                    crate::leaving::PaneKeeps {
+                        shown: pane.shows_kept_terminal(),
+                        local: pane.keeps_local_terminal(),
+                        left_running: crate::hold_service::left_running(pane.uuid()),
+                    },
+                )
+            })
             .map(|pane| pane.uuid().clone())
             .collect();
         if !panes.is_empty() {

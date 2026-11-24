@@ -478,6 +478,9 @@ pub struct Ledger {
     path: Option<PathBuf>,
     /// Serializes the calls of this process and, without a path, is the ledger.
     rows: Mutex<Rows>,
+    /// How many times the file was read ([`Ledger::loads`]).
+    #[cfg(test)]
+    loads: std::sync::atomic::AtomicUsize,
 }
 
 impl Ledger {
@@ -486,6 +489,8 @@ impl Ledger {
         Ledger {
             path: Some(path),
             rows: Mutex::new(Rows::default()),
+            #[cfg(test)]
+            loads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -494,6 +499,8 @@ impl Ledger {
         Ledger {
             path: None,
             rows: Mutex::new(Rows::default()),
+            #[cfg(test)]
+            loads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -523,11 +530,20 @@ impl Ledger {
 
     fn load(&self, rows: &mut Rows) {
         if let Some(path) = &self.path {
+            #[cfg(test)]
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *rows = std::fs::read_to_string(path)
                 .ok()
                 .and_then(|text| Rows::parse(&text))
                 .unwrap_or_default();
         }
+    }
+
+    /// How many times the file has been read and parsed: what a test counts to see that a path
+    /// does not read it.
+    #[cfg(test)]
+    pub fn loads(&self) -> usize {
+        self.loads.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The server of an account, if the ledger remembers it.
@@ -557,18 +573,29 @@ impl Ledger {
     }
 
     /// A terminal bateri started (or took up again) for `pane`. One already marked
-    /// to end stays so.
-    pub fn shown(&self, account: &str, terminal: &SessionId, pane: Option<&PaneUuid>) {
-        self.change(|rows| {
-            match rows.position(account, terminal) {
-                Some(at) => {
-                    let row = &mut rows.terminals[at];
-                    if row.pane.as_ref() == pane || pane.is_none() {
-                        return (false, ());
-                    }
-                    row.pane = pane.cloned();
+    /// to end stays so. Returns what the row says of the view its pane had open (one taken up
+    /// again may have one: [`Ledger::view_mark`]), read in the same pass.
+    pub fn shown(
+        &self,
+        account: &str,
+        terminal: &SessionId,
+        pane: Option<&PaneUuid>,
+    ) -> Option<ViewMark> {
+        self.change(|rows| match rows.position(account, terminal) {
+            Some(at) => {
+                let row = &mut rows.terminals[at];
+                let view = row.view.then(|| ViewMark {
+                    program: row.program.clone(),
+                    waits: row.waits,
+                });
+                if row.pane.as_ref() == pane || pane.is_none() {
+                    return (false, view);
                 }
-                None => rows.terminals.push(Row {
+                row.pane = pane.cloned();
+                (true, view)
+            }
+            None => {
+                rows.terminals.push(Row {
                     account: account.to_owned(),
                     terminal: terminal.clone(),
                     pane: pane.cloned(),
@@ -576,10 +603,10 @@ impl Ledger {
                     view: false,
                     program: None,
                     waits: None,
-                }),
+                });
+                (true, None)
             }
-            (true, ())
-        });
+        })
     }
 
     /// The terminal was asked to end: the row stays until it is seen to have.

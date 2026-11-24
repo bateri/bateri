@@ -977,6 +977,12 @@ enum Msg {
     /// The person chose an ordinary shell in place of the terminal a pane waits for: the
     /// request's ticket says which ([`bt_core::PtyOps::ordinary_instead`]).
     Ordinary(Arc<ask::Ticket>),
+    /// A view opened in the pane a terminal of this Mac carries, by a program of that name if it
+    /// gave one (`Some`), or none is open (`None`) ([`Service::view_changed`]).
+    View {
+        terminal: SessionId,
+        program: Option<Option<String>>,
+    },
     /// The counter was asked for the number of the terminal a pane of this Mac wants
     /// ([`Core::local_numbered`]).
     LocalNumbered {
@@ -1566,6 +1572,9 @@ pub struct Service {
     /// The program in front of each terminal of this Mac that a pane has, as the loop last wrote
     /// it ([`Service::local_program`]).
     local_programs: Arc<Mutex<HashMap<SessionId, String>>>,
+    /// The panes that chose an ordinary shell over a terminal found again, as the loop keeps them
+    /// ([`Service::left_running`]).
+    left_running: Arc<Mutex<HashSet<PaneUuid>>>,
     /// The terminals each account keeps in the background, as the loop last wrote them.
     background: Arc<Mutex<BTreeMap<String, Kept>>>,
     /// The terminals each account's server lists that are no longer running and that no pane
@@ -1654,6 +1663,7 @@ impl Service {
         let kept_backend = Arc::clone(&backend);
         let shown = Arc::new(Mutex::new(HashMap::new()));
         let local_programs = Arc::new(Mutex::new(HashMap::new()));
+        let left_running = Arc::new(Mutex::new(HashSet::new()));
         let background = Arc::new(Mutex::new(BTreeMap::new()));
         let exited = Arc::new(Mutex::new(BTreeMap::new()));
         let stages = Arc::new(Mutex::new(HashMap::new()));
@@ -1680,7 +1690,8 @@ impl Service {
             awaiting: BTreeMap::new(),
             end_on_arrival: BTreeSet::new(),
             ordinaries: BTreeMap::new(),
-            left_running: HashSet::new(),
+            left_running: Arc::clone(&left_running),
+            views: HashMap::new(),
             arrived: Vec::new(),
             shown: Arc::clone(&shown),
             local_programs: Arc::clone(&local_programs),
@@ -1723,6 +1734,7 @@ impl Service {
             threads: Mutex::new(vec![accepting, serving]),
             shown,
             local_programs,
+            left_running,
             background,
             exited,
             ledger: kept_ledger,
@@ -2076,6 +2088,46 @@ impl Service {
         self.ledger.local_terminal_of(pane).is_some()
     }
 
+    /// Whether `pane` chose an ordinary shell over the terminal it found again, which runs on
+    /// unseen ([`Core::choose_ordinary`]): it keeps its row in the ledger and is shown again by the
+    /// next launch, and a quit that ends the programs ends it.
+    pub fn left_running(&self, pane: &PaneUuid) -> bool {
+        lock(&self.left_running).contains(pane)
+    }
+
+    /// The terminal of this Mac that carries `pane`'s bytes, as far as anything that asks the
+    /// application about the pane goes (a program's `send` and `capture`, the name of the pane in
+    /// `ls`, the view a program opens in it). A pane that left the terminal it found again
+    /// running for an ordinary shell has none: the terminal is still the pane's in the ledger,
+    /// for the next launch, but what the pane runs now is the shell.
+    pub fn local_terminal(&self, pane: &PaneUuid) -> Option<SessionId> {
+        if self.left_running(pane) {
+            return None;
+        }
+        self.ledger.local_terminal_of(pane)
+    }
+
+    /// The terminals of this Mac that are meant to live and that none of `shown` carries
+    /// ([`Ledger::unshown_local`]): what a launch shows again in tabs of their own. A terminal a
+    /// pane left running for an ordinary shell is the pane's still, and waits for the next launch
+    /// (it is not shown beside the pane that did not want to wait for it).
+    pub fn unshown_local(&self, shown: &[PaneUuid]) -> Vec<SessionId> {
+        let mut panes = shown.to_vec();
+        panes.extend(lock(&self.left_running).iter().cloned());
+        self.ledger.unshown_local(&panes)
+    }
+
+    /// A view opened (`open`, by the program that calls itself `program`) or closed in the pane
+    /// whose terminal of this Mac is `terminal`: what the log says the pane shows when it is let
+    /// go of ([`Core::stalled`]), kept by the loop so that it reads no file for it. The ledger,
+    /// which the next bateri reads, is the caller's to write.
+    pub fn view_changed(&self, terminal: &SessionId, open: bool, program: Option<&str>) {
+        let _ = self.tx.send(Msg::View {
+            terminal: terminal.clone(),
+            program: open.then(|| program.map(str::to_owned)),
+        });
+    }
+
     /// A terminal for `pane`, waited for: [`Service::submit_local`] and then until the terminal's
     /// process id is known on the stream, or the pane was given an ordinary shell instead, or
     /// `wait` is over. What a test that wants the terminal asks.
@@ -2341,11 +2393,17 @@ struct Core {
     /// The ordinary shells that carry a pane's stream in place of a terminal the person did not
     /// wait for ([`Core::choose_ordinary`]), by the holder of the stream: what the pane types
     /// goes to them.
-    ordinaries: BTreeMap<HoldId, Arc<bt_core::Ordinary>>,
+    ordinaries: BTreeMap<HoldId, ask::Carried>,
     /// The panes that chose an ordinary shell over a terminal found again, which was left
     /// running: the close of such a pane ends nothing, a quit that ends the programs ends the
-    /// terminal ([`Core::end_all`]).
-    left_running: HashSet<PaneUuid>,
+    /// terminal ([`Core::end_all`]). Shared with [`Service::left_running`]: the application asks
+    /// it of a pane, and a pane in it has no terminal of this Mac to anything that asks.
+    left_running: Arc<Mutex<HashSet<PaneUuid>>>,
+    /// The program whose view is open in the pane each terminal of this Mac carries, as the
+    /// application said it ([`Service::view_changed`], `None`: a view of a program that gave no
+    /// name), or as the ledger had it when the terminal was found again: what a line of the log
+    /// says a pane showed, read without the ledger's file.
+    views: HashMap<SessionId, Option<String>>,
     /// What the bridge's readers have sent the loop that it has taken in and not settled
     /// ([`Queue::settled`]), by the queue the reader counted it in.
     arrived: Vec<(Arc<Queue>, usize)>,
@@ -2532,14 +2590,16 @@ impl Core {
                 conn.suspended = Some(now);
                 owed = conn.load.uncount_owing();
             }
-            // Said before what may follow from it: a pane that is owed nothing is taken back at
-            // once, and its line would come first.
+            // The writer took the last of what the pane was owed while it was being let go of:
+            // it is taken back at once, and a pair of lines about a pane that owed nothing would
+            // say nothing.
+            if owed == 0 {
+                self.awaken_saying(hold, false);
+                continue;
+            }
             let line =
                 let_go::let_go_line(&self.pane_of(hold), &self.shows(hold), owed, HOLD_STALL);
             self.shared.backend.log_line(&line);
-            if owed == 0 {
-                self.drained(hold);
-            }
         }
     }
 
@@ -2551,14 +2611,15 @@ impl Core {
     }
 
     /// What the pane of `hold` shows, as a line of the log says it: a plain terminal, or the view
-    /// of a program the terminal's record has open ([`Ledger::view_mark`]), with its name. The
-    /// ledger is read, not the pane: the pane is what is not heard from when it is let go of.
+    /// of a program, with its name, as the application last said it ([`Core::views`]). Not the
+    /// pane, which is what is not heard from when it is let go of, and not the ledger's file,
+    /// which the loop would read and parse under the ledger's lock for every line.
     fn shows(&self, hold: HoldId) -> String {
         let view = self
             .hub
             .terminal_of(hold)
-            .and_then(|(account, terminal)| self.shared.ledger.view_mark(account, terminal));
-        let_go::shows(view.as_ref())
+            .and_then(|(_, terminal)| self.views.get(terminal));
+        let_go::shows(view.map(Option::as_deref))
     }
 
     /// A pane that was let go of ([`Core::stalled`]) has taken all it was owed: its terminal's
@@ -2579,6 +2640,11 @@ impl Core {
     /// attached from the byte after the last the pane was given, and what the pane is owed counts
     /// against the account again (it has taken all it was owed: [`Core::drained`]).
     fn awaken(&mut self, hold: HoldId) {
+        self.awaken_saying(hold, true);
+    }
+
+    /// [`Core::awaken`], with the line of the return when `say` (the pane's going was said).
+    fn awaken_saying(&mut self, hold: HoldId, say: bool) {
         let Some(conn) = self.conns.get_mut(&hold) else {
             return;
         };
@@ -2587,6 +2653,9 @@ impl Core {
         };
         conn.load.recount();
         self.hub.awake(hold);
+        if !say {
+            return;
+        }
         let line = let_go::taken_back_line(
             &self.pane_of(hold),
             &self.shows(hold),
@@ -2727,8 +2796,8 @@ impl Core {
             Msg::Accepted(stream, peer) => self.accepted(stream, peer),
             Msg::Hold(hold, bytes) => {
                 // The pane's stream is carried by an ordinary shell: what is typed is its input.
-                if let Some(shell) = self.ordinaries.get(&hold) {
-                    shell.write(bytes);
+                if let Some(carried) = self.ordinaries.get(&hold) {
+                    carried.shell.write(bytes);
                 } else {
                     self.say(hold, |hub| hub.push(hold, &bytes));
                     self.meter(hold);
@@ -2941,6 +3010,14 @@ impl Core {
                     self.choose_ordinary(hold);
                 }
             }
+            Msg::View { terminal, program } => match program {
+                Some(program) => {
+                    self.views.insert(terminal, program);
+                }
+                None => {
+                    self.views.remove(&terminal);
+                }
+            },
             Msg::LocalNumbered { hold, number } => {
                 if let Some(awaiting) = self.awaiting.get_mut(&hold) {
                     awaiting.parts.name = terminal_named(number);
@@ -3721,7 +3798,7 @@ impl Core {
     fn end(&mut self, pane: &PaneUuid, now: Instant) {
         // A pane that chose an ordinary shell over a terminal found again closes only the shell:
         // the terminal was left running, and the next bateri shows it again.
-        self.left_running.remove(pane);
+        lock(&self.left_running).remove(pane);
         let (coming, unbound) = self.end_coming(pane);
         for (account, terminal) in self.terminals_of(pane).into_iter().chain(unbound) {
             // A terminal another computer took is that computer's: closing the dimmed pane that
@@ -3826,8 +3903,7 @@ impl Core {
             let (coming, unbound) = self.end_coming(pane);
             // A terminal found again that the pane chose an ordinary shell over was left running:
             // a quit that ends the programs ends it.
-            let left: Vec<(String, SessionId)> = self
-                .left_running
+            let left: Vec<(String, SessionId)> = lock(&self.left_running)
                 .remove(pane)
                 .then(|| self.shared.ledger.local_terminal_of(pane))
                 .flatten()
@@ -4009,6 +4085,18 @@ impl Core {
             .copied()
             .collect();
         for hold in ended {
+            // The person chose a shell while the terminal was on its way: the wait ended then,
+            // with its line, and the pane has its shell; what the server says of the terminal now
+            // is nobody's.
+            if self
+                .awaiting
+                .get(&hold)
+                .is_some_and(|awaiting| awaiting.chosen)
+            {
+                self.awaiting.remove(&hold);
+                self.hub.closed(hold);
+                continue;
+            }
             if self
                 .awaiting
                 .get(&hold)
@@ -4576,7 +4664,10 @@ impl Core {
     ///
     /// A stream a holder carries already (the last two) cannot be given to a shell by handing
     /// over its ends, so the shell writes to the holder's writer and what the holder reads of the
-    /// pane goes to the shell ([`Msg::Hold`]).
+    /// pane goes to the shell ([`Msg::Hold`]). A choice that comes after the terminal has come
+    /// as far as the pane — attached, or taking what the pane types — is not taken: the pane
+    /// may have been shown some of it, or typed into it, and the line goes as the terminal is
+    /// shown ([`Core::found`] has its program).
     fn choose_ordinary(&mut self, hold: HoldId) {
         let Some(awaiting) = self.awaiting.get_mut(&hold) else {
             return;
@@ -4593,9 +4684,14 @@ impl Core {
             // The stream is not carried yet: a shell takes the ends the service has.
             if awaiting.terminal.is_none() {
                 if found_again {
-                    self.left_running.insert(pane);
+                    lock(&self.left_running).insert(pane);
                 }
                 return self.refuse_local(hold, why);
+            }
+            // The terminal asked for has no row from now on: a bateri that is gone before it
+            // comes leaves nothing a pane would find again, and the next connection ends it.
+            if let Some(terminal) = &awaiting.terminal {
+                self.shared.ledger.end(local::ACCOUNT, terminal);
             }
             let behind = awaiting.parts.lend_behind();
             awaiting.parts.trace.refuse(why);
@@ -4610,7 +4706,26 @@ impl Core {
             awaiting.end_asked = true;
             return;
         }
-        // A holder carries the stream.
+        // A holder carries the stream. The terminal has come if the server attached it (its past
+        // may be on the pane's screen) or it takes what the pane types (what was typed before
+        // the click went to it): the choice came too late, and the terminal is the pane's.
+        let arrived = self.hub.is_attached(hold)
+            || self
+                .conns
+                .get(&hold)
+                .is_some_and(|conn| !conn.waits_for_input);
+        if arrived {
+            // The wait goes on to its end as if the choice had not been made, and the log says
+            // so: a click on the link that did nothing is a question someone asks.
+            if let Some(awaiting) = self.awaiting.get_mut(&hold) {
+                awaiting.chosen = false;
+                self.shared.backend.log_line(&format!(
+                    "the pane {} chose an ordinary shell after its terminal had come: it is shown its terminal",
+                    awaiting.parts.pane.as_str()
+                ));
+            }
+            return;
+        }
         let Some(awaiting) = self.awaiting.remove(&hold) else {
             return;
         };
@@ -4622,7 +4737,7 @@ impl Core {
         } = awaiting;
         self.hub.let_go_raw(hold);
         if resumed.is_some() {
-            self.left_running.insert(pane);
+            lock(&self.left_running).insert(pane);
         } else if let Some(terminal) = terminal {
             self.shared.ledger.end(local::ACCOUNT, &terminal);
             self.end_on_arrival
@@ -4828,9 +4943,15 @@ impl Core {
             }
         };
         self.remember_account(account);
-        self.shared
+        let view = self
+            .shared
             .ledger
             .shown(account, &terminal, Some(&awaiting.parts.pane));
+        // A terminal found again may have a program's view open from before: what a line of the
+        // log says the pane shows until the application says otherwise ([`Core::views`]).
+        if let Some(view) = view {
+            self.views.insert(terminal.clone(), view.program);
+        }
         self.panes.insert(hold, awaiting.parts.pane.clone());
         awaiting.parts.trace.enter(waiting::Step::Server);
         awaiting.terminal = Some(terminal);

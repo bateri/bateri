@@ -105,6 +105,7 @@ pub use png_out::encode_png;
 pub use pointer::PointerShape;
 pub use program_status::{ProgramActivity, ProgramReport, State as ProgramState};
 pub use reset::keeping_history as reset_keeping_history;
+pub use reset::modes_only as reset_modes;
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,
     escape as escape_search,

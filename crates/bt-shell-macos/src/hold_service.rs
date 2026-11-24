@@ -89,7 +89,10 @@ pub(crate) fn when_local(done: impl FnOnce(bool) + Send + 'static) {
 /// launch's start (a crash under `keep_running = "update"`, [`end_leftovers`]) was decided before,
 /// and what the table says of a quit was done by the quit itself.
 pub(crate) fn unshown_local(shown: &[PaneUuid]) -> Vec<SessionId> {
-    ledger().unshown_local(shown)
+    match SERVICE.get() {
+        Some(service) => service.unshown_local(shown),
+        None => ledger().unshown_local(shown),
+    }
 }
 
 /// Whether the ledger has a terminal of this Mac that is meant to live: a launch that asks it
@@ -141,13 +144,36 @@ pub(crate) fn drop_shown(pane: &PaneUuid) {
     }
 }
 
+/// Whether `pane` chose an ordinary shell over the terminal of this Mac it found again, which runs
+/// on unseen ([`Service::left_running`]): a quit that ends the programs ends it. `false` in a
+/// process without the service.
+pub(crate) fn left_running(pane: &PaneUuid) -> bool {
+    SERVICE
+        .get()
+        .is_some_and(|service| service.left_running(pane))
+}
+
+/// The terminal of this Mac whose row in the ledger is the pane's own — the one that carries its
+/// bytes —, as far as what the pane runs goes: a pane that left the terminal it found again
+/// running for an ordinary shell has none ([`Service::local_terminal`]), so that what its shell
+/// does is not written on that terminal's row nor read from it.
+fn own_terminal(pane: &PaneUuid) -> Option<SessionId> {
+    match SERVICE.get() {
+        Some(service) => service.local_terminal(pane),
+        None => ledger().local_terminal_of(pane),
+    }
+}
+
 /// A view opened or closed in the pane: said beside the terminal of this Mac that carries its
-/// bytes ([`Ledger::set_view`]), with the name the program gave itself when it opened. An opening
-/// ends a wait of the view before it.
+/// bytes ([`Ledger::set_view`]), with the name the program gave itself when it opened, and to the
+/// service, whose log says what a pane that is let go of shows ([`Service::view_changed`]). An
+/// opening ends a wait of the view before it.
 pub(crate) fn view_changed(pane: &PaneUuid, open: bool, program: Option<&str>) {
-    let ledger = ledger();
-    if let Some(terminal) = ledger.local_terminal_of(pane) {
-        ledger.set_view(local::ACCOUNT, &terminal, open, program);
+    if let Some(terminal) = own_terminal(pane) {
+        ledger().set_view(local::ACCOUNT, &terminal, open, program);
+        if let Some(service) = SERVICE.get() {
+            service.view_changed(&terminal, open, program);
+        }
     }
 }
 
@@ -155,25 +181,21 @@ pub(crate) fn view_changed(pane: &PaneUuid, open: bool, program: Option<&str>) {
 /// said ([`Service::local_program`]); `None` where it has not said, and in a process without the
 /// service.
 pub(crate) fn local_program(pane: &PaneUuid) -> Option<String> {
-    let terminal = ledger().local_terminal_of(pane)?;
+    let terminal = own_terminal(pane)?;
     SERVICE.get()?.local_program(&terminal)
 }
 
 /// What the ledger says of the view the pane's terminal of this Mac had open when it was last
 /// said ([`Ledger::view_mark`]); `None` when it had none.
 pub(crate) fn view_mark(pane: &PaneUuid) -> Option<ViewMark> {
-    let ledger = ledger();
-    ledger
-        .local_terminal_of(pane)
-        .and_then(|terminal| ledger.view_mark(local::ACCOUNT, &terminal))
+    own_terminal(pane).and_then(|terminal| ledger().view_mark(local::ACCOUNT, &terminal))
 }
 
 /// The view the pane's terminal of this Mac had open waits for the person, and why, or does not
 /// any more ([`Ledger::set_view_waits`]).
 pub(crate) fn view_waits(pane: &PaneUuid, waits: Option<WaitCause>) {
-    let ledger = ledger();
-    if let Some(terminal) = ledger.local_terminal_of(pane) {
-        ledger.set_view_waits(local::ACCOUNT, &terminal, waits);
+    if let Some(terminal) = own_terminal(pane) {
+        ledger().set_view_waits(local::ACCOUNT, &terminal, waits);
     }
 }
 
@@ -239,7 +261,7 @@ pub(crate) fn local_terminal(pane: &PaneUuid) -> Option<SessionId> {
     if shown(pane).is_some() {
         return None;
     }
-    ledger().local_terminal_of(pane)
+    own_terminal(pane)
 }
 
 /// [`shown`] for a pane of this Mac, as far as a program that asks the app something needs it:

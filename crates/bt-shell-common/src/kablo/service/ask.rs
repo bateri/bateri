@@ -23,7 +23,7 @@ use bt_core::{
 };
 use kablo_proto::v1::NewSession;
 
-use super::{Backend, HoldId, Load, Msg, Out, SessionId, Size, waiting, widen};
+use super::{Backend, HoldId, Load, Msg, Out, Queue, SessionId, Size, Waited, waiting, widen};
 
 /// What a pane's session says to its terminal, before and after the terminal is there. Made by
 /// the pane with its stream and kept by the loop, which binds it to the terminal's holder: until
@@ -531,16 +531,35 @@ pub(super) fn ordinary_behind(behind: Behind, why: &str) {
     }
 }
 
+/// An ordinary shell that carries a holder's stream ([`ordinary_carried`]), and what it has written
+/// and the pane has not read. Dropping it (the holder is gone) lets a shell that waits for its pane
+/// go on to its end.
+pub(super) struct Carried {
+    pub(super) shell: Arc<Ordinary>,
+    queue: Arc<Queue>,
+}
+
+impl Drop for Carried {
+    fn drop(&mut self) {
+        self.queue.close();
+    }
+}
+
 /// Gives a stream that a holder of the loop carries an ordinary shell of this process: what the
 /// shell writes goes to the holder's writer (`out`), and how it ended is written in the stream's
 /// status before the writer is told to close, so that the pane has read every byte when it hears
 /// its program is gone. What the pane types is the loop's to give the shell it returns
 /// ([`super::Core::choose_ordinary`]). `None` when no shell could be started: the pane is told.
-pub(super) fn ordinary_carried(
-    behind: Behind,
-    out: Sender<Out>,
-    why: &str,
-) -> Option<Arc<Ordinary>> {
+///
+/// The shell writes no faster than the pane reads, as a program of a terminal does: what it has
+/// written and the pane has not taken is counted, and past [`super::HIGH_WATER`] the shell's
+/// terminal is not read until the pane has taken some, so that its program waits for the pane and
+/// a pane that reads nothing does not fill the memory of the process.
+///
+/// The pane may have been shown something before the shell (a screen a program left on the
+/// alternate screen, its mouse reporting on): the terminal's modes are set back first
+/// ([`bt_core::reset_modes`]), what it showed staying where it is.
+pub(super) fn ordinary_carried(behind: Behind, out: Sender<Out>, why: &str) -> Option<Carried> {
     let Behind {
         mut launch,
         status,
@@ -553,21 +572,34 @@ pub(super) fn ordinary_carried(
     if let Some(silence) = &silence {
         silence.close();
     }
-    let say = |out: &Sender<Out>, bytes: Vec<u8>| {
-        let load = Load::alone(bytes.len());
-        let _ = out.send(Out::Bytes(bytes, load));
+    // What the shell has written and the pane has not taken, counted apart from the account's
+    // terminals: a shell that waits for its pane holds nobody else back.
+    let queue = Arc::new(Queue::new(false));
+    let load = Load::new();
+    let say = {
+        let (queue, load) = (Arc::clone(&queue), Arc::clone(&load));
+        move |out: &Sender<Out>, bytes: Vec<u8>| {
+            load.add(bytes.len(), &queue);
+            out.send(Out::Bytes(bytes, Arc::clone(&load))).is_ok()
+        }
     };
-    say(&out, refusal_line(why));
+    let mut first = bt_core::reset_modes();
+    first.extend_from_slice(&refusal_line(why));
+    let _ = say(&out, first);
     if let Some(size) = ticket.state().last {
         launch.size = size;
     }
     let shell = {
         let (output, closing, status) = (out.clone(), out.clone(), Arc::clone(&status));
+        let (say, queue) = (say.clone(), Arc::clone(&queue));
         Ordinary::start(
             &launch,
             move |bytes| {
-                let load = Load::alone(bytes.len());
-                let _ = output.send(Out::Bytes(bytes, load));
+                // Past the mark the shell's terminal is not read until the pane has taken some, or
+                // until the holder is gone and nobody waits for what it writes.
+                if say(&output, bytes) {
+                    let _: Waited = queue.wait();
+                }
             },
             move |how: Ended| {
                 match how {
@@ -588,10 +620,10 @@ pub(super) fn ordinary_carried(
                 shell.resize(size);
             }
             pid.set(shell.pid());
-            Some(shell)
+            Some(Carried { shell, queue })
         }
         Err(error) => {
-            say(
+            let _ = say(
                 &out,
                 format!("\x1b[2mbateri: no shell could be started: {error}\x1b[0m\r\n")
                     .into_bytes(),
