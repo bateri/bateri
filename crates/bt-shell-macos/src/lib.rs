@@ -55,6 +55,7 @@ mod card_gesture;
 mod carry;
 mod clipboard;
 mod context_menu;
+mod dev_fault;
 pub mod embed;
 mod footer;
 mod hold_service;

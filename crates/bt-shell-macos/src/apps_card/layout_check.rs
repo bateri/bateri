@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use bt_shell_common::apps::card::{Card, Coming, Row, Stage};
+use bt_shell_common::apps::card::{Card, Coming, Row, Stage, Why};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
@@ -62,6 +62,7 @@ fn scenes() -> Vec<(&'static str, Card, f64)> {
     let made = |host: &str, names: &[&str]| {
         Card::new(host, names.iter().map(|name| row(name)).collect()).expect("rows make a card")
     };
+    let waiting = |program: &str, why: Why| Card::for_waiting_view(Some(program), why);
     let mut none = made("dev-1", &["textpen", "notes"]);
     none.toggle(0);
     none.toggle(1);
@@ -258,6 +259,65 @@ fn scenes() -> Vec<(&'static str, Card, f64)> {
         ("failed-narrow", failed, PANE.1),
         ("failed-long", long_why, PANE.1),
         ("done", done, PANE.1),
+        // The notices: a program's view that waits (after a quit, after a page failed, with a long
+        // name and with none) and the windows a launch gave up.
+        ("notice-view-quit", waiting("linearpen", Why::Quit), PANE.1),
+        (
+            "notice-view-quit-narrow",
+            waiting("linearpen", Why::Quit),
+            PANE.1,
+        ),
+        (
+            "notice-view-quit-narrowest",
+            waiting("linearpen", Why::Quit),
+            420.0,
+        ),
+        ("notice-view-quit-low", waiting("linearpen", Why::Quit), LOW),
+        (
+            "notice-view-quit-over-floating",
+            waiting("linearpen", Why::Quit),
+            PANE.1,
+        ),
+        (
+            "notice-view-quit-under-find",
+            waiting("linearpen", Why::Quit),
+            PANE.1,
+        ),
+        (
+            "notice-view-quit-long-name",
+            waiting(
+                "a-very-long-program-name-that-a-person-gave-their-own-view",
+                Why::Quit,
+            ),
+            PANE.1,
+        ),
+        (
+            "notice-view-quit-unnamed",
+            Card::for_waiting_view(None, Why::Quit),
+            PANE.1,
+        ),
+        (
+            "notice-view-stopped",
+            waiting("linearpen", Why::Stopped),
+            PANE.1,
+        ),
+        (
+            "notice-view-stopped-narrow",
+            waiting("linearpen", Why::Stopped),
+            PANE.1,
+        ),
+        ("notice-windows", Card::for_given_up_windows(), PANE.1),
+        (
+            "notice-windows-narrow",
+            Card::for_given_up_windows(),
+            PANE.1,
+        ),
+        (
+            "notice-windows-narrowest",
+            Card::for_given_up_windows(),
+            420.0,
+        ),
+        ("notice-windows-low", Card::for_given_up_windows(), LOW),
         (
             "long-host",
             made(

@@ -629,7 +629,9 @@ pub trait Backend: Send + Sync + 'static {
     /// appearing (a program already in front) or going (the pane has the server's
     /// icon again), and when the server first says what is in front, whatever it is
     /// (a pane handed over with a program's view over the terminal waits for that
-    /// word). Called on the service's thread; the application hops to its own.
+    /// word). Told also where the program in front of a pane's terminal on this Mac is another
+    /// one by name ([`Service::local_program`]). Called on the service's thread; the application
+    /// hops to its own.
     fn program_changed(&self, _pane: &PaneUuid) {}
 
     /// The terminals the account's server keeps in the background
@@ -1429,6 +1431,7 @@ impl Service {
             awaiting: BTreeMap::new(),
             shown: Arc::clone(&shown),
             local_programs: Arc::clone(&local_programs),
+            local_told: HashMap::new(),
             roster: BTreeMap::new(),
             relist: BTreeSet::new(),
             fresh: BTreeSet::new(),
@@ -2036,6 +2039,9 @@ struct Core {
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
     /// What [`Service::local_program`] reads.
     local_programs: Arc<Mutex<HashMap<SessionId, String>>>,
+    /// The program in front of the terminal of this Mac each pane has, as it was last told
+    /// ([`Backend::program_changed`]).
+    local_told: HashMap<PaneUuid, String>,
     /// What each account's server last said of its terminals.
     roster: BTreeMap<String, Roster>,
     /// The accounts to ask for their terminals again before anything else is done.
@@ -2905,6 +2911,7 @@ impl Core {
         }
         let mut shown = HashMap::new();
         let mut local_programs = HashMap::new();
+        let mut local_told = HashMap::new();
         for (hold, pane) in &self.panes {
             let Some((account, terminal)) = self.hub.terminal_of(*hold) else {
                 continue;
@@ -2929,6 +2936,7 @@ impl Core {
             // that is kept apart.
             if local::is_account(account) {
                 if let Some(program) = program {
+                    local_told.insert(pane.clone(), program.clone());
                     local_programs.insert(terminal.clone(), program);
                 }
                 continue;
@@ -3024,6 +3032,14 @@ impl Core {
             if kind_of(&before, pane) != kind_of(&shown, pane)
                 || (said(&shown, pane) && !said(&before, pane))
             {
+                self.shared.backend.program_changed(pane);
+            }
+        }
+        // A terminal of this Mac has no kind to tell, but what is in front of it is news too: a
+        // program's view that waits for the person is over when the program is.
+        let told = std::mem::replace(&mut self.local_told, local_told);
+        for pane in self.local_told.keys().chain(told.keys()) {
+            if told.get(pane) != self.local_told.get(pane) {
                 self.shared.backend.program_changed(pane);
             }
         }

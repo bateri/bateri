@@ -74,6 +74,8 @@ fn rich() -> Rows {
         pane: Some(pane()),
         ending: false,
         view: false,
+        program: None,
+        waits: false,
     });
     rows.terminals.push(Row {
         account: "root@prod:22".to_owned(),
@@ -81,6 +83,8 @@ fn rich() -> Rows {
         pane: None,
         ending: false,
         view: false,
+        program: None,
+        waits: false,
     });
     rows.terminals.push(Row {
         account: "gone@elsewhere:22".to_owned(),
@@ -88,6 +92,8 @@ fn rich() -> Rows {
         pane: None,
         ending: true,
         view: false,
+        program: None,
+        waits: false,
     });
     rows
 }
@@ -135,6 +141,8 @@ fn richer() -> Rows {
         pane: Some(pane()),
         ending: false,
         view: false,
+        program: None,
+        waits: false,
     });
     rows
 }
@@ -273,7 +281,7 @@ fn a_row_with_a_root_is_understood_exactly_or_not_at_all() {
             "0.2.0-dev+222309ff9090 .local/share/bateri/kablo .local/share/kablo\n",
         ),
         // A version this bateri does not know.
-        V3_FIXTURE.replacen("bateri-kablo 3", "bateri-kablo 4", 1),
+        V3_FIXTURE.replacen("bateri-kablo 3", "bateri-kablo 5", 1),
     ] {
         assert_eq!(Rows::parse(&text), None, "{text:?}");
     }
@@ -382,7 +390,7 @@ fn the_view_of_a_pane_and_the_departure_for_an_update_outlive_the_process() {
     ledger.remember(&local::host(), &mac_installed);
     ledger.shown(local::ACCOUNT, &id("t1"), Some(&pane()));
     assert!(!ledger.view_of(local::ACCOUNT, &id("t1")));
-    ledger.set_view(local::ACCOUNT, &id("t1"), true);
+    ledger.set_view(local::ACCOUNT, &id("t1"), true, None);
     ledger.leave_for_update();
     // Another process: it reads the file.
     let next = Ledger::open(path);
@@ -393,11 +401,121 @@ fn the_view_of_a_pane_and_the_departure_for_an_update_outlive_the_process() {
         !next.arrived_by_update(),
         "said once: the launch after a crash is not the update's"
     );
-    next.set_view(local::ACCOUNT, &id("t1"), false);
+    next.set_view(local::ACCOUNT, &id("t1"), false, None);
     assert!(!next.view_of(local::ACCOUNT, &id("t1")));
     // A terminal the ledger does not have has no view, and saying one changes nothing.
-    next.set_view(local::ACCOUNT, &id("nope"), true);
+    next.set_view(local::ACCOUNT, &id("nope"), true, None);
     assert!(!next.view_of(local::ACCOUNT, &id("nope")));
+}
+
+/// What [`watched`] is when its view's program has a name and the view waits: the fourth
+/// version, the two words after the state.
+const V4_WAITING_FIXTURE: &str = concat!(
+    "bateri-kablo 4\n",
+    "U\n",
+    r"A ada@rasp:2222\svia\smy\sjump:22 rasp 2222 aarch64-unknown-linux-musl 0.2.0 .local/share/kablo ssh -p 2222 -J my\sjump ada@rasp",
+    "\n",
+    "L aarch64-apple-darwin 0.2.0-dev+222309ff9090 .local/share/kablo\n",
+    "A root@prod:22 prod - aarch64-apple-darwin 0.2.1-rc.1 .local/share/kablo ssh prod\n",
+    r"T ada@rasp:2222\svia\smy\sjump:22 b-0123456789abcdef0123456789abcdef 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live",
+    "\n",
+    "T root@prod:22 b-fedcba9876543210fedcba9876543210 - live\n",
+    "T gone@elsewhere:22 b-1 - ending\n",
+    r"T local t1 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live view waits name:line\sear",
+    "\n",
+);
+
+#[test]
+fn a_view_that_waits_and_the_name_of_its_program_are_the_fourth_version_and_nothing_else_is() {
+    let mut waiting = watched();
+    let row = waiting
+        .terminals
+        .last_mut()
+        .expect("the terminal of this Mac");
+    row.waits = true;
+    row.program = Some("line ear".to_owned());
+    assert_eq!(Rows::parse(V4_WAITING_FIXTURE), Some(waiting.clone()));
+    assert_eq!(waiting.render(), V4_WAITING_FIXTURE);
+    // A name alone is the fourth version too; a view with neither is the second, as it was.
+    let mut named = watched();
+    named.terminals.last_mut().expect("row").program = Some("textpen".to_owned());
+    assert!(named.render().starts_with("bateri-kablo 4\n"));
+    assert_eq!(Rows::parse(&named.render()), Some(named));
+    assert_eq!(watched().render(), V2_WATCHED_FIXTURE);
+    // What the fourth version has is in no earlier one, in no other order, and not twice; a
+    // wait with no view open is no row.
+    for text in [
+        V2_WATCHED_FIXTURE.replacen(" live view\n", " live view name:x\n", 1),
+        V2_WATCHED_FIXTURE.replacen(" live view\n", " live view waits\n", 1),
+        V4_WAITING_FIXTURE.replacen(
+            " view waits name:line\\sear",
+            " view name:line\\sear waits",
+            1,
+        ),
+        V4_WAITING_FIXTURE.replacen(" view waits", " view waits waits", 1),
+        V4_WAITING_FIXTURE.replacen(" live view waits", " live waits", 1),
+        V4_WAITING_FIXTURE.replacen("name:line\\sear", "name:line\\qear", 1),
+    ] {
+        assert_eq!(Rows::parse(&text), None, "{text:?}");
+    }
+}
+
+#[test]
+fn a_view_that_waits_stays_waiting_until_it_opens_again_or_ends() {
+    let dir = crate::settings::TempRoot::new("ledger-view-waits");
+    let path = dir.0.join("kablo");
+    let installed = Installed {
+        target: Target::MacosAarch64,
+        version: "0.2.0-dev+222309ff9090".to_owned(),
+        path: String::new(),
+        fresh: true,
+        census: None,
+    };
+    let ledger = Ledger::open(path.clone());
+    ledger.remember(&local::host(), &installed);
+    ledger.shown(local::ACCOUNT, &id("t1"), Some(&pane()));
+    // No view, no mark; and no wait can be put on a terminal with none.
+    assert_eq!(ledger.view_mark(local::ACCOUNT, &id("t1")), None);
+    ledger.set_view_waits(local::ACCOUNT, &id("t1"), true);
+    assert_eq!(ledger.view_mark(local::ACCOUNT, &id("t1")), None);
+    // The view opens with the program's name, and does not wait.
+    ledger.set_view(local::ACCOUNT, &id("t1"), true, Some("textpen"));
+    assert_eq!(
+        Ledger::open(path.clone()).view_mark(local::ACCOUNT, &id("t1")),
+        Some(ViewMark {
+            program: Some("textpen".to_owned()),
+            waits: false
+        })
+    );
+    // The wait outlives the process, and the name stays with it.
+    ledger.set_view_waits(local::ACCOUNT, &id("t1"), true);
+    assert_eq!(
+        Ledger::open(path.clone()).view_mark(local::ACCOUNT, &id("t1")),
+        Some(ViewMark {
+            program: Some("textpen".to_owned()),
+            waits: true
+        })
+    );
+    // Opened again (the card answered), the view waits no more; ended, nothing is left.
+    ledger.set_view(local::ACCOUNT, &id("t1"), true, Some("textpen"));
+    assert_eq!(
+        ledger
+            .view_mark(local::ACCOUNT, &id("t1"))
+            .map(|mark| mark.waits),
+        Some(false)
+    );
+    ledger.set_view_waits(local::ACCOUNT, &id("t1"), true);
+    ledger.set_view(local::ACCOUNT, &id("t1"), false, None);
+    assert_eq!(ledger.view_mark(local::ACCOUNT, &id("t1")), None);
+    assert!(!ledger.view_of(local::ACCOUNT, &id("t1")));
+    // A row an earlier bateri wrote has a view and no name.
+    let text = V2_WATCHED_FIXTURE;
+    let rows = Rows::parse(text).expect("v2");
+    assert!(
+        rows.terminals
+            .iter()
+            .any(|row| row.view && row.program.is_none() && !row.waits)
+    );
 }
 
 #[test]
@@ -466,7 +584,7 @@ fn text_that_is_not_exactly_understood_is_an_empty_ledger() {
     };
     for text in [
         String::new(),
-        "bateri-kablo 4\n".to_owned(),
+        "bateri-kablo 5\n".to_owned(),
         "bateri-kablo 0\n".to_owned(),
         "bateri-kablo 1 extra\n".to_owned(),
         "bateri-kablo 1".to_owned(),

@@ -84,6 +84,8 @@ use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::agent::view::{Held, Shared as AgentSession, Shown as ViewShown};
+use bt_shell_common::apps::card::{Card as NoticeCard, Why};
+use bt_shell_common::kablo::ledger::ViewMark;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{Answer, PaneLink, Shown};
 use bt_shell_common::native_view::{
@@ -181,6 +183,20 @@ pub trait PaneHost {
     /// card it would make now is another size, and makes it again only then. Told from inside the
     /// pane's layout; nothing for an owner with no such card (the tests').
     fn resized(&self, _pane: u64) {}
+    /// The pane's program has a view that waits behind a card for the person
+    /// ([`NoticeCard::for_waiting_view`]): the owner puts the card in the pane's corner once the
+    /// pane has a size, and keeps it there until [`PaneHost::view_notice_dropped`]. Nothing for an
+    /// owner with no such card (the tests').
+    fn view_notice_wanted(&self, _pane: u64, _card: NoticeCard) {}
+    /// The view that waited is over, or open again: the card goes if it is up.
+    fn view_notice_dropped(&self, _pane: u64) {}
+    /// The pane is closed: what it wanted of the owner's cards goes with it.
+    fn view_notice_forgotten(&self, _pane: u64) {}
+    /// Whether the pane wants a notice whose card is not made yet: it is made when the pane has a
+    /// size, so a resize is news to it.
+    fn view_notice_waits_for_its_card(&self, _pane: u64) -> bool {
+        false
+    }
     /// A card was put in the pane's corner ([`TerminalPane::set_corner_card`]): the owner that
     /// keeps the stacking of the views the pane stands among puts it in its place at once. Nothing
     /// for an owner with no such stacking (the tests').
@@ -354,10 +370,26 @@ pub trait PaneHost {
     /// A program's view opened or closed in the pane: written beside the terminal of this
     /// Mac that carries the pane's bytes, so that a bateri that finds the terminal again
     /// offers the program a restart of it. The default is an owner that keeps no terminals.
-    fn view_changed(&self, _pane: &PaneUuid, _open: bool) {}
-    /// Whether a view was open in the pane when the bateri before this one left, as
-    /// [`PaneHost::view_changed`] wrote it.
-    fn view_was_open(&self, _pane: &PaneUuid) -> bool {
+    fn view_changed(&self, _pane: &PaneUuid, _open: bool, _program: Option<&str>) {}
+    /// What the ledger says of the view the pane had open when the bateri before this one left,
+    /// as [`PaneHost::view_changed`] wrote it: the program's name and whether the view waits for
+    /// the person ([`PaneHost::view_waits`]); `None` when it had none.
+    fn view_mark(&self, _pane: &PaneUuid) -> Option<ViewMark> {
+        None
+    }
+    /// The view the pane had open waits behind a card for the person (or no longer does): written
+    /// with the view, so that a bateri that is left cleanly with the card unanswered does not
+    /// open it by itself at the next launch.
+    fn view_waits(&self, _pane: &PaneUuid, _waits: bool) {}
+    /// The program in front of the terminal of this Mac that carries the pane's bytes, as kablo
+    /// last said. The default is an owner that keeps no terminals.
+    fn local_program(&self, _pane: &PaneUuid) -> Option<String> {
+        None
+    }
+    /// This launch follows a bateri that did not quit cleanly (a crash, a forced quit, a power
+    /// cut) and not an update's relaunch: what it shows again of a program's view waits for the
+    /// person.
+    fn launch_was_unexpected(&self) -> bool {
         false
     }
     /// ⏎ in a pane that waits for its connection: the account of the terminal it
@@ -2390,6 +2422,14 @@ pub struct PaneIvars {
     /// the program once its server says what is in front of it
     /// ([`TerminalPane::offer_owed_view`]). `None` when nothing is owed.
     view_owed: RefCell<Option<Resume>>,
+    /// The program's view waits behind a card: bateri quit unexpectedly with it open (or a page of
+    /// it failed), so it is not offered a restart by itself ([`TerminalPane::restart_view_offered`]
+    /// holds the offer back) until the person answers the card ([`TerminalPane::reopen_view`]).
+    /// `None` when nothing waits.
+    view_hold: RefCell<Option<ViewHold>>,
+    /// What the program whose view is up calls itself (`ViewStart::program`): the name its card
+    /// says when the view stops ([`TerminalPane::start_view`]); `None` while no view is up.
+    view_program: RefCell<Option<String>>,
     /// The questions the program's view has put to the person and that are up
     /// ([`pencere_view::ask`]).
     view_asking: pencere_view::ask::Asking,
@@ -2544,7 +2584,9 @@ define_class!(
             self.refresh_geometry();
             // A card in the corner is made for the pane's size, width and height: it is told of
             // the new size on the next turn of the loop, outside of the layout this runs in.
-            if self.ivars().corner_card.borrow().is_some() {
+            if self.ivars().corner_card.borrow().is_some()
+                || self.host().view_notice_waits_for_its_card(self.id())
+            {
                 self.host().resized(self.id());
             }
         }
@@ -3198,6 +3240,8 @@ impl TerminalPane {
             unseen_wake: Cell::new((0, None)),
             view_waits: RefCell::new(Waits::default()),
             view_owed: RefCell::new(None),
+            view_hold: RefCell::new(None),
+            view_program: RefCell::new(None),
             view_asking: pencere_view::ask::Asking::default(),
             view_size: Cell::new((0, 0)),
             exit_status: Cell::new(None),
@@ -4278,7 +4322,18 @@ impl TerminalPane {
         if shown_again {
             // Offered, not forced: the conversation answers only where a program is in front of
             // the pane (§6.2), and a pane that had no view gets nothing written.
-            if self.host().view_was_open(self.uuid()) {
+            if let Some(mark) = self.host().view_mark(self.uuid()) {
+                // A view that was open when bateri quit unexpectedly is not opened by itself: it
+                // was the program's view that may have taken bateri with it, and the next launch
+                // would find it open again. The same for one the person was asked about and did
+                // not answer, whichever way the bateri after it was left.
+                if view_waits_at_launch(&mark, self.host().launch_was_unexpected()) {
+                    self.hold_view(
+                        mark.program,
+                        Why::Quit,
+                        held.as_ref().is_some_and(|held| held.resume.is_some()),
+                    );
+                }
                 match held.as_ref().and_then(|held| held.resume.clone()) {
                     // A terminal a server keeps has no bridge behind it yet: the offer waits for
                     // its server to say what is in front of it ([`Self::offer_owed_view`]).
@@ -4586,6 +4641,7 @@ impl TerminalPane {
     /// (`PageFields::apply`, told before this). A page that went down meanwhile is not the pane's
     /// to do anything for ([`PageHost`] does each part only while the page is up).
     fn deliver_held(&self, painted: &mut bt_shell_common::native_view::Painted) {
+        crate::dev_fault::page_delivered(self.ivars().view_program.borrow().as_deref());
         // While an agent's request is carried out, what the frame holds for the fields (a copy, the
         // keyboard) is told as the rest of what the page says is: held back from the person's pane.
         if self.agent_active()
@@ -5726,6 +5782,7 @@ impl TerminalPane {
         self.sync_server_shell();
         self.host().program_changed(self.ivars().id);
         self.offer_owed_view();
+        self.check_view_hold();
     }
 
     /// Tells the session the shell at the server's prompt, which its title says (`zsh rasp`): the
@@ -6241,6 +6298,7 @@ impl TerminalPane {
         // list's goes in `abandon_uploads`).
         self.close_server_card();
         self.set_corner_card(None);
+        self.host().view_notice_forgotten(self.id());
         self.stop_stats();
         // A forward tunnel of ours goes with the pane.
         self.end_remote_ports();
@@ -7793,6 +7851,8 @@ impl TerminalPane {
     /// A script that cannot be started (its entry is not there) fails the view: the program is
     /// told, and the terminal stays.
     fn start_native_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
+        // A view that opens is not one that waits (the card was answered, or another program's).
+        self.drop_view_hold();
         // The crate has one view at a time; a stale one goes first.
         self.end_view();
         let Some(link) = self.link() else {
@@ -7868,7 +7928,10 @@ impl TerminalPane {
         self.host().program_changed(ivars.id);
         // And the terminal that carries the pane's bytes remembers it, as for a web view: a
         // bateri that finds the terminal again offers the program a restart of its view.
-        self.host().view_changed(self.uuid(), true);
+        self.ivars().view_program.replace(start.program.clone());
+        self.host()
+            .view_changed(self.uuid(), true, start.program.as_deref());
+        crate::dev_fault::view_opened(start.program.as_deref());
     }
 
     /// Puts the view over the whole terminal — the header over the pane says what it is
@@ -7891,6 +7954,8 @@ impl TerminalPane {
         // here, and the header is read again below, with the view's own words in it, or here
         // when the view could not be started.
         let waited = self.end_program_wait();
+        // A view that opens is not one that waits (the card was answered, or another program's).
+        self.drop_view_hold();
         // The crate has one view at a time; a stale one goes first.
         self.end_view();
         self.sync_view_size();
@@ -7925,7 +7990,10 @@ impl TerminalPane {
         self.host().program_changed(ivars.id);
         // And the terminal that carries the pane's bytes remembers it: a bateri that finds the
         // terminal again offers the program a restart of its view.
-        self.host().view_changed(self.uuid(), true);
+        self.ivars().view_program.replace(start.program.clone());
+        self.host()
+            .view_changed(self.uuid(), true, start.program.as_deref());
+        crate::dev_fault::view_opened(start.program.as_deref());
     }
 
     /// Takes the view down: the keyboard goes back to the terminal if the view
@@ -7933,6 +8001,16 @@ impl TerminalPane {
     /// keyboard), and the terminal's frames come back — it is drawn again, with
     /// the screen the program left.
     fn end_view(&self) {
+        // A view that waits has no page to take down; its conversation ending (the program's
+        // command ended) is its program gone.
+        if self.ivars().view_hold.borrow().is_some()
+            && self
+                .session()
+                .is_some_and(|session| matches!(session.view_state(), None | Some(State::Ended)))
+        {
+            self.end_view_hold();
+        }
+        self.ivars().view_program.replace(None);
         // A restart waits for the terminal, so a view that ends while it is not there was ended
         // by the person or by the program's own last word: nothing is owed.
         if self.connection().is_passive() {
@@ -7944,7 +8022,7 @@ impl TerminalPane {
             // view's does.
             self.view_gone();
             self.take_page_down();
-            self.host().view_changed(self.uuid(), false);
+            self.host().view_changed(self.uuid(), false, None);
             return;
         }
         let Some(host) = self.ivars().pencere.take() else {
@@ -7964,7 +8042,7 @@ impl TerminalPane {
         }
         // And the mark of what runs in the pane again.
         self.host().program_changed(self.ivars().id);
-        self.host().view_changed(self.uuid(), false);
+        self.host().view_changed(self.uuid(), false, None);
     }
 
     /// The program's view goes with the pane, whatever it was doing: no
@@ -8046,9 +8124,99 @@ impl TerminalPane {
     /// ([`pencere_view`]'s `wait`), and this is the one way to offer it — a call that does not
     /// set the time leaves the token valid for as long as the pane lives.
     fn restart_view_offered(&self, session: &Arc<Session>, restart: fn(&Session)) {
+        // A view that waits for the person is not offered a restart: its program is there (this
+        // is the place every restart comes to), and the card asks.
+        if let Some(hold) = self.ivars().view_hold.borrow_mut().as_mut() {
+            hold.held_back = true;
+            self.want_view_card(hold);
+            return;
+        }
         restart(session);
         self.ivars().view_waits.borrow_mut().restart_offered();
         self.wait_for_view(session);
+    }
+
+    /// The pane's view waits for the person ([`Self::view_hold`]): written beside the terminal of
+    /// this Mac that carries the pane's bytes, where it stays until the card is answered. The card
+    /// is up once the program is known to be there ([`Self::restart_view_offered`]).
+    fn hold_view(&self, program: Option<String>, why: Why, to_program: bool) {
+        self.ivars().view_hold.replace(Some(ViewHold {
+            program,
+            why,
+            to_program,
+            held_back: false,
+        }));
+        self.host().view_waits(self.uuid(), true);
+    }
+
+    fn want_view_card(&self, hold: &ViewHold) {
+        self.host().view_notice_wanted(
+            self.id(),
+            NoticeCard::for_waiting_view(hold.program.as_deref(), hold.why),
+        );
+    }
+
+    /// The person answered the card: the program is offered its view's restart, by the way the
+    /// offer was held back.
+    pub(crate) fn reopen_view(&self) {
+        let Some(hold) = self.ivars().view_hold.take() else {
+            return;
+        };
+        let Some(session) = self.session().cloned() else {
+            return;
+        };
+        if hold.to_program {
+            self.restart_view_offered(&session, Session::restart_view_to_program);
+        } else {
+            self.restart_view_offered(&session, Session::restart_view);
+        }
+    }
+
+    /// A waiting view's program is gone while its card is up: a shell is in front of the terminal
+    /// again (the server's word, or kablo's of this Mac's terminal), or its view's conversation
+    /// ended. Called where those are told ([`Self::server_program_changed`], the shell speaking
+    /// ([`PaneHost::activity_changed`]), a view destroyed ([`Self::end_view`])).
+    pub(crate) fn check_view_hold(&self) {
+        if !self
+            .ivars()
+            .view_hold
+            .borrow()
+            .as_ref()
+            .is_some_and(|hold| hold.held_back)
+        {
+            return;
+        }
+        let gone = match self.host().kept_terminal(self.uuid()) {
+            Some(shown) => {
+                shown.program_fresh && shown.program.as_deref().is_some_and(program::is_shell_name)
+            }
+            None => self
+                .host()
+                .local_program(self.uuid())
+                .is_some_and(|name| program::is_shell_name(&name)),
+        };
+        if gone {
+            self.end_view_hold();
+        }
+    }
+
+    /// A view opens: nothing waits any more, and the card goes. The ledger is told by the opening
+    /// itself ([`PaneHost::view_changed`]).
+    fn drop_view_hold(&self) {
+        if self.ivars().view_hold.take().is_some() {
+            self.host().view_notice_dropped(self.id());
+        }
+    }
+
+    /// What waited is over: the program ended (or another program's view opened), so the card goes
+    /// and the ledger forgets the view. Whether there was anything to forget.
+    fn end_view_hold(&self) -> bool {
+        if self.ivars().view_hold.take().is_none() {
+            return false;
+        }
+        self.host().view_notice_dropped(self.id());
+        self.host().view_changed(self.uuid(), false, None);
+        true
     }
 
     /// The restart owed to the program of a terminal a server keeps (`view_owed`), decided by
@@ -8081,8 +8249,14 @@ impl TerminalPane {
         };
         match decided {
             Owed::Offer => self.restart_view_offered(&session, Session::restart_view_to_program),
-            Owed::ProgramGone => session.view_program_gone(),
-            Owed::Wait | Owed::Forget => {}
+            Owed::ProgramGone => {
+                session.view_program_gone();
+                self.end_view_hold();
+            }
+            Owed::Forget => {
+                self.end_view_hold();
+            }
+            Owed::Wait => {}
         }
     }
 
@@ -9175,6 +9349,27 @@ enum Owed {
     Forget,
 }
 
+/// A program's view that waits behind a card ([`TerminalPane::view_hold`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ViewHold {
+    /// What the program called itself, as the ledger or the view said.
+    program: Option<String>,
+    why: Why,
+    /// The program is offered its view's restart by the way of a terminal a server keeps (the
+    /// offer names the program) and not by the screen's.
+    to_program: bool,
+    /// The offer was held back: the program is there to be offered it. The card is up from then.
+    held_back: bool,
+}
+
+/// Whether the view the ledger says a pane had open waits for the person where the pane is shown
+/// again, and is not offered a restart by itself: the launch follows a quit that was not expected
+/// (the view was open then, and may be what took bateri with it), or the card that asked was
+/// never answered, whichever way the bateri after it was left.
+fn view_waits_at_launch(mark: &ViewMark, launch_unexpected: bool) -> bool {
+    mark.waits || launch_unexpected
+}
+
 fn owed_offer(owed: &Resume, shown: &Shown, view: Option<State>) -> Owed {
     if shown.account != owed.account || shown.terminal.as_str() != owed.terminal {
         return Owed::Forget;
@@ -9889,7 +10084,7 @@ mod tests {
             .find("let shown_again = session.is_shown_again();")
             .expect("the terminal shown again");
         let body = &pane[at..at + pane[at..].find("nudge_program(&session);").expect("nudge")];
-        assert!(body.contains("self.host().view_was_open(self.uuid())"));
+        assert!(body.contains("self.host().view_mark(self.uuid())"));
         assert!(body.contains("self.restart_view_offered(&session, Session::restart_view)"));
         // And owed to the terminal a server keeps that the pane showed, by its name: that one has
         // no bridge behind it yet to carry an offer.
@@ -10213,6 +10408,95 @@ mod tests {
     /// that never opens its view again must not leave it valid for as long as the pane lives:
     /// the offer has a time to be taken up (`Waits`), set where the offer is made. A call of
     /// `restart_view` anywhere else would offer a token with no clock behind it.
+    /// What the ledger says of a view and how the launch was reached decide whether it waits.
+    #[test]
+    fn a_view_waits_after_an_unexpected_quit_or_an_unanswered_card_and_not_otherwise() {
+        let open = super::ViewMark {
+            program: Some("linearpen".to_owned()),
+            waits: false,
+        };
+        let asked = super::ViewMark {
+            waits: true,
+            ..open.clone()
+        };
+        // After a clean quit, or an update's relaunch, or a connection that came back in a run
+        // that was fine (which never comes here at all): the view is offered a restart by itself.
+        assert!(!super::view_waits_at_launch(&open, false));
+        // After any unexpected quit — a crash, a forced quit, a power cut — it waits.
+        assert!(super::view_waits_at_launch(&open, true));
+        // A card nobody answered keeps it waiting through a quit that was clean.
+        assert!(super::view_waits_at_launch(&asked, false));
+        // A row an earlier bateri wrote has no name and is the same.
+        let nameless = super::ViewMark {
+            program: None,
+            waits: false,
+        };
+        assert!(
+            super::view_waits_at_launch(&nameless, true)
+                && !super::view_waits_at_launch(&nameless, false)
+        );
+    }
+
+    /// The gate is the one place every restart comes to, the card's answer goes through it, and
+    /// what waits is let go of where its program is gone. Source scans, because the panes need a
+    /// window server.
+    #[test]
+    fn a_view_that_waits_is_held_back_in_the_one_place_and_ends_with_its_program() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |signature: &str| {
+            let at = pane
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        // Held back before the program is told anything, with its card up.
+        let offered = body_of("    fn restart_view_offered(");
+        assert!(
+            offered.find("view_hold").expect("the gate")
+                < offered.find("restart(session)").unwrap(),
+            "{offered}"
+        );
+        assert!(offered.contains("self.want_view_card(hold)"), "{offered}");
+        // The answer offers the restart the way the offer was held back, through the same place.
+        let reopen = body_of("    pub(crate) fn reopen_view(");
+        assert!(
+            reopen
+                .contains("self.restart_view_offered(&session, Session::restart_view_to_program)")
+        );
+        assert!(reopen.contains("self.restart_view_offered(&session, Session::restart_view)"));
+        // Born holding (from the ledger and the launch), written beside the terminal at once.
+        let born = pane
+            .find("let shown_again = session.is_shown_again();")
+            .expect("the terminal shown again");
+        let born = &pane[born..born
+            + pane[born..]
+                .find("nudge_program(&session);")
+                .expect("nudge")];
+        assert!(born.contains("view_waits_at_launch(&mark, self.host().launch_was_unexpected())"));
+        assert!(born.contains("self.hold_view("));
+        assert!(body_of("    fn hold_view(").contains("self.host().view_waits(self.uuid(), true)"));
+        // Gone with the program: the server's word that a shell is in front, the shell speaking
+        // after kablo says so, the conversation ending; a program that is not there when the
+        // server answers; another view opening.
+        assert!(body_of("    pub fn server_program_changed(").contains("self.check_view_hold()"));
+        let check = body_of("    pub(crate) fn check_view_hold(");
+        assert!(check.contains("program::is_shell_name"), "{check}");
+        assert!(check.contains("self.end_view_hold()"), "{check}");
+        let end = body_of("    fn end_view_hold(");
+        assert!(end.contains("view_notice_dropped("), "{end}");
+        assert!(
+            end.contains("view_changed(self.uuid(), false, None)"),
+            "{end}"
+        );
+        assert!(body_of("    fn end_view(").contains("self.end_view_hold()"));
+        let owed = body_of("    fn offer_owed_view(");
+        assert!(owed.matches("self.end_view_hold()").count() == 2, "{owed}");
+        for start in ["    fn start_native_view(", "    fn start_view("] {
+            assert!(body_of(start).contains("self.drop_view_hold()"), "{start}");
+        }
+    }
+
     #[test]
     fn a_restart_is_offered_only_where_the_offer_has_its_time() {
         let pane = include_str!("pane.rs");

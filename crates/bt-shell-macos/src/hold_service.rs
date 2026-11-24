@@ -24,7 +24,7 @@ use crate::{child, settings, ssh_route};
 use bt_core::{PaneUuid, SettingsEdit};
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::install::Bundle;
-use bt_shell_common::kablo::ledger::Ledger;
+use bt_shell_common::kablo::ledger::{Ledger, ViewMark};
 use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{
@@ -141,20 +141,55 @@ pub(crate) fn drop_shown(pane: &PaneUuid) {
 }
 
 /// A view opened or closed in the pane: said beside the terminal of this Mac that carries its
-/// bytes ([`Ledger::set_view`]).
-pub(crate) fn view_changed(pane: &PaneUuid, open: bool) {
+/// bytes ([`Ledger::set_view`]), with the name the program gave itself when it opened. An opening
+/// ends a wait of the view before it.
+pub(crate) fn view_changed(pane: &PaneUuid, open: bool, program: Option<&str>) {
     let ledger = ledger();
     if let Some(terminal) = ledger.local_terminal_of(pane) {
-        ledger.set_view(local::ACCOUNT, &terminal, open);
+        ledger.set_view(local::ACCOUNT, &terminal, open, program);
     }
 }
 
-/// Whether the pane's terminal of this Mac had a view open when it was last said.
-pub(crate) fn view_was_open(pane: &PaneUuid) -> bool {
+/// The program in front of the terminal of this Mac that carries the pane's bytes, as kablo last
+/// said ([`Service::local_program`]); `None` where it has not said, and in a process without the
+/// service.
+pub(crate) fn local_program(pane: &PaneUuid) -> Option<String> {
+    let terminal = ledger().local_terminal_of(pane)?;
+    SERVICE.get()?.local_program(&terminal)
+}
+
+/// What the ledger says of the view the pane's terminal of this Mac had open when it was last
+/// said ([`Ledger::view_mark`]); `None` when it had none.
+pub(crate) fn view_mark(pane: &PaneUuid) -> Option<ViewMark> {
     let ledger = ledger();
     ledger
         .local_terminal_of(pane)
-        .is_some_and(|terminal| ledger.view_of(local::ACCOUNT, &terminal))
+        .and_then(|terminal| ledger.view_mark(local::ACCOUNT, &terminal))
+}
+
+/// The view the pane's terminal of this Mac had open waits for the person, or does not any more
+/// ([`Ledger::set_view_waits`]).
+pub(crate) fn view_waits(pane: &PaneUuid, waits: bool) {
+    let ledger = ledger();
+    if let Some(terminal) = ledger.local_terminal_of(pane) {
+        ledger.set_view_waits(local::ACCOUNT, &terminal, waits);
+    }
+}
+
+/// Whether this launch follows a bateri that did not quit cleanly (and was not an update's
+/// relaunch): said by the application before the first pane is made
+/// ([`set_unexpected_launch`]).
+static UNEXPECTED_LAUNCH: AtomicBool = AtomicBool::new(false);
+
+/// This launch follows an unexpected quit, or does not.
+pub(crate) fn set_unexpected_launch(unexpected: bool) {
+    UNEXPECTED_LAUNCH.store(unexpected, Ordering::Relaxed);
+}
+
+/// Whether the launch follows an unexpected quit ([`set_unexpected_launch`]): what the panes show
+/// again of a program's view then waits for the person.
+pub(crate) fn unexpected_launch() -> bool {
+    UNEXPECTED_LAUNCH.load(Ordering::Relaxed)
 }
 
 /// The files of the account's machine are written again as its level now says: this Mac's

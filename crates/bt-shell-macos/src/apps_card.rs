@@ -30,6 +30,7 @@
 //! connection, the clock.
 
 pub(crate) mod layout_check;
+pub(crate) mod notice;
 mod view;
 
 use std::cell::RefCell;
@@ -239,7 +240,8 @@ fn consider(mtm: MainThreadMarker) {
                         .is_some_and(|shown| shown.account == account),
                     // A pane that holds a card has no room for a second.
                     prompted: cards.prompted.contains(&pane.id())
-                        && !cards.open.values().any(|open| open.pane == pane.id()),
+                        && !cards.open.values().any(|open| open.pane == pane.id())
+                        && !notice::has(pane.id()),
                 })
                 .collect()
         });
@@ -355,6 +357,7 @@ fn redraw(mtm: MainThreadMarker, account: &str) {
 /// narrower, wider, lower or higher, and a card the new room does not touch is left as it is. Told
 /// by the pane on the next turn of the loop, so that nothing here runs inside its layout.
 pub(crate) fn pane_resized(mtm: MainThreadMarker, id: u64) {
+    notice::pane_resized(mtm, id);
     let Some(app) = app::delegate(mtm) else {
         return;
     };
@@ -395,6 +398,9 @@ fn remove(mtm: MainThreadMarker, account: &str) {
 
 /// The person pressed something on the card of `account`.
 pub(super) fn act(mtm: MainThreadMarker, account: &str, act: Act) {
+    if notice::is_notice(account) {
+        return notice::act(mtm, account, act);
+    }
     if local::is_account(account) {
         return act_here(mtm, act);
     }
@@ -617,6 +623,10 @@ fn on_server(ssh: &[String], host: &str, words: &[String]) -> Result<(), String>
 /// The account of the card over a pane of `tab`, when it asks: Shell ▸ Install Programs Here
 /// (⌘Return) and Don't Install Programs Here (⌘Escape) act on it. `install` wants a box checked.
 pub(crate) fn asking_in(tab: &TerminalTab, install: bool) -> Option<String> {
+    // A notice has its one answer, which is what ⌘Return is; it has no second one for ⌘Escape.
+    if install && let Some(account) = notice::asking_in(tab) {
+        return Some(account);
+    }
     // The card over the pane the person is in comes first, then the others in the tab's order: two
     // servers in one tab each have a card, and the keys are for the one they look at.
     let focused = tab.focused_pane().id();
@@ -673,9 +683,12 @@ pub(crate) fn offer_link(
     };
     // One card to a pane: a pane that holds one (the programs this server lacks, or the first
     // click's question) has none for this click.
-    if with(|cards| {
-        cards.open.contains_key(&account) || cards.open.values().any(|open| open.pane == from.id())
-    }) {
+    if notice::has(from.id())
+        || with(|cards| {
+            cards.open.contains_key(&account)
+                || cards.open.values().any(|open| open.pane == from.id())
+        })
+    {
         return false;
     }
     let (Some(root), Some(answerer)) = (crate::apps_root(), crate::apps_answerer()) else {
@@ -731,9 +744,11 @@ pub(crate) fn offer_here(
     engine_here: bool,
     engine_bytes: Option<u64>,
 ) -> bool {
-    if with(|cards| {
-        cards.open.contains_key(HERE) || cards.open.values().any(|open| open.pane == from.id())
-    }) {
+    if notice::has(from.id())
+        || with(|cards| {
+            cards.open.contains_key(HERE) || cards.open.values().any(|open| open.pane == from.id())
+        })
+    {
         return false;
     }
     let card = Card::for_here(url, program_here, engine_here, engine_bytes);

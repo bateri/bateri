@@ -172,6 +172,53 @@ pub struct Card {
     /// is in its life are its own; its rows are what its yes brings, shown once it is answered
     /// (and not when the answer could not be saved, [`Card::not_saved`]).
     here: Option<Here>,
+    /// Set for a notice ([`Card::for_waiting_view`], [`Card::for_given_up_windows`]): a card that
+    /// says one thing and has one answer, and no rows.
+    notice: Option<Notice>,
+}
+
+/// What a notice says: its title, a line under it (or none) and its one answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Notice {
+    title: String,
+    note: String,
+    yes: &'static str,
+}
+
+/// Why a program's view waits behind a card instead of being open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// bateri quit unexpectedly while it was open.
+    Quit,
+    /// A page of it failed in bateri's own code.
+    Stopped,
+}
+
+/// The one answer of the card of a view that waits.
+pub const REOPEN: &str = "Reopen";
+
+/// The one answer of the card of a launch that gave the windows up.
+pub const OPEN_THEM: &str = "Open Them";
+
+/// What the card of a view that waits tells of the pane.
+const END_HINT: &str = "Press \u{2303}C in this pane to end it.";
+
+/// What the card of a launch that gave the windows up says.
+const GAVE_UP: &str =
+    "bateri didn\u{2019}t open your windows after quitting unexpectedly. They are kept.";
+
+impl Why {
+    /// The card's title: what the program is called, when it is known.
+    fn title(self, program: Option<&str>) -> String {
+        match (self, program) {
+            (Why::Quit, Some(name)) => format!("{name} was open when bateri quit unexpectedly."),
+            (Why::Quit, None) => {
+                "A program\u{2019}s view was open here when bateri quit unexpectedly.".to_owned()
+            }
+            (Why::Stopped, Some(name)) => format!("{name}\u{2019}s view stopped."),
+            (Why::Stopped, None) => "A program\u{2019}s view stopped.".to_owned(),
+        }
+    }
 }
 
 /// What the card of the first click's question knows besides the address and its rows (what is not
@@ -253,6 +300,7 @@ impl Card {
                 .collect(),
             link: None,
             here: None,
+            notice: None,
         })
     }
 
@@ -272,6 +320,7 @@ impl Card {
             }],
             link: Some(url.to_owned()),
             here: None,
+            notice: None,
         }
     }
 
@@ -313,7 +362,41 @@ impl Card {
                 engine_bytes,
                 why: String::new(),
             }),
+            notice: None,
         }
+    }
+
+    /// The card of a program's view that waits (`program`: what it calls itself, when the ledger
+    /// or the view said): bateri quit unexpectedly with it open, or a page of it failed; it is
+    /// not opened by itself, and its one answer opens it.
+    pub fn for_waiting_view(program: Option<&str>, why: Why) -> Self {
+        Self::notice(why.title(program), END_HINT, REOPEN)
+    }
+
+    /// The card of a launch that did not open the windows after bateri quit unexpectedly: they
+    /// are kept, and its one answer opens them.
+    pub fn for_given_up_windows() -> Self {
+        Self::notice(GAVE_UP.to_owned(), "", OPEN_THEM)
+    }
+
+    fn notice(title: String, note: &str, yes: &'static str) -> Self {
+        Self {
+            host: String::new(),
+            stage: Stage::Ask,
+            lines: Vec::new(),
+            link: None,
+            here: None,
+            notice: Some(Notice {
+                title,
+                note: note.to_owned(),
+                yes,
+            }),
+        }
+    }
+
+    /// The one answer of a notice ([`Card::for_waiting_view`]); `None` for every other card.
+    pub fn notice_answer(&self) -> Option<&'static str> {
+        self.notice.as_ref().map(|notice| notice.yes)
     }
 
     /// Whether this is the card of this Mac's one question ([`Card::for_here`]).
@@ -325,6 +408,12 @@ impl Card {
     /// download and where the answer can be changed; when its yes could not be carried out at all,
     /// why. None otherwise (its rows say how far each thing has come).
     pub fn notes(&self) -> Vec<String> {
+        if let Some(notice) = &self.notice {
+            return Some(notice.note.clone())
+                .filter(|note| !note.is_empty())
+                .into_iter()
+                .collect();
+        }
         let Some(here) = &self.here else {
             return Vec::new();
         };
@@ -507,6 +596,9 @@ impl Card {
 
     /// The card's title.
     pub fn title(&self) -> String {
+        if let Some(notice) = &self.notice {
+            return notice.title.clone();
+        }
         if let Some(here) = &self.here {
             match self.stage {
                 Stage::Ask => return here.question.title.clone(),
@@ -539,7 +631,10 @@ impl Card {
 
     /// Whether *Install* does something: asking, with a box checked.
     pub fn can_install(&self) -> bool {
-        self.stage == Stage::Ask && (self.here.is_some() || self.lines.iter().any(|line| line.on))
+        self.stage == Stage::Ask
+            && (self.here.is_some()
+                || self.notice.is_some()
+                || self.lines.iter().any(|line| line.on))
     }
 
     /// *Install*: the unchecked rows leave the card, and the first of the rest is being
@@ -1122,5 +1217,47 @@ mod tests {
         // The checked one is what is brought; the others have left the card.
         assert_eq!(card.begin(), Some(0));
         assert_eq!(card.declined_words(), None);
+    }
+    #[test]
+    fn the_card_of_a_view_that_waits_names_its_program_and_has_one_answer() {
+        let quit = Card::for_waiting_view(Some("linearpen"), Why::Quit);
+        assert_eq!(
+            quit.title(),
+            "linearpen was open when bateri quit unexpectedly."
+        );
+        assert_eq!(quit.notes(), ["Press \u{2303}C in this pane to end it."]);
+        assert_eq!(quit.notice_answer(), Some("Reopen"));
+        assert_eq!(quit.stage(), Stage::Ask);
+        assert!(quit.lines().is_empty() && quit.can_install() && !quit.is_here());
+        // A page of it failed: its own words, and the same hint and answer.
+        let stopped = Card::for_waiting_view(Some("linearpen"), Why::Stopped);
+        assert_eq!(stopped.title(), "linearpen\u{2019}s view stopped.");
+        assert_eq!(stopped.notes(), quit.notes());
+        // A row an earlier bateri wrote has no name.
+        assert_eq!(
+            Card::for_waiting_view(None, Why::Quit).title(),
+            "A program\u{2019}s view was open here when bateri quit unexpectedly."
+        );
+        assert_eq!(
+            Card::for_waiting_view(None, Why::Stopped).title(),
+            "A program\u{2019}s view stopped."
+        );
+    }
+
+    #[test]
+    fn the_card_of_a_launch_that_gave_the_windows_up_says_they_are_kept() {
+        let card = Card::for_given_up_windows();
+        assert_eq!(
+            card.title(),
+            "bateri didn\u{2019}t open your windows after quitting unexpectedly. They are kept."
+        );
+        assert!(card.notes().is_empty());
+        assert_eq!(card.notice_answer(), Some("Open Them"));
+        assert!(card.can_install());
+        // The cards of programs are no notices.
+        assert_eq!(
+            Card::for_link("rasp", rows(&["a"]).remove(0), "https://x").notice_answer(),
+            None
+        );
     }
 }

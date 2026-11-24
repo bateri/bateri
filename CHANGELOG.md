@@ -12,6 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A crash no longer reopens the program that caused it.** If bateri quits unexpectedly, the views that were open come back behind a small card with one button, Reopen, instead of opening again by themselves and crashing again. After two launches that never settled, bateri keeps your windows and offers to open them with one button.
+
 ## [0.33.0] - 2026-11-24
 
 ### Added

@@ -39,7 +39,13 @@
 //! A terminal row may say the pane it carries has a program's **view** open (`view`, after
 //! the state; version 2): the view lives on messages the terminal's bytes carry, and a bateri
 //! that finds the terminal again offers the program a restart of it
-//! ([`Ledger::set_view`], [`Ledger::view_of`]). One more fact outlives the process and is
+//! ([`Ledger::set_view`], [`Ledger::view_of`]). The row also says **what the program calls
+//! itself** (`name:`, [`ViewMark::program`]) and whether the view **waits** behind the card that
+//! asks the person to open it again (`waits`, [`Ledger::set_view_waits`]): after a bateri quit
+//! unexpectedly the view is not opened by itself, and that stays so until the card is answered,
+//! whichever way the bateri after it was left (both are version 4: a ledger with neither is
+//! written as before, and an earlier bateri that finds a fourth version reads it as no ledger).
+//! One more fact outlives the process and is
 //! not a terminal's: that the bateri that left did so **for an update** (`U`; version 2),
 //! which is what tells the one that starts next that the terminals left in the ledger are
 //! carried on and not left behind by a crash ([`Ledger::leave_for_update`],
@@ -90,6 +96,10 @@ pub const HEADER: &str = "bateri-kablo";
 
 /// The format's newest version: the one that says where an account's kablo is.
 pub const VERSION: u32 = 3;
+
+/// The version that can hold a view's program name and the wait of the view ([`Row::program`],
+/// [`Row::waits`]): written only for a ledger that has one.
+const NAMED: u32 = 4;
 
 /// The version that can hold this Mac's account, a view and an update: what a ledger that has
 /// one and no account in the current root is written as.
@@ -165,6 +175,22 @@ pub struct Row {
     pub ending: bool,
     /// The program in the pane it carries has a view open.
     pub view: bool,
+    /// What that program calls itself, as the view said it (cut and cleaned by the session);
+    /// none for a row written before it was kept.
+    pub program: Option<String>,
+    /// The view is not opened by itself where the pane is shown again: a card asks the person
+    /// (bateri quit unexpectedly with it open, or a page of it failed). It stays until the card
+    /// is answered or the program is gone.
+    pub waits: bool,
+}
+
+/// What a ledger says of a view that was open ([`Ledger::view_mark`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewMark {
+    /// What the program called itself; none for a row written before it was kept.
+    pub program: Option<String>,
+    /// The view waits for the person ([`Row::waits`]).
+    pub waits: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -199,6 +225,12 @@ impl Rows {
         // ledger that has no account of this Mac, no view and no update, and one whose accounts
         // are all in the former root, which is where a row with no root is.
         let version = if self
+            .terminals
+            .iter()
+            .any(|row| row.program.is_some() || row.waits)
+        {
+            NAMED
+        } else if self
             .accounts
             .values()
             .any(|known| known.root == Root::Current)
@@ -247,13 +279,21 @@ impl Rows {
         }
         for row in &self.terminals {
             out.push_str(&format!(
-                "T {} {} {} {}{}\n",
+                "T {} {} {} {}{}",
                 escape(&row.account),
                 row.terminal.as_str(),
                 row.pane.as_ref().map_or("-", PaneUuid::as_str),
                 if row.ending { "ending" } else { "live" },
                 if row.view { " view" } else { "" },
             ));
+            // The words after the state are the ones a version holds; the line ends with them.
+            if row.waits {
+                out.push_str(" waits");
+            }
+            if let Some(program) = &row.program {
+                out.push_str(&format!(" name:{}", escape(program)));
+            }
+            out.push('\n');
         }
         out
     }
@@ -266,7 +306,7 @@ impl Rows {
             return None;
         }
         let version = header.next()?.parse::<u32>().ok()?;
-        if !(OLDEST..=VERSION).contains(&version) || header.next().is_some() {
+        if !(OLDEST..=NAMED).contains(&version) || header.next().is_some() {
             return None;
         }
         let mut rows = Rows::default();
@@ -390,18 +430,29 @@ fn parse_terminal<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) 
         "ending" => true,
         _ => return None,
     };
-    // The word after the state, in a ledger that has such a thing; the line ends after it.
-    let view = match tokens.next() {
-        None => false,
-        Some("view") if version >= 2 => true,
-        Some(_) => return None,
-    };
-    (!account.is_empty()).then_some(Row {
+    // The words after the state, in a ledger that has such things, each once and in the order
+    // they are written; the line ends after them.
+    let mut view = false;
+    let mut waits = false;
+    let mut program = None;
+    for word in tokens {
+        match word {
+            "view" if version >= 2 && !view && !waits && program.is_none() => view = true,
+            "waits" if version >= NAMED && !waits && program.is_none() => waits = true,
+            name if version >= NAMED && program.is_none() && name.starts_with("name:") => {
+                program = Some(unescape(&name["name:".len()..])?);
+            }
+            _ => return None,
+        }
+    }
+    (!account.is_empty() && (view || (!waits && program.is_none()))).then_some(Row {
         account,
         terminal,
         pane,
         ending,
         view,
+        program,
+        waits,
     })
 }
 
@@ -506,6 +557,8 @@ impl Ledger {
                     pane: pane.cloned(),
                     ending: false,
                     view: false,
+                    program: None,
+                    waits: false,
                 }),
             }
             (true, ())
@@ -524,6 +577,8 @@ impl Ledger {
                     pane: None,
                     ending: true,
                     view: false,
+                    program: None,
+                    waits: false,
                 }),
             }
             rows.forget_idle_accounts();
@@ -636,16 +691,38 @@ impl Ledger {
     }
 
     /// Whether the program in the pane the terminal carries has a view open: said as the view
-    /// opens and closes, read by the bateri that finds the terminal again.
-    pub fn set_view(&self, account: &str, terminal: &SessionId, open: bool) {
+    /// opens and closes, read by the bateri that finds the terminal again. Opening says what the
+    /// program calls itself (`program`) and ends any wait of an earlier view; closing forgets
+    /// both.
+    pub fn set_view(&self, account: &str, terminal: &SessionId, open: bool, program: Option<&str>) {
         self.change(|rows| {
             let Some(at) = rows.position(account, terminal) else {
                 return (false, ());
             };
-            if rows.terminals[at].view == open {
+            let program = program.filter(|_| open).map(str::to_owned);
+            let row = &mut rows.terminals[at];
+            if row.view == open && row.program == program && !row.waits {
                 return (false, ());
             }
-            rows.terminals[at].view = open;
+            row.view = open;
+            row.program = program;
+            row.waits = false;
+            (true, ())
+        });
+    }
+
+    /// Says that the view the terminal's pane had open waits for the person (`waits`) or does
+    /// not any more. A terminal with no view open has nothing to wait.
+    pub fn set_view_waits(&self, account: &str, terminal: &SessionId, waits: bool) {
+        self.change(|rows| {
+            let Some(at) = rows.position(account, terminal) else {
+                return (false, ());
+            };
+            let row = &mut rows.terminals[at];
+            if !row.view || row.waits == waits {
+                return (false, ());
+            }
+            row.waits = waits;
             (true, ())
         });
     }
@@ -655,6 +732,17 @@ impl Ledger {
         self.read(|rows| {
             rows.position(account, terminal)
                 .is_some_and(|at| rows.terminals[at].view)
+        })
+    }
+
+    /// What the ledger says of the view the terminal's pane had open; none when it had none.
+    pub fn view_mark(&self, account: &str, terminal: &SessionId) -> Option<ViewMark> {
+        self.read(|rows| {
+            let row = &rows.terminals[rows.position(account, terminal)?];
+            row.view.then(|| ViewMark {
+                program: row.program.clone(),
+                waits: row.waits,
+            })
         })
     }
 

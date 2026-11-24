@@ -77,7 +77,10 @@
 //! in the launch before again from nothing — no history, and the terminals kablo keeps come back
 //! with a picture of their screen, their past forgotten; the third reads no session, as a launch
 //! with ⇧ held does, and the terminals wait for a later one. The marker is application state like
-//! the Recent: the sweep and the clears leave it, a settled launch or a clean quit removes it.
+//! the Recent: the sweep and the clears leave it. It also says that a launch **is running**
+//! ([`begin_launch`]): settling resets the count and leaves that word, and only a clean quit
+//! removes the marker ([`clear_attempt`]) — so the launch after a crash that came after the
+//! settling is known for it too ([`Before::unexpected`]), which the count alone never showed.
 //!
 //! Pure except the file bodies, which are thin; it sees no AppKit (the `split`/`zoom`
 //! precedent).
@@ -1626,26 +1629,107 @@ pub fn attempt_mode(previous: u32) -> AttemptMode {
     }
 }
 
-/// Counts one more attempt (`0600`, through a temporary name) and returns the count before it. A
-/// missing or unreadable marker counts as none — the wrong way is one attempt too many, never a
-/// session lost. A write that fails is not an error the launch can act on: the count before it
-/// is still the answer.
-pub fn bump_attempt(lock: &Lock) -> u32 {
-    let path = lock.dir.join(ATTEMPT);
-    let previous = fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| text.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    let _ = write_atomic(
-        &path,
-        format!("{}\n", previous.saturating_add(1)).as_bytes(),
-    );
-    previous
+/// What the attempt marker says: the launches that read the session and did not settle, and
+/// whether a launch is running that has not quit cleanly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Attempt {
+    count: u32,
+    running: bool,
 }
 
-/// Removes the marker: the launch settled, or bateri quit cleanly.
+impl Attempt {
+    /// A bare count, as the bateri before this one wrote it (`3\n`), or the count and the word
+    /// `running` on a line of its own. What is not that is none: the wrong way is one attempt
+    /// too many, never a session lost.
+    fn parse(text: &str) -> Attempt {
+        let mut lines = text.lines();
+        let Some(count) = lines
+            .next()
+            .and_then(|line| line.trim().parse::<u32>().ok())
+        else {
+            return Attempt::default();
+        };
+        Attempt {
+            count,
+            running: lines.next().is_some_and(|line| line.trim() == "running"),
+        }
+    }
+
+    fn render(self) -> String {
+        format!(
+            "{}\n{}",
+            self.count,
+            if self.running { "running\n" } else { "" }
+        )
+    }
+}
+
+/// What a launch finds of the ones before it ([`begin_launch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Before {
+    /// The launches before it that read the session and did not settle: [`attempt_mode`]'s input.
+    pub count: u32,
+    /// The bateri before it did not quit cleanly: it was running when it ended (a crash, a
+    /// forced quit, a power cut), or a launch of it that read the session never settled — what
+    /// an earlier bateri's marker, a bare count above nothing, says.
+    pub unexpected: bool,
+}
+
+/// Whether the launch that found `unexpected` ([`Before::unexpected`]) follows a quit that was
+/// not expected. An update's relaunch (`by_update`: the ledger says the bateri left to be updated,
+/// or the one before kablo's holder waited) is no unexpected quit even where the marker could not
+/// say it was clean.
+pub fn follows_unexpected_quit(unexpected: bool, by_update: bool) -> bool {
+    unexpected && !by_update
+}
+
+/// Marks the launch as running (`0600`, through a temporary name), counting it when it reads the
+/// session (`counted`; a launch with ⇧ held does not), and says what the ones before found. A
+/// marker that cannot be written is not an error the launch can act on: what it found is
+/// still the answer.
+pub fn begin_launch(lock: &Lock, counted: bool) -> Before {
+    let path = lock.dir.join(ATTEMPT);
+    let previous = Attempt::parse(&fs::read_to_string(&path).unwrap_or_default());
+    let now = Attempt {
+        count: if counted {
+            previous.count.saturating_add(1)
+        } else {
+            previous.count
+        },
+        running: true,
+    };
+    let _ = write_atomic(&path, now.render().as_bytes());
+    Before {
+        count: previous.count,
+        unexpected: previous.running || previous.count > 0,
+    }
+}
+
+/// Counts one more attempt and returns the count before it ([`begin_launch`]).
+pub fn bump_attempt(lock: &Lock) -> u32 {
+    begin_launch(lock, true).count
+}
+
+/// The launch settled (or gave the session up): what it restored did not crash it, so the count
+/// goes back to nothing — and the launch is still running, so that a crash after this is a
+/// crash the next one knows of.
+pub fn settle_attempt(lock: &Lock) {
+    let now = Attempt {
+        count: 0,
+        running: true,
+    };
+    let _ = write_atomic(&lock.dir.join(ATTEMPT), now.render().as_bytes());
+}
+
+/// Removes the marker: bateri quit cleanly.
 pub fn clear_attempt(lock: &Lock) {
-    let _ = fs::remove_file(lock.dir.join(ATTEMPT));
+    clear_attempt_in(&lock.dir);
+}
+
+/// [`clear_attempt`] where the directory's lock is not held any more (a launch that gave the
+/// session up lets go of it, and quits as cleanly as any).
+pub fn clear_attempt_in(dir: &Path) {
+    let _ = fs::remove_file(dir.join(ATTEMPT));
 }
 
 #[cfg(test)]
@@ -3188,6 +3272,61 @@ mod tests {
             pane.history = false;
         }
         assert_eq!(taken, expected);
+    }
+
+    #[test]
+    fn a_launch_is_marked_running_until_a_clean_quit_and_settling_only_resets_the_count() {
+        let root = TempRoot::new("restore-launch-record");
+        let lock = lock(&root.0.join("s")).expect("lock");
+        let attempt = lock.dir().join(ATTEMPT);
+        let before = |count, unexpected| Before { count, unexpected };
+        // The first launch of all has nothing before it.
+        assert_eq!(begin_launch(&lock, true), before(0, false));
+        assert_eq!(mode(&attempt), 0o600);
+        // Settling resets the count and leaves the launch running: a crash after it is known.
+        settle_attempt(&lock);
+        assert_eq!(
+            fs::read_to_string(&attempt).expect("marker"),
+            "0\nrunning\n"
+        );
+        assert_eq!(begin_launch(&lock, true), before(0, true));
+        // A crash before the settling counts as well, and a settled launch after it is again
+        // one that is running.
+        assert_eq!(begin_launch(&lock, true), before(1, true));
+        settle_attempt(&lock);
+        // A clean quit, by the directory alone (the launch may have let go of its lock).
+        clear_attempt_in(lock.dir());
+        assert_eq!(begin_launch(&lock, true), before(0, false));
+        // A launch that does not read the session is running and is not counted.
+        clear_attempt(&lock);
+        assert_eq!(begin_launch(&lock, false), before(0, false));
+        assert_eq!(
+            fs::read_to_string(&attempt).expect("marker"),
+            "0\nrunning\n"
+        );
+        assert_eq!(begin_launch(&lock, false), before(0, true));
+        assert_eq!(begin_launch(&lock, true), before(0, true));
+        assert_eq!(begin_launch(&lock, true), before(1, true));
+        // What an earlier bateri wrote is a bare count: above nothing it is an unsettled launch,
+        // which no clean quit leaves behind.
+        fs::write(&attempt, b"2\n").expect("bare");
+        assert_eq!(begin_launch(&lock, true), before(2, true));
+        fs::write(&attempt, b"0\n").expect("bare");
+        assert_eq!(begin_launch(&lock, true), before(0, false));
+        fs::write(&attempt, b"garbage\nrunning\n").expect("garbage");
+        assert_eq!(
+            begin_launch(&lock, true),
+            before(0, false),
+            "an unreadable marker is none"
+        );
+        // An update's relaunch is no unexpected quit, whatever the marker says.
+        assert!(follows_unexpected_quit(true, false));
+        assert!(!follows_unexpected_quit(true, true));
+        assert!(!follows_unexpected_quit(false, false));
+        // The clears of the layout leave it, as ever.
+        settle_attempt(&lock);
+        clear(&lock).expect("clear");
+        assert!(attempt.exists());
     }
 
     #[test]

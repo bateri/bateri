@@ -1044,6 +1044,11 @@ fn specs(card: &Card) -> Vec<Spec> {
     let here = card.is_here();
     let enter = Some("\u{2318}Enter");
     let escape = Some("\u{2318}Esc");
+    // A notice has one answer and no way out: the card stays until the answer is given or what it
+    // is about is over.
+    if let Some(answer) = card.notice_answer() {
+        return vec![Spec::new(answer, enter, true, true, sel!(install:))];
+    }
     match card.stage() {
         Stage::Ask if here => vec![
             Spec::new("Open in Your Browser", escape, false, true, sel!(notHere:)),

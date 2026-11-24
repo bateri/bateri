@@ -164,6 +164,22 @@ impl PaneHost for TabHost {
         });
     }
 
+    fn view_notice_wanted(&self, pane: u64, card: bt_shell_common::apps::card::Card) {
+        crate::apps_card::notice::want(pane, crate::apps_card::notice::Kind::View, card);
+    }
+
+    fn view_notice_dropped(&self, pane: u64) {
+        crate::apps_card::notice::drop_notice(Self::mtm(), pane);
+    }
+
+    fn view_notice_forgotten(&self, pane: u64) {
+        crate::apps_card::notice::forget(pane);
+    }
+
+    fn view_notice_waits_for_its_card(&self, pane: u64) -> bool {
+        crate::apps_card::notice::waits_for_its_card(pane)
+    }
+
     fn resized(&self, pane: u64) {
         // On the next turn of the loop: the card is made again outside of the layout this is
         // told in.
@@ -259,12 +275,27 @@ impl PaneHost for TabHost {
         crate::hold_service::stage_of(account)
     }
 
-    fn view_changed(&self, pane: &bt_core::PaneUuid, open: bool) {
-        crate::hold_service::view_changed(pane, open);
+    fn view_changed(&self, pane: &bt_core::PaneUuid, open: bool, program: Option<&str>) {
+        crate::hold_service::view_changed(pane, open, program);
     }
 
-    fn view_was_open(&self, pane: &bt_core::PaneUuid) -> bool {
-        crate::hold_service::view_was_open(pane)
+    fn view_mark(
+        &self,
+        pane: &bt_core::PaneUuid,
+    ) -> Option<bt_shell_common::kablo::ledger::ViewMark> {
+        crate::hold_service::view_mark(pane)
+    }
+
+    fn view_waits(&self, pane: &bt_core::PaneUuid, waits: bool) {
+        crate::hold_service::view_waits(pane, waits);
+    }
+
+    fn local_program(&self, pane: &bt_core::PaneUuid) -> Option<String> {
+        crate::hold_service::local_program(pane)
+    }
+
+    fn launch_was_unexpected(&self) -> bool {
+        crate::hold_service::unexpected_launch()
     }
 
     fn retry_kept_terminal(&self, pane: &bt_core::PaneUuid) {
@@ -362,6 +393,15 @@ impl PaneHost for TabHost {
     fn activity_changed(&self, pane: u64) {
         if let Some(tab) = self.tab() {
             tab.activity_changed();
+        }
+        // The shell spoke: the program a view waited for may be the one that ended.
+        if let Some(tab) = self.tab()
+            && let Some(pane) = tab
+                .panes()
+                .into_iter()
+                .find(|candidate| candidate.id() == pane)
+        {
+            pane.check_view_hold();
         }
         // The shell spoke, so it is past its opening moment: a server's card may come over it.
         crate::apps_card::prompted(Self::mtm(), pane);
