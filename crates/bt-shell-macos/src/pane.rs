@@ -2852,6 +2852,10 @@ define_class!(
             } else if action == Some(sel!(forgetPassword:)) {
                 // A remote tab with a saved password.
                 self.can_forget_password()
+            } else if action == Some(sel!(inspectPage:)) {
+                // View ▸ Inspect Page: grey where the pane shows no page of the kit.
+                bt_shell_common::native_view::inspect(self.inspect_asked(false))
+                    != bt_shell_common::native_view::Inspect::Grey
             } else if action == Some(sel!(pageCommand:)) {
                 // View ▸ Page Commands ▸: the command of the item's tag can be done now.
                 usize::try_from(item.tag())
@@ -2967,7 +2971,22 @@ define_class!(
         /// where it is open (`crate::inspector`).
         #[unsafe(method(inspectPage:))]
         fn inspect_page_sent(&self, _sender: Option<&AnyObject>) {
-            self.host().open_inspector(self);
+            use bt_shell_common::native_view::{Inspect, inspect};
+            // A menu's key is caught before the pane's own key: the current event says it was
+            // the key, and the browser's tools were what the key meant where there is a browser.
+            let by_key = NSApplication::sharedApplication(self.mtm())
+                .currentEvent()
+                .is_some_and(|event| crate::native_browser::is_tools_key(&event));
+            match inspect(self.inspect_asked(by_key)) {
+                Inspect::Grey => {}
+                Inspect::Tools => {
+                    if let Some(browsers) = self.page_browsers() {
+                        browsers.open_tools(self);
+                    }
+                }
+                Inspect::Open | Inspect::Close => self.host().open_inspector(self),
+                Inspect::End => self.end_tool(),
+            }
         }
 
         /// The header's button over a page of the kit's own: the page comes down and the
@@ -6677,6 +6696,19 @@ impl TerminalPane {
         crate::inspector::target_changed(self.mtm(), self.id());
     }
 
+    /// What View ▸ Inspect Page is asked of this pane, as the key or the menu asks it.
+    fn inspect_asked(&self, by_key: bool) -> bt_shell_common::native_view::Asked {
+        bt_shell_common::native_view::Asked {
+            page: self.page_is_up(),
+            by_key,
+            browser: self
+                .page_browsers()
+                .is_some_and(|browsers| browsers.has_tools(self)),
+            tool: self.is_tool(),
+            open: !crate::inspector::inspectors_of(self.id()).is_empty(),
+        }
+    }
+
     /// Whether the pane is one of bateri's own tools.
     pub(crate) fn is_tool(&self) -> bool {
         self.ivars().tool.is_some()
@@ -6884,12 +6916,7 @@ impl TerminalPane {
                 spot
             }))
         };
-        // The page's points are from the pane's top, the pane's frames from its bottom.
-        let height = self.bounds().size.height;
-        spot.setFrame(NSRect::new(
-            NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
-            NSSize::new(f64::from(rect.w), f64::from(rect.h)),
-        ));
+        spot.setFrame(crate::native_page::rect_in_pane(self, rect));
         spot.setHidden(false);
     }
 
@@ -9752,6 +9779,10 @@ impl PageDriveHost for PageHost<'_> {
             // And down the way every end of a program's view goes: its questions and requests
             // with it, the tab's mark and the terminal's record.
             pane.end_view();
+        } else if pane.inspector_up() {
+            // The inspector's own page failed: its pane has nothing else to show, so it goes, and
+            // with it the page it measured and the box it showed.
+            pane.end_tool();
         } else {
             pane.take_page_down();
         }
@@ -11936,6 +11967,15 @@ mod tests {
             close.contains("self.0.inspector_up()") && close.contains("self.0.end_tool();"),
             "{close}"
         );
+        // The inspector's own page failing ends its pane: there is nothing else to show in it.
+        let ended = &host[host.find("fn ended(").expect("ended")..];
+        let ended = &ended[..ended.find("\n    }\n").expect("its end")];
+        assert!(
+            ended.find("pane.inspector_up()").expect(ended)
+                < ended.find("pane.take_page_down();").expect(ended),
+            "{ended}"
+        );
+        assert!(ended.contains("pane.end_tool();"), "{ended}");
         // The header's button and the pane's own end: through the owner, from the main queue.
         let end = body_of("    pub(crate) fn end_tool(");
         assert!(end.contains("DispatchQueue::main().exec_async"), "{end}");
@@ -12004,5 +12044,40 @@ mod tests {
             drew.find("drew.push(target)").expect(drew) < drew.find("exec_async").expect(drew),
             "{drew}"
         );
+    }
+
+    /// View ▸ Inspect Page is one command for the menu and the key: the browser's tools are opened
+    /// by the rule the key has always had (`open_tools`, which the page's own key path calls too),
+    /// and the decision of which way it goes is the one function that is tested. A source scan,
+    /// because a pane needs a window server.
+    #[test]
+    fn inspect_page_asks_the_one_rule_of_the_tools_key_and_the_one_decision() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn inspect_page_sent(").expect("the action");
+        let action = &pane[at..at + pane[at..].find("\n        }\n").expect("its end")];
+        assert!(
+            action.contains("inspect(self.inspect_asked(by_key))"),
+            "{action}"
+        );
+        assert!(action.contains("browsers.open_tools(self);"), "{action}");
+        assert!(action.contains("is_tools_key(&event)"), "{action}");
+        assert!(
+            !action.contains("tools_for"),
+            "the rule is not copied: {action}"
+        );
+        // The grey of the item is the same decision, asked as the menu asks it.
+        let validate = &pane[pane.find("fn validate_menu_item(").expect("validate")..];
+        assert!(
+            validate.contains("inspect(self.inspect_asked(false))"),
+            "the item is grey where the command has nothing to do"
+        );
+        let browser = include_str!("native_browser.rs");
+        let key = &browser[browser.find("pub(crate) fn key_down(").expect("key_down")..];
+        let key = &key[..key
+            .find("let Some(room) = self.focused.get()")
+            .expect("its next step")];
+        assert!(key.contains("self.open_tools(pane)"), "{key}");
+        assert!(!key.contains("Command::DevTools"), "{key}");
     }
 }

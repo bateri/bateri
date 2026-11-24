@@ -420,18 +420,13 @@ impl PageFields {
         for (tag, _) in self.tip_tags.take() {
             view.removeToolTip(tag);
         }
-        let height = pane.bounds().size.height;
         let tags = self
             .tips
             .borrow()
             .iter()
             .map(|tip| {
                 // The page's rooms are from the pane's top, the pane's frames from its bottom.
-                let rect = tip.rect;
-                let in_pane = NSRect::new(
-                    NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
-                    NSSize::new(f64::from(rect.w), f64::from(rect.h)),
-                );
+                let in_pane = rect_in_pane(pane, tip.rect);
                 let words = NSString::from_str(&tip.words);
                 let at = view.convertRect_fromView(in_pane, Some(pane));
                 // SAFETY: an owner that does not answer `view:stringForToolTip:point:userData:`
@@ -1441,7 +1436,15 @@ fn nearest(nodes: &[AxNode], made: &[Option<Made>], at: usize) -> Option<usize> 
 
 /// Where `item` stands, in the pane's coordinates, which grow upward where the page's go downward.
 fn frame_in_pane(pane: &TerminalPane, item: &Accessible) -> NSRect {
-    let rect = item.rect;
+    rect_in_pane(pane, item.rect)
+}
+
+/// Where `rect`, in the page's points (from the pane's top), stands in the pane's own coordinates
+/// (from its bottom): the one place the page's rooms are turned over.
+pub(crate) fn rect_in_pane(
+    pane: &TerminalPane,
+    rect: bt_shell_common::native_view::Rect,
+) -> NSRect {
     let height = pane.bounds().size.height;
     NSRect::new(
         NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),

@@ -12,8 +12,10 @@
 //! [`Subject`], which the platform's pane gives, and what it says is:
 //!
 //! - `target` (topic): `{ pane, page, gone, stamp }`, when the page subscribes and whenever what
-//!   it says changes. The `stamp` is how many pages the target's script has made: **the page
-//!   asks again what it asked under another stamp**, and the stamp changes at most four times a
+//!   it says changes. The `stamp` says which page of the target's it is: a new one each time
+//!   the target draws a frame that did something (made a page, laid it out again, ran its
+//!   script), and a new generation for each page the pane shows after another. **The page asks
+//!   again what it asked under another stamp**, and the stamp changes at most four times a
 //!   second ([`INTERVAL`]), however often the target draws, and once more where it comes to rest;
 //! - `costs` (topic): what the target's last frames cost, pushed after the target drew a frame
 //!   and never otherwise;
@@ -30,7 +32,7 @@
 //! measures while the inspector is open and is let go of when it closes ([`Responder::end`]).
 //! What it says is no program's: it never reaches a terminal or a wire.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -102,6 +104,18 @@ pub fn inspector_page(
     )
 }
 
+/// How many calls of the page the table keeps before the answered ones are let go of.
+const KEPT: usize = 256;
+
+/// The table the page's calls are answered by: `close`, which the responder takes itself.
+fn table(closing: &Rc<Cell<bool>>) -> Calls {
+    let asked = Rc::clone(closing);
+    Calls::new().on(CLOSE, move |_| {
+        asked.set(true);
+        Ok(Value::Object(Default::default()))
+    })
+}
+
 /// What the page was last told of its target: the pane, and the stamp of its page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Told {
@@ -143,6 +157,56 @@ fn refused(code: &str, message: &str) -> Held {
     })
 }
 
+/// What View ▸ Inspect Page (⌥⌘I) is asked of, by the pane that has the keyboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Asked {
+    /// The pane shows a page of the kit (a program's view, or the inspector's own page).
+    pub page: bool,
+    /// The key was pressed: the item was not clicked in the menu.
+    pub by_key: bool,
+    /// A browser of the page is the one the host's tools key means (the one the keyboard is in,
+    /// or the one that had it last, or the only one shown).
+    pub browser: bool,
+    /// The pane is an inspector.
+    pub tool: bool,
+    /// An inspector of the pane is open.
+    pub open: bool,
+}
+
+/// What the command does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Inspect {
+    /// The item is grey: the pane shows no page of the kit (a terminal, a web view).
+    Grey,
+    /// The browser's tools open, as ⌥⌘I did before the page had an inspector: the key stays
+    /// the browser's wherever it means one.
+    Tools,
+    /// The inspector of the pane opens, beside it.
+    Open,
+    /// The inspector of the pane closes: the command is asked a second time.
+    Close,
+    /// The pane is the inspector and closes: it inspects no inspector.
+    End,
+}
+
+/// What View ▸ Inspect Page does for the pane that has the keyboard. The key keeps the browser's
+/// tools where the pane has a browser they mean, as it was before (the menu's key is caught before
+/// the pane's own `keyDown:`, so the command has to do what the pane's would have done); from the
+/// menu, where nothing says a browser is meant, it is always the inspector.
+pub fn inspect(asked: Asked) -> Inspect {
+    if asked.tool {
+        Inspect::End
+    } else if !asked.page {
+        Inspect::Grey
+    } else if asked.by_key && asked.browser {
+        Inspect::Tools
+    } else if asked.open {
+        Inspect::Close
+    } else {
+        Inspect::Open
+    }
+}
+
 /// What the page says is answered here, and what the page is to be told is said here.
 pub struct Responder {
     calls: Calls,
@@ -162,7 +226,17 @@ pub struct Responder {
     /// When the page was last told of the target's frames.
     published_at: Option<f64>,
     /// The target's page as its last frame left it, kept until the next frame.
-    cache: Option<(u64, Rc<Inspection>)>,
+    cache: Option<Rc<Inspection>>,
+    /// How many pages the pane has shown after another since the inspector looked at it: the
+    /// stamp's high part, so that a page that came where another went (a reload) is not taken for
+    /// the one before, whose first frames the new one's would otherwise match.
+    generation: Cell<u64>,
+    /// The page the stamp is of.
+    page: RefCell<Option<PageHandle>>,
+    /// How many frames of the page that did something the inspector has seen: the stamp's low part.
+    epoch: Cell<u64>,
+    /// The last frame that did something that was seen, which says whether another came.
+    last_frame: RefCell<Option<Cost>>,
     /// The inspector is over: the target is not measured any more.
     ended: bool,
 }
@@ -172,11 +246,7 @@ impl Responder {
     /// the pane has.
     pub fn new(subject: Rc<dyn Subject>) -> Self {
         let closing = Rc::new(Cell::new(false));
-        let asked = Rc::clone(&closing);
-        let calls = Calls::new().on(CLOSE, move |_| {
-            asked.set(true);
-            Ok(Value::Object(Default::default()))
-        });
+        let calls = table(&closing);
         let responder = Self {
             calls,
             subject,
@@ -188,6 +258,10 @@ impl Responder {
             pending: false,
             published_at: None,
             cache: None,
+            generation: Cell::new(0),
+            page: RefCell::new(None),
+            epoch: Cell::new(0),
+            last_frame: RefCell::new(None),
             ended: false,
         };
         responder.measure();
@@ -200,7 +274,7 @@ impl Responder {
         self.refuse_unknown_calls();
         self.answer_new_subscriptions();
         self.serve();
-        self.calls.said()
+        self.out()
     }
 
     /// What the pane looked at shows changed (its page came up or went down): the page is told it
@@ -210,12 +284,11 @@ impl Responder {
         self.measure();
         self.cache = None;
         self.tell_target();
-        if !self.subject.target().page {
-            self.chosen = None;
-        }
+        // What was chosen is kept while the page is away: where one comes back, the element is
+        // found again by its name, or its place where it has none.
         self.place_highlight();
         self.serve();
-        self.calls.said()
+        self.out()
     }
 
     /// The target drew a frame, `now` on the clock the pane keeps. The page is told of it, if the
@@ -230,7 +303,7 @@ impl Responder {
             self.pending = true;
         }
         self.serve();
-        self.calls.said()
+        self.out()
     }
 
     /// When the frames the page has not been told of are due to be, on the pane's clock, if
@@ -246,13 +319,13 @@ impl Responder {
             self.publish(now);
         }
         self.serve();
-        self.calls.said()
+        self.out()
     }
 
     /// What the page asked while the target's page was in use is answered now if the page is not.
     pub fn poll(&mut self) -> Vec<String> {
         self.serve();
-        self.calls.said()
+        self.out()
     }
 
     /// Whether what the page asked is still waiting for the target's page to be free.
@@ -283,12 +356,60 @@ impl Responder {
         }
     }
 
+    /// The target's page, and whether it is another than the one the stamp was of: a page that
+    /// came where another went is a new generation of stamps, however few pages it has made.
+    fn handle(&self) -> Option<PageHandle> {
+        let handle = self.subject.page()?;
+        let mut known = self.page.borrow_mut();
+        match known.as_ref() {
+            Some(old) if old.same(&handle) => {}
+            Some(_) => {
+                self.generation.set(self.generation.get() + 1);
+                self.epoch.set(0);
+                self.last_frame.replace(None);
+                *known = Some(handle.clone());
+            }
+            None => *known = Some(handle.clone()),
+        }
+        Some(handle)
+    }
+
+    /// What the responder said since it was last asked. The table of calls keeps what the page
+    /// asked for ever, and a page that is asked again at every stamp of a target that moves asks a
+    /// great many: where all of it is answered, what is kept of it is let go of.
+    fn out(&mut self) -> Vec<String> {
+        let said = self.calls.said();
+        if self.calls.calls().len() > KEPT && self.calls.waiting().is_empty() {
+            let live: Vec<(u64, &str)> = self
+                .calls
+                .subscriptions()
+                .iter()
+                .filter(|subscription| subscription.live)
+                .filter_map(|subscription| {
+                    [TARGET, COSTS]
+                        .into_iter()
+                        .find(|topic| *topic == subscription.topic)
+                        .map(|topic| (subscription.id, topic))
+                })
+                .collect();
+            let mut fresh = table(&self.closing);
+            for (id, topic) in &live {
+                fresh.heard(&format!(
+                    r#"{{"subscribe":{{"id":{id},"topic":"{topic}"}}}}"#
+                ));
+            }
+            self.seen = live.len();
+            self.calls = fresh;
+        }
+        said
+    }
+
     /// The target's page measures from now on, where it does not.
     fn measure(&self) {
         if self.ended {
             return;
         }
-        if let Some(handle) = self.subject.page()
+        if let Some(handle) = self.handle()
             && let Some(mut page) = handle.try_page()
             && !page.inspecting()
         {
@@ -298,7 +419,7 @@ impl Responder {
 
     /// The target's page as its last frame left it.
     fn read(&mut self) -> Read {
-        let Some(handle) = self.subject.page() else {
+        let Some(handle) = self.handle() else {
             return Read::Absent;
         };
         let Some(mut page) = handle.try_page() else {
@@ -307,37 +428,47 @@ impl Responder {
         if !self.ended && !page.inspecting() {
             page.inspect(true);
         }
-        let stamp = page.module().renders();
-        if let Some((kept, model)) = &self.cache
-            && *kept == stamp
-        {
-            return Read::Model(stamp, Rc::clone(model));
+        if let Some(model) = &self.cache {
+            return Read::Model(self.stamp(), Rc::clone(model));
         }
         match page.inspection() {
             Some(inspection) => {
+                self.note(&inspection);
                 let model = Rc::new(inspection);
-                self.cache = Some((stamp, Rc::clone(&model)));
-                Read::Model(stamp, model)
+                self.cache = Some(Rc::clone(&model));
+                Read::Model(self.stamp(), model)
             }
             None => Read::Unseen,
         }
     }
 
-    /// How many pages the target's script has made, where its page is free to ask.
-    fn stamp(&self) -> u64 {
-        self.subject
-            .page()
-            .and_then(|handle| handle.try_page().map(|page| page.module().renders()))
-            .or_else(|| self.told.as_ref().map(|told| told.stamp))
-            .unwrap_or(0)
+    /// A model that has a frame of the page that did something that the last did not is another
+    /// page of the target's: the stamp moves on. It is the page as it was **drawn** that is read,
+    /// and what the drive says of it is the frames it kept: the count of pages the script made
+    /// runs ahead of the one drawn, and a stamp that followed it would be the same for the page
+    /// before and for the one that came after.
+    fn note(&self, model: &Inspection) {
+        let last = model.frames.last();
+        if self.last_frame.borrow().as_ref() != last {
+            self.epoch.set(self.epoch.get() + 1);
+            self.last_frame.replace(last.cloned());
+        }
+    }
+
+    /// Which page of the target's the inspector knows: the pages the pane has shown one after the
+    /// other, and the frames of the page that did something.
+    pub fn stamp(&self) -> u64 {
+        (self.generation.get() << 32) | self.epoch.get().min(u64::from(u32::MAX))
     }
 
     /// The target's frames were drawn since the page was last told: it is told now.
     fn publish(&mut self, now: f64) {
         self.pending = false;
         self.published_at = Some(now);
+        // The page as it was drawn first: what it says of it is the stamp that is told.
+        let read = self.read();
         self.tell_target();
-        let Read::Model(stamp, model) = self.read() else {
+        let Read::Model(stamp, model) = read else {
             return;
         };
         let value = costs_of(stamp, &model);
@@ -513,8 +644,11 @@ impl Responder {
             self.show(None);
             return;
         }
-        if let Read::Model(_, model) = self.read() {
-            self.place_highlight_in(&model);
+        match self.read() {
+            Read::Model(_, model) => self.place_highlight_in(&model),
+            // No page: no box; what was chosen is kept to be found where a page comes back.
+            Read::Absent => self.show(None),
+            Read::Busy | Read::Unseen => {}
         }
     }
 
@@ -536,8 +670,11 @@ impl Responder {
         self.show(found.and_then(|item| shown_box(&item.element)));
     }
 
+    /// The box is where `rect` is: told to the pane each time a frame was drawn while there is one,
+    /// since the pane may have moved or resized it meanwhile (a box is kept from the top, the
+    /// pane's frames from the bottom), and told once when there is none.
     fn show(&mut self, rect: Option<Rect>) {
-        if self.shown != rect {
+        if rect.is_some() || self.shown != rect {
             self.shown = rect;
             self.subject.highlight(rect);
         }
@@ -578,9 +715,12 @@ fn path_of(params: &Value) -> Result<Option<Vec<usize>>, Held> {
     let Some(path) = params.get("path").filter(|path| !path.is_null()) else {
         return Ok(None);
     };
-    let places = path
-        .as_array()
-        .ok_or_else(|| refused("invalid", "a path is a list of places"))?;
+    // A page that writes an empty list as `{}` names the root: an empty table is both.
+    let places = match path {
+        Value::Array(places) => places.as_slice(),
+        Value::Object(members) if members.is_empty() => &[],
+        _ => return Err(refused("invalid", "a path is a list of places")),
+    };
     places
         .iter()
         .map(|place| {

@@ -846,11 +846,26 @@ impl Layers {
             .position(|card| card.tree.leaves().contains(&pane))
     }
 
-    /// The share of the tab's content area `pane`'s place takes: its card's, or the whole where
-    /// it is in the flat area.
+    /// The share of the tab's content area `pane` takes as the tab is laid out: where it stands
+    /// in the flat area's split, or inside its card. The whole where the pane is in neither.
     pub fn area_of(&self, pane: u64) -> Area {
-        self.card_of(pane)
-            .map_or(Area::WHOLE, |index| self.cards[index].area)
+        self.fractions()
+            .into_iter()
+            .find(|(id, _)| *id == pane)
+            .map_or(Area::WHOLE, |(_, rect)| {
+                Area::new(rect.x, rect.y, rect.width, rect.height)
+            })
+    }
+
+    /// The layers with the panes `left_out` taken out as a closed pane is: a tab as the person
+    /// has it, without the tools bateri opened in it.
+    #[must_use]
+    pub fn without(&self, left_out: &[u64]) -> Self {
+        let mut kept = self.clone();
+        for pane in left_out {
+            let _ = kept.remove(*pane);
+        }
+        kept
     }
 
     /// Whether `pane` is in a card.
@@ -2933,12 +2948,25 @@ mod tests {
         assert!(low.y + low.height <= 1.0 + 1e-9, "{low:?}");
     }
 
-    /// The place of a pane is its card's, or the whole of the tab where it is in the flat area.
+    /// The place of a pane is where it stands in the split of the flat area or in its card, and
+    /// the whole of the tab where it stands nowhere.
     #[test]
-    fn the_place_of_a_pane_is_its_cards_or_the_whole_tab() {
+    fn the_place_of_a_pane_is_where_the_tab_has_it() {
         let layers = with_cards(vec![card(7)]);
-        assert!(same(layers.area_of(1), Area::WHOLE));
+        assert!(same(layers.area_of(1), Area::new(0.0, 0.0, 0.5, 1.0)));
+        assert!(same(layers.area_of(2), Area::new(0.5, 0.0, 0.5, 1.0)));
         assert!(same(layers.area_of(7), layers.cards[0].area));
         assert!(same(layers.area_of(99), Area::WHOLE));
+    }
+
+    /// A tab without a pane is the tab as it would be had the pane been closed.
+    #[test]
+    fn layers_without_a_pane_are_as_if_it_had_been_closed() {
+        let layers = with_cards(vec![card(7)]);
+        let without = layers.without(&[7]);
+        assert!(without.cards.is_empty());
+        assert_eq!(without.flat, layers.flat);
+        assert_eq!(layers.without(&[]), layers);
+        assert_eq!(layers.without(&[2]).flat, Tree::Leaf(1));
     }
 }

@@ -6509,8 +6509,12 @@ impl AppDelegate {
         }
         let open = crate::inspector::inspectors_of(from.id());
         if !open.is_empty() {
+            // Closed where it is, which is not always this tab: a pane that was moved takes its
+            // inspector's card with it nowhere.
             for inspector in open {
-                tab.close_pane(inspector);
+                if let Some(pane) = crate::embed::pane(self.mtm(), inspector) {
+                    pane.end_tool();
+                }
             }
             return false;
         }

@@ -587,11 +587,7 @@ impl SavedTab {
         order: &[u64],
         left_out: &[u64],
     ) -> Option<(Shape, Vec<SavedCard>)> {
-        let mut kept = layers.clone();
-        for pane in left_out {
-            let _ = kept.remove(*pane);
-        }
-        Self::shapes(&kept, order)
+        Self::shapes(&layers.without(left_out), order)
     }
 
     /// The tab's layers with each pane index replaced by `ids[index]` — the restored panes' new

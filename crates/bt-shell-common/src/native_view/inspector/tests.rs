@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::native_view::pane_tests::PaneRig;
+use crate::native_view::{Button, Input};
 use pencere_view::{Id, Key, Mods};
 use std::cell::RefCell;
 
@@ -131,6 +132,10 @@ struct Bench {
     stand: Rc<Stand>,
     /// How many `children` calls the page made.
     asked: usize,
+    /// What the page said, in order.
+    heard: Vec<String>,
+    /// The time of the frames: it goes on where a scenario lets it.
+    now: f64,
 }
 
 impl Bench {
@@ -145,6 +150,8 @@ impl Bench {
             responder,
             stand,
             asked: 0,
+            heard: Vec::new(),
+            now: 0.0,
         };
         bench.rig.frame(0.0);
         bench.settle();
@@ -154,7 +161,7 @@ impl Bench {
     /// The page said what it said and the responder answered, until neither has more.
     fn settle(&mut self) {
         for _ in 0..20 {
-            self.rig.settle(0.0);
+            self.rig.settle(self.now);
             let said: Vec<String> = self
                 .rig
                 .lines()
@@ -168,6 +175,7 @@ impl Bench {
                 if message.contains(r#""method":"children""#) {
                     self.asked += 1;
                 }
+                self.heard.push(message.clone());
                 let replies = self.responder.hear(&message);
                 tell(self.rig.handle(), &replies);
             }
@@ -194,6 +202,44 @@ impl Bench {
     fn says(&self, words: &str) -> bool {
         self.rig.words().iter().any(|line| line == words)
     }
+
+    /// The person presses the element named `name`, and lets go.
+    fn click(&mut self, name: &str) {
+        let at = self
+            .rig
+            .handle()
+            .page()
+            .reach(Id::named(name))
+            .unwrap_or_else(|why| panic!("{name} is not reached: {why:?}"));
+        for input in [
+            Input::Press {
+                at,
+                button: Button::Left,
+                mods: Mods::default(),
+                count: 1,
+            },
+            Input::Release {
+                at,
+                button: Button::Left,
+                mods: Mods::default(),
+            },
+        ] {
+            self.rig.input(input);
+        }
+        self.settle();
+    }
+
+    /// The calls of `method` the page made, as their params say.
+    fn calls_of(&self, method: &str) -> Vec<Value> {
+        self.heard
+            .iter()
+            .map(|message| value(message))
+            .filter_map(|message| {
+                let call = message.get("call")?;
+                (call["method"] == method).then(|| call["params"].clone())
+            })
+            .collect()
+    }
 }
 
 /// The page is the kit's own: it requires `@pencere/ui` and `@pencere/query`, which a script of
@@ -210,21 +256,13 @@ fn the_page_requires_the_kits_library_and_is_drawn_headless() {
 fn the_page_is_told_the_target_first_and_again_when_its_page_goes_and_comes_back() {
     let target = target_rig();
     let mut bench = Bench::over(Stand::new(Some(target.handle().clone())));
-    assert!(
-        bench.says("Reading the page of p3."),
-        "{:?}",
-        bench.rig.words()
-    );
+    assert!(bench.says("p3"), "{:?}", bench.rig.words());
     bench.becomes(false, false);
     assert!(bench.says("No page in p3."), "{:?}", bench.rig.words());
     bench.stand.page.replace(Some(target.handle().clone()));
     let replies = bench.responder.refresh();
     bench.told(&replies);
-    assert!(
-        bench.says("Reading the page of p3."),
-        "{:?}",
-        bench.rig.words()
-    );
+    assert!(bench.says("p3"), "{:?}", bench.rig.words());
     bench.becomes(false, true);
     assert!(bench.says("The pane is gone."), "{:?}", bench.rig.words());
 }
@@ -429,8 +467,16 @@ fn a_target_that_draws_all_the_time_is_told_of_four_times_a_second_at_most() {
     // It rests: the last frames are told when their time comes.
     let due = responder.due().expect("frames wait to be told");
     stamped(&mut stamps, responder.tick(due));
-    let last = target.handle().page().module().renders();
-    assert_eq!(stamps.last().copied(), Some(last), "{stamps:?}");
+    assert_eq!(
+        stamps.last().copied(),
+        Some(responder.stamp()),
+        "{stamps:?}"
+    );
+    // Each was another page of the target's.
+    assert!(
+        stamps.windows(2).all(|pair| pair[0] < pair[1]),
+        "{stamps:?}"
+    );
     assert!(responder.due().is_none());
 }
 
@@ -463,11 +509,7 @@ fn the_page_asks_again_for_a_new_stamp_and_for_no_frame() {
         bench.asked
     );
     // The page was told of a page made, so what it asks is of the target's page it has now.
-    assert!(
-        bench.says("Reading the page of p3."),
-        "{:?}",
-        bench.rig.words()
-    );
+    assert!(bench.says("p3"), "{:?}", bench.rig.words());
 }
 
 /// The element chosen has its box shown over the pane, and the box follows it when the page
@@ -599,4 +641,272 @@ fn a_frame_is_told_to_the_one_who_watches_the_frames() {
     target.handle().watch_frames(None);
     target.frame(4.0);
     assert_eq!(drawn.get(), 2);
+}
+
+/// View ▸ Inspect Page and ⌥⌘I, for each way the pane that has the keyboard can be.
+#[test]
+fn the_command_goes_the_way_the_pane_and_the_key_say() {
+    let page = Asked {
+        page: true,
+        ..Asked::default()
+    };
+    // A pane with no page of the kit (a terminal, a web view): the item is grey, from the key too.
+    assert_eq!(inspect(Asked::default()), Inspect::Grey);
+    assert_eq!(
+        inspect(Asked {
+            by_key: true,
+            browser: true,
+            ..Asked::default()
+        }),
+        Inspect::Grey
+    );
+    // A page: the inspector opens, and a second time it closes.
+    assert_eq!(inspect(page), Inspect::Open);
+    assert_eq!(inspect(Asked { open: true, ..page }), Inspect::Close);
+    // The key, where a browser is the one it means: the browser's tools, as it always was.
+    let keyed = Asked {
+        by_key: true,
+        ..page
+    };
+    assert_eq!(
+        inspect(Asked {
+            browser: true,
+            ..keyed
+        }),
+        Inspect::Tools
+    );
+    // The key where there is no browser, or the menu where there is: the inspector.
+    assert_eq!(inspect(keyed), Inspect::Open);
+    assert_eq!(
+        inspect(Asked {
+            browser: true,
+            ..page
+        }),
+        Inspect::Open
+    );
+    assert_eq!(
+        inspect(Asked {
+            browser: true,
+            open: true,
+            ..page
+        }),
+        Inspect::Close
+    );
+    // The inspector's own pane closes, whatever else is true of it.
+    assert_eq!(inspect(Asked { tool: true, ..page }), Inspect::End);
+    assert_eq!(
+        inspect(Asked {
+            tool: true,
+            by_key: true,
+            browser: true,
+            ..page
+        }),
+        Inspect::End
+    );
+}
+
+/// The place a call named, as a list (a page writes the root's as an empty list or as an empty
+/// table: the responder takes either, and so does this).
+fn place_of(params: &Value) -> Vec<u64> {
+    params["path"]
+        .as_array()
+        .map(|places| places.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default()
+}
+
+/// The key the page gives the element named `name`.
+fn key(name: &str) -> String {
+    format!("#{}", hex(name))
+}
+
+fn over_target() -> (PaneRig, Bench) {
+    let target = target_rig();
+    let mut bench = Bench::over(Stand::new(Some(target.handle().clone())));
+    // The timer the page set to take the keyboard for the tree runs at the frame after it.
+    bench.now = 0.5;
+    bench.settle();
+    bench.rig.frame(0.5);
+    bench.settle();
+    (target, bench)
+}
+
+/// The first thing the page asks is the first level of the page it looks at, and it shows it.
+#[test]
+fn the_page_reads_the_first_level_and_shows_it() {
+    let (_target, bench) = over_target();
+    let asked = bench.calls_of("children");
+    assert_eq!(asked.len(), 1, "{:?}", bench.heard);
+    assert!(place_of(&asked[0]).is_empty());
+    // The root, and the four boxes the page has at its top, named or not.
+    assert!(bench.says("p3"), "{:?}", bench.rig.words());
+    let boxes = bench
+        .rig
+        .words()
+        .iter()
+        .filter(|line| *line == "box")
+        .count();
+    assert_eq!(boxes, 4, "{:?}", bench.rig.words());
+    assert!(
+        bench.says("Choose an element of the page."),
+        "{:?}",
+        bench.rig.words()
+    );
+}
+
+/// A folder is read when it is opened: its level is asked for then and no sooner.
+#[test]
+fn a_level_is_read_when_it_is_opened() {
+    let (_target, mut bench) = over_target();
+    assert!(!bench.says("text"));
+    bench.click(&format!("tree/chevron/{}", key("a")));
+    let asked: Vec<Vec<u64>> = bench.calls_of("children").iter().map(place_of).collect();
+    assert_eq!(asked, [vec![], vec![0]], "{:?}", bench.heard);
+    // What is in the first box is its word, which is a text.
+    assert!(bench.says("text"), "{:?}", bench.rig.words());
+}
+
+/// An element chosen is chosen in the page it is of, and its box and style are in the details.
+#[test]
+fn an_element_chosen_is_chosen_in_the_target_and_described() {
+    let (_target, mut bench) = over_target();
+    bench.click(&format!("tree/list/row/{}", key("b")));
+    let chosen = bench.calls_of("select");
+    assert_eq!(chosen.len(), 1, "{:?}", bench.heard);
+    assert_eq!(place_of(&chosen[0]), [1]);
+    let lit = bench.stand.box_now().expect("a box over the pane");
+    assert_eq!((lit.y, lit.h), (52.0, 20.0));
+    // Its box and how it was placed are said in the details.
+    assert!(bench.says("box"), "{:?}", bench.rig.words());
+    assert!(bench.says("0, 52   800 × 20"), "{:?}", bench.rig.words());
+    assert!(bench.says("auto × 20px"), "{:?}", bench.rig.words());
+}
+
+/// The tree is walked with the keys the moment the inspector opens, and what the keys land on is
+/// chosen as a click would choose it.
+#[test]
+fn the_keyboard_is_the_trees_from_the_start() {
+    let (_target, mut bench) = over_target();
+    bench.rig.key(Key::Down, Mods::default());
+    bench.settle();
+    bench.rig.key(Key::Down, Mods::default());
+    bench.settle();
+    let chosen = bench.calls_of("select");
+    assert!(!chosen.is_empty(), "{:?}", bench.heard);
+}
+
+/// The button closes it as Esc does.
+#[test]
+fn the_close_button_asks_the_pane_to_close() {
+    let (_target, mut bench) = over_target();
+    assert!(!bench.responder.closing());
+    bench.click("close");
+    assert!(bench.responder.closing());
+}
+
+/// A page that came where another went is another page whatever it has drawn, so that what the
+/// page of the inspector kept of the one before is asked again; the same page is not.
+#[test]
+fn a_page_that_comes_where_another_went_is_another_stamp() {
+    let old = target_rig();
+    let stand = Stand::new(Some(old.handle().clone()));
+    let mut responder = Responder::new(Rc::clone(&stand) as Rc<dyn Subject>);
+    responder.hear(r#"{"subscribe":{"id":1,"topic":"target"}}"#);
+    responder.hear(&call(2, "children", Some(&[])));
+    let before = responder.stamp();
+    // The same page, asked again: the stamp stays.
+    responder.hear(&call(3, "children", Some(&[])));
+    assert_eq!(responder.stamp(), before);
+    // A new page that has drawn as much as the old one: the stamp is not the old one's.
+    let new = target_rig();
+    stand.page.replace(Some(new.handle().clone()));
+    let told = responder.refresh();
+    responder.hear(&call(4, "children", Some(&[])));
+    assert_ne!(responder.stamp(), before);
+    assert!(
+        told.iter()
+            .any(|reply| reply.contains(r#""push""#) && reply.contains(r#""stamp""#)),
+        "{told:?}"
+    );
+}
+
+/// What was chosen is kept while the page is away, and found again where one comes back.
+#[test]
+fn the_chosen_element_is_found_again_when_the_page_comes_back() {
+    let old = target_rig();
+    let stand = Stand::new(Some(old.handle().clone()));
+    let mut responder = Responder::new(Rc::clone(&stand) as Rc<dyn Subject>);
+    responder.hear(&call(1, "select", Some(&[1])));
+    assert!(stand.box_now().is_some());
+    stand.page.replace(None);
+    responder.refresh();
+    assert_eq!(stand.box_now(), None, "no page, no box");
+    let new = target_rig();
+    stand.page.replace(Some(new.handle().clone()));
+    responder.refresh();
+    let shown = stand.box_now().expect("the element is boxed again");
+    assert_eq!((shown.y, shown.h), (52.0, 20.0));
+}
+
+/// The box is told to the pane at each frame while there is one: the pane may have been resized
+/// meanwhile, and the box is placed from the pane's own edge.
+#[test]
+fn the_box_is_told_at_each_frame_even_where_it_has_not_moved() {
+    let mut target = target_rig();
+    let stand = Stand::new(Some(target.handle().clone()));
+    let mut responder = Responder::new(Rc::clone(&stand) as Rc<dyn Subject>);
+    responder.hear(&call(1, "select", Some(&[0])));
+    let told = stand.lit.borrow().len();
+    target.frame(1.0);
+    responder.drew(1.0);
+    target.frame(2.0);
+    responder.drew(2.0);
+    assert_eq!(stand.lit.borrow().len(), told + 2);
+}
+
+/// What the page asked for ever is not kept for ever: a page that is asked again at every stamp of
+/// a target that moves asks a great many, and still hears what it subscribed to.
+#[test]
+fn the_calls_of_a_long_session_are_let_go_of_and_the_subscriptions_are_kept() {
+    let mut target = target_rig();
+    let mut responder = Responder::new(Stand::new(Some(target.handle().clone())));
+    responder.hear(r#"{"subscribe":{"id":1,"topic":"target"}}"#);
+    let mut stamps = Vec::new();
+    for id in 2..2000_u64 {
+        responder.hear(&call(id, "children", Some(&[])));
+    }
+    assert!(
+        responder.calls.calls().len() <= KEPT + 1,
+        "{} calls kept",
+        responder.calls.calls().len()
+    );
+    // The subscription is still there: a frame that did something is told.
+    target.key(Key::Character('r'), Mods::default());
+    target.settle(10.0);
+    stamped(&mut stamps, responder.drew(10.0));
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    // And a page that was cancelled stays cancelled.
+    responder.hear(r#"{"cancel":{"id":1}}"#);
+    target.key(Key::Character('r'), Mods::default());
+    target.settle(20.0);
+    stamped(&mut stamps, responder.drew(20.0));
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+}
+
+/// A layout made for a reader who asked for it draws no frame: the one who watches the frames is
+/// not told.
+#[test]
+fn a_layout_made_for_a_reader_is_no_frame() {
+    let target = target_rig();
+    let drawn = Rc::new(Cell::new(0_u32));
+    let counted = Rc::clone(&drawn);
+    target
+        .handle()
+        .watch_frames(Some(Box::new(move || counted.set(counted.get() + 1))));
+    target.handle().lay_out_unseen(pencere_drive::FrameAt {
+        size: (800, 600),
+        scale: 1.0,
+        now: 3.0,
+        reduce_motion: false,
+    });
+    assert_eq!(drawn.get(), 0);
 }

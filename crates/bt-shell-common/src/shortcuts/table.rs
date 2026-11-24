@@ -297,6 +297,9 @@ pub const COMMANDS: &[Command] = &[
     )),
     // View
     command("command_palette", "toggleCommandPalette", &["shift+cmd+p"]),
+    // The page of the pane that has the keyboard, element by element, in a card beside it. Not
+    // content: the key is the application's over a web page too, where the item is grey.
+    command("inspect_page", "inspectPage", &["option+cmd+i"]),
     command("themes", "showThemes", &[]),
     command("open_themes_folder", "openThemesFolder", &[]),
     command("tabs_top", "tabsAtTop", &[]),
@@ -557,6 +560,7 @@ mod tests {
             ("toggleCommandPalette", "p", "cs"),
             ("toggleSideColumn", "s", "ck"),
             ("showActivity", "a", "cs"),
+            ("inspectPage", "i", "co"),
             ("makeFontBigger", "+", "c"),
             ("makeFontSmaller", "-", "c"),
             ("resetFontSize", "0", "c"),

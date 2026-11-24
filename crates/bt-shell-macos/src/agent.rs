@@ -1408,10 +1408,12 @@ fn windows_of(
             }
             // A tool of bateri's (the page inspector) is no pane of the person's: the picture of
             // the tab has nothing of it, as the saved layout has nothing.
-            let mut layers = tab.container().layers();
-            for tool in panes.iter().filter(|pane| pane.is_tool()) {
-                let _ = layers.remove(tool.id());
-            }
+            let tools: Vec<u64> = panes
+                .iter()
+                .filter(|pane| pane.is_tool())
+                .map(|pane| pane.id())
+                .collect();
+            let layers = tab.container().layers().without(&tools);
             tabs.push(Tab {
                 id: tab.number(),
                 group: groups

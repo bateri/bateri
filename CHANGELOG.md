@@ -14,6 +14,7 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Inspect Page, in the View menu (⌥⌘I).** A program's page shows what it is made of: every element, named or not, with its box, its room, its border, the style that put it there and what a screen reader says of it, and what each frame cost. It opens beside the page; choose an element and its box is drawn over the page. ⌥⌘I still opens a browser's tools where a page has a browser.
 - **A program's page can keep what it asks of its program.** The page library has `@pencere/query`, which remembers each answer and whether it is loading, stale or given up, so a program's page no longer writes that bookkeeping itself.
 
 ## [0.33.0] - 2026-11-24

@@ -323,6 +323,9 @@ impl UiPage for PageDrawing {
         // (`Painted::deliver_held`) is given to the pane, once its fields exist. Not only when the
         // outline changed: what is held can wait for a frame whose outline is the one the pane has.
         self.handle.tell_frame(&mut painted);
+        // A frame the link drew, as the person sees it: not a layout made for a reader that asked
+        // for one (`lay_out_unseen`), which draws nothing and counts as no frame.
+        self.handle.frame_drawn();
         list
     }
 
@@ -559,10 +562,6 @@ impl PageHandle {
     /// A frame's outline if it changed, then what the drive held for its fields: the order a pane
     /// needs, for a field is the pane's only once the outline was told. The page is not borrowed.
     fn tell_frame(&self, painted: &mut Painted) {
-        let watched = self.on_frame.borrow().clone();
-        if let Some(watched) = watched {
-            watched();
-        }
         if let Some(outline) = painted.outline.take() {
             self.tell_outline(&outline);
         }
@@ -581,6 +580,20 @@ impl PageHandle {
     /// was drawn (the inspector), and it does its work later, not in the frame's path.
     pub fn watch_frames(&self, told: Option<Box<dyn Fn()>>) {
         self.on_frame.replace(told.map(Rc::from));
+    }
+
+    /// Tells who watches the frames ([`PageHandle::watch_frames`]) that one was drawn. The page is
+    /// not borrowed.
+    fn frame_drawn(&self) {
+        let watched = self.on_frame.borrow().clone();
+        if let Some(watched) = watched {
+            watched();
+        }
+    }
+
+    /// Whether `other` is the same page as this: a page that came where another went is not.
+    pub fn same(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.page, &other.page)
     }
 
     /// The page's editors, as the pane's keys, input method, pasteboard and screen reader reach
@@ -919,6 +932,7 @@ pub(super) mod tests {
             });
             let mut painted = painted;
             self.handle.tell_frame(&mut painted);
+            self.handle.frame_drawn();
             self.list = painted.list;
         }
 
