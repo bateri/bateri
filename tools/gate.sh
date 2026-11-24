@@ -18,6 +18,10 @@
 # lost a race with its neighbours and the step stands; it is named on the screen and in the
 # `bateri-gate-flaky` list under the git directory. Failing once, the step is red.
 #
+# A test binary that says nothing for `SILENT` seconds is taken for a hang: it is killed with
+# what it started, and the step is red and names the tests it was still running. A hang is
+# never run again alone, and a test that hangs alone is red the same way.
+#
 # A stamp names the content that passed — the working tree's files as a git tree, the
 # uncommitted and the untracked ones included, the ignored and excluded ones not — so
 # committing what passed keeps its stamp, and the same content is never checked twice. The
@@ -135,40 +139,138 @@ mkdir -p "$logs"
 flaky=$(git rev-parse --git-common-dir)/bateri-gate-flaky
 ALONE_RUNS=3
 ALONE_MOST=30
+# How long a test binary may say nothing (no test ends, no line of its own) before it is taken
+# for a hang. The longest silence of a binary that passed was 21 s (the program view's, in a run
+# of `make test`, `test-heavy` and `test-view` with each line timed, 2026-11-25, on a Mac at load
+# 12; a whole binary took at most 130 s). 120 s is over five times that, and past the 60 s after
+# which libtest names a test that is still running, which is how a hang gets its name.
+SILENT=120
+
+# The test binaries the gate runs now: processes under the gate whose program is a target's
+# (`…/deps/…`), each without another one above it (a test may start its own binary again).
+test_binaries() {
+    ps -A -o pid=,ppid=,comm= | awk -v gate=$$ '
+        { up[$1] = $2; deps[$1] = ($0 ~ /\/deps\//) }
+        END {
+            for (p in up) {
+                if (!deps[p]) continue
+                for (q = up[p]; q > 1 && q != gate && !deps[q]; q = up[q]) {}
+                if (q == gate) print p
+            }
+        }'
+}
+
+# A process and everything under it.
+family() {
+    ps -A -o pid=,ppid= | awk -v top="$1" '
+        { up[$1] = $2 }
+        END { for (p in up) { for (q = p; q > 1 && q != top; q = up[q]) {}; if (q == top) print p } }'
+}
+
+# What the killed binary was still running, by its log: the tests libtest said had been running
+# for over 60 seconds, or that a run of one test began, and that have not ended since the
+# binary's `Running` line; the binary itself when it names no test (a target with its own
+# `main`).
+hung_tests() {
+    awk '
+        $1 == "Running" { split("", open); split("", ended); target = $0; sub(/^ *Running /, "", target) }
+        $1 == "test" && / has been running for over / { open[$2] = 1 }
+        $1 == "test" && / \.\.\. *$/ { open[$2] = 1 }
+        $1 == "test" && / \.\.\. [a-zA-Z]/ { ended[$2] = 1 }
+        END {
+            for (t in open) if (!(t in ended)) { print t; named = 1 }
+            if (!named) print target
+        }' "$1"
+}
+
+# Watches a step whose output goes to `$1`, for as long as the gate is there: a test binary that
+# leaves the log silent for $SILENT seconds (libtest's warnings not counted) is killed with what
+# it started, and what it was running is added to `$1.hung`.
+watch() {
+    local log=$1 heard=-1 now bins seen="" since=$SECONDS b
+    while kill -0 $$ 2>/dev/null; do
+        sleep 1
+        now=$(grep -v ' has been running for over ' "$log" 2>/dev/null | wc -c)
+        bins=$(test_binaries | sort | tr '\n' ' ')
+        if [ "$now" != "$heard" ] || [ "$bins" != "$seen" ]; then
+            heard=$now seen=$bins since=$SECONDS
+        elif [ -n "$bins" ] && [ $((SECONDS - since)) -ge "$SILENT" ]; then
+            hung_tests "$log" >>"$log.hung"
+            for b in $bins; do kill -9 $(family "$b") 2>/dev/null; done
+            since=$SECONDS
+        fi
+    done
+}
+
+# Runs a command with its output in `$1`, as `"$@" >"$1" 2>&1` does, under `watch`. A command
+# whose test binary was killed fails, whatever it said.
+watched() {
+    local log=$1 status watcher
+    shift
+    rm -f "$log.hung"
+    watch "$log" &
+    watcher=$!
+    "$@" >"$log" 2>&1
+    status=$?
+    kill "$watcher" 2>/dev/null
+    wait "$watcher" 2>/dev/null
+    [ -e "$log.hung" ] && return 1
+    return "$status"
+}
 
 # Whether what failed in the log is only tests that pass alone, every one of them $ALONE_RUNS
-# times. Sets `alone` to their names. Anything else that failed — a build, a binary with its
-# own `main`, a test binary that died, more tests than a race explains — is a failure: cargo
-# names every target that failed, and each must be one whose failed tests are listed.
+# times, each in its own target. Sets `alone` to their names. Anything else that failed — a
+# build, a binary with its own `main`, a test binary that died, more tests than a race
+# explains — is a failure: cargo names every target that failed, and each must be one whose
+# failed tests are listed.
 passes_alone() {
-    local log=$1 names targets select t i
+    local log=$1 names tests targets select t i
     alone=""
     names=$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$log" | sort -u)
+    # `<target>\t<test>`: cargo says how to run a target again after the tests that failed in it.
+    tests=$(awk '
+        /^test .* \.\.\. FAILED$/ { failed[++n] = $2 }
+        /^error: test failed, to rerun pass `/ {
+            select = $0; sub(/^[^`]*`/, "", select); sub(/`.*$/, "", select)
+            for (i = 1; i <= n; i++) print select "\t" failed[i]
+            n = 0
+        }' "$log" | sort -u)
     targets=$(sed -n 's/^error: \([0-9]*\) targets\{0,1\} failed:$/\1/p' "$log")
     [ -n "$names" ] && [ "$(wc -l <<<"$names")" -le "$ALONE_MOST" ] || return 1
+    [ "$(wc -l <<<"$tests")" = "$(wc -l <<<"$names")" ] || return 1
     [ "$targets" = "$(grep -c '^test result: FAILED' "$log")" ] || return 1
-    select=$(sed -n 's/^ *`\(-p .*\)`$/\1/p' "$log" | tr '\n' ' ')
-    [ -n "$select" ] || return 1
-    while IFS= read -r t; do
+    while IFS=$'\t' read -r select t; do
         for ((i = 0; i < ALONE_RUNS; i++)); do
-            make test-one SELECT="$select" NAME="$t" >"$log.alone" 2>&1 || return 1
+            watched "$log.alone" make test-one SELECT="$select" NAME="$t" || return 1
             grep -qx "test $t \.\.\. ok" "$log.alone" || return 1
         done
-    done <<<"$names"
+    done <<<"$tests"
     alone=$(tr '\n' ' ' <<<"$names")
     while IFS= read -r t; do echo "$(date +%F) $t" >>"$flaky"; done <<<"$names"
+}
+
+# A step red for a test binary killed for its silence (its log is `$3`), with what it ran.
+hung() {
+    echo "  $1: FAILED ($((SECONDS - $2)) s) — hung, killed after $SILENT s of silence:" \
+        "$(sort -u "$3.hung" | tr '\n' ' ')— $3"
+    exit 1
 }
 
 step() {
     local name=$1
     shift
     local start=$SECONDS out=$logs/$name.log
-    if "$@" >"$out" 2>&1; then
+    rm -f "$out.alone.hung"
+    if watched "$out" "$@"; then
         echo "  $name: ok ($((SECONDS - start)) s)"
+    elif [ -e "$out.hung" ]; then
+        hung "$name" "$start" "$out"
     elif [ "$name" = linux-server ] && grep -q '^SKIPPED' "$out"; then
         echo "  $name: SKIPPED — $(grep -m1 '^SKIPPED' "$out")"
     elif passes_alone "$out"; then
         echo "  $name: ok ($((SECONDS - start)) s) — failed beside the others, passed alone: ${alone% }"
+    elif [ -e "$out.alone.hung" ]; then
+        hung "$name" "$start" "$out.alone"
     else
         echo "  $name: FAILED ($((SECONDS - start)) s) — $out"
         tail -n 20 "$out" | sed 's/^/    /'
