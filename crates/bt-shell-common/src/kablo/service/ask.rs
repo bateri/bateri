@@ -125,7 +125,7 @@ impl PtyOps for LocalOps {
         let log = self.ticket.state().log.clone();
         match log {
             Some(backend) => backend.log_line(&line),
-            None => eprintln!("bateri: {line}"),
+            None => eprintln!("{} bateri: {line}", crate::clock::stamp()),
         }
     }
 
@@ -326,7 +326,7 @@ pub(super) fn refuse(parts: Parts, why: &str, log: Option<&dyn Backend>) {
     let line = parts.trace.refused_line(parts.pane.as_str(), why, now);
     match log {
         Some(backend) => backend.log_line(&line),
-        None => eprintln!("bateri: {line}"),
+        None => eprintln!("{} bateri: {line}", crate::clock::stamp()),
     }
     ordinary_behind(parts, why);
 }

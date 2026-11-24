@@ -6228,7 +6228,8 @@ fn a_pane_that_takes_nothing_is_let_go_of_so_the_ones_beside_it_go_on_and_it_is_
     let ledger = Arc::new(Ledger::memory());
     let world = Fake::new(Bridge::new(Age::Current));
     let rig = Rig::kept("local-stuck", world.clone(), ledger.clone(), END_GRACE);
-    let mut stuck = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    let stuck_pane = PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1B7").expect("a pane");
+    let mut stuck = Pane::of(open_local(&rig, &stuck_pane).expect("a terminal"));
     let mut beside = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
     let terminals = ledger.terminals_of(local::ACCOUNT);
     let (stuck_id, beside_id) = (terminals[0].clone(), terminals[1].clone());
@@ -6266,6 +6267,12 @@ fn a_pane_that_takes_nothing_is_let_go_of_so_the_ones_beside_it_go_on_and_it_is_
         world.bridge().attaches(&stuck_id).len() == 1,
         "its stream was stopped and the server was asked for no more than the one attach yet"
     );
+    // The log says which pane, what it showed and how much it was owed — once.
+    let said = let_go_lines(&world);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].contains(stuck_pane.as_str()), "{}", said[0]);
+    assert!(said[0].contains("showing a plain terminal"), "{}", said[0]);
+    assert!(owed_in(&said[0]) > 0, "{}", said[0]);
 
     // The program goes on writing and ends while the pane takes nothing.
     for number in lines..lines + 100 {
@@ -6283,6 +6290,15 @@ fn a_pane_that_takes_nothing_is_let_go_of_so_the_ones_beside_it_go_on_and_it_is_
     );
     let attaches = world.bridge().attaches(&stuck_id);
     assert_eq!(attaches.len(), 2, "{attaches:?}");
+    // And how long it was let go of, when it reads again — one line for the pair.
+    until("the line of its return", || {
+        !taken_back_lines(&world).is_empty()
+    });
+    let back = taken_back_lines(&world);
+    assert_eq!(back.len(), 1, "{back:?}");
+    assert!(back[0].contains(stuck_pane.as_str()), "{}", back[0]);
+    assert!(back[0].contains("let go of for "), "{}", back[0]);
+    assert_eq!(let_go_lines(&world).len(), 1, "no second line for it");
     // From the byte after the last it was given (some of what its terminal wrote was not
     // taken from the server when it was let go of), and not from the start.
     let given = attaches[1].0;
@@ -6293,13 +6309,56 @@ fn a_pane_that_takes_nothing_is_let_go_of_so_the_ones_beside_it_go_on_and_it_is_
     drop(third);
 }
 
+/// The lines of the log that say a pane was let go of.
+fn let_go_lines(world: &Fake) -> Vec<String> {
+    let lines = world.lines.lock().expect("lock");
+    lines
+        .iter()
+        .filter(|line| line.contains("took nothing of what its terminal wrote"))
+        .cloned()
+        .collect()
+}
+
+/// The lines of the log that say a pane that was let go of is streamed to again.
+fn taken_back_lines(world: &Fake) -> Vec<String> {
+    let lines = world.lines.lock().expect("lock");
+    lines
+        .iter()
+        .filter(|line| line.contains("was let go of for "))
+        .cloned()
+        .collect()
+}
+
+/// The bytes a line of a pane let go of says it was owed (`(3145728 bytes owed)`).
+fn owed_in(line: &str) -> usize {
+    let before = line.split(" bytes owed)").next().expect("a line");
+    before
+        .rsplit('(')
+        .next()
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("no bytes owed in {line}"))
+}
+
 /// A pane of this Mac, `uuid`, that took nothing of what its terminal wrote (three times what the
 /// bridge lets wait) and has been let go of for it: its terminal's stream is stopped. Returns the
 /// pane and its terminal.
 fn a_pane_let_go_of(rig: &Rig, ledger: &Ledger, uuid: &str) -> (Pane, PaneUuid, SessionId) {
+    a_pane_let_go_of_showing(rig, ledger, uuid, None)
+}
+
+/// [`a_pane_let_go_of`] for a pane whose terminal's record has a view of `program` open.
+fn a_pane_let_go_of_showing(
+    rig: &Rig,
+    ledger: &Ledger,
+    uuid: &str,
+    view: Option<&str>,
+) -> (Pane, PaneUuid, SessionId) {
     let pane = PaneUuid::parse(uuid).expect("a pane");
     let stuck = Pane::of(open_local(rig, &pane).expect("a terminal"));
     let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    if let Some(program) = view {
+        ledger.set_view(local::ACCOUNT, &id, true, Some(program));
+    }
     until("its terminal streams to it", || {
         rig.world.bridge().is_attached(&id)
     });
@@ -6336,6 +6395,7 @@ fn a_pane_that_is_let_go_of_still_types_sizes_and_asks_of_its_terminal() {
     );
     let (stuck, pane, id) = a_pane_let_go_of(&rig, &ledger, "5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A1");
     let mut master = stuck.master.try_clone().expect("a clone");
+    let said = world.lines.lock().expect("lock").len();
 
     // ⌃C: typed to the terminal, in a stream that comes back for it, with the view it had.
     master.write_all(&[0x03]).expect("typed");
@@ -6390,6 +6450,13 @@ fn a_pane_that_is_let_go_of_still_types_sizes_and_asks_of_its_terminal() {
     });
     let_go_of_again(&rig, &id);
     assert_eq!(world.bridge().typed(&id), [0x03], "nothing else was typed");
+    // What it says to its terminal is no news: no line for each key, size and request.
+    assert_eq!(
+        world.lines.lock().expect("lock").len(),
+        said,
+        "{:?}",
+        world.lines.lock().expect("lock")
+    );
 
     // Closing it ends its terminal, and it is told that it has: it streams for that.
     rig.service.end(&pane);
@@ -6399,6 +6466,34 @@ fn a_pane_that_is_let_go_of_still_types_sizes_and_asks_of_its_terminal() {
     until("the terminal forgotten once it ended", || {
         ledger.terminals_of(local::ACCOUNT).is_empty()
     });
+}
+
+/// A pane that shows the view of a program says so in the line that tells it was let go of, with
+/// the name the program gave itself: the log tells a pane that waits on a page from one that
+/// waits on a shell.
+#[test]
+fn the_log_says_which_program_the_view_of_a_pane_that_is_let_go_of_belongs_to() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-let-go-view",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let (_stuck, _pane, _id) = a_pane_let_go_of_showing(
+        &rig,
+        &ledger,
+        "5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A3",
+        Some("pen"),
+    );
+    let said = let_go_lines(&world);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].contains("showing the view of the program \"pen\""),
+        "{}",
+        said[0]
+    );
 }
 
 /// A quit that ends the programs ends the terminal of a pane that is let go of and waits to be

@@ -9985,7 +9985,15 @@ impl PageDriveHost for PageHost<'_> {
         if !self.up() {
             return;
         }
-        eprintln!("bateri: {why}; the terminal is back");
+        eprintln!(
+            "{}",
+            page_ended_line(
+                &bt_shell_common::clock::stamp(),
+                &why.to_string(),
+                pane.uuid().as_str(),
+                pane.view_program_name().as_deref(),
+            )
+        );
         if pane.program_page_up()
             && let Some(session) = pane.session()
         {
@@ -10011,8 +10019,44 @@ impl PageDriveHost for PageHost<'_> {
     }
 }
 
+/// The line of the log for a page that is gone and a terminal that is the pane's again: when
+/// (`stamp`), why, and whose — the pane and the program whose view it was, so that one of a
+/// number of panes and views is told from the others.
+fn page_ended_line(stamp: &str, why: &str, pane: &str, program: Option<&str>) -> String {
+    let whose = match program {
+        Some(name) => format!("the view of the program {name:?}"),
+        None => "a view of no program that named itself".to_owned(),
+    };
+    format!("{stamp} bateri: {why}; the terminal is back (the pane {pane}, {whose})")
+}
+
 #[cfg(test)]
 mod tests {
+    /// The line of a page that did not come back says when, and which pane and program.
+    #[test]
+    fn the_line_of_a_page_that_is_gone_says_when_and_whose_it_was() {
+        assert_eq!(
+            super::page_ended_line(
+                "11:03:27",
+                "the page did not come back within 5 s (a call: a frame, a settle, an event)",
+                "5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A1",
+                Some("pen"),
+            ),
+            "11:03:27 bateri: the page did not come back within 5 s (a call: a frame, a settle, an event); the terminal is back (the pane 5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1A1, the view of the program \"pen\")"
+        );
+        let nameless = super::page_ended_line(
+            "00:00:01",
+            "the page did not finish starting within 10 s",
+            "p",
+            None,
+        );
+        assert!(nameless.starts_with("00:00:01 bateri: "), "{nameless}");
+        assert!(
+            nameless.contains("no program that named itself"),
+            "{nameless}"
+        );
+    }
+
     use super::saved_while_waiting;
     use std::path::PathBuf;
 

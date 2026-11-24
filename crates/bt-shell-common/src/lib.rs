@@ -55,6 +55,7 @@ pub mod apps;
 pub mod browser;
 pub mod card_gesture;
 pub mod child;
+pub mod clock;
 pub mod config_command;
 pub mod digest;
 pub mod download;

@@ -533,10 +533,12 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Where a line about a pane's wait for its terminal of this Mac goes: a wait that was slow
     /// ([`Backend::slow_open`]), and every pane that was not given a terminal, with the step it was
-    /// stuck in or the reason. The default is the log (`bateri.log` is the standard error of the
-    /// application).
+    /// stuck in or the reason, and a pane that was let go of ([`Core::stalled`]) and is back. The
+    /// default is the log (`bateri.log` is the standard error of the application), each line
+    /// beginning with the time of day it was written at: these lines say what happened while no
+    /// one looked, and the person remembers when.
     fn log_line(&self, line: &str) {
-        eprintln!("bateri: {line}");
+        eprintln!("{} bateri: {line}", crate::clock::stamp());
     }
 
     /// How long a pane's wait for its terminal is before it is told ([`Backend::log_line`]).
@@ -1369,6 +1371,11 @@ impl Load {
     /// nothing: the writer took the last of it while the holder was being let go of and did not
     /// say so, as it says it only of a holder that was let go of already.
     fn uncount(&self) -> bool {
+        self.uncount_owing() == 0
+    }
+
+    /// [`Load::uncount`], saying how many bytes the holder is owed, read under the same lock.
+    fn uncount_owing(&self) -> usize {
         let mut state = lock(&self.state);
         if state.counted {
             state.counted = false;
@@ -1376,7 +1383,7 @@ impl Load {
                 queue.lower(state.owed);
             }
         }
-        state.owed == 0
+        state.owed
     }
 
     /// What the holder is owed counts again.
@@ -1463,8 +1470,9 @@ struct Conn {
     /// What the holder's writer is owed ([`Load`]).
     load: Arc<Load>,
     /// The holder took nothing for so long that its terminal's stream was stopped
-    /// ([`Core::stalled`]); it is started again when the pane has taken what it was owed.
-    suspended: bool,
+    /// ([`Core::stalled`]), and when; it is started again when the pane has taken what it was
+    /// owed.
+    suspended: Option<Instant>,
     /// The pane's terminal does not take input yet ([`Core::open_gates`]): what the pane types
     /// waits in its stream, in order, and is read when it does.
     waits_for_input: bool,
@@ -2487,7 +2495,7 @@ impl Core {
             .conns
             .iter()
             .filter(|(hold, conn)| {
-                !conn.suspended
+                conn.suspended.is_none()
                     && conn.load.stalled(now, HOLD_STALL)
                     && self
                         .hub
@@ -2500,23 +2508,38 @@ impl Core {
             if !self.hub.suspend(hold) {
                 continue;
             }
-            let mut nothing_owed = false;
+            let mut owed = 0;
             if let Some(conn) = self.conns.get_mut(&hold) {
-                conn.suspended = true;
-                nothing_owed = conn.load.uncount();
+                conn.suspended = Some(now);
+                owed = conn.load.uncount_owing();
             }
-            if nothing_owed {
+            // Said before what may follow from it: a pane that is owed nothing is taken back at
+            // once, and its line would come first.
+            let line =
+                let_go::let_go_line(&self.pane_of(hold), &self.shows(hold), owed, HOLD_STALL);
+            self.shared.backend.log_line(&line);
+            if owed == 0 {
                 self.drained(hold);
             }
-            let pane = self.panes.get(&hold).map_or_else(
-                || "a pane".to_owned(),
-                |pane| format!("the pane {}", pane.as_str()),
-            );
-            self.shared.backend.log_line(&format!(
-                "{pane} took nothing of what its terminal wrote for {} and the account was held back by it: the panes beside it go on, and it is given the rest when it reads",
-                waiting::seconds(HOLD_STALL),
-            ));
         }
+    }
+
+    /// The pane `hold` runs in, as a line of the log names it.
+    fn pane_of(&self, hold: HoldId) -> String {
+        self.panes
+            .get(&hold)
+            .map_or_else(|| "?".to_owned(), |pane| pane.as_str().to_owned())
+    }
+
+    /// What the pane of `hold` shows, as a line of the log says it: a plain terminal, or the view
+    /// of a program the terminal's record has open ([`Ledger::view_mark`]), with its name. The
+    /// ledger is read, not the pane: the pane is what is not heard from when it is let go of.
+    fn shows(&self, hold: HoldId) -> String {
+        let view = self
+            .hub
+            .terminal_of(hold)
+            .and_then(|(account, terminal)| self.shared.ledger.view_mark(account, terminal));
+        let_go::shows(view.as_ref())
     }
 
     /// A pane that was let go of ([`Core::stalled`]) has taken all it was owed: its terminal's
@@ -2525,7 +2548,7 @@ impl Core {
         let Some(conn) = self.conns.get_mut(&hold) else {
             return;
         };
-        if conn.suspended {
+        if conn.suspended.is_some() {
             self.awaken(hold);
         } else {
             // Streaming and not counted ([`Core::awaken_to_end`]): it counts again.
@@ -2540,12 +2563,18 @@ impl Core {
         let Some(conn) = self.conns.get_mut(&hold) else {
             return;
         };
-        if !conn.suspended {
+        let Some(since) = conn.suspended.take() else {
             return;
-        }
-        conn.suspended = false;
+        };
         conn.load.recount();
         self.hub.awake(hold);
+        let line = let_go::taken_back_line(
+            &self.pane_of(hold),
+            &self.shows(hold),
+            Instant::now().saturating_duration_since(since),
+            let_go::Back::Read,
+        );
+        self.shared.backend.log_line(&line);
     }
 
     /// Says `say` to the terminal of `hold`. A pane that was let go of ([`Core::stalled`]) has
@@ -2559,7 +2588,10 @@ impl Core {
     /// pane typed and the server has not taken is kept, and goes the same way when the answers
     /// that open its window come ([`Core::pump_suspended`]).
     fn say(&mut self, hold: HoldId, say: impl FnOnce(&mut Hub)) {
-        let let_go = self.conns.get(&hold).is_some_and(|conn| conn.suspended);
+        let let_go = self
+            .conns
+            .get(&hold)
+            .is_some_and(|conn| conn.suspended.is_some());
         if !let_go || !self.hub.awake_to_say(hold) {
             // Said as it is: the connection is down, and what cannot be said is told as always.
             say(&mut self.hub);
@@ -2590,8 +2622,15 @@ impl Core {
             return;
         };
         let nothing_owed = conn.load.uncount();
-        if std::mem::take(&mut conn.suspended) {
+        if let Some(since) = conn.suspended.take() {
             self.hub.awake(hold);
+            let line = let_go::taken_back_line(
+                &self.pane_of(hold),
+                &self.shows(hold),
+                Instant::now().saturating_duration_since(since),
+                let_go::Back::ToEnd,
+            );
+            self.shared.backend.log_line(&line);
         }
         if nothing_owed {
             self.drained(hold);
@@ -2604,7 +2643,7 @@ impl Core {
         let ready: Vec<HoldId> = self
             .conns
             .iter()
-            .filter(|(hold, conn)| conn.suspended && self.hub.input_ready(**hold))
+            .filter(|(hold, conn)| conn.suspended.is_some() && self.hub.input_ready(**hold))
             .map(|(hold, _)| *hold)
             .filter(|hold| {
                 self.hub
@@ -2933,7 +2972,7 @@ impl Core {
                 throttle,
                 status,
                 load: Load::new(),
-                suspended: false,
+                suspended: None,
                 waits_for_input,
             },
         );
@@ -5640,6 +5679,7 @@ fn bridge_writer(mut writer: Box<dyn Write + Send>, written: &Receiver<Vec<u8>>)
 }
 
 mod ask;
+mod let_go;
 mod pipes;
 pub use pipes::Streams;
 pub(super) mod waiting;
