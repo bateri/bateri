@@ -7107,6 +7107,219 @@ fn what_a_pane_types_before_the_server_says_its_terminal_is_gone_goes_to_the_new
     second.stop();
 }
 
+/// A pane's terminal, on its way, and the person chose an ordinary shell instead: the pane has the
+/// shell at once and is told it was the choice, what is typed reaches it, and the terminal that was
+/// asked for is ended when it comes — nobody would show it, and it leaves no row.
+#[test]
+fn an_ordinary_shell_chosen_for_a_new_terminal_on_its_way_ends_the_terminal_when_it_comes() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-chose-new", world.clone(), ledger.clone(), END_GRACE);
+    world.bridge().hold_created();
+    let stream = ask_local(&rig, &a_pane());
+    until("its terminal asked for", || {
+        ledger.terminals_of(local::ACCOUNT).len() == 1
+    });
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    assert!(!stream.pid.is_settled(), "waiting");
+
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+    assert!(stream.status.is_ordinary());
+    assert_ne!(stream.pid.get(), Some(crate::kablo::fake::FAKE_PID));
+    let mut mac = Pane::of(stream);
+    let told = String::from_utf8_lossy(&mac.reads(b"ordinary shell")).into_owned();
+    assert!(told.contains("you chose it"), "{told}");
+    mac.master
+        .write_all(b"echo shell_said_$((6*7))\n")
+        .expect("typed");
+    let read = String::from_utf8_lossy(&mac.reads(b"shell_said_42")).into_owned();
+    assert!(read.contains("shell_said_42"), "{read}");
+
+    // The terminal comes to nobody: it is ended, and no row is left for it.
+    world.bridge().release_created();
+    until("the terminal ended as it came", || {
+        world.bridge().terminated(&id) == Some(false)
+    });
+    // Nobody shows it: the ledger no longer has it for the pane (it is marked to end).
+    assert_eq!(ledger.local_terminal_of(&a_pane()), None);
+    assert!(
+        world.bridge().typed(&id).is_empty(),
+        "what the pane typed went to the shell and not to the terminal"
+    );
+}
+
+/// The choice is made while the account of this Mac is still being made — nothing has been asked of
+/// the server: the pane has its shell at once, and no terminal is started when the account comes.
+#[test]
+fn an_ordinary_shell_chosen_while_the_account_is_made_is_given_at_once_and_no_terminal_follows() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_millis.store(1500, Ordering::SeqCst);
+    let rig = Rig::kept(
+        "local-chose-early",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let stream = ask_local(&rig, &a_pane());
+    thread::sleep(Duration::from_millis(100));
+    stream.ops.ordinary_instead();
+    let began = Instant::now();
+    until("the shell", || stream.pid.get().is_some());
+    assert!(
+        began.elapsed() < Duration::from_millis(1000),
+        "the choice waited for the account: {:?}",
+        began.elapsed()
+    );
+    assert!(stream.status.is_ordinary());
+    // The account comes, and starts nothing for the pane.
+    thread::sleep(Duration::from_millis(1800));
+    assert!(ledger.terminals_of(local::ACCOUNT).is_empty());
+}
+
+/// A terminal found again whose list does not come: the pane has an ordinary shell instead, and
+/// the terminal — its program may live — is not ended, and stays in the ledger with the pane. The
+/// pane's close ends nothing of it; a quit that ends the programs does.
+#[test]
+fn an_ordinary_shell_chosen_for_a_terminal_found_again_leaves_the_terminal_running() {
+    let back = Comeback::leaves("local-chose-found", b"x\r\n");
+    back.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    let carries = back.world.count("carry");
+    until("an attempt", || back.world.count("carry") > carries);
+    assert!(!stream.pid.is_settled(), "waiting for the terminal");
+
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+    assert!(stream.status.is_ordinary());
+    let mut mac = Pane::of(stream);
+    let told = String::from_utf8_lossy(&mac.reads(b"ordinary shell")).into_owned();
+    assert!(told.contains("you chose it"), "{told}");
+    mac.master
+        .write_all(b"echo shell_said_$((6*7))\n")
+        .expect("typed");
+    let read = String::from_utf8_lossy(&mac.reads(b"shell_said_42")).into_owned();
+    assert!(read.contains("shell_said_42"), "{read}");
+
+    // The terminal is left as it was: in the ledger with its pane, asked nothing.
+    assert_eq!(
+        back.ledger.local_terminal_of(&back.pane),
+        Some(back.terminal.clone())
+    );
+    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
+    // Closing the pane that has the shell ends nothing of the terminal.
+    drop(mac);
+    second.end(&back.pane);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        back.ledger.local_terminal_of(&back.pane),
+        Some(back.terminal.clone()),
+        "the close of a shell is no close of the terminal"
+    );
+    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
+    second.stop();
+}
+
+/// A quit that ends the programs ends a terminal found again that the pane left running for a
+/// shell of its own choosing: the quit asked for no program to outlive it.
+#[test]
+fn a_quit_that_ends_the_programs_ends_the_terminal_a_pane_left_running_for_an_ordinary_shell() {
+    let back = Comeback::leaves("local-chose-found-quit", b"x\r\n");
+    back.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    let carries = back.world.count("carry");
+    until("an attempt", || back.world.count("carry") > carries);
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+
+    second.end_all(std::slice::from_ref(&back.pane), Duration::from_millis(300));
+    assert!(
+        back.ledger.local_terminal_of(&back.pane).is_none(),
+        "marked to end"
+    );
+    // Whenever the connection comes, it is ended.
+    back.world.carry_fails_with(None);
+    let mut asked = Instant::now();
+    until("the terminal ended", || {
+        if asked.elapsed() >= Duration::from_millis(25) {
+            asked = Instant::now();
+            second.retry_account(local::ACCOUNT);
+        }
+        back.world.bridge().terminated(&back.terminal).is_some()
+    });
+    drop(stream);
+    second.stop();
+}
+
+/// The terminal a pane was to be shown again is not on the server, and the new one made instead is
+/// on its way: the choice gives the pane a shell on the stream a holder carries already, and the
+/// new terminal is ended when it comes.
+#[test]
+fn an_ordinary_shell_chosen_for_the_new_terminal_that_took_the_place_of_a_found_one_ends_it_when_it_comes()
+ {
+    let back = Comeback::leaves("local-chose-gone", b"x\r\n");
+    back.world.bridge().exit(&back.terminal, Exit::Code(0));
+    back.world.bridge().hold_created();
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    until("a new terminal asked for the pane", || {
+        back.ledger
+            .local_terminal_of(&back.pane)
+            .is_some_and(|made| made != back.terminal)
+    });
+    let made = back
+        .ledger
+        .local_terminal_of(&back.pane)
+        .expect("a terminal");
+    assert!(!stream.pid.is_settled(), "waiting for it");
+
+    stream.ops.ordinary_instead();
+    until("the shell", || stream.pid.get().is_some());
+    assert!(stream.status.is_ordinary());
+    let mut mac = Pane::of(stream);
+    mac.master
+        .write_all(b"echo shell_said_$((6*7))\n")
+        .expect("typed");
+    let read = String::from_utf8_lossy(&mac.reads(b"shell_said_42")).into_owned();
+    assert!(read.contains("shell_said_42"), "{read}");
+
+    back.world.bridge().release_created();
+    until("the new terminal ended as it came", || {
+        back.world.bridge().terminated(&made) == Some(false)
+    });
+    assert!(back.world.bridge().typed(&made).is_empty());
+    second.stop();
+}
+
 #[test]
 fn a_local_terminal_marked_to_end_is_not_shown_again() {
     let back = Comeback::leaves("local-back-ending", b"x\r\n");

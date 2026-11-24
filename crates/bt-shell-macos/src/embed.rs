@@ -257,6 +257,18 @@ pub fn open(
     Ok(pane)
 }
 
+/// The font the line of a pane's wait is set in when the terminal's family is `family` (none: the
+/// default) at `size` points, by the terminal's own rule: its family name, whether it has one
+/// width for every character, and the width of one cell in points. For a host that wants to know
+/// what the line will look like, and for the tests of that rule.
+pub fn wait_line_font(family: Option<&str>, size: f64) -> (String, bool, f64) {
+    crate::wait_line::describe(&crate::wait_line::resolve(
+        family,
+        bt_gpu::app_default_family(),
+        size,
+    ))
+}
+
 thread_local! {
     /// Every pane opened here, by id, held weakly: the panes are their hosts'.
     static OPENED: RefCell<Vec<(u64, Weak<TerminalPane>)>> = const { RefCell::new(Vec::new()) };

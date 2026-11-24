@@ -1366,8 +1366,34 @@ struct Born {
     quiet: Quiet,
     refuse: Option<&'static str>,
     found: bool,
+    /// The person's Reduce Motion, as the pane is opened with it.
+    reduce_motion: bool,
     asks: RefCell<Vec<LocalAsk>>,
     pids: RefCell<Vec<bt_core::ChildPid>>,
+    /// How many times the pane asked its stream's owner for an ordinary shell instead.
+    chosen: Arc<AtomicUsize>,
+}
+
+/// The ops of a stream as its owner gave them, counting what the pane asks of them.
+struct Counting {
+    inner: Arc<dyn bt_core::PtyOps>,
+    chosen: Arc<AtomicUsize>,
+}
+
+impl bt_core::PtyOps for Counting {
+    fn resize(&self, master: std::os::fd::BorrowedFd<'_>, size: bt_core::PtySize) {
+        self.inner.resize(master, size);
+    }
+    fn hangup(&self, pid: Option<u32>, exit: std::os::fd::BorrowedFd<'_>) {
+        self.inner.hangup(pid, exit);
+    }
+    fn still_waiting(&self) {
+        self.inner.still_waiting();
+    }
+    fn ordinary_instead(&self) {
+        self.chosen.fetch_add(1, Ordering::SeqCst);
+        self.inner.ordinary_instead();
+    }
 }
 
 impl Host for Born {
@@ -1403,7 +1429,13 @@ impl Host for Born {
             Some(why) => ask.refuse(why),
             None => self.asks.borrow_mut().push(ask),
         }
-        Some(stream)
+        Some(bt_core::Stream {
+            ops: Arc::new(Counting {
+                inner: Arc::clone(&stream.ops),
+                chosen: Arc::clone(&self.chosen),
+            }),
+            ..stream
+        })
     }
 }
 
@@ -1438,7 +1470,12 @@ fn picture_of(pane: &TerminalPane, scale: f64) -> Option<Vec<u8>> {
     terminal.drawInRect(whole);
     let view: &NSView = pane;
     for label in descendants(view.retain()) {
-        if label.isHidden() || label.class().name().to_str() != Ok("BateriLinkLabel") {
+        if label.isHidden()
+            || !matches!(
+                label.class().name().to_str(),
+                Ok("BateriWaitRow" | "BateriJumpButton")
+            )
+        {
             continue;
         }
         let bounds = label.bounds();
@@ -1457,11 +1494,123 @@ fn picture_of(pane: &TerminalPane, scale: f64) -> Option<Vec<u8>> {
     png.map(|png| png.to_vec())
 }
 
-/// A pane that is born without its terminal: nothing waits for it, it says so once two seconds in,
-/// the line goes when the terminal comes, and the idle pane draws nothing in the meantime; a pane
-/// that is refused its terminal says why and carries a mark for good, and a pane born where no
-/// kablo is expected has neither. Pictures of each, light and dark, go where
-/// `BT_PANE_SHOTS` says.
+/// The bars' heights (parts of the tallest) are these.
+fn assert_heights(heights: &[f64], expected: [f64; 3], what: &str) {
+    assert!(
+        heights.len() == 3
+            && heights
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 1e-3),
+        "{what}: {heights:?} is not {expected:?}"
+    );
+}
+
+/// The heights the bars rest at under Reduce Motion, all different.
+const AT_REST: [f64; 3] = [0.5, 1.0, 0.7];
+
+/// Two colours (red, green, blue, alpha) that are the same one.
+fn assert_close(left: [f64; 4], right: [f64; 4], what: &str) {
+    for (a, b) in left.iter().zip(right) {
+        assert!((a - b).abs() < 1e-3, "{what}: {left:?} and {right:?}");
+    }
+}
+
+/// A window of the test's own kind: borderless, nothing in it.
+fn make_window(mtm: MainThreadMarker, frame_rect: NSRect) -> Retained<NSWindow> {
+    // SAFETY: with `defer` false the window exists at once; the `Retained` is its owner.
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame_rect,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    // SAFETY: only changes who owns the window; the `Retained` above does.
+    unsafe { window.setReleasedWhenClosed(false) };
+    window
+}
+
+/// What the bars did in a second and a fifth, as the animation has them: how many different
+/// heights the middle one was drawn at, its lowest and highest, the biggest jump between two looks
+/// 25 ms apart, and how many looks had the three bars at different heights (they are behind one
+/// another). Where the animation plays and the window draws it is smooth and fills the range; where
+/// it does not, one height (the test window is never visible, and Core Animation could then not
+/// advance it).
+struct Swing {
+    distinct: usize,
+    low: f64,
+    high: f64,
+    jump: f64,
+    apart: usize,
+    looks: usize,
+}
+
+fn swing(pane: &TerminalPane) -> Swing {
+    let mut seen: Vec<i64> = Vec::new();
+    let (mut low, mut high, mut jump, mut apart, mut looks) = (f64::MAX, f64::MIN, 0.0_f64, 0, 0);
+    let mut last: Option<f64> = None;
+    let until = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < until {
+        let bars = pane.wait_bars_drawn();
+        let middle = bars[1];
+        let key = (middle * 1000.0).round() as i64;
+        if !seen.contains(&key) {
+            seen.push(key);
+        }
+        low = low.min(middle);
+        high = high.max(middle);
+        if let Some(before) = last {
+            jump = jump.max((middle - before).abs());
+        }
+        last = Some(middle);
+        looks += 1;
+        if (bars[0] - bars[2]).abs() > 0.02 {
+            apart += 1;
+        }
+        spin(0.025);
+    }
+    Swing {
+        distinct: seen.len(),
+        low,
+        high,
+        jump,
+        apart,
+        looks,
+    }
+}
+
+/// Where a click at `point` (in the pane's coordinates) lands, as a view: the name of its class.
+fn hit_by_a_click(pane: &TerminalPane, point: NSPoint) -> (String, bool) {
+    // SAFETY: the pane is in a window's view tree on the main thread.
+    let container = unsafe { pane.superview() }.expect("the pane is in a window");
+    let hit = container
+        .hitTest(pane.convertPoint_toView(point, Some(&container)))
+        .expect("a click on the pane lands on a view");
+    let name = hit.class().name().to_string_lossy().into_owned();
+    (name, hit.isDescendantOf(pane))
+}
+
+/// The middle of a rectangle.
+fn centre_of(rect: NSRect) -> NSPoint {
+    NSPoint::new(
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    )
+}
+
+/// A pane that is born without its terminal: nothing waits for it; two seconds in it says so with
+/// a dim line of plain words in the terminal's font and three bars that rise and fall smoothly, which go
+/// when the terminal comes; the bars still move when the pane has been out of its window and back
+/// (a tab put in the background, a split, a tab moved to another window), take the colour of the
+/// words when the theme changes under them, and stand at different heights under Reduce Motion; ten
+/// seconds in it offers an ordinary shell instead, which only a click takes. A pane that is
+/// refused its terminal has the line and the bars no more and no mark, and one born where no
+/// kablo is expected has neither. Pictures of each, light and dark, go where `BT_PANE_SHOTS`
+/// says (the test pane has no title bar and no foot: the pictures that are looked at are of the
+/// application's own window).
 fn born_without_its_terminal(
     mtm: MainThreadMarker,
     window: &NSWindow,
@@ -1472,27 +1621,20 @@ fn born_without_its_terminal(
     if let Some(shots) = &shots {
         fs::create_dir_all(shots).expect("the pictures' folder");
     }
-    let host = |refuse, found| {
+    let host = |refuse, found, reduce_motion| {
         Rc::new(Born {
             quiet: Quiet::default(),
             refuse,
             found,
+            reduce_motion,
             asks: RefCell::new(Vec::new()),
             pids: RefCell::new(Vec::new()),
+            chosen: Arc::new(AtomicUsize::new(0)),
         })
     };
-    // `rc` is what the pane's shell reads first; `rect` the pane's frame.
-    let open_at = |id: u64,
-                   host: Rc<Born>,
-                   theme: Theme,
-                   rect: NSRect,
-                   rc: Option<&str>|
-     -> Retained<TerminalPane> {
+    let open = |id: u64, host: Rc<Born>, theme: Theme| -> Retained<TerminalPane> {
         let folder = dir.join(format!("born-{id}"));
         fs::create_dir_all(folder.join("zdot")).expect("the pane's folder");
-        if let Some(rc) = rc {
-            fs::write(folder.join("zdot").join(".zshrc"), rc).expect("the shell's rc");
-        }
         let identity = Rc::new(Identity {
             app_name: "pencere-test".to_owned(),
             helper: None,
@@ -1500,7 +1642,9 @@ fn born_without_its_terminal(
             fish_wrapper_dir: None,
             bash_wrapper_dir: None,
         });
+        let reduce_motion = host.reduce_motion;
         let mut config = embed::Config::new(mtm, id, host, identity, Settings::default(), theme);
+        config.reduce_motion = reduce_motion;
         config.env = vec![
             (
                 "ZDOTDIR".to_owned(),
@@ -1508,7 +1652,7 @@ fn born_without_its_terminal(
             ),
             ("PS1".to_owned(), "% ".to_owned()),
         ];
-        let pane = embed::open(mtm, rect, config).expect("the pane opens");
+        let pane = embed::open(mtm, frame_rect, config).expect("the pane opens");
         window
             .contentView()
             .expect("a window has a content view")
@@ -1517,7 +1661,22 @@ fn born_without_its_terminal(
         pane.start(mtm).expect("the pane starts");
         pane
     };
-    let open = |id: u64, host: Rc<Born>, theme: Theme| open_at(id, host, theme, frame_rect, None);
+    // The line and its bars are no control: a click on them reaches the pane's own view.
+    let is_no_control = |pane: &TerminalPane| {
+        let (line, bars, _) = pane.wait_frames();
+        for (what, rect) in [("the line", line), ("the bars", bars)] {
+            let (name, is_the_panes) = hit_by_a_click(pane, centre_of(rect.expect(what)));
+            println!("pencere: a click on {what} reaches {name}");
+            assert!(is_the_panes, "{what}: the click is the pane's, not {name}");
+            assert!(
+                !matches!(
+                    name.as_str(),
+                    "BateriWaitRow" | "BateriWaitBars" | "NSTextField" | "BateriJumpButton"
+                ),
+                "{what}: a click on it reached {name}"
+            );
+        }
+    };
     for (look, theme, appearance) in [
         ("dark", Theme::BATERI, "NSAppearanceNameDarkAqua"),
         ("light", Theme::BATERI_LIGHT, "NSAppearanceNameAqua"),
@@ -1526,11 +1685,12 @@ fn born_without_its_terminal(
         window.setAppearance(NSAppearance::appearanceNamed(&named).as_deref());
         let base = 900 + if look == "dark" { 0 } else { 10 };
         // Born without its terminal, a new one: nothing yet, then the line, then nothing again.
-        let born = host(None, false);
+        let born = host(None, false, false);
         let started = Instant::now();
         let pane = open(base, born.clone(), theme);
         assert!(started.elapsed() < Duration::from_secs(1), "nothing waited");
         assert_eq!(pane.wait_line_text(), None, "not before two seconds");
+        assert!(!pane.wait_bars_turn());
         assert_eq!(
             born.asks.borrow().len(),
             1,
@@ -1540,30 +1700,153 @@ fn born_without_its_terminal(
 
         assert_eq!(
             pane.wait_line_text().as_deref(),
-            Some("Starting the terminal…")
+            Some("Starting the terminal"),
+            "plain words, no dots"
         );
-        assert_eq!(pane.not_kept_mark_text(), None);
+        assert!(pane.wait_bars_turn(), "the bars move");
+        assert!(pane.wait_bars_play(), "the bars have their animation");
+        assert_eq!(pane.ordinary_link_text(), None, "no way out yet");
+        is_no_control(&pane);
+        // The bars stand in the width of one cell of the font the words are in, and that font has
+        // one width for every character.
+        let (family, fixed, cell) = pane.wait_font();
+        println!("pencere: the words of the wait are in {family}, a cell {cell:.2} points");
+        assert!(fixed, "{family} is not a font of one width");
+        let (_, bars, _) = pane.wait_frames();
+        assert!(
+            (bars.expect("the bars").size.width - cell).abs() < 0.01,
+            "the bars are a cell wide"
+        );
         if let Some(shots) = &shots {
             let png = picture_of(&pane, 2.0).expect("a picture");
             fs::write(shots.join(format!("waiting-new-{look}.png")), png).expect("written");
         }
-        // The idle pane draws nothing while it waits: no repeating timer, no frames.
-        let before = pane.frames_drawn();
-        spin_for(1.5);
-        assert_eq!(pane.frames_drawn(), before, "an idle waiting pane draws");
-        // The terminal comes: the line goes.
+        // The bars are the words' colour, and follow a theme that changes while the line shows
+        // (the window's appearance goes with the theme, as in the application).
+        let (bars_colour, words_colour) = pane.wait_colors().expect("colours while it shows");
+        assert_close(
+            bars_colour,
+            words_colour,
+            &format!("{look}: bars and words"),
+        );
+        let other = if theme.is_dark() {
+            Theme::BATERI_LIGHT
+        } else {
+            Theme::BATERI
+        };
+        let other_appearance = if theme.is_dark() {
+            "NSAppearanceNameAqua"
+        } else {
+            "NSAppearanceNameDarkAqua"
+        };
+        window.setAppearance(
+            NSAppearance::appearanceNamed(&NSString::from_str(other_appearance)).as_deref(),
+        );
+        pane.set_theme(other);
+        spin_for(0.3);
+        let (switched, words_switched) = pane.wait_colors().expect("colours while it shows");
+        assert_ne!(
+            switched, bars_colour,
+            "{look}: the bars kept the old colour"
+        );
+        assert_close(switched, words_switched, &format!("{look}: switched"));
+        window.setAppearance(NSAppearance::appearanceNamed(&named).as_deref());
+        pane.set_theme(theme);
+        spin_for(0.3);
+        let (back, words_back) = pane.wait_colors().expect("colours while it shows");
+        assert_close(back, bars_colour, &format!("{look}: back"));
+        assert_close(back, words_back, &format!("{look}: back, the words"));
+        // The pane goes out of its window and comes back, as a tab does that is put in the
+        // background, a split, a tab moved to another window: the animation is on every bar
+        // where the pane stands in a window, and not where it does not.
+        let content = window.contentView().expect("a window has a content view");
+        let other_window = make_window(mtm, frame_rect);
+        let is_back = |what: &str| {
+            spin_for(0.3);
+            assert!(pane.wait_bars_turn(), "{what}: the bars are to move");
+            assert!(
+                pane.wait_bars_play(),
+                "{what}: the bars lost their animation"
+            );
+            let swing = swing(&pane);
+            println!(
+                "pencere: {what}: {} heights, {:.2} to {:.2}, the biggest jump {:.3}, apart in {} of {} looks",
+                swing.distinct, swing.low, swing.high, swing.jump, swing.apart, swing.looks
+            );
+            assert!(
+                swing.distinct >= 20,
+                "{what}: the bars are not moving smoothly"
+            );
+            assert!(
+                swing.high - swing.low >= 0.5,
+                "{what}: the bars do not fall and rise"
+            );
+            assert!(swing.jump < 0.2, "{what}: the bars jump");
+            assert!(
+                swing.apart * 10 >= swing.looks * 8,
+                "{what}: the bars are not behind one another"
+            );
+        };
+        // Each time the animation is taken off the bars while the pane is out of its place (as a
+        // layer may lose it when its window changes), and the pane must put it again.
+        pane.removeFromSuperview();
+        pane.wait_bars_drop_animation();
+        spin_for(0.3);
+        assert!(!pane.wait_bars_play(), "out of every window nothing plays");
+        content.addSubview(&pane);
+        is_back("a tab put in the background and chosen again");
+        pane.setHidden(true);
+        pane.wait_bars_drop_animation();
+        spin_for(0.3);
+        pane.setHidden(false);
+        is_back("a pane hidden and shown");
+        let split = NSView::initWithFrame(NSView::alloc(mtm), frame_rect);
+        content.addSubview(&split);
+        pane.removeFromSuperview();
+        pane.wait_bars_drop_animation();
+        split.addSubview(&pane);
+        is_back("a split");
+        pane.removeFromSuperview();
+        pane.wait_bars_drop_animation();
+        other_window
+            .contentView()
+            .expect("a window has a content view")
+            .addSubview(&pane);
+        is_back("a tab moved to another window");
+        pane.removeFromSuperview();
+        pane.wait_bars_drop_animation();
+        split.removeFromSuperview();
+        content.addSubview(&pane);
+        is_back("and back");
+        other_window.close();
+        // Reduce Motion, while the line shows: the bars stand at different heights, and move
+        // again when the person lets them.
+        pane.set_reduce_motion(true);
+        assert!(!pane.wait_bars_turn() && !pane.wait_bars_play());
+        assert_heights(&pane.wait_bars_rest(), AT_REST, "at rest");
+        spin_for(0.5);
+        assert_heights(&pane.wait_bars_drawn(), AT_REST, "and they stand");
+        pane.set_reduce_motion(false);
+        assert!(pane.wait_bars_turn() && pane.wait_bars_play());
+        assert!(swing(&pane).distinct >= 20, "and they move again");
+        // The bars are Core Animation's and the pane's renderer asks for no frame for them: the
+        // application's own CPU while they move is measured in the application (`k8-*`), as the
+        // test window is never visible here and a frame count would not move for anything.
+        // The terminal comes: the line goes, and the bars stop with it.
         born.pids.borrow()[0].set(4242);
         until("the line to go", || pane.wait_line_text().is_none());
-        assert_eq!(pane.not_kept_mark_text(), None, "a terminal is no refusal");
+        assert!(!pane.wait_bars_turn(), "the bars stopped with the line");
+        assert!(!pane.wait_bars_play());
+        assert_eq!(pane.ordinary_link_text(), None);
         pane.close();
 
         // A pane that finds its terminal again says so in its words.
-        let found = host(None, true);
+        let found = host(None, true, false);
         let pane = open(base + 1, found, theme);
         spin_for(2.4);
         assert_eq!(
             pane.wait_line_text().as_deref(),
-            Some("Bringing the terminal back…")
+            Some("Bringing the terminal back")
         );
         if let Some(shots) = &shots {
             let png = picture_of(&pane, 2.0).expect("a picture");
@@ -1572,94 +1855,114 @@ fn born_without_its_terminal(
         pane.close();
 
         // A terminal that came before the two seconds are over: the line never shows.
-        let quick = host(None, false);
+        let quick = host(None, false, false);
         let pane = open(base + 2, quick.clone(), theme);
         quick.pids.borrow()[0].set(4243);
         spin_for(2.4);
         assert_eq!(pane.wait_line_text(), None, "the one-shot found it over");
+        assert!(!pane.wait_bars_turn());
         pane.close();
 
-        // Refused: an ordinary shell, told in the pane, and the mark for good.
+        // Reduce Motion from the start: the line shows and the bars stand at different heights;
+        // they move when the person lets them, and stand again, without the pane being made
+        // again.
+        let reduced = host(None, false, true);
+        let pane = open(base + 3, reduced, theme);
+        spin_for(2.4);
+        assert!(pane.wait_line_text().is_some());
+        assert!(!pane.wait_bars_turn(), "Reduce Motion: the bars stand");
+        assert!(!pane.wait_bars_play());
+        assert_heights(&pane.wait_bars_drawn(), AT_REST, "bars at rest");
+        pane.set_reduce_motion(false);
+        assert!(
+            pane.wait_bars_turn() && pane.wait_bars_play(),
+            "Reduce Motion went off"
+        );
+        pane.set_reduce_motion(true);
+        assert!(!pane.wait_bars_turn(), "Reduce Motion came on: they stand");
+        assert_heights(&pane.wait_bars_drawn(), AT_REST, "bars at rest");
+        pane.close();
+
+        // Refused: an ordinary shell, told in the pane in a dim line, and nothing of the wait
+        // is left over it — no line, no bars, no mark.
         let refused = host(
             Some("the service that makes the terminals of this Mac did not start"),
             false,
+            false,
         );
-        let pane = open(base + 3, refused, theme);
-        until("the mark", || pane.not_kept_mark_text().is_some());
-        assert_eq!(pane.not_kept_mark_text().as_deref(), Some("Not kept"));
+        let pane = open(base + 4, refused, theme);
+        spin_for(2.4);
         assert_eq!(pane.wait_line_text(), None);
-        spin_for(1.5);
-        assert_eq!(pane.not_kept_mark_text().as_deref(), Some("Not kept"));
+        assert!(!pane.wait_bars_turn());
+        assert_eq!(pane.ordinary_link_text(), None);
         if let Some(shots) = &shots {
             let png = picture_of(&pane, 2.0).expect("a picture");
             fs::write(shots.join(format!("refused-{look}.png")), png).expect("written");
         }
-        // The mark is not a control: a click on it reaches the pane, and no cursor or hover is
-        // asked of it.
-        let mark = pane.not_kept_mark_frame().expect("the mark's frame");
-        let centre = NSPoint::new(
-            mark.origin.x + mark.size.width / 2.0,
-            mark.origin.y + mark.size.height / 2.0,
-        );
-        // SAFETY: the pane is in a window's view tree on the main thread.
-        let hit = unsafe { pane.superview() }.and_then(|container| {
-            container.hitTest(pane.convertPoint_toView(centre, Some(&container)))
-        });
-        let named = hit
-            .as_ref()
-            .map(|view| view.class().name().to_string_lossy().into_owned());
-        println!("pencere: a click on the mark reaches {named:?}");
-        let hit = hit.expect("a click on the mark reaches a view");
-        assert!(
-            hit.isDescendantOf(&pane),
-            "the click is the pane's, not the label's: {named:?}"
-        );
-        assert_ne!(named.as_deref(), Some("BateriLinkLabel"));
-        assert_ne!(named.as_deref(), Some("NSBox"));
         pane.close();
-
-        // The mark and the text under it: a last row that is full across, in a pane as wide as
-        // the window and in a narrow one. What the mark covers is measured and written, and
-        // the pictures are kept.
-        let rc = "setopt promptsubst\nPROMPT='${(l:$((COLUMNS-1))::W:)}'\nprecmd() { echo $COLUMNS > \"$ZDOTDIR/cols\" }\n";
-        for (kind, width) in [("wide", frame_rect.size.width), ("narrow", 220.0)] {
-            let mut rect = frame_rect;
-            rect.size.width = width;
-            let id = base + 4 + if kind == "wide" { 0 } else { 1 };
-            let pane = open_at(
-                id,
-                host(
-                    Some("the service that makes the terminals of this Mac did not start"),
-                    false,
-                ),
-                theme,
-                rect,
-                Some(rc),
-            );
-            until("the mark", || pane.not_kept_mark_text().is_some());
-            let cols_file = dir.join(format!("born-{id}")).join("zdot").join("cols");
-            until("the shell's width", || cols_file.exists());
-            spin_for(1.0);
-            let cols: f64 = fs::read_to_string(&cols_file)
-                .ok()
-                .and_then(|text| text.trim().parse().ok())
-                .expect("the shell said its width");
-            let mark = pane.not_kept_mark_frame().expect("the mark's frame");
-            let covered = (mark.size.width / rect.size.width * cols).ceil();
-            println!(
-                "pencere: mark ({kind}, {look}): {:.0}x{:.0} pt in a pane {:.0} pt wide of {cols} columns covers {covered} columns of the last row, which is {:.0}% of its width",
-                mark.size.width,
-                mark.size.height,
-                rect.size.width,
-                covered / cols * 100.0
-            );
-            if let Some(shots) = &shots {
-                let png = picture_of(&pane, 2.0).expect("a picture");
-                fs::write(shots.join(format!("mark-{kind}-{look}.png")), png).expect("written");
-            }
-            pane.close();
-        }
     }
+
+    // Ten seconds in, once: a link beside the line, which only a click takes. Once, in the dark.
+    window.setAppearance(
+        NSAppearance::appearanceNamed(&NSString::from_str("NSAppearanceNameDarkAqua")).as_deref(),
+    );
+    let waits = host(None, false, false);
+    let pane = open(920, waits.clone(), Theme::BATERI);
+    spin_for(9.0);
+    assert!(pane.wait_line_text().is_some());
+    assert_eq!(pane.ordinary_link_text(), None, "not before ten seconds");
+    spin_for(1.6);
+    assert_eq!(
+        pane.ordinary_link_text().as_deref(),
+        Some("Open an ordinary shell instead")
+    );
+    assert!(pane.wait_line_text().is_some(), "the line is still there");
+    // The link is the one hit; the line and the bars are still no control.
+    is_no_control(&pane);
+    let (_, _, link) = pane.wait_frames();
+    let (name, is_the_panes) = hit_by_a_click(&pane, centre_of(link.expect("the link's frame")));
+    println!("pencere: a click on the link reaches {name}");
+    assert_eq!(name, "BateriJumpButton");
+    assert!(is_the_panes);
+    // Nothing fell to a shell by itself, by time or by a key.
+    assert_eq!(waits.chosen.load(Ordering::SeqCst), 0);
+    // The bars move beside the link as they moved without it.
+    assert!(pane.wait_bars_play());
+    spin_for(1.5);
+    // The click: the owner is asked once, and the link goes.
+    pane.click_ordinary_link();
+    assert_eq!(
+        waits.chosen.load(Ordering::SeqCst),
+        1,
+        "the owner was asked"
+    );
+    assert_eq!(
+        pane.ordinary_link_text(),
+        None,
+        "the link goes at the click"
+    );
+    pane.click_ordinary_link();
+    assert_eq!(
+        waits.chosen.load(Ordering::SeqCst),
+        1,
+        "a second click asks nothing"
+    );
+    // The shell is on the stream: the owner settles the wait and the line goes with it.
+    waits.pids.borrow()[0].set(4244);
+    until("the line to go", || pane.wait_line_text().is_none());
+    assert!(!pane.wait_bars_turn());
+    pane.close();
+
+    // A terminal that comes at the sixth second: the link is not offered at the tenth.
+    let comes = host(None, false, false);
+    let pane = open(921, comes.clone(), Theme::BATERI);
+    spin_for(6.0);
+    assert!(pane.wait_line_text().is_some());
+    comes.pids.borrow()[0].set(4245);
+    spin_for(5.0);
+    assert_eq!(pane.wait_line_text(), None);
+    assert_eq!(pane.ordinary_link_text(), None, "the terminal came first");
+    pane.close();
     window.setAppearance(None);
 }
 

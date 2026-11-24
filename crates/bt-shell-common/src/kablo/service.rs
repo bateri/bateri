@@ -111,7 +111,7 @@
 //! server has said what it keeps ([`Service::background`], [`Service::exited`]), the backend is
 //! told once ([`Backend::reachable`], on a thread of its own) and reads what was left.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -909,6 +909,8 @@ struct Awaiting {
     /// The pane was closed, or its quit ends its programs, while the terminal was on its way: it
     /// is ended when it comes.
     end_asked: bool,
+    /// The person chose an ordinary shell instead ([`Core::choose_ordinary`]).
+    chosen: bool,
 }
 
 /// How long a refused account of this Mac stays refused: the next pane does not repeat a step
@@ -972,6 +974,9 @@ enum Msg {
     Here(Pending),
     /// A pane wants a terminal of this Mac ([`Service::submit_local`]).
     Local(LocalAsk),
+    /// The person chose an ordinary shell in place of the terminal a pane waits for: the
+    /// request's ticket says which ([`bt_core::PtyOps::ordinary_instead`]).
+    Ordinary(Arc<ask::Ticket>),
     /// The counter was asked for the number of the terminal a pane of this Mac wants
     /// ([`Core::local_numbered`]).
     LocalNumbered {
@@ -1674,6 +1679,8 @@ impl Service {
             local_refused: None,
             awaiting: BTreeMap::new(),
             end_on_arrival: BTreeSet::new(),
+            ordinaries: BTreeMap::new(),
+            left_running: HashSet::new(),
             arrived: Vec::new(),
             shown: Arc::clone(&shown),
             local_programs: Arc::clone(&local_programs),
@@ -2044,7 +2051,11 @@ impl Service {
     /// with [`Service::found_again`]) and the process id is the program's there. A terminal the
     /// server does not have any more is made again, behind the same stream.
     pub fn submit_local(&self, mut ask: LocalAsk) {
-        ask.handed(Arc::clone(&self.stop), Arc::clone(&self.backend));
+        ask.handed(
+            Arc::clone(&self.stop),
+            Arc::clone(&self.backend),
+            self.tx.clone(),
+        );
         let name = ask.pane().and_then(|pane| {
             self.names
                 .lock()
@@ -2327,6 +2338,14 @@ struct Core {
     /// The terminals asked for a pane that was closed while they were on their way: ended when
     /// they come ([`Core::created`]).
     end_on_arrival: BTreeSet<(String, SessionId)>,
+    /// The ordinary shells that carry a pane's stream in place of a terminal the person did not
+    /// wait for ([`Core::choose_ordinary`]), by the holder of the stream: what the pane types
+    /// goes to them.
+    ordinaries: BTreeMap<HoldId, Arc<bt_core::Ordinary>>,
+    /// The panes that chose an ordinary shell over a terminal found again, which was left
+    /// running: the close of such a pane ends nothing, a quit that ends the programs ends the
+    /// terminal ([`Core::end_all`]).
+    left_running: HashSet<PaneUuid>,
     /// What the bridge's readers have sent the loop that it has taken in and not settled
     /// ([`Queue::settled`]), by the queue the reader counted it in.
     arrived: Vec<(Arc<Queue>, usize)>,
@@ -2707,10 +2726,16 @@ impl Core {
         match message {
             Msg::Accepted(stream, peer) => self.accepted(stream, peer),
             Msg::Hold(hold, bytes) => {
-                self.say(hold, |hub| hub.push(hold, &bytes));
-                self.meter(hold);
+                // The pane's stream is carried by an ordinary shell: what is typed is its input.
+                if let Some(shell) = self.ordinaries.get(&hold) {
+                    shell.write(bytes);
+                } else {
+                    self.say(hold, |hub| hub.push(hold, &bytes));
+                    self.meter(hold);
+                }
             }
             Msg::HoldEof(hold) => {
+                self.ordinaries.remove(&hold);
                 self.hub.closed(hold);
             }
             Msg::Run { hold, argv, reply } => match self.hub.run(hold, &argv) {
@@ -2906,6 +2931,16 @@ impl Core {
             }
             Msg::Here(pending) => self.here(pending),
             Msg::Local(ask) => self.local(ask, now),
+            Msg::Ordinary(ticket) => {
+                let hold = self
+                    .awaiting
+                    .iter()
+                    .find(|(_, awaiting)| Arc::ptr_eq(&awaiting.parts.ticket, &ticket))
+                    .map(|(hold, _)| *hold);
+                if let Some(hold) = hold {
+                    self.choose_ordinary(hold);
+                }
+            }
             Msg::LocalNumbered { hold, number } => {
                 if let Some(awaiting) = self.awaiting.get_mut(&hold) {
                     awaiting.parts.name = terminal_named(number);
@@ -3048,6 +3083,7 @@ impl Core {
                             asked.stop.store(true, Ordering::SeqCst);
                         }
                         self.collisions.remove(&hold);
+                        self.ordinaries.remove(&hold);
                         self.conns.remove(&hold);
                         self.panes.remove(&hold);
                         // This Mac was attached to the terminal until now, and what the server
@@ -3683,6 +3719,9 @@ impl Core {
     /// cannot ask; the ledger keeps the request and the next connection to the
     /// account carries it out.
     fn end(&mut self, pane: &PaneUuid, now: Instant) {
+        // A pane that chose an ordinary shell over a terminal found again closes only the shell:
+        // the terminal was left running, and the next bateri shows it again.
+        self.left_running.remove(pane);
         let (coming, unbound) = self.end_coming(pane);
         for (account, terminal) in self.terminals_of(pane).into_iter().chain(unbound) {
             // A terminal another computer took is that computer's: closing the dimmed pane that
@@ -3785,7 +3824,22 @@ impl Core {
         let mut pending = BTreeSet::new();
         for pane in panes {
             let (coming, unbound) = self.end_coming(pane);
-            for (account, terminal) in self.terminals_of(pane).into_iter().chain(unbound) {
+            // A terminal found again that the pane chose an ordinary shell over was left running:
+            // a quit that ends the programs ends it.
+            let left: Vec<(String, SessionId)> = self
+                .left_running
+                .remove(pane)
+                .then(|| self.shared.ledger.local_terminal_of(pane))
+                .flatten()
+                .map(|terminal| (local::ACCOUNT.to_owned(), terminal))
+                .into_iter()
+                .collect();
+            for (account, terminal) in self
+                .terminals_of(pane)
+                .into_iter()
+                .chain(unbound)
+                .chain(left)
+            {
                 if self.is_taken(&account, &terminal) {
                     self.shared.ledger.gone(&account, &terminal);
                     continue;
@@ -4438,8 +4492,17 @@ impl Core {
                 resumed: None,
                 terminal: None,
                 end_asked: false,
+                chosen: false,
             },
         );
+        // Chosen before the request reached the loop (the service was not up).
+        if self
+            .awaiting
+            .get(&hold)
+            .is_some_and(|awaiting| awaiting.parts.ticket.chose())
+        {
+            return self.choose_ordinary(hold);
+        }
         if self.accounts.contains_key(local::ACCOUNT) {
             return self.local_start(hold);
         }
@@ -4495,6 +4558,94 @@ impl Core {
         }
         let backend = Arc::clone(&self.shared.backend);
         ask::refuse(parts, why, Some(backend.as_ref()));
+    }
+
+    /// The person chose an ordinary shell in place of the terminal the pane waits for
+    /// ([`bt_core::PtyOps::ordinary_instead`], once, from a click). What becomes of the terminal
+    /// depends on what it is:
+    ///
+    /// - **nothing was asked of the server yet** (the account is being made, the counter asked):
+    ///   the pane is refused as for any reason ([`Core::refuse_local`]);
+    /// - **a new terminal is on its way**: the pane's stream is given the shell, and the terminal
+    ///   is ended when it comes, as for a pane that was closed ([`Awaiting::end_asked`]) — no
+    ///   shell runs that nobody sees;
+    /// - **a terminal found again**, whose program may live: it is left as it is, in the ledger
+    ///   with its pane, and what the pane's holder carries is the shell from now on. The pane's
+    ///   close ends nothing of it; a quit that ends the programs does ([`Core::end_all`]).
+    /// - **the new terminal made instead of a found one that was not there**: as a new one.
+    ///
+    /// A stream a holder carries already (the last two) cannot be given to a shell by handing
+    /// over its ends, so the shell writes to the holder's writer and what the holder reads of the
+    /// pane goes to the shell ([`Msg::Hold`]).
+    fn choose_ordinary(&mut self, hold: HoldId) {
+        let Some(awaiting) = self.awaiting.get_mut(&hold) else {
+            return;
+        };
+        if std::mem::replace(&mut awaiting.chosen, true) {
+            return;
+        }
+        let why = ask::CHOSEN;
+        let pane = awaiting.parts.pane.clone();
+        let found_again = self.shared.ledger.local_terminal_of(&pane).is_some()
+            && awaiting.terminal.is_none()
+            || awaiting.resumed.is_some();
+        if awaiting.parts.held.is_some() {
+            // The stream is not carried yet: a shell takes the ends the service has.
+            if awaiting.terminal.is_none() {
+                if found_again {
+                    self.left_running.insert(pane);
+                }
+                return self.refuse_local(hold, why);
+            }
+            let behind = awaiting.parts.lend_behind();
+            awaiting.parts.trace.refuse(why);
+            let line = awaiting
+                .parts
+                .trace
+                .refused_line(pane.as_str(), why, Instant::now());
+            self.shared.backend.log_line(&line);
+            ask::ordinary_behind(behind, why);
+            // As for a pane that was closed while its terminal was on its way: it is ended as it
+            // comes ([`Core::created`]), and nothing is made of it for nobody.
+            awaiting.end_asked = true;
+            return;
+        }
+        // A holder carries the stream.
+        let Some(awaiting) = self.awaiting.remove(&hold) else {
+            return;
+        };
+        let Awaiting {
+            parts,
+            resumed,
+            terminal,
+            ..
+        } = awaiting;
+        self.hub.let_go_raw(hold);
+        if resumed.is_some() {
+            self.left_running.insert(pane);
+        } else if let Some(terminal) = terminal {
+            self.shared.ledger.end(local::ACCOUNT, &terminal);
+            self.end_on_arrival
+                .insert((local::ACCOUNT.to_owned(), terminal));
+        }
+        parts.trace.refuse(why);
+        let line = parts
+            .trace
+            .refused_line(parts.pane.as_str(), why, Instant::now());
+        self.shared.backend.log_line(&line);
+        let Some(conn) = self.conns.get_mut(&hold) else {
+            parts.status.code(1);
+            parts.pid.settle();
+            return;
+        };
+        let shell = ask::ordinary_carried(parts.lend_carried(), conn.out.clone(), why);
+        // What the pane typed while it waited goes to the shell now, in order.
+        conn.waits_for_input = false;
+        conn.throttle.0.open();
+        if let Some(shell) = shell {
+            self.ordinaries.insert(hold, shell);
+        }
+        self.refresh = true;
     }
 
     /// The account of this Mac is made for the ones that wait for it ([`Core::local_account`]).

@@ -3412,6 +3412,12 @@ pub trait PtyOps: Send + Sync {
     /// ([`ChildPid::is_settled`] is `false` still): the owner writes what it knows of the wait
     /// where it keeps its own account of it. The default does nothing.
     fn still_waiting(&self) {}
+    /// The person chose an ordinary shell in place of the terminal the pane still waits for
+    /// ([`ChildPid::is_settled`] is `false`): the owner gives the stream one, and what becomes of
+    /// the terminal that was asked for or found is its own to decide — one that was found is
+    /// not ended, one that was made for the pane is when it comes. Said at most once, from the
+    /// main thread; the default does nothing.
+    fn ordinary_instead(&self) {}
 }
 
 /// What the terminal a streamed session's program is on says: the two readings the pane's

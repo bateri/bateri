@@ -23,7 +23,7 @@ use bt_core::{
 };
 use kablo_proto::v1::NewSession;
 
-use super::{Backend, HoldId, Msg, SessionId, Size, waiting, widen};
+use super::{Backend, HoldId, Load, Msg, Out, SessionId, Size, waiting, widen};
 
 /// What a pane's session says to its terminal, before and after the terminal is there. Made by
 /// the pane with its stream and kept by the loop, which binds it to the terminal's holder: until
@@ -50,6 +50,11 @@ struct TicketState {
     ordinary: Option<Arc<Ordinary>>,
     /// Where the service writes its log, once the request is handed to it.
     log: Option<Arc<dyn Backend>>,
+    /// The person chose an ordinary shell in place of the terminal ([`PtyOps::ordinary_instead`]):
+    /// kept for the loop that has not taken the request up yet.
+    chose: bool,
+    /// How the loop is told of the choice, once the request is handed to the service.
+    wake: Option<Sender<Msg>>,
 }
 
 impl Ticket {
@@ -69,6 +74,20 @@ impl Ticket {
     /// Whether the pane let go of its stream.
     pub(super) fn is_gone(&self) -> bool {
         self.state().gone
+    }
+
+    /// Whether the person chose an ordinary shell ([`PtyOps::ordinary_instead`]).
+    pub(super) fn chose(&self) -> bool {
+        self.state().chose
+    }
+
+    /// The ordinary shell of this process the stream is carried by from now on, put there by the
+    /// loop for a stream that a holder carries ([`super::Core::choose_ordinary`]): what the pane
+    /// says of its size goes to it directly, and the last size the pane said is returned.
+    pub(super) fn put_ordinary(&self, shell: &Arc<Ordinary>) -> Option<PtySize> {
+        let mut state = self.state();
+        state.ordinary = Some(Arc::clone(shell));
+        state.last
     }
 }
 
@@ -145,6 +164,19 @@ impl PtyOps for LocalOps {
                 hold: *hold,
                 remote,
             });
+        }
+    }
+
+    /// The person chose an ordinary shell while the terminal has not come: the loop is told if
+    /// the request is its own already, and finds the choice in the ticket when it takes the
+    /// request up if it is not.
+    fn ordinary_instead(&self) {
+        let mut state = self.ticket.state();
+        if std::mem::replace(&mut state.chose, true) {
+            return;
+        }
+        if let Some(wake) = &state.wake {
+            let _ = wake.send(Msg::Ordinary(Arc::clone(&self.ticket)));
         }
     }
 }
@@ -240,9 +272,16 @@ impl LocalAsk {
     }
 
     /// The service takes the request: it is refused with the service's words if it is dropped.
-    pub(super) fn handed(&mut self, stop: Arc<AtomicBool>, backend: Arc<dyn Backend>) {
+    pub(super) fn handed(
+        &mut self,
+        stop: Arc<AtomicBool>,
+        backend: Arc<dyn Backend>,
+        wake: Sender<Msg>,
+    ) {
         if let Some(parts) = &self.parts {
-            parts.ticket.state().log = Some(Arc::clone(&backend));
+            let mut state = parts.ticket.state();
+            state.log = Some(Arc::clone(&backend));
+            state.wake = Some(wake);
         }
         self.handed = Some((stop, backend));
     }
@@ -299,6 +338,10 @@ impl Drop for LocalAsk {
     }
 }
 
+/// What a pane that chose an ordinary shell over its terminal is told in the dim line, and what
+/// the log says: the person's own choice.
+pub(super) const CHOSEN: &str = "you chose it instead of waiting";
+
 /// The dim line a pane is told its terminal was refused in.
 pub(super) fn refusal_line(why: &str) -> Vec<u8> {
     format!(
@@ -328,11 +371,67 @@ pub(super) fn refuse(parts: Parts, why: &str, log: Option<&dyn Backend>) {
         Some(backend) => backend.log_line(&line),
         None => eprintln!("{} bateri: {line}", crate::clock::stamp()),
     }
-    ordinary_behind(parts, why);
+    ordinary_behind(parts.into_behind(), why);
 }
 
-fn ordinary_behind(parts: Parts, why: &str) {
-    let Parts {
+/// What an ordinary shell behind a pane's stream is made of: the service's ends of the stream and
+/// of its exit signal, and what the request shares with the pane.
+pub(super) struct Behind {
+    launch: ChildLaunch,
+    held: Option<UnixStream>,
+    exit: Option<UnixStream>,
+    status: Arc<StreamExit>,
+    pid: ChildPid,
+    silence: Option<Arc<Silence>>,
+    ticket: Arc<Ticket>,
+}
+
+impl Parts {
+    /// The request ends here: all of it goes to the shell.
+    fn into_behind(self) -> Behind {
+        Behind {
+            launch: self.launch,
+            held: self.held,
+            exit: self.exit,
+            status: self.status,
+            pid: self.pid,
+            silence: self.silence,
+            ticket: self.ticket,
+        }
+    }
+
+    /// The request goes on waiting for its terminal (a new one is asked of the server and will
+    /// come to nobody): the shell takes the ends of the stream and shares the rest.
+    pub(super) fn lend_behind(&mut self) -> Behind {
+        Behind {
+            launch: self.launch.clone(),
+            held: self.held.take(),
+            exit: self.exit.take(),
+            status: Arc::clone(&self.status),
+            pid: self.pid.clone(),
+            silence: self.silence.clone(),
+            ticket: Arc::clone(&self.ticket),
+        }
+    }
+
+    /// What a stream a holder carries is given an ordinary shell with ([`ordinary_carried`]).
+    pub(super) fn lend_carried(&self) -> Behind {
+        Behind {
+            launch: self.launch.clone(),
+            held: None,
+            exit: None,
+            status: Arc::clone(&self.status),
+            pid: self.pid.clone(),
+            silence: self.silence.clone(),
+            ticket: Arc::clone(&self.ticket),
+        }
+    }
+}
+
+/// Gives the stream a shell of this process as [`refuse`] does, to a request that goes on
+/// waiting for its terminal (the choice of the person, [`PtyOps::ordinary_instead`]).
+pub(super) fn ordinary_behind(behind: Behind, why: &str) {
+    let Behind {
         mut launch,
         held,
         exit,
@@ -340,8 +439,7 @@ fn ordinary_behind(parts: Parts, why: &str) {
         pid,
         silence,
         ticket,
-        ..
-    } = parts;
+    } = behind;
     status.made_ordinary();
     // What the pane was waiting to hear of its past is nothing: every byte of the shell is live.
     if let Some(silence) = &silence {
@@ -429,6 +527,79 @@ fn ordinary_behind(parts: Parts, why: &str) {
             let _ = output.shutdown(std::net::Shutdown::Both);
             // The pane does not wait for a process that will not come.
             pid.settle();
+        }
+    }
+}
+
+/// Gives a stream that a holder of the loop carries an ordinary shell of this process: what the
+/// shell writes goes to the holder's writer (`out`), and how it ended is written in the stream's
+/// status before the writer is told to close, so that the pane has read every byte when it hears
+/// its program is gone. What the pane types is the loop's to give the shell it returns
+/// ([`super::Core::choose_ordinary`]). `None` when no shell could be started: the pane is told.
+pub(super) fn ordinary_carried(
+    behind: Behind,
+    out: Sender<Out>,
+    why: &str,
+) -> Option<Arc<Ordinary>> {
+    let Behind {
+        mut launch,
+        status,
+        pid,
+        silence,
+        ticket,
+        ..
+    } = behind;
+    status.made_ordinary();
+    if let Some(silence) = &silence {
+        silence.close();
+    }
+    let say = |out: &Sender<Out>, bytes: Vec<u8>| {
+        let load = Load::alone(bytes.len());
+        let _ = out.send(Out::Bytes(bytes, load));
+    };
+    say(&out, refusal_line(why));
+    if let Some(size) = ticket.state().last {
+        launch.size = size;
+    }
+    let shell = {
+        let (output, closing, status) = (out.clone(), out.clone(), Arc::clone(&status));
+        Ordinary::start(
+            &launch,
+            move |bytes| {
+                let load = Load::alone(bytes.len());
+                let _ = output.send(Out::Bytes(bytes, load));
+            },
+            move |how: Ended| {
+                match how {
+                    Ended::Code(code) => status.code(code),
+                    Ended::Signal(signal) => status.signal(signal),
+                }
+                let _ = closing.send(Out::Close);
+            },
+        )
+    };
+    match shell {
+        Ok(shell) => {
+            let shell = Arc::new(shell);
+            // What the pane said while the shell was starting is said to it now.
+            if let Some(size) = ticket.put_ordinary(&shell)
+                && size != launch.size
+            {
+                shell.resize(size);
+            }
+            pid.set(shell.pid());
+            Some(shell)
+        }
+        Err(error) => {
+            say(
+                &out,
+                format!("\x1b[2mbateri: no shell could be started: {error}\x1b[0m\r\n")
+                    .into_bytes(),
+            );
+            status.code(1);
+            let _ = out.send(Out::Close);
+            pid.settle();
+            None
         }
     }
 }

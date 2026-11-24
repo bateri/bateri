@@ -1496,6 +1496,10 @@ impl bt_core::PtyOps for StreamTty {
     fn still_waiting(&self) {
         self.inner.still_waiting();
     }
+
+    fn ordinary_instead(&self) {
+        self.inner.ordinary_instead();
+    }
 }
 
 /// The uid and pid of the process at the other end of `stream`.

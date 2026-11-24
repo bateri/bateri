@@ -701,9 +701,6 @@ impl LinkLabel {
     }
 }
 
-/// How far the status labels stand from the pane's corners, points.
-const STATUS_LABEL_MARGIN: f64 = 8.0;
-
 /// What a layout saved while a pane waits for its terminal keeps of the pane: the session has
 /// said nothing yet (no directory, no remote line), so what the pane was born with stands for
 /// what it has not said — the directory it starts in and the line it types first. Once the
@@ -726,72 +723,10 @@ fn saved_while_waiting(
 /// How long a pane born without its terminal waits before it says so.
 pub(crate) const WAIT_LINE_AFTER: Duration = Duration::from_secs(2);
 
-/// The two labels of a pane about its terminal of this Mac: the line of the wait and the mark of
-/// a refusal ([`LinkLabel`]'s box, with another corner and another text).
-#[derive(Clone)]
-struct StatusLabels {
-    wait: (Retained<LinkLabel>, Retained<NSTextField>),
-    mark: (Retained<LinkLabel>, Retained<NSTextField>),
-}
-
-impl StatusLabels {
-    fn new(mtm: MainThreadMarker, theme: &Theme) -> Self {
-        let wait = LinkLabel::new(mtm);
-        wait.0.paint(theme);
-        // Anchored to the top: the pane's y is up.
-        wait.0.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMaxXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
-        );
-        let mark = LinkLabel::new(mtm);
-        mark.0.paint(theme);
-        mark.0.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
-        );
-        Self { wait, mark }
-    }
-
-    fn paint(&self, theme: &Theme) {
-        self.wait.0.paint(theme);
-        self.mark.0.paint(theme);
-    }
-
-    /// `text` in `label`, `corner` of a pane of `bounds`; `None` hides it.
-    fn set(
-        label: &(Retained<LinkLabel>, Retained<NSTextField>),
-        text: Option<&str>,
-        bounds: NSRect,
-        top: bool,
-        right: bool,
-    ) {
-        let (label, field) = label;
-        let Some(text) = text else {
-            label.setHidden(true);
-            return;
-        };
-        field.setStringValue(&NSString::from_str(text));
-        let fit = field.fittingSize();
-        let border = label.borderWidth();
-        let room = bounds.size.width - 2.0 * (STATUS_LABEL_MARGIN + LINK_LABEL_PAD_X + border);
-        let width = fit.width.min(room).max(0.0);
-        label.setFrameFromContentFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(width, fit.height),
-        ));
-        let size = label.frame().size;
-        let x = if right {
-            (bounds.size.width - STATUS_LABEL_MARGIN - size.width).max(0.0)
-        } else {
-            STATUS_LABEL_MARGIN
-        };
-        let y = if top {
-            (bounds.size.height - STATUS_LABEL_MARGIN - size.height).max(0.0)
-        } else {
-            STATUS_LABEL_MARGIN
-        };
-        label.setFrameOrigin(NSPoint::new(x, y));
-        label.setHidden(false);
-    }
-}
+/// How long it waits before the line offers an ordinary shell instead: a wait that long is not
+/// the usual one, and a link that came sooner would take the pane out of the terminal the person
+/// was about to be given.
+pub(crate) const ORDINARY_LINK_AFTER: Duration = Duration::from_secs(10);
 
 /// The block tip's inset from its border and the gaps between its parts,
 /// points — design constants (not measured), the link label's padding.
@@ -2387,11 +2322,15 @@ pub struct PaneIvars {
     /// frame path; shown by [`TerminalPane::set_link_target`].
     link_label: (Retained<LinkLabel>, Retained<NSTextField>),
     /// What the pane says of its terminal of this Mac while it is on its way — a dim line in the
-    /// top left corner, shown once, two seconds after the pane was born without it
-    /// ([`TerminalPane::wait_for_terminal`]) — and, for good, that the terminal was refused and the
-    /// pane's shell ends with bateri: a small mark in the bottom right corner
-    /// ([`TerminalPane::terminal_settled`]). AppKit's, outside the frame path, hit-test-less.
-    status_labels: StatusLabels,
+    /// top left corner with a turning ring beside it, shown once, two seconds after the pane was
+    /// born without it ([`TerminalPane::wait_for_terminal`]), and, ten seconds in, a link to an
+    /// ordinary shell instead ([`TerminalPane::open_ordinary_shell`]). AppKit's, outside the frame
+    /// path; the line takes no hit.
+    wait_line: crate::wait_line::WaitLine,
+    /// What the pane asks its stream's owner of when the person chooses the ordinary shell
+    /// ([`bt_core::PtyOps::ordinary_instead`]): the owner's own ops, not the wrapper the session
+    /// holds. Kept while the pane waits.
+    wait_ops: RefCell<Option<Arc<dyn bt_core::PtyOps>>>,
     /// What the pane was born with that its session cannot say until its terminal has come: the
     /// directory it starts in and the line it types first ([`saved_while_waiting`]).
     born_with: RefCell<(Option<std::path::PathBuf>, Option<String>)>,
@@ -3136,6 +3075,12 @@ define_class!(
             self.copy_remote_port_url_sent(sender);
         }
 
+        /// The link of the wait for a terminal ([`crate::wait_line::WaitLine`]).
+        #[unsafe(method(openOrdinaryShell:))]
+        fn open_ordinary_shell_sent(&self, _sender: Option<&AnyObject>) {
+            self.open_ordinary_shell();
+        }
+
         /// "Jump to latest"'s button ([`JumpLatest`]).
         #[unsafe(method(jumpToLatest:))]
         fn jump_to_latest_sent(&self, _sender: Option<&AnyObject>) {
@@ -3246,7 +3191,13 @@ impl TerminalPane {
         let card_frame = FrameBox::new(mtm, &theme);
         let link_label = LinkLabel::new(mtm);
         link_label.0.paint(&theme);
-        let status_labels = StatusLabels::new(mtm, &theme);
+        // The line of the wait is set in the terminal's own font (its family and its size, as the
+        // zoom made it).
+        let wait_line = crate::wait_line::WaitLine::new(
+            mtm,
+            reduce_motion,
+            crate::wait_line::line_font(&zoom.apply(&font)),
+        );
         let block_tip = BlockTipParts::new(mtm);
         block_tip.paint(&theme);
         let tip = block_tip.tip.clone();
@@ -3286,7 +3237,8 @@ impl TerminalPane {
             card_frame: card_frame.clone(),
             headed: Cell::new(false),
             link_label: link_label.clone(),
-            status_labels: status_labels.clone(),
+            wait_line: wait_line.clone(),
+            wait_ops: RefCell::new(None),
             born_with: RefCell::new((None, None)),
             link: OnceCell::new(),
             shot: RefCell::new(None),
@@ -3415,8 +3367,10 @@ impl TerminalPane {
         this.addSubview(&view);
         // The link label under the veil (an unfocused pane gets no hover anyway).
         this.addSubview(&link_label.0);
-        this.addSubview(&status_labels.wait.0);
-        this.addSubview(&status_labels.mark.0);
+        for view in wait_line.views() {
+            this.addSubview(view);
+        }
+        wait_line.aim(&this);
         // The block tip beside it, under the veil too.
         this.addSubview(&tip);
         // "Jump to latest" too; its button's target is this pane.
@@ -4232,8 +4186,10 @@ impl TerminalPane {
 
     /// The pane is born over a stream whose terminal has not come: nothing waits for it, and
     /// the pane says so **once**, [`WAIT_LINE_AFTER`] in, if it is still waiting then — a dim line
-    /// in the corner, not written to the terminal, that goes when the wait is over. What ends the
-    /// wait says so ([`bt_core::ChildPid::when_settled`]): no timer repeats and nothing asks.
+    /// in the corner with three bars that rise and fall, not written to the terminal, that goes
+    /// when the wait is over — and **once** more, [`ORDINARY_LINK_AFTER`] in, with a link to an ordinary shell
+    /// instead ([`TerminalPane::open_ordinary_shell`]). What ends the wait says so
+    /// ([`bt_core::ChildPid::when_settled`]): no timer repeats and nothing asks.
     fn wait_for_terminal(&self, stream: &bt_core::Stream) {
         let (id, lookup) = (self.id(), self.lookup());
         let found = stream.silence.is_some();
@@ -4241,6 +4197,9 @@ impl TerminalPane {
         // before the pane was built) has no wait to say.
         let waiting = !stream.pid.is_settled();
         let ops = Arc::clone(&stream.ops);
+        if waiting {
+            *self.ivars().wait_ops.borrow_mut() = Some(Arc::clone(&ops));
+        }
         if waiting && let Ok(when) = DispatchTime::try_from(WAIT_LINE_AFTER) {
             let _ = DispatchQueue::main().after(when, move || {
                 // audit: a block running on the main queue is on the main thread by definition.
@@ -4250,6 +4209,15 @@ impl TerminalPane {
                     // The same moment says it to the log, with the step the wait is in: a
                     // terminal that never comes is written nowhere else.
                     ops.still_waiting();
+                }
+            });
+        }
+        if waiting && let Ok(when) = DispatchTime::try_from(ORDINARY_LINK_AFTER) {
+            let _ = DispatchQueue::main().after(when, move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = lookup(mtm, id) {
+                    pane.offer_ordinary_shell();
                 }
             });
         }
@@ -4264,63 +4232,110 @@ impl TerminalPane {
         });
     }
 
+    /// Whether the pane still has no terminal: its session has not settled.
+    fn still_waiting_for_terminal(&self) -> bool {
+        self.session()
+            .is_some_and(|session| !session.child_settled())
+    }
+
     /// The line of the wait, if the pane still has no terminal.
     fn show_wait_line(&self, found: bool) {
-        let waiting = self
-            .session()
-            .is_some_and(|session| !session.child_settled());
-        if !waiting {
+        if !self.still_waiting_for_terminal() {
             return;
         }
         let text = if found {
-            "Bringing the terminal back…"
+            "Bringing the terminal back"
         } else {
-            "Starting the terminal…"
+            "Starting the terminal"
         };
-        StatusLabels::set(
-            &self.ivars().status_labels.wait,
-            Some(text),
-            self.bounds(),
-            true,
-            false,
-        );
+        self.ivars().wait_line.show(text, self.bounds());
     }
 
-    /// The wait for the terminal is over: the line goes, and a pane that was given an ordinary
-    /// shell instead of its terminal keeps a mark that says so, for as long as it lives.
-    fn terminal_settled(&self) {
-        let labels = &self.ivars().status_labels;
-        StatusLabels::set(&labels.wait, None, self.bounds(), true, false);
-        let ordinary = self
-            .session()
-            .is_some_and(|session| session.is_streamed() && !session.is_kept());
-        if ordinary {
-            StatusLabels::set(&labels.mark, Some("Not kept"), self.bounds(), false, true);
+    /// The link to an ordinary shell, beside the line, if the pane still has no terminal.
+    fn offer_ordinary_shell(&self) {
+        if self.still_waiting_for_terminal() {
+            self.ivars().wait_line.offer(self.bounds());
         }
+    }
+
+    /// The person clicked the link: the owner of the pane's stream gives it an ordinary shell
+    /// ([`bt_core::PtyOps::ordinary_instead`]), and what becomes of the terminal is its to say.
+    /// Only a click gets here, once; the link goes at the click and the line with the terminal's
+    /// stand-in (the shell is on the stream, [`TerminalPane::terminal_settled`]).
+    fn open_ordinary_shell(&self) {
+        self.ivars().wait_line.withdraw();
+        let ops = self.ivars().wait_ops.borrow().clone();
+        if let Some(ops) = ops {
+            ops.ordinary_instead();
+        }
+    }
+
+    /// The wait for the terminal is over: the line, the ring and the link go.
+    fn terminal_settled(&self) {
+        self.ivars().wait_line.hide();
+        self.ivars().wait_ops.borrow_mut().take();
     }
 
     /// The text of the line of the wait, while it shows ([`TerminalPane::show_wait_line`]).
     pub fn wait_line_text(&self) -> Option<String> {
-        let (label, field) = &self.ivars().status_labels.wait;
-        (!label.isHidden()).then(|| field.stringValue().to_string())
+        self.ivars().wait_line.words()
     }
 
-    /// How many frames the pane's renderer has finished: a host that wants to know whether an
-    /// idle pane draws nothing counts them twice.
-    pub fn frames_drawn(&self) -> u64 {
-        self.renderer().frames()
+    /// The text of the link to an ordinary shell, while it shows.
+    pub fn ordinary_link_text(&self) -> Option<String> {
+        self.ivars().wait_line.link_words()
     }
 
-    /// Where the mark of a pane that was refused its terminal is, in the pane's own coordinates.
-    pub fn not_kept_mark_frame(&self) -> Option<NSRect> {
-        let (label, _) = &self.ivars().status_labels.mark;
-        (!label.isHidden()).then(|| label.frame())
+    /// Whether the bars of the wait are to move (the line is up and Reduce Motion is off).
+    pub fn wait_bars_turn(&self) -> bool {
+        self.ivars().wait_line.is_turning()
     }
 
-    /// The text of the mark of a pane that was refused its terminal, while it shows.
-    pub fn not_kept_mark_text(&self) -> Option<String> {
-        let (label, field) = &self.ivars().status_labels.mark;
-        (!label.isHidden()).then(|| field.stringValue().to_string())
+    /// Whether every bar has its animation in a window: what a pane put back in a window must
+    /// still have.
+    pub fn wait_bars_play(&self) -> bool {
+        self.ivars().wait_line.is_playing()
+    }
+
+    /// Takes the animation off the bars of the wait, as a layer may lose it when its window
+    /// changes: a test does it by hand and looks that the pane puts it again.
+    pub fn wait_bars_drop_animation(&self) {
+        self.ivars().wait_line.drop_animation();
+    }
+
+    /// The heights of the bars at rest as parts of the tallest (the font's capital): what the
+    /// layers say, which is the heights they stand at under Reduce Motion.
+    pub fn wait_bars_rest(&self) -> Vec<f64> {
+        self.ivars().wait_line.heights()
+    }
+
+    /// The heights the bars are drawn at now, in the same parts, as the animation has them.
+    pub fn wait_bars_drawn(&self) -> Vec<f64> {
+        self.ivars().wait_line.drawn_heights()
+    }
+
+    /// The colour of the bars and the colour of the words, each as red, green, blue and alpha.
+    pub fn wait_colors(&self) -> Option<([f64; 4], [f64; 4])> {
+        self.ivars().wait_line.colors()
+    }
+
+    /// The family the words of the wait are set in, whether it is one with a single width for
+    /// every character, and the width of its cell in points.
+    pub fn wait_font(&self) -> (String, bool, f64) {
+        let line = &self.ivars().wait_line;
+        (line.family(), line.is_fixed_pitch(), line.cell())
+    }
+
+    /// Where the line of the wait, its bars and the link are, in the pane's own coordinates,
+    /// while they show: what a test hits.
+    pub fn wait_frames(&self) -> (Option<NSRect>, Option<NSRect>, Option<NSRect>) {
+        let line = &self.ivars().wait_line;
+        (line.line_frame(), line.bars_frame(), line.link_frame())
+    }
+
+    /// Clicks the link, as a click does: through the control's action.
+    pub fn click_ordinary_link(&self) {
+        self.ivars().wait_line.press_link();
     }
 
     /// Opens the session and attaches the link that drives frames. The order
@@ -4826,6 +4841,10 @@ impl TerminalPane {
         if self.ivars().renderer.set_font(&font) {
             self.refresh_geometry();
         }
+        // The line of the wait follows the terminal's font.
+        self.ivars()
+            .wait_line
+            .set_font(crate::wait_line::line_font(&font), self.bounds());
         // A page of the kit is as large as the terminal's text, Bigger and Smaller with it.
         self.apply_page_zoom();
     }
@@ -5142,13 +5161,13 @@ impl TerminalPane {
         }
         paint_layer(&self.ivars().layer, &theme);
         self.ivars().dim.paint(&theme);
+        self.ivars().wait_line.paint();
         self.ivars().link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
         if let Some(wait) = self.ivars().program_wait.borrow().as_ref() {
             wait.paint(&theme);
         }
         self.ivars().card_frame.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
-        self.ivars().status_labels.paint(&theme);
         self.ivars().block_tip.paint(&theme);
         self.ivars().jump.paint(&theme);
     }
@@ -5652,8 +5671,9 @@ impl TerminalPane {
     /// Gives the link Reduce Motion's **resolved** value
     /// (`AppDelegate::reduce_motion`). A no-op if the value did not change
     /// (`bt_gpu::DisplayLink::set_reduce_motion`); returns silently if there is no link.
-    pub(crate) fn set_reduce_motion(&self, reduce: bool) {
+    pub fn set_reduce_motion(&self, reduce: bool) {
         self.ivars().reduce_motion.set(reduce);
+        self.ivars().wait_line.set_reduce_motion(reduce);
         if let Some(link) = self.ivars().link.get() {
             link.set_reduce_motion(reduce);
         }

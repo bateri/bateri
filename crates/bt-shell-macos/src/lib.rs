@@ -104,6 +104,7 @@ mod updater;
 mod upload_card;
 mod uploader;
 mod view;
+mod wait_line;
 mod window;
 mod zoom_motion;
 
