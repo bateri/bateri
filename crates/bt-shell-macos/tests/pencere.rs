@@ -2060,6 +2060,49 @@ fn born_without_its_terminal(
         1,
         "a second click asks nothing"
     );
+    // The owner did not take the click, as the terminal had come: the pane shows it, its wait is
+    // over on its screen before the pid is known, and the line goes.
+    let pid = waits.pids.borrow()[0].clone();
+    pid.shown();
+    until("the line to go as the terminal is shown", || {
+        pane.wait_line_text().is_none()
+    });
+    assert!(!pane.wait_bars_turn());
+    // The terminal was not there after all, and another is on its way: the pane waits again and
+    // says so as it did when it was born, both clocks from the start — the line two seconds in,
+    // the link at ten — and a click on the link is told to the owner again.
+    pid.waits_again();
+    spin_for(1.0);
+    assert_eq!(
+        pane.wait_line_text(),
+        None,
+        "the line not before two seconds"
+    );
+    spin_for(1.4);
+    assert_eq!(
+        pane.wait_line_text().as_deref(),
+        Some("Starting the terminal"),
+        "the line of the wait that began again"
+    );
+    assert!(pane.wait_bars_play());
+    assert_eq!(
+        pane.ordinary_link_text(),
+        None,
+        "the link not before ten seconds"
+    );
+    spin_for(8.2);
+    assert_eq!(
+        pane.ordinary_link_text().as_deref(),
+        Some("Open an ordinary shell instead"),
+        "the link of the wait that began again"
+    );
+    pane.click_ordinary_link();
+    assert_eq!(
+        waits.chosen.load(Ordering::SeqCst),
+        2,
+        "the owner was asked again"
+    );
+    assert_eq!(pane.ordinary_link_text(), None);
     // The shell is on the stream: the owner settles the wait and the line goes with it.
     waits.pids.borrow()[0].set(4244);
     until("the line to go", || pane.wait_line_text().is_none());

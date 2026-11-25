@@ -554,5 +554,32 @@ fn the_modes_alone_are_set_back_and_the_screen_and_history_are_kept() {
         main.feed(modes_only());
         main.feed("p");
         assert!(!row(&main.term, 3).contains("31"), "{}", row(&main.term, 3));
+        // The shell's prompt is in plain letters: the program's line-drawing sets (G0 and G1 DEC
+        // Special Graphics, G1 shifted in) do not stay, and do not come back with the cursor the
+        // reset saves and restores, nor with the main screen's saved cursor.
+        assert_eq!(
+            letters_after(&mut pane, ""),
+            "qx$",
+            "alternate={alternate}: the prompt's letters"
+        );
+        let mut restored = before(COLUMNS, alternate);
+        restored.feed(modes_only());
+        assert_eq!(
+            letters_after(&mut restored, "\x1b8"),
+            "qx$",
+            "alternate={alternate}: the letters after the saved cursor"
+        );
     }
+    // A screen left with only G0 in DEC Special Graphics, nothing shifted.
+    let mut drawing = Pane::new(COLUMNS);
+    drawing.feed("lqqk\r\n\x1b(0");
+    drawing.feed(modes_only());
+    assert_eq!(letters_after(&mut drawing, ""), "qx$", "G0 alone");
+}
+
+/// The letters a shell's prompt `qx$` comes out as on the last row of `pane`, written after
+/// `before` (as a shell writes after the reset): plain, or a line-drawing set's `─│$`.
+fn letters_after(pane: &mut Pane, before: &str) -> String {
+    pane.feed(format!("{before}\x1b[{ROWS};1H\x1b[2Kqx$"));
+    text(&pane.term, ROWS as i32 - 1)
 }

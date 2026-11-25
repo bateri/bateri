@@ -2328,9 +2328,10 @@ pub struct PaneIvars {
     /// path; the line takes no hit.
     wait_line: crate::wait_line::WaitLine,
     /// What the pane asks its stream's owner of when the person chooses the ordinary shell
-    /// ([`bt_core::PtyOps::ordinary_instead`]): the owner's own ops, not the wrapper the session
-    /// holds. Kept while the pane waits.
-    wait_ops: RefCell<Option<Arc<dyn bt_core::PtyOps>>>,
+    /// ([`bt_core::PtyOps::ordinary_instead`]) — the owner's own ops, not the wrapper the session
+    /// holds — and the pid whose wait the pane shows. Kept while the pane waits, and while a wait
+    /// that ended before the pid was known may begin again ([`bt_core::ChildPid::waits_again`]).
+    wait_ops: RefCell<Option<(Arc<dyn bt_core::PtyOps>, bt_core::ChildPid)>>,
     /// What the pane was born with that its session cannot say until its terminal has come: the
     /// directory it starts in and the line it types first ([`saved_while_waiting`]).
     born_with: RefCell<(Option<std::path::PathBuf>, Option<String>)>,
@@ -4191,18 +4192,39 @@ impl TerminalPane {
     /// in the corner with three bars that rise and fall, not written to the terminal, that goes
     /// when the wait is over — and **once** more, [`ORDINARY_LINK_AFTER`] in, with a link to an ordinary shell
     /// instead ([`TerminalPane::open_ordinary_shell`]). What ends the wait says so
-    /// ([`bt_core::ChildPid::when_settled`]): no timer repeats and nothing asks.
+    /// ([`bt_core::ChildPid::when_settled`]): no timer repeats and nothing asks. A wait that ended
+    /// as the pane showed a terminal that was not there after all begins again, and is said again
+    /// the same way, its two clocks from the start ([`bt_core::ChildPid::waits_again`]).
     fn wait_for_terminal(&self, stream: &bt_core::Stream) {
-        let (id, lookup) = (self.id(), self.lookup());
-        let found = stream.silence.is_some();
         // A stream whose wait is over already (a refusal that gave the pane an ordinary shell
         // before the pane was built) has no wait to say.
-        let waiting = !stream.pid.is_settled();
-        let ops = Arc::clone(&stream.ops);
-        if waiting {
-            *self.ivars().wait_ops.borrow_mut() = Some(Arc::clone(&ops));
+        if stream.pid.is_settled() {
+            return;
         }
-        if waiting && let Ok(when) = DispatchTime::try_from(WAIT_LINE_AFTER) {
+        *self.ivars().wait_ops.borrow_mut() = Some((Arc::clone(&stream.ops), stream.pid.clone()));
+        self.say_wait(stream.silence.is_some());
+        let (id, lookup) = (self.id(), self.lookup());
+        stream.pid.when_waiting_again(move || {
+            DispatchQueue::main().exec_async(move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = lookup(mtm, id) {
+                    // A new terminal is on its way in place of the one that was not there.
+                    pane.say_wait(false);
+                }
+            });
+        });
+    }
+
+    /// The wait [`TerminalPane::wait_for_terminal`] says, from now: the line and the link on
+    /// their clocks, and their end with the wait's. `found`: the pane waits for a terminal found
+    /// again, which the line names.
+    fn say_wait(&self, found: bool) {
+        let Some((ops, pid)) = self.ivars().wait_ops.borrow().clone() else {
+            return;
+        };
+        let (id, lookup) = (self.id(), self.lookup());
+        if let Ok(when) = DispatchTime::try_from(WAIT_LINE_AFTER) {
             let _ = DispatchQueue::main().after(when, move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -4214,7 +4236,7 @@ impl TerminalPane {
                 }
             });
         }
-        if waiting && let Ok(when) = DispatchTime::try_from(ORDINARY_LINK_AFTER) {
+        if let Ok(when) = DispatchTime::try_from(ORDINARY_LINK_AFTER) {
             let _ = DispatchQueue::main().after(when, move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -4223,7 +4245,7 @@ impl TerminalPane {
                 }
             });
         }
-        stream.pid.when_settled(move || {
+        pid.when_settled(move || {
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -4268,16 +4290,25 @@ impl TerminalPane {
     /// its terminal ([`bt_core::ChildPid::shown`]).
     fn open_ordinary_shell(&self) {
         self.ivars().wait_line.withdraw();
-        let ops = self.ivars().wait_ops.borrow().clone();
+        let ops = self
+            .ivars()
+            .wait_ops
+            .borrow()
+            .as_ref()
+            .map(|(ops, _)| Arc::clone(ops));
         if let Some(ops) = ops {
             ops.ordinary_instead();
         }
     }
 
-    /// The wait for the terminal is over: the line, its bars and the link go.
+    /// The wait for the terminal is over: the line, its bars and the link go. What the wait was
+    /// said with is kept while the pid is not known: a wait that ended as the pane showed its
+    /// terminal may begin again ([`bt_core::ChildPid::waits_again`]).
     fn terminal_settled(&self) {
         self.ivars().wait_line.hide();
-        self.ivars().wait_ops.borrow_mut().take();
+        if !self.still_waiting_for_terminal() {
+            self.ivars().wait_ops.borrow_mut().take();
+        }
     }
 
     /// The text of the line of the wait, while it shows ([`TerminalPane::show_wait_line`]).

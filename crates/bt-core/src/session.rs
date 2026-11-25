@@ -3162,7 +3162,8 @@ impl Silence {
 ///
 /// The cell says when the wait is over ([`ChildPid::when_settled`]), so that what shows the wait
 /// does not ask again and again. The wait the pane shows can be over before the pid is known
-/// ([`ChildPid::shown`]).
+/// ([`ChildPid::shown`]), and begin again if what it showed is not there after all
+/// ([`ChildPid::waits_again`]).
 #[derive(Clone, Debug, Default)]
 pub struct ChildPid(Arc<PidCell>);
 
@@ -3174,6 +3175,9 @@ struct PidCell {
     shown: AtomicBool,
     /// What is done once, when the wait is over.
     hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// What is done each time the wait begins again ([`ChildPid::when_waiting_again`]). It holds
+    /// nothing that holds the cell: whoever keeps the cell would keep itself.
+    again: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl std::fmt::Debug for PidCell {
@@ -3217,6 +3221,8 @@ impl ChildPid {
     /// The wait is over without a pid: no program will have one.
     pub fn settle(&self) {
         self.0.settled.store(true, Ordering::Release);
+        // It does not begin again.
+        lock(&self.0.again).take();
         self.tell();
     }
 
@@ -3228,6 +3234,32 @@ impl ChildPid {
     pub fn shown(&self) {
         self.0.shown.store(true, Ordering::Release);
         self.tell();
+    }
+
+    /// What the pane was shown before the pid ([`ChildPid::shown`]) is not there after all, and
+    /// another terminal is on its way: the wait is on again, for the pane to show as it showed it
+    /// first — [`ChildPid::when_waiting_again`]'s `then` runs, on the caller's thread, and
+    /// [`ChildPid::when_settled`] waits again. Nothing when the wait was not shown over, or is over.
+    pub fn waits_again(&self) {
+        if self.0.settled.load(Ordering::Acquire) || !self.0.shown.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let again = lock(&self.0.again);
+        if let Some(again) = again.as_ref() {
+            again();
+        }
+    }
+
+    /// `then` is called each time the wait begins again ([`ChildPid::waits_again`]), on the
+    /// thread that says so, until the wait is over for good ([`ChildPid::set`],
+    /// [`ChildPid::settle`]). One at a time: a second replaces the first. `then` is called with
+    /// the cell's own lock held, so it hands what it does to another thread or queue and does not
+    /// ask the cell for another `then` itself.
+    pub fn when_waiting_again(&self, then: impl Fn() + Send + 'static) {
+        if self.0.settled.load(Ordering::Acquire) {
+            return;
+        }
+        *lock(&self.0.again) = Some(Box::new(then));
     }
 
     /// What waits for the end of the wait is done, once.
@@ -15332,6 +15364,41 @@ mod tests {
             2,
             "the pid tells nothing again"
         );
+    }
+
+    #[test]
+    fn a_wait_shown_over_begins_again_and_ends_again() {
+        let over = Arc::new(AtomicU32::new(0));
+        let again = Arc::new(AtomicU32::new(0));
+        let pid = ChildPid::unknown();
+        let counted = Arc::clone(&again);
+        pid.when_waiting_again(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        let counted = Arc::clone(&over);
+        pid.when_settled(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        // A wait that was not shown over does not begin again.
+        pid.waits_again();
+        assert_eq!(again.load(Ordering::SeqCst), 0);
+        pid.shown();
+        assert_eq!(over.load(Ordering::SeqCst), 1);
+        pid.waits_again();
+        pid.waits_again();
+        assert_eq!(again.load(Ordering::SeqCst), 1, "once for one shown");
+        // The wait is on: what waits for its end waits again, and the pid ends it.
+        let counted = Arc::clone(&over);
+        pid.when_settled(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(over.load(Ordering::SeqCst), 1, "not over yet");
+        pid.set(4243);
+        assert_eq!(over.load(Ordering::SeqCst), 2);
+        // Over for good: nothing begins again.
+        pid.shown();
+        pid.waits_again();
+        assert_eq!(again.load(Ordering::SeqCst), 1);
     }
 
     #[test]

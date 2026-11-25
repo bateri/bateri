@@ -6366,6 +6366,62 @@ fn the_lines_of_a_pane_let_go_of_and_of_its_return_read_nothing_of_the_ledgers_f
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What the loop keeps of a program's view in a terminal of this Mac goes with the terminal: when
+/// its program ends, and when the terminal found again is not there and the pane is given a new
+/// one.
+#[test]
+fn the_view_kept_for_a_terminal_goes_when_the_terminal_does() {
+    let dir = scratch("local-view-forgotten");
+    let ledger = Arc::new(Ledger::open(dir.join("ledger")));
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-view-forgotten-svc",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1C9").expect("a pane");
+    let stream = open_local(&rig, &pane).expect("a terminal");
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    rig.service.view_changed(&id, true, Some("demo"));
+    until("the view kept", || rig.service.kept_counts().views == 1);
+    world.bridge().exit(&id, Exit::Code(0));
+    until("the terminal gone from the ledger", || {
+        ledger.local_terminal_of(&pane).is_none()
+    });
+    assert_eq!(
+        rig.service.kept_counts().views,
+        0,
+        "the ended terminal's view"
+    );
+    drop(stream);
+    rig.service.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Found again with a view the ledger had for it, and not there: the pane's new terminal has
+    // no view, and nothing is kept of the old one's.
+    let back = Comeback::leaves("local-view-found-gone", b"x\r\n");
+    back.ledger
+        .set_view(local::ACCOUNT, &back.terminal, true, Some("pen"));
+    back.world.bridge().exit(&back.terminal, Exit::Code(0));
+    let second = back.arrives();
+    let stream = second
+        .open_local_wait(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("a terminal");
+    assert_ne!(
+        back.ledger.local_terminal_of(&back.pane),
+        Some(back.terminal.clone()),
+        "a new terminal"
+    );
+    assert_eq!(
+        second.kept_counts().views,
+        0,
+        "the view of the one not there"
+    );
+    drop(stream);
+    second.stop();
+}
+
 /// A terminal found again whose pane had a program's view open, as the bateri before wrote it in
 /// the ledger: the line of the pane that is let go of names that program, though the application
 /// has not said anything of a view yet.
@@ -7240,6 +7296,10 @@ fn an_ordinary_shell_chosen_for_a_new_terminal_on_its_way_ends_the_terminal_when
         world.bridge().typed(&id).is_empty(),
         "what the pane typed went to the shell and not to the terminal"
     );
+    // The holder the terminal was asked through is gone, and the loop keeps no pane for it.
+    until("no pane kept for a holder that is gone", || {
+        rig.service.kept_counts().panes == 0
+    });
 }
 
 /// The choice is made while the account of this Mac is still being made — nothing has been asked of
@@ -7273,9 +7333,11 @@ fn an_ordinary_shell_chosen_while_the_account_is_made_is_given_at_once_and_no_te
 
 /// A terminal found again whose list does not come: the pane has an ordinary shell instead, and
 /// the terminal — its program may live — is not ended, and stays in the ledger with the pane. The
-/// pane's close ends nothing of it; a quit that ends the programs does.
+/// pane's close ends it, as the close of any pane ends the pane's terminal; so does a quit that
+/// ends the programs.
 #[test]
-fn an_ordinary_shell_chosen_for_a_terminal_found_again_leaves_the_terminal_running() {
+fn an_ordinary_shell_chosen_for_a_terminal_found_again_leaves_the_terminal_running_until_the_pane_closes()
+ {
     let back = Comeback::leaves("local-chose-found", b"x\r\n");
     back.world
         .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
@@ -7311,16 +7373,24 @@ fn an_ordinary_shell_chosen_for_a_terminal_found_again_leaves_the_terminal_runni
         Some(back.terminal.clone())
     );
     assert_eq!(back.world.bridge().terminated(&back.terminal), None);
-    // Closing the pane that has the shell ends nothing of the terminal.
+    // Closing the pane that has the shell ends the terminal it left running too: nothing of the
+    // pane is left for a quit, a launch or the list to find.
     drop(mac);
     second.end(&back.pane);
-    thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        back.ledger.local_terminal_of(&back.pane),
-        Some(back.terminal.clone()),
-        "the close of a shell is no close of the terminal"
-    );
-    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
+    until("marked to end", || {
+        back.ledger.local_terminal_of(&back.pane).is_none()
+    });
+    assert!(!second.left_running(&back.pane));
+    // Whenever the connection comes, it is ended.
+    back.world.carry_fails_with(None);
+    let mut asked = Instant::now();
+    until("the terminal ended", || {
+        if asked.elapsed() >= Duration::from_millis(25) {
+            asked = Instant::now();
+            second.retry_account(local::ACCOUNT);
+        }
+        back.world.bridge().terminated(&back.terminal).is_some()
+    });
     second.stop();
 }
 
@@ -7459,6 +7529,11 @@ fn an_ordinary_shell_chosen_for_a_new_terminal_ends_its_row_at_once_and_a_refusa
     thread::sleep(Duration::from_millis(400));
     let said = ordinary_lines(&world);
     assert_eq!(said.len(), 1, "{said:?}");
+    // The holder the terminal was asked through is gone with the refusal, and the loop keeps no
+    // pane for it.
+    until("no pane kept for a holder that is gone", || {
+        rig.service.kept_counts().panes == 0
+    });
     let mut mac = Pane::of(stream);
     mac.master
         .write_all(b"echo shell_said_$((6*7))\n")
@@ -7619,6 +7694,106 @@ fn a_choice_that_comes_after_the_terminal_found_again_was_attached_is_not_taken(
         second.local_terminal(&back.pane),
         Some(back.terminal.clone())
     );
+    drop(mac);
+    second.stop();
+}
+
+/// The person's choice came after the terminal found again was attached and was not taken, and
+/// then the server says the terminal is gone: the pane is given a new one and waits for it again,
+/// and says so — its wait begins again, as it began when the pane was born, link and all — and a
+/// second choice is taken: the pane has an ordinary shell, and the new terminal is ended as it
+/// comes.
+#[test]
+fn a_choice_not_taken_is_offered_again_when_the_terminal_found_again_is_gone_after_all() {
+    let back = Comeback::leaves("local-chose-late-gone", b"x\r\n");
+    back.world.bridge().hold_lists();
+    back.world.bridge().hold_created();
+    let second = back.arrives();
+    let (stream, ask) = LocalAsk::new(
+        &back.pane,
+        a_shell(),
+        MAC,
+        a_launch(),
+        second.found_again(&back.pane),
+    )
+    .expect("a request");
+    second.submit_local(ask);
+    until("the terminal attached", || {
+        back.world.bridge().is_attached(&back.terminal)
+    });
+    let pid = stream.pid.clone();
+    let wait_over = Arc::new(AtomicUsize::new(0));
+    let wait_again = Arc::new(AtomicUsize::new(0));
+    pid.when_settled({
+        let wait_over = Arc::clone(&wait_over);
+        move || {
+            wait_over.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    pid.when_waiting_again({
+        let wait_again = Arc::clone(&wait_again);
+        move || {
+            wait_again.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let status = Arc::clone(&stream.status);
+    let ops = Arc::clone(&stream.ops);
+    let mut mac = Pane::of(stream);
+    // The terminal has come as far as the pane: what is typed reaches it.
+    mac.master.write_all(b"before\r").expect("typed");
+    until("typed into the terminal", || {
+        back.world.bridge().typed(&back.terminal) == b"before\r"
+    });
+
+    ops.ordinary_instead();
+    until("the choice heard and not taken", || {
+        back.world
+            .lines
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|line| line.contains("chose an ordinary shell after its terminal had come"))
+    });
+    until("the pane's wait over at the click", || {
+        wait_over.load(Ordering::SeqCst) == 1
+    });
+    // The terminal is gone after all: its program ended before the list came.
+    back.world.bridge().exit(&back.terminal, Exit::Code(0));
+    back.world.bridge().release_lists();
+    until("a new terminal asked for the pane", || {
+        back.ledger
+            .local_terminal_of(&back.pane)
+            .is_some_and(|made| made != back.terminal)
+    });
+    let made = back
+        .ledger
+        .local_terminal_of(&back.pane)
+        .expect("a terminal");
+    until("the pane's wait begins again", || {
+        wait_again.load(Ordering::SeqCst) == 1
+    });
+    assert!(!pid.is_settled(), "waiting for the new terminal");
+    let wait_over_again = Arc::new(AtomicBool::new(false));
+    pid.when_settled({
+        let wait_over_again = Arc::clone(&wait_over_again);
+        move || wait_over_again.store(true, Ordering::SeqCst)
+    });
+    assert!(!wait_over_again.load(Ordering::SeqCst), "the wait is on");
+
+    // The second choice is taken.
+    ops.ordinary_instead();
+    until("the shell", || pid.get().is_some());
+    assert!(status.is_ordinary());
+    assert!(wait_over_again.load(Ordering::SeqCst));
+    mac.master
+        .write_all(b"echo shell_said_$((6*7))\n")
+        .expect("typed");
+    let read = String::from_utf8_lossy(&mac.reads(b"shell_said_42")).into_owned();
+    assert!(read.contains("shell_said_42"), "{read}");
+    back.world.bridge().release_created();
+    until("the new terminal ended as it came", || {
+        back.world.bridge().terminated(&made) == Some(false)
+    });
     drop(mac);
     second.stop();
 }

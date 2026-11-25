@@ -129,15 +129,19 @@ pub fn keeping_history(columns: u16) -> Vec<u8> {
 
 /// What a pane's terminal needs before a shell of this process takes the pane over from a
 /// program it was shown ([`crate::Ordinary`]): off the alternate screen, a plain pen and no link
-/// open, the whole screen to scroll in (no origin mode, no region), the main screen's kitty
-/// keyboard stack and pointer shapes emptied, DECSET 1016 and 2048 off and the modes a new
-/// terminal starts in — so that the shell is not left in a full-screen program's screen,
-/// reporting the mouse or wrapping its pastes. Unlike [`keeping_history`] nothing is erased and
-/// the cursor stays where it was (the region's reset homes it, so it is saved around that): what
-/// the pane showed stays above the shell.
+/// open, ASCII in all four character sets and the first of them in use, the whole screen to
+/// scroll in (no origin mode, no region), the main screen's kitty keyboard stack and pointer
+/// shapes emptied, DECSET 1016 and 2048 off and the modes a new terminal starts in — so that the
+/// shell is not left in a full-screen program's screen, drawing lines for letters, reporting the
+/// mouse or wrapping its pastes. Unlike [`keeping_history`] nothing is erased and the cursor stays
+/// where it was (the region's reset homes it, so it is saved around that): what the pane showed
+/// stays above the shell. The sets are set back before the cursor is saved, as `DECSC` keeps
+/// them with it: the saved cursor the shell finds is a plain one.
 #[must_use]
 pub fn modes_only() -> Vec<u8> {
-    let mut out = String::from("\x1b[?1049l\x1b[0m\x1b]8;;\x1b\\\x1b7\x1b[?6l\x1b[r\x1b8");
+    let mut out = String::from(
+        "\x1b[?1049l\x1b[0m\x1b]8;;\x1b\\\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b7\x1b[?6l\x1b[r\x1b8",
+    );
     keyboard_and_pointer(&mut out);
     out.push_str("\x1b[?1016l\x1b[?2048l");
     out.push_str(NEW_MODES);

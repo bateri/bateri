@@ -1120,7 +1120,21 @@ enum Msg {
         id: u64,
         records: Vec<(Terminal, Record)>,
     },
+    /// What the loop holds for the holders and terminals it knows, for a test that looks that
+    /// nothing is kept for one that is gone ([`Service::kept_counts`]).
+    #[cfg(test)]
+    Counts(Sender<Counts>),
     Stop,
+}
+
+/// How many entries the loop keeps of a few kinds ([`Service::kept_counts`]).
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counts {
+    /// The panes of holders ([`Core::panes`]).
+    pub(crate) panes: usize,
+    /// The programs' views of terminals of this Mac ([`Core::views`]).
+    pub(crate) views: usize,
 }
 
 /// What is told when the account of this Mac is there, or could not be made: its name.
@@ -2090,7 +2104,7 @@ impl Service {
 
     /// Whether `pane` chose an ordinary shell over the terminal it found again, which runs on
     /// unseen ([`Core::choose_ordinary`]): it keeps its row in the ledger and is shown again by the
-    /// next launch, and a quit that ends the programs ends it.
+    /// next launch; the pane's close and a quit that ends the programs end it.
     pub fn left_running(&self, pane: &PaneUuid) -> bool {
         lock(&self.left_running).contains(pane)
     }
@@ -2126,6 +2140,16 @@ impl Service {
             terminal: terminal.clone(),
             program: open.then(|| program.map(str::to_owned)),
         });
+    }
+
+    /// How many entries the loop keeps of a few kinds, once it has taken in everything sent to it
+    /// before.
+    #[cfg(test)]
+    pub(crate) fn kept_counts(&self) -> Counts {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.tx.send(Msg::Counts(tx));
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the loop answers")
     }
 
     /// A terminal for `pane`, waited for: [`Service::submit_local`] and then until the terminal's
@@ -2395,14 +2419,16 @@ struct Core {
     /// goes to them.
     ordinaries: BTreeMap<HoldId, ask::Carried>,
     /// The panes that chose an ordinary shell over a terminal found again, which was left
-    /// running: the close of such a pane ends nothing, a quit that ends the programs ends the
-    /// terminal ([`Core::end_all`]). Shared with [`Service::left_running`]: the application asks
-    /// it of a pane, and a pane in it has no terminal of this Mac to anything that asks.
+    /// running: the close of such a pane ends the terminal ([`Core::end`]), and so does a quit
+    /// that ends the programs ([`Core::end_all`]); any other quit leaves it for the next launch.
+    /// Shared with [`Service::left_running`]: the application asks it of a pane, and a pane in it
+    /// has no terminal of this Mac to anything that asks.
     left_running: Arc<Mutex<HashSet<PaneUuid>>>,
     /// The program whose view is open in the pane each terminal of this Mac carries, as the
     /// application said it ([`Service::view_changed`], `None`: a view of a program that gave no
     /// name), or as the ledger had it when the terminal was found again: what a line of the log
-    /// says a pane showed, read without the ledger's file.
+    /// says a pane showed, read without the ledger's file. Forgotten when the terminal ends
+    /// ([`Core::finished`]) or is not there to be found again ([`Core::resumed_gone`]).
     views: HashMap<SessionId, Option<String>>,
     /// What the bridge's readers have sent the loop that it has taken in and not settled
     /// ([`Queue::settled`]), by the queue the reader counted it in.
@@ -2981,6 +3007,13 @@ impl Core {
                 self.refresh = true;
             }
             Msg::Relist => self.relist.extend(self.accounts.keys().cloned()),
+            #[cfg(test)]
+            Msg::Counts(tx) => {
+                let _ = tx.send(Counts {
+                    panes: self.panes.len(),
+                    views: self.views.len(),
+                });
+            }
             Msg::Answer {
                 account,
                 talk,
@@ -3796,11 +3829,16 @@ impl Core {
     /// cannot ask; the ledger keeps the request and the next connection to the
     /// account carries it out.
     fn end(&mut self, pane: &PaneUuid, now: Instant) {
-        // A pane that chose an ordinary shell over a terminal found again closes only the shell:
-        // the terminal was left running, and the next bateri shows it again.
-        lock(&self.left_running).remove(pane);
         let (coming, unbound) = self.end_coming(pane);
-        for (account, terminal) in self.terminals_of(pane).into_iter().chain(unbound) {
+        // A pane that chose an ordinary shell over a terminal found again ends that terminal too:
+        // closing a pane ends its terminal, and this one is the pane's still.
+        let left = self.left_by(pane);
+        for (account, terminal) in self
+            .terminals_of(pane)
+            .into_iter()
+            .chain(unbound)
+            .chain(left)
+        {
             // A terminal another computer took is that computer's: closing the dimmed pane that
             // showed it hangs up nothing.
             if self.is_taken(&account, &terminal) {
@@ -3903,13 +3941,7 @@ impl Core {
             let (coming, unbound) = self.end_coming(pane);
             // A terminal found again that the pane chose an ordinary shell over was left running:
             // a quit that ends the programs ends it.
-            let left: Vec<(String, SessionId)> = lock(&self.left_running)
-                .remove(pane)
-                .then(|| self.shared.ledger.local_terminal_of(pane))
-                .flatten()
-                .map(|terminal| (local::ACCOUNT.to_owned(), terminal))
-                .into_iter()
-                .collect();
+            let left = self.left_by(pane);
             for (account, terminal) in self
                 .terminals_of(pane)
                 .into_iter()
@@ -3934,6 +3966,17 @@ impl Core {
         } else {
             self.waiters.push(Waiter { pending, done });
         }
+    }
+
+    /// The terminal found again that `pane` left running when it chose an ordinary shell
+    /// ([`Core::choose_ordinary`]), taken out of [`Core::left_running`]: what the pane's close
+    /// and a quit that ends the programs end with the pane's other terminals.
+    fn left_by(&self, pane: &PaneUuid) -> Option<(String, SessionId)> {
+        lock(&self.left_running)
+            .remove(pane)
+            .then(|| self.shared.ledger.local_terminal_of(pane))
+            .flatten()
+            .map(|terminal| (local::ACCOUNT.to_owned(), terminal))
     }
 
     /// Asks the terminal to hang up, and to be killed after the grace if it is
@@ -4001,6 +4044,11 @@ impl Core {
     /// it and the quits that waited for it are one terminal closer.
     fn finished(&mut self, account: &str, terminal: &SessionId) {
         self.shared.ledger.gone(account, terminal);
+        // Its program's view goes with it; the views are kept by name for this Mac's terminals
+        // only, and a server's terminal of the same name is not one of them.
+        if local::is_account(account) {
+            self.views.remove(terminal);
+        }
         let key = (account.to_owned(), terminal.clone());
         for waiter in &mut self.waiters {
             waiter.pending.remove(&key);
@@ -4659,7 +4707,8 @@ impl Core {
     ///   shell runs that nobody sees;
     /// - **a terminal found again**, whose program may live: it is left as it is, in the ledger
     ///   with its pane, and what the pane's holder carries is the shell from now on. The pane's
-    ///   close ends nothing of it; a quit that ends the programs does ([`Core::end_all`]).
+    ///   close ends it, as a close ends a pane's terminal ([`Core::end`]), and so does a quit that
+    ///   ends the programs ([`Core::end_all`]); any other quit leaves it for the next launch.
     /// - **the new terminal made instead of a found one that was not there**: as a new one.
     ///
     /// A stream a holder carries already (the last two) cannot be given to a shell by handing
@@ -4690,9 +4739,14 @@ impl Core {
                 }
                 return self.refuse_local(hold, why);
             }
-            // The terminal asked for has no row from now on: a bateri that is gone before it
-            // comes leaves nothing a pane would find again, and the next connection ends it.
-            if let Some(terminal) = &awaiting.terminal {
+            // A new terminal asked for has no row from now on: a bateri that is gone before it
+            // comes leaves nothing a pane would find again, and the next connection ends it. One
+            // found again is left running in its row, as where a holder carries the stream (a
+            // found one's stream is carried as it is asked for, so this is not expected).
+            let found = awaiting.resumed.is_some();
+            if found {
+                lock(&self.left_running).insert(pane.clone());
+            } else if let Some(terminal) = &awaiting.terminal {
                 self.shared.ledger.end(local::ACCOUNT, terminal);
             }
             let behind = awaiting.parts.lend_behind();
@@ -4703,8 +4757,15 @@ impl Core {
                 .refused_line(pane.as_str(), why, Instant::now());
             self.shared.backend.log_line(&line);
             ask::ordinary_behind(behind, why);
-            // As for a pane that was closed while its terminal was on its way: it is ended as it
-            // comes ([`Core::created`]), and nothing is made of it for nobody.
+            if found {
+                // Nothing waits for it from now on: its holder is let go of, and the terminal
+                // lives on unseen.
+                self.awaiting.remove(&hold);
+                self.hub.closed(hold);
+                return;
+            }
+            // As for a pane that was closed while its terminal was on its way: a new one is ended
+            // as it comes ([`Core::created`]), and nothing is made of it for nobody.
             awaiting.end_asked = true;
             return;
         }
@@ -4722,6 +4783,7 @@ impl Core {
             // screen the wait is over: its line goes now, not when the list comes.
             if let Some(awaiting) = self.awaiting.get_mut(&hold) {
                 awaiting.chosen = false;
+                awaiting.parts.ticket.forget_choice();
                 self.shared.backend.log_line(&format!(
                     "the pane {} chose an ordinary shell after its terminal had come: it is shown its terminal",
                     awaiting.parts.pane.as_str()
@@ -5145,10 +5207,17 @@ impl Core {
             silence.close();
         }
         self.shared.ledger.end(local::ACCOUNT, &terminal);
+        // What the ledger had of a view in it is not the new terminal's.
+        self.views.remove(&terminal);
         self.hub.let_go_raw(hold);
         if let Some(conn) = self.conns.get_mut(&hold) {
             conn.waits_for_input = true;
             conn.throttle.0.shut();
+        }
+        // A pane whose wait ended at a click that was not taken, as it showed this terminal
+        // ([`Core::choose_ordinary`]), waits again, and says so as it did when it was born.
+        if let Some(awaiting) = self.awaiting.get(&hold) {
+            awaiting.parts.pid.waits_again();
         }
         self.local_numbered(hold);
     }

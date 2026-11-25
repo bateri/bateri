@@ -81,6 +81,12 @@ impl Ticket {
         self.state().chose
     }
 
+    /// The choice was not taken (the terminal had come): the next one the person makes, when the
+    /// pane offers it again, is told to the loop like the first.
+    pub(super) fn forget_choice(&self) {
+        self.state().chose = false;
+    }
+
     /// The ordinary shell of this process the stream is carried by from now on, put there by the
     /// loop for a stream that a holder carries ([`super::Core::choose_ordinary`]): what the pane
     /// says of its size goes to it directly, and the last size the pane said is returned.

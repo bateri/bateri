@@ -145,8 +145,8 @@ pub(crate) fn drop_shown(pane: &PaneUuid) {
 }
 
 /// Whether `pane` chose an ordinary shell over the terminal of this Mac it found again, which runs
-/// on unseen ([`Service::left_running`]): a quit that ends the programs ends it. `false` in a
-/// process without the service.
+/// on unseen ([`Service::left_running`]): the pane's close and a quit that ends the programs end
+/// it. `false` in a process without the service.
 pub(crate) fn left_running(pane: &PaneUuid) -> bool {
     SERVICE
         .get()
