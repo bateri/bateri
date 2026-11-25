@@ -306,7 +306,7 @@ impl UiPage for PageDrawing {
 
 impl PageDrawing {
     fn build_frame(&mut self, cx: &UiContext<'_>) -> UiList {
-        let probe = self.handle.on_frame.borrow().clone();
+        let probe = self.handle.on_frame_start.borrow().clone();
         if let Some(probe) = probe {
             probe();
         }
@@ -352,6 +352,9 @@ impl PageDrawing {
         // (`Painted::deliver_held`) is given to the pane, once its fields exist. Not only when the
         // outline changed: what is held can wait for a frame whose outline is the one the pane has.
         self.handle.tell_frame(&mut painted);
+        // A frame the link drew, as the person sees it: not a layout made for a reader that asked
+        // for one (`lay_out_unseen`), which draws nothing and counts as no frame.
+        self.handle.frame_drawn();
         list
     }
 }
@@ -362,8 +365,11 @@ type OnOutline = Rc<dyn Fn(&Outline)>;
 /// What is called with what a frame brings besides its outline ([`PageHandle::watch_held`]).
 type OnHeld = Rc<dyn Fn(&mut Painted)>;
 
-/// What is called at the start of each frame ([`PageHandle::watch_frame`]).
+/// What is called when a frame of the page was drawn ([`PageHandle::watch_frames`]).
 type OnFrame = Rc<dyn Fn()>;
+
+/// What is called at the start of each frame ([`PageHandle::watch_frame_start`]).
+type OnFrameStart = Rc<dyn Fn()>;
 
 /// What is called once at a page's failure, with what was said of it ([`PageHandle::watch_failure`]).
 type OnFailure = Rc<dyn Fn(&str)>;
@@ -379,12 +385,14 @@ pub struct PageHandle {
     told: Rc<Cell<Mods>>,
     on_outline: Rc<RefCell<Option<OnOutline>>>,
     on_held: Rc<RefCell<Option<OnHeld>>>,
+    /// Told after each frame the page draws, while somebody watches them.
+    on_frame: Rc<RefCell<Option<OnFrame>>>,
     /// The pictures of the page's browsers, if the shell shows any.
     surfaces: Rc<RefCell<Option<Arc<dyn Surfaces>>>>,
     /// What the page's failure is, once there is one ([`PageHandle::guard`]).
     failure: Rc<Failure>,
-    /// Called at the start of each frame the link builds ([`PageHandle::watch_frame`]).
-    on_frame: Rc<RefCell<Option<OnFrame>>>,
+    /// Called at the start of each frame the link builds ([`PageHandle::watch_frame_start`]).
+    on_frame_start: Rc<RefCell<Option<OnFrameStart>>>,
 }
 
 /// A page that failed: what was said of it, and who is told.
@@ -448,11 +456,12 @@ impl PageHandle {
     fn new(page: Page) -> Self {
         Self {
             failure: Rc::new(Failure::default()),
-            on_frame: Rc::new(RefCell::new(None)),
+            on_frame_start: Rc::new(RefCell::new(None)),
             page: Rc::new(RefCell::new(page)),
             told: Rc::new(Cell::new(Mods::default())),
             on_outline: Rc::new(RefCell::new(None)),
             on_held: Rc::new(RefCell::new(None)),
+            on_frame: Rc::new(RefCell::new(None)),
             surfaces: Rc::new(RefCell::new(None)),
         }
     }
@@ -488,8 +497,8 @@ impl PageHandle {
     /// `told` is called at the start of each frame the link builds, inside the page's error
     /// boundary and with nothing of the page borrowed: a shell that looks at frames (a development
     /// copy's fault injector) hangs here, and what goes wrong in it is the page's failure.
-    pub fn watch_frame(&self, told: Box<dyn Fn()>) {
-        self.on_frame.replace(Some(Rc::from(told)));
+    pub fn watch_frame_start(&self, told: Box<dyn Fn()>) {
+        self.on_frame_start.replace(Some(Rc::from(told)));
     }
 
     /// Whether the page failed ([`PageHandle::guard`]): it draws nothing and is told nothing, and
@@ -514,6 +523,14 @@ impl PageHandle {
     /// pane, which may call the page again).
     pub fn page(&self) -> RefMut<'_, Page> {
         self.page.borrow_mut()
+    }
+
+    /// The drive's page where nothing else has it: `None` while a frame is being built or a call
+    /// is in it. For a reader that is not the pane (the inspector, which looks at another pane's
+    /// page from a call of its own that a frame of that page may have caused): it asks again
+    /// later, and never a second borrow, which would bring every pane down.
+    pub fn try_page(&self) -> Option<RefMut<'_, Page>> {
+        self.page.try_borrow_mut().ok()
     }
 
     /// Tells the page what the person did, with `held` the modifiers the system holds now. The
@@ -707,6 +724,28 @@ impl PageHandle {
         if let Some(told) = told {
             told(painted);
         }
+    }
+
+    /// `told` is called, on the thread that builds the frame, after each frame the page draws, with
+    /// the page not borrowed; `None` stops it. Nothing is read or kept for it: a page that is not
+    /// watched pays a look at an empty slot. It is for a reader that wants to know that the page
+    /// was drawn (the inspector), and it does its work later, not in the frame's path.
+    pub fn watch_frames(&self, told: Option<Box<dyn Fn()>>) {
+        self.on_frame.replace(told.map(Rc::from));
+    }
+
+    /// Tells who watches the frames ([`PageHandle::watch_frames`]) that one was drawn. The page is
+    /// not borrowed.
+    fn frame_drawn(&self) {
+        let watched = self.on_frame.borrow().clone();
+        if let Some(watched) = watched {
+            watched();
+        }
+    }
+
+    /// Whether `other` is the same page as this: a page that came where another went is not.
+    pub fn same(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.page, &other.page)
     }
 
     /// The page's editors, as the pane's keys, input method, pasteboard and screen reader reach
@@ -1045,6 +1084,7 @@ pub(super) mod tests {
             });
             let mut painted = painted;
             self.handle.tell_frame(&mut painted);
+            self.handle.frame_drawn();
             self.list = painted.list;
         }
 
@@ -1264,6 +1304,11 @@ pub(super) mod tests {
                 .into_iter()
                 .find_map(|words| words.strip_prefix("said: ").map(str::to_owned))
                 .unwrap_or_default()
+        }
+
+        /// Every run of text the last frame drew, in the order it drew them.
+        pub(in crate::native_view) fn words(&self) -> Vec<String> {
+            drawn(&self.list)
         }
 
         /// How many boxes the last frame drew.

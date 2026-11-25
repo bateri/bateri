@@ -976,13 +976,7 @@ impl PageBrowsers {
         // ⌥⌘I opens the engine's tools: the host's own key, as in a browser. With the keyboard on
         // the page (after a load error's card, say) it is the browser that had the keyboard last.
         let flags = event.modifierFlags();
-        if event.keyCode() == 34
-            && flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
-            && flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
-            && !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
-            && let Some(room) = self.tools_for(pane)
-        {
-            self.send(room, |browser| Command::DevTools { browser });
+        if is_tools_key(event) && self.open_tools(pane) {
             return true;
         }
         let Some(room) = self.focused.get() else {
@@ -1242,6 +1236,21 @@ impl PageBrowsers {
         self.edit(input::edit_action(key))
     }
 
+    /// Whether the host's tools key means a browser of the page ([`Self::tools_for`]).
+    pub(crate) fn has_tools(&self, pane: &TerminalPane) -> bool {
+        self.tools_for(pane).is_some()
+    }
+
+    /// The engine's tools open for the browser the key means: whether there was one. The key's
+    /// rule is one: the menu's item for the same key asks it here, and does not copy it.
+    pub(crate) fn open_tools(&self, pane: &TerminalPane) -> bool {
+        let Some(room) = self.tools_for(pane) else {
+            return false;
+        };
+        self.send(room, |browser| Command::DevTools { browser });
+        true
+    }
+
     /// The browser the host's tools key means: the one the keyboard is in, or with it on the page
     /// the one that had it last if it is shown, or the page's only shown one.
     fn tools_for(&self, pane: &TerminalPane) -> Option<Id> {
@@ -1270,6 +1279,17 @@ impl PageBrowsers {
     pub(crate) fn caret(&self) -> Point {
         self.pressed_at.get()
     }
+}
+
+/// Whether `event` is the key that opens a browser's tools: ⌥⌘I, pressed (not a menu's click, nor
+/// the ⏎ that picks an item of the command palette, which the palette runs inside its own key).
+pub(crate) fn is_tools_key(event: &NSEvent) -> bool {
+    let flags = event.modifierFlags();
+    event.r#type() == objc2_app_kit::NSEventType::KeyDown
+        && event.keyCode() == 34
+        && flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+        && flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
+        && !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
 }
 
 fn mouse(

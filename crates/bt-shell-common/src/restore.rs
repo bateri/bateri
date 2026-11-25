@@ -580,6 +580,19 @@ impl SavedTab {
         whole.then_some((shape, cards))
     }
 
+    /// The shapes a tab's layers are saved as once the panes `left_out` are taken out of them
+    /// (the tools bateri opens in a tab, which are not saved: a card of theirs is not in the
+    /// picture and the panes beside it are as if it had never been), over `order`, which lists
+    /// the panes that stay. A tool that stood alone in the flat area leaves the front card
+    /// there, as a pane closed does.
+    pub fn shapes_without(
+        layers: &crate::floating::Layers,
+        order: &[u64],
+        left_out: &[u64],
+    ) -> Option<(Shape, Vec<SavedCard>)> {
+        Self::shapes(&layers.without(left_out), order)
+    }
+
     /// The tab's layers with each pane index replaced by `ids[index]` — the restored panes' new
     /// identities. `None` if an index is out of range.
     pub fn layers(&self, ids: &[u64]) -> Option<crate::floating::Layers> {
@@ -2391,6 +2404,37 @@ mod tests {
             cards: vec![Card::of(10, Area::opening())],
         };
         assert!(SavedTab::shapes(&twice, &[10]).is_none());
+    }
+
+    /// A tool's card is not in the saved picture of the tab, wherever it stands, and the panes of
+    /// the person's are saved as they were.
+    #[test]
+    fn a_tools_card_is_not_in_what_is_saved_of_a_tab() {
+        use crate::floating::{Area, Card, Layers};
+        let layers = Layers {
+            flat: Tree::Leaf(10),
+            cards: vec![
+                Card::of(11, Area::new(0.1, 0.1, 0.3, 0.4)),
+                Card::of(12, Area::new(0.5, 0.0, 0.38, 0.8)),
+            ],
+        };
+        // Pane 12 is the tool's: the order the tab is saved over has the other two.
+        let (shape, cards) = SavedTab::shapes_without(&layers, &[10, 11], &[12])
+            .expect("the panes that stay are the whole picture");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(shape.leaves(), vec![0]);
+        assert_eq!(cards[0].shape.leaves(), vec![1]);
+        // The tool as the one pane the tab keeps in a card of its own, and in the flat area.
+        let docked = Layers {
+            flat: Tree::Leaf(12),
+            cards: vec![Card::of(11, Area::opening())],
+        };
+        let (shape, cards) = SavedTab::shapes_without(&docked, &[11], &[12]).expect("one pane");
+        assert_eq!(shape.leaves(), vec![0]);
+        assert!(cards.is_empty());
+        // What is left out and what is listed must agree: a pane listed that the layers have no
+        // more is no picture.
+        assert!(SavedTab::shapes_without(&layers, &[10, 11, 12], &[12]).is_none());
     }
 
     #[test]

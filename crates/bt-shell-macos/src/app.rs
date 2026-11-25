@@ -433,6 +433,8 @@ pub(crate) struct Start {
     /// The program the pane is opened for, which its terminal runs in place of a shell: a ⌘-clicked
     /// file or folder ([`AppDelegate::open_program`]).
     pub(crate) program: Option<launch::ProgramStart>,
+    /// What bateri opens the pane for when it is one of its own tools ([`launch::Tool`]).
+    pub(crate) tool: Option<launch::Tool>,
 }
 
 /// Where a command the palette lists ran, in the same order as the list the palette was handed
@@ -627,6 +629,8 @@ fn restored_launch(
         // A program a click opened a pane for is not saved: it comes back as the terminal it
         // showed (a server's, by its name), or not at all.
         program: None,
+        // A tool is not saved either: nothing a saved pane was is one.
+        tool: None,
     }
 }
 
@@ -4459,6 +4463,7 @@ impl AppDelegate {
             env: launch::shell_env(&runs),
             runs,
             program: start.and_then(|start| start.program.clone()),
+            tool: start.and_then(|start| start.tool),
         };
         (config, theme)
     }
@@ -5539,6 +5544,7 @@ impl AppDelegate {
                     uuid: None,
                     runs: PaneRuns::UserShell,
                     program: None,
+                    tool: None,
                 };
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
@@ -5555,6 +5561,7 @@ impl AppDelegate {
                     uuid: None,
                     runs: PaneRuns::UserShell,
                     program: None,
+                    tool: None,
                 };
                 let split = beside
                     && window
@@ -5671,6 +5678,7 @@ impl AppDelegate {
             uuid: None,
             runs: PaneRuns::UserShell,
             program: None,
+            tool: None,
         })
     }
 
@@ -6067,6 +6075,7 @@ impl AppDelegate {
                 uuid: None,
                 runs: PaneRuns::UserShell,
                 program: None,
+                tool: None,
             })
         };
         match how {
@@ -6587,6 +6596,65 @@ impl AppDelegate {
         }
         match tab.add_floating(self.mtm(), launch, None, None) {
             Ok(_) => true,
+            Err(e) => {
+                eprintln!("bateri: {e}");
+                false
+            }
+        }
+    }
+
+    /// View ▸ Inspect Page: the page inspector of `from`, in a floating pane of `tab` beside it,
+    /// which shows the page the pane draws; where one is open already, it is closed. The pane is
+    /// a tool of bateri's ([`launch::Tool`]): its process is bateri's own `tool-hold`, which says
+    /// nothing, and it is born in this process, not in kablo. Whether an inspector was opened.
+    pub(crate) fn open_inspector(&self, tab: &TerminalTab, from: &TerminalPane) -> bool {
+        if from.is_tool() {
+            return false;
+        }
+        let open = crate::inspector::inspectors_of(from.id());
+        if !open.is_empty() {
+            // Closed where it is, which is not always this tab: a pane that was moved takes its
+            // inspector's card with it nowhere.
+            for inspector in open {
+                if let Some(pane) = crate::embed::pane(self.mtm(), inspector) {
+                    pane.end_tool();
+                }
+            }
+            return false;
+        }
+        // The program of the pane is this executable's own subcommand: where the application
+        // found it is the identity's (a copy that has none opens no inspector).
+        let Some(helper) = self.ivars().identity.helper.clone() else {
+            eprintln!("bateri: there is no executable to hold the inspector's pane");
+            return false;
+        };
+        let argv = vec![
+            helper.to_string_lossy().into_owned(),
+            bt_shell_common::tool_hold::SUBCOMMAND.to_owned(),
+        ];
+        let start = Start {
+            program: Some(launch::ProgramStart {
+                argv,
+                directory: None,
+                env: Vec::new(),
+                opens: launch::Opens {
+                    place: None,
+                    program: "Page inspector".to_owned(),
+                    what: crate::window::pane_name(from),
+                },
+            }),
+            runs: PaneRuns::Program { keep_open: false },
+            tool: Some(launch::Tool::Inspector { target: from.id() }),
+            ..Start::default()
+        };
+        let (launch, _) = self.pane_launch(tab.id(), Some(from), Opening::Split, Some(&start));
+        // Beside the pane it looks at: the page it reads is not covered by it where the tab has
+        // room, and the person moves it from there as any card.
+        let beside = bt_shell_common::floating::Area::beside(tab.area_of(from.id()));
+        let at = Some((beside.x, beside.y));
+        let size = Some((beside.width, beside.height));
+        match tab.add_floating(self.mtm(), launch, at, size) {
+            Ok(()) => true,
             Err(e) => {
                 eprintln!("bateri: {e}");
                 false
@@ -9657,6 +9725,7 @@ mod tests {
             uuid: None,
             runs: PaneRuns::UserShell,
             program: None,
+            tool: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&folder)),
@@ -9670,6 +9739,7 @@ mod tests {
             uuid: None,
             runs: PaneRuns::UserShell,
             program: None,
+            tool: None,
         };
         let (input, inherited) = first_input(Opening::Tab, remote(), Some(&history));
         assert_eq!(input, Some(InitialInput::ready("make test")));
@@ -9688,6 +9758,7 @@ mod tests {
             uuid: None,
             runs: PaneRuns::UserShell,
             program: None,
+            tool: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&server)),
@@ -9753,6 +9824,7 @@ mod tests {
             uuid: None,
             runs: PaneRuns::UserShell,
             program: None,
+            tool: None,
         };
         assert_eq!(
             held(Opening::Tab, Some(&folder), true, Some(&target), &installed),

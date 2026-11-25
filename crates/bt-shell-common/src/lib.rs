@@ -102,6 +102,7 @@ mod ssh_spawners;
 pub mod ssh_wrap;
 pub mod stage;
 pub mod tabs;
+pub mod tool_hold;
 pub mod undo;
 pub mod upload;
 pub mod view_ask;

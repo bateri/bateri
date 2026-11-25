@@ -12,6 +12,11 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Inspect Page, in the View menu (⌥⌘I).** See how a program's page is built while you work on it: every element with its size, spacing and style, what a screen reader says of it, and how long each frame took. The inspector opens beside the page, and the element you choose is outlined on the page. Where a page shows a browser, ⌥⌘I still opens the browser's tools; open the inspector from the menu there.
+- **For pen authors: `@pencere/query`.** A page can let this new library module keep what it asks of its program (each answer, and whether it is loading, stale or failed) instead of writing that bookkeeping itself.
+
 ### Fixed
 
 - **A new pane opens at once and no longer falls back to an ordinary shell for being slow.** The pane is there the moment you open it and what you type waits for the terminal; after two seconds it says it is still starting, and after ten it offers to open an ordinary shell instead. It becomes an ordinary shell by itself only when the terminal is refused or kablo cannot be reached, and then says why.

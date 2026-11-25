@@ -30,6 +30,10 @@ use crate::split::{Direction, Layout, Rect, Removal, Room, Size, Spacing, Tree, 
 /// A design constant.
 pub const NEW_SHARE: (f64, f64) = (0.55, 0.60);
 
+/// How much of the content area a tool's card takes beside the pane it looks at: 38% wide and 80%
+/// tall. A design constant.
+pub const BESIDE_SHARE: (f64, f64) = (0.38, 0.80);
+
 /// How much of the place it stood in a pane that floats takes: four fifths of it each way, in
 /// its middle. A design constant.
 pub const FLOATED_SHARE: f64 = 0.80;
@@ -207,6 +211,22 @@ impl Area {
     /// Where a new floating pane opens ([`NEW_SHARE`]).
     pub fn opening() -> Self {
         Self::centred(NEW_SHARE.0, NEW_SHARE.1)
+    }
+
+    /// Where a card opens beside `place`, the area of the pane it is about ([`BESIDE_SHARE`]): on
+    /// its right side where there is room for it there, else on its left, else — the pane is as
+    /// wide as the tab — over its right edge. Level with its top.
+    pub fn beside(place: Area) -> Self {
+        let (width, height) = BESIDE_SHARE;
+        let right = place.x + place.width;
+        let x = if right + width <= 1.0 + EPSILON {
+            right
+        } else if place.x - width >= -EPSILON {
+            place.x - width
+        } else {
+            1.0 - width
+        };
+        Self::new(x, place.y, width, height).within((width, height))
     }
 
     /// Where a pane that stood in `place` floats to: [`FLOATED_SHARE`] of it, in its middle.
@@ -824,6 +844,28 @@ impl Layers {
         self.cards
             .iter()
             .position(|card| card.tree.leaves().contains(&pane))
+    }
+
+    /// The share of the tab's content area `pane` takes as the tab is laid out: where it stands
+    /// in the flat area's split, or inside its card. The whole where the pane is in neither.
+    pub fn area_of(&self, pane: u64) -> Area {
+        self.fractions()
+            .into_iter()
+            .find(|(id, _)| *id == pane)
+            .map_or(Area::WHOLE, |(_, rect)| {
+                Area::new(rect.x, rect.y, rect.width, rect.height)
+            })
+    }
+
+    /// The layers with the panes `left_out` taken out as a closed pane is: a tab as the person
+    /// has it, without the tools bateri opened in it.
+    #[must_use]
+    pub fn without(&self, left_out: &[u64]) -> Self {
+        let mut kept = self.clone();
+        for pane in left_out {
+            let _ = kept.remove(*pane);
+        }
+        kept
     }
 
     /// Whether `pane` is in a card.
@@ -2882,5 +2924,49 @@ mod tests {
         assert!(near(frames[0].x, 792.0 - 80.0 - capsule::GAP - 100.0));
         assert!(frames.iter().all(|frame| near(frame.y, 38.0)));
         assert!(capsule::row(CapsulePlace::TopRight, area, false, 30.0, &[]).is_empty());
+    }
+
+    /// A tool's card opens by the pane it looks at: on its right where there is room, else on its
+    /// left, else over its right edge; level with its top, and always inside the tab.
+    #[test]
+    fn a_card_opens_beside_the_place_it_is_about() {
+        let (width, height) = BESIDE_SHARE;
+        // A card at the left: the new one is on its right, touching it.
+        let left = Area::new(0.05, 0.1, 0.4, 0.5);
+        let beside = Area::beside(left);
+        assert!(near(beside.x, 0.45) && near(beside.y, 0.1));
+        assert!(near(beside.width, width) && near(beside.height, height));
+        // A card at the right: there is no room on its right, so it is on its left.
+        let right = Area::new(0.55, 0.0, 0.4, 0.5);
+        let beside = Area::beside(right);
+        assert!(near(beside.x, 0.55 - width) && near(beside.y, 0.0));
+        // The whole tab (the flat area): over its right edge.
+        let beside = Area::beside(Area::WHOLE);
+        assert!(near(beside.x, 1.0 - width) && near(beside.y, 0.0));
+        // Inside the tab whichever way it falls: a card low in the tab does not fall off it.
+        let low = Area::beside(Area::new(0.0, 0.7, 0.3, 0.3));
+        assert!(low.y + low.height <= 1.0 + 1e-9, "{low:?}");
+    }
+
+    /// The place of a pane is where it stands in the split of the flat area or in its card, and
+    /// the whole of the tab where it stands nowhere.
+    #[test]
+    fn the_place_of_a_pane_is_where_the_tab_has_it() {
+        let layers = with_cards(vec![card(7)]);
+        assert!(same(layers.area_of(1), Area::new(0.0, 0.0, 0.5, 1.0)));
+        assert!(same(layers.area_of(2), Area::new(0.5, 0.0, 0.5, 1.0)));
+        assert!(same(layers.area_of(7), layers.cards[0].area));
+        assert!(same(layers.area_of(99), Area::WHOLE));
+    }
+
+    /// A tab without a pane is the tab as it would be had the pane been closed.
+    #[test]
+    fn layers_without_a_pane_are_as_if_it_had_been_closed() {
+        let layers = with_cards(vec![card(7)]);
+        let without = layers.without(&[7]);
+        assert!(without.cards.is_empty());
+        assert_eq!(without.flat, layers.flat);
+        assert_eq!(layers.without(&[]), layers);
+        assert_eq!(layers.without(&[2]).flat, Tree::Leaf(1));
     }
 }

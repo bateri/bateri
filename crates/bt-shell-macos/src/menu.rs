@@ -552,6 +552,9 @@ pub(crate) fn install(
             // validation is the delegate's too.
             item(mtm, "Command Palette\u{2026}", sel!(toggleCommandPalette:)),
             page_commands.clone(),
+            // The page of the pane that has the keyboard, beside it (`TerminalPane`'s; grey where
+            // the pane shows no page of the kit).
+            item(mtm, "Inspect Page", sel!(inspectPage:)),
             NSMenuItem::separatorItem(mtm),
             // The palette's themes page, opened from here (the app delegate's, listed by the
             // palette as that page); Theme ▸ is the list itself.
