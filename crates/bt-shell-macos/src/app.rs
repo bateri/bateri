@@ -1000,6 +1000,10 @@ pub(crate) struct Ivars {
     /// the application plays itself (`feel`): the trackpad and the speaker are opened when
     /// something is first played.
     feel: Rc<crate::feel::Feel>,
+    /// The system's notices of trackpads coming and going and what the Mac's waking says to them:
+    /// what `feel` found of the trackpads is looked for again when they change
+    /// ([`AppDelegate::observe_trackpads`]).
+    trackpads: OnceCell<(crate::feel::Trackpads, Option<crate::feel::Watch>)>,
     /// The programs `[apps] sources` lists, followed on a thread of their own
     /// ([`bt_shell_common::apps`]): started once the settings are read
     /// ([`AppDelegate::start_apps`]), never in a timed run.
@@ -1266,6 +1270,7 @@ define_class!(
             // A quit while the Mac logs out leaves no reminder.
             self.observe_power_off();
             self.observe_wake();
+            self.observe_trackpads();
 
             if let Some(run) = self.ivars().run {
                 match run.workload {
@@ -1574,6 +1579,10 @@ define_class!(
         #[unsafe(method(workspaceDidWake:))]
         fn workspace_did_wake(&self, _note: Option<&AnyObject>) {
             crate::hold_service::wake();
+            // Trackpads that were plugged in or taken out while the Mac slept are not told of.
+            if let Some((trackpads, _)) = self.ivars().trackpads.get() {
+                trackpads.changed();
+            }
         }
 
         /// Shell ▸ New Window (⌘N): a new window in the active window's
@@ -2813,6 +2822,7 @@ impl AppDelegate {
             settings_window: RefCell::new(None),
             settings_state: RefCell::new(settings::FileState::Missing),
             feel: Rc::new(crate::feel::Feel::new()),
+            trackpads: OnceCell::new(),
             apps: OnceCell::new(),
             openers: RefCell::new(None),
             links_lookup: Cell::new(bt_shell_common::web_links::Lookup::UNREAD),
@@ -7549,6 +7559,25 @@ impl AppDelegate {
                 None,
             );
         }
+    }
+
+    /// Starts watching for trackpads coming and going (a Bluetooth one reconnects as another
+    /// device, a plugged one comes back), so that the trackpad a vibration is played on is found
+    /// again ([`crate::feel::Feel::trackpads_changed`]); the Mac waking says the same
+    /// ([`AppDelegate::observe_wake`]). Nothing is listed here: where no vibration was asked for
+    /// yet, the first one lists the trackpads that are there.
+    fn observe_trackpads(&self) {
+        let Inputs::User { .. } = self.inputs() else {
+            return;
+        };
+        let feel = Rc::downgrade(&self.ivars().feel);
+        let trackpads = crate::feel::Trackpads::new(self.mtm(), move || {
+            if let Some(feel) = feel.upgrade() {
+                feel.trackpads_changed();
+            }
+        });
+        let watch = trackpads.watch(self.mtm());
+        let _ = self.ivars().trackpads.set((trackpads, watch));
     }
 
     /// ⌘Q under `keep_running = "quit"` kept the programs: the reminder that

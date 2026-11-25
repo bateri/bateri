@@ -17,9 +17,10 @@
 //! step: nothing plays where no finger is on the glass and nothing is kept for when one comes, a
 //! vibration is cut when the finger lifts, and a new pattern takes the place of the one that plays.
 //!
-//! Nothing here is started until the first vibration is asked for, and none of the tests
-//! reaches the framework: the choice, the numbers, the clock and the contact table are pure and the
-//! thread is driven by a recording stand-in.
+//! The framework is not opened until the first vibration is asked for (the system's notices of
+//! trackpads coming and going are listened to from the start, and look again at what was opened
+//! when they come: `trackpads`), and none of the tests reaches it: the choice, the numbers, the
+//! clock and the contact table are pure and the thread is driven by a recording stand-in.
 
 mod contact;
 mod fallback;
@@ -29,11 +30,13 @@ mod schedule;
 mod service;
 mod steps;
 mod symbols;
+mod trackpads;
 
 use bt_shell_common::agent::ready::Outcome;
 use bt_shell_common::native_view::haptic::Pattern;
 
 pub use service::{APPLICATION, Engine, Feel, Speaker, is_felt};
+pub use trackpads::{Trackpads, Watch};
 
 use fallback::Fallback;
 use motor::Motor;

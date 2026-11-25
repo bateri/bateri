@@ -255,4 +255,48 @@ mod tests {
         assert_eq!(contacts.register(0x20), Some(slot));
         assert!(!contacts.is_down(slot));
     }
+
+    #[test]
+    fn a_device_let_go_of_with_a_finger_on_it_is_not_chosen_after_the_trackpads_were_listed_again()
+    {
+        let contacts = Contacts::new();
+        let old = contacts.register(0x10).expect("a slot");
+        contacts.touch(0x10, true);
+        assert_eq!(contacts.latest_down(), Some(old));
+        // The trackpad was taken out with a finger on it, and plugged in again as another device.
+        contacts.release(old);
+        let new = contacts.register(0x30).expect("a slot");
+        assert_eq!(contacts.latest_down(), None);
+        assert!(!contacts.is_down(new));
+        // What the old one's last frames say is no one's.
+        contacts.touch(0x10, true);
+        assert_eq!(contacts.latest_down(), None);
+        // The same device listed again starts with no finger too, whatever it had before.
+        contacts.touch(0x30, true);
+        contacts.release(new);
+        let again = contacts.register(0x30).expect("a slot");
+        assert!(!contacts.is_down(again));
+        assert_eq!(contacts.latest_down(), None);
+    }
+
+    #[test]
+    fn more_than_eight_lists_in_a_row_do_not_use_up_the_slots() {
+        let contacts = Contacts::new();
+        for round in 0..(MOST_DEVICES * 3) {
+            // Each list names every device as a new one, as a framework that makes them again does.
+            let slots: Vec<usize> = (0..MOST_DEVICES)
+                .map(|n| {
+                    contacts
+                        .register(0x100 * (round + 1) + n + 1)
+                        .expect("a slot")
+                })
+                .collect();
+            contacts.touch(0x100 * (round + 1) + 1, true);
+            assert!(contacts.latest_down().is_some());
+            for slot in slots {
+                contacts.release(slot);
+            }
+            assert_eq!(contacts.latest_down(), None, "round {round}");
+        }
+    }
 }

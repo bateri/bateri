@@ -12,6 +12,7 @@ use super::contact::{CONTACTS, on_frame};
 use super::player::Driver;
 use super::steps::Step;
 use super::symbols::Symbols;
+use super::trackpads::{actuation_played, actuation_refused};
 
 // SAFETY: CoreFoundation is linked through `objc2-core-foundation`; these are its own C
 // functions with the signatures below.
@@ -201,9 +202,18 @@ impl Motor {
         }
         // SAFETY: the actuation just made and the open motor of a device of the list; the
         // actuation is a reference this owns and is released once.
-        unsafe {
-            play(actuation, device.actuator, 0, step.level, 0.0);
+        let played = unsafe {
+            let played = play(actuation, device.actuator, 0, step.level, 0.0);
             CFRelease(actuation);
+            played
+        };
+        // A motor that refuses is one whose device is not the one it was opened for (a trackpad
+        // that was taken out and put back is another device): the trackpads are listed again,
+        // once, and the motors opened with them.
+        if played == 0 {
+            actuation_played();
+        } else {
+            actuation_refused();
         }
     }
 }
@@ -294,8 +304,13 @@ impl Drop for Motor {
             }
             CONTACTS.release(device.slot);
         }
-        // SAFETY: the list was made by a `Create` function and is released once, after its devices.
-        unsafe { CFRelease(self.list) };
+        // The list is not given back, which would let go of its devices: a device that is let go
+        // of while the framework still has a frame of it on the way crashed the programs that drive
+        // this framework (Karabiner-Elements leaves the list for that, and so does the trackpad
+        // tool this was taken from). What each look at the trackpads leaves is that list and its
+        // device objects, which are not measured; the devices were stopped and their callbacks
+        // taken off above, so nothing of them runs.
+        let _ = self.list;
     }
 }
 

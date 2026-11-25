@@ -10,8 +10,9 @@
 //! The device and the speaker are what a test replaces ([`Engine`], [`Speaker`]): the rules here
 //! are pure, and the real ones are not started until a vibration or a sound is first asked for.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -171,7 +172,8 @@ struct State {
 /// The vibration and the sounds of the views of the application.
 pub struct Feel {
     open: Box<dyn Fn() -> Box<dyn Engine>>,
-    engine: OnceCell<Box<dyn Engine>>,
+    /// What vibrates, once it was first asked for; made again when the trackpads change.
+    engine: RefCell<Option<Rc<dyn Engine>>>,
     speaker: RefCell<Box<dyn Speaker>>,
     now: Box<dyn Fn() -> f64>,
     state: RefCell<State>,
@@ -205,7 +207,7 @@ impl Feel {
     ) -> Self {
         Self {
             open,
-            engine: OnceCell::new(),
+            engine: RefCell::new(None),
             speaker: RefCell::new(speaker),
             now,
             state: RefCell::new(State::default()),
@@ -230,13 +232,43 @@ impl Feel {
     }
 
     /// Starts `pattern` for `view`. The device is opened here, on the thread that asks (the main
-    /// one), the first time a vibration is: the framework is loaded and the trackpads listed once.
+    /// one), the first time a vibration is: the framework is loaded and the trackpads listed, and
+    /// listed again when they change ([`Feel::trackpads_changed`]).
     /// What came of it is told to `told`, if there is one, when it is known.
     fn vibrate(&self, view: u64, pattern: &Pattern, told: Option<Told>) {
         self.state.borrow_mut().vibrating = Some(view);
-        self.engine
-            .get_or_init(|| (self.open)())
-            .play(pattern, told);
+        self.engine().play(pattern, told);
+    }
+
+    /// What vibrates: made the first time it is asked for.
+    fn engine(&self) -> Rc<dyn Engine> {
+        let made = self.engine.borrow().clone();
+        if let Some(made) = made {
+            return made;
+        }
+        let made: Rc<dyn Engine> = Rc::from((self.open)());
+        *self.engine.borrow_mut() = Some(Rc::clone(&made));
+        made
+    }
+
+    /// The trackpads changed (one was plugged in, taken out or reconnected, or the Mac woke): what
+    /// was found of them is a list of the devices of the time before, and the frames of a device
+    /// that is gone do not come again. What plays ends, the engine lets go of its devices (its
+    /// thread leaves them) and, where one was made, another is made at once from what is there
+    /// now, so that the fingers are watched without waiting for the next vibration. Where none
+    /// was made yet the first vibration lists them anyway. The choice is made again with it: a
+    /// Mac with no trackpad that gets one vibrates, and one that loses its last says there is none.
+    pub fn trackpads_changed(&self) {
+        let old = self.engine.borrow_mut().take();
+        let Some(old) = old else {
+            return;
+        };
+        self.state.borrow_mut().vibrating = None;
+        old.stop();
+        // The old devices are let go of before the new ones are taken up: the two lists name
+        // devices of the same framework, and a frame that is late must not find the new slot.
+        drop(old);
+        let _ = self.engine();
     }
 
     /// What a view asks of its sounds.
@@ -325,7 +357,8 @@ impl Feel {
         if state.vibrating == Some(view) {
             state.vibrating = None;
             drop(state);
-            if let Some(engine) = self.engine.get() {
+            let engine = self.engine.borrow().clone();
+            if let Some(engine) = engine {
                 engine.stop();
             }
         }
@@ -702,6 +735,119 @@ mod tests {
             feel.play_ready_sound("tap").expect("a ready sound");
         }
         assert!(stopped.borrow().is_empty(), "{:?}", stopped.borrow());
+    }
+
+    /// An engine that lists the trackpads when it is made, as the real one does, and plays on what
+    /// it listed: nothing where it listed none.
+    struct Listed {
+        devices: usize,
+        log: Rc<RefCell<Vec<(usize, &'static str)>>>,
+    }
+
+    impl Engine for Listed {
+        fn play(&self, _pattern: &Pattern, told: Option<Told>) {
+            self.log.borrow_mut().push((self.devices, "played"));
+            if let Some(told) = told {
+                told(if self.devices > 0 {
+                    Outcome::Played
+                } else {
+                    Outcome::NoTrackpad
+                });
+            }
+        }
+
+        fn stop(&self) {
+            self.log.borrow_mut().push((self.devices, "stopped"));
+        }
+    }
+
+    /// A service whose engine lists `present` trackpads each time it is made.
+    struct Plugs {
+        feel: Feel,
+        present: Rc<Cell<usize>>,
+        opened: Rc<Cell<u32>>,
+        log: Rc<RefCell<Vec<(usize, &'static str)>>>,
+    }
+
+    fn plugs(present: usize) -> Plugs {
+        let present = Rc::new(Cell::new(present));
+        let opened = Rc::new(Cell::new(0));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let (listed, count, heard) = (Rc::clone(&present), Rc::clone(&opened), Rc::clone(&log));
+        let feel = Feel::with(
+            Box::new(move || {
+                count.set(count.get() + 1);
+                Box::new(Listed {
+                    devices: listed.get(),
+                    log: Rc::clone(&heard),
+                })
+            }),
+            Box::new(Speakers::default()),
+            Box::new(|| 0.0),
+        );
+        Plugs {
+            feel,
+            present,
+            opened,
+            log,
+        }
+    }
+
+    #[test]
+    fn what_is_played_after_the_trackpads_changed_is_played_on_the_list_made_after() {
+        let plugs = plugs(1);
+        assert_eq!(ready_haptic(&plugs.feel, "tick"), Some(Outcome::Played));
+        assert_eq!(plugs.opened.get(), 1);
+        // A second trackpad is plugged in: the engine that listed one is let go of, and the one
+        // that plays next lists two.
+        plugs.present.set(2);
+        plugs.feel.trackpads_changed();
+        assert_eq!(
+            plugs.opened.get(),
+            2,
+            "made again at once, not at the next vibration"
+        );
+        assert_eq!(ready_haptic(&plugs.feel, "tick"), Some(Outcome::Played));
+        assert_eq!(plugs.opened.get(), 2, "and not again for each vibration");
+        assert_eq!(
+            *plugs.log.borrow(),
+            [(1, "played"), (1, "stopped"), (2, "played")]
+        );
+    }
+
+    #[test]
+    fn a_trackpad_that_comes_where_there_was_none_is_vibrated_and_the_last_that_goes_says_none() {
+        let plugs = plugs(0);
+        assert_eq!(ready_haptic(&plugs.feel, "tick"), Some(Outcome::NoTrackpad));
+        plugs.present.set(1);
+        plugs.feel.trackpads_changed();
+        assert_eq!(ready_haptic(&plugs.feel, "tick"), Some(Outcome::Played));
+        plugs.present.set(0);
+        plugs.feel.trackpads_changed();
+        assert_eq!(ready_haptic(&plugs.feel, "tick"), Some(Outcome::NoTrackpad));
+    }
+
+    #[test]
+    fn nothing_is_made_for_trackpads_that_changed_before_any_vibration_was_asked_for() {
+        let plugs = plugs(1);
+        plugs.feel.trackpads_changed();
+        assert_eq!(plugs.opened.get(), 0);
+        plugs.present.set(3);
+        assert_eq!(ready_haptic(&plugs.feel, "tick"), Some(Outcome::Played));
+        assert_eq!(plugs.opened.get(), 1);
+        assert_eq!(*plugs.log.borrow(), [(3, "played")]);
+    }
+
+    #[test]
+    fn the_trackpads_changing_ends_the_vibration_and_leaves_nothing_for_the_view_to_end() {
+        let plugs = plugs(1);
+        plugs.feel.haptic(4, &Haptic::Play(pattern()), true);
+        plugs.feel.trackpads_changed();
+        assert_eq!(*plugs.log.borrow(), [(1, "played"), (1, "stopped")]);
+        // The view ending afterwards has nothing of its own left that would stop what plays on
+        // the engine that was made.
+        plugs.feel.view_ended(4);
+        assert_eq!(*plugs.log.borrow(), [(1, "played"), (1, "stopped")]);
     }
 
     #[test]
