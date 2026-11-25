@@ -115,14 +115,17 @@ pub fn bin_here(home: &Path) -> PathBuf {
     home.join(BIN_UNDER_HOME)
 }
 
-/// How long, in milliseconds, the terminal of a program keeps the terminal's questions for the
-/// pane the program was opened for (kablo's `wait_for_client`). The program is started with its
+/// How long, in milliseconds, a terminal bateri makes for a pane keeps the terminal's questions
+/// for that pane (kablo's `wait_for_client`): a program's, and a plain pane's shell
+/// (`kablo::local::new_session`, the server's `new_session`). The program is started with its
 /// terminal and asks the moment it starts (a program that shows a view asks whether the
-/// terminal shows views); the pane attaches a moment later, on a server a round trip later, and
-/// a terminal nobody is attached to answers for itself, as a plain terminal: the program then
-/// took the pane for one that shows no views and fell back to what it does without (an editor
-/// to the person's `$EDITOR`). Shorter than the two seconds such a program waits for its answer:
-/// a pane that takes longer than this to come is answered for, as before.
+/// terminal shows views; a shell or an editor asks who the terminal is, its colours, whether it
+/// shows pictures); the pane attaches a moment later, on a server a round trip later, and
+/// a terminal nobody is attached to answers for itself, as a plainer terminal: the program then
+/// took the pane for one that has less than bateri has and did without it for the whole of its
+/// run (an editor fell back to the person's `$EDITOR`, a picture was not shown). Shorter than the
+/// two seconds such a program waits for its answer: a pane that takes longer than this to come is
+/// answered for, as before.
 pub const CLIENT_WAIT_MS: u32 = 1500;
 
 /// What the request for the terminal of a program a click opens says of it: its first questions

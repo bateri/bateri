@@ -2971,6 +2971,21 @@ fn a_program_session_is_the_words_and_the_folder() {
     assert_eq!(spec.program, Some(kablo_proto::v1::ProgramEnd::Closes));
 }
 
+/// A plain pane's terminal on a server keeps its first questions for the pane: the shell asks the
+/// moment it starts, a round trip before the pane can have attached, and what a terminal nobody is
+/// attached to answers is a plainer terminal's.
+#[test]
+fn a_plain_panes_terminal_keeps_its_first_questions_for_the_pane() {
+    let rig = Rig::new("first-questions");
+    pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    assert_eq!(
+        rig.world.bridge().wait_for_client_of(&terminal),
+        Some(crate::open_with::CLIENT_WAIT_MS)
+    );
+}
+
 /// The dock's tier is the settings' (`[shell] integration`): `"blocks"` reaches a new terminal as
 /// `BATERI_DOCK=off` in its environment, the dock leaves the environment as it is — the
 /// shells there read it, and `bateri` hands it to the terminals it opens.

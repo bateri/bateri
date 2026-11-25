@@ -5652,6 +5652,9 @@ fn new_session(shared: &Shared, pane: &PaneInfo) -> NewSession {
         spec.env.push((b"BATERI_DOCK".to_vec(), b"off".to_vec()));
     }
     spec.history = shared.backend.history();
+    // The shell asks the moment it starts, a round trip before the pane can have attached: its
+    // questions are the pane's to answer ([`crate::open_with::CLIENT_WAIT_MS`]).
+    spec.wait_for_client = Some(crate::open_with::CLIENT_WAIT_MS);
     spec
 }
 

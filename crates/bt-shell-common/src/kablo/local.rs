@@ -175,6 +175,9 @@ pub fn new_session(launch: &bt_core::ChildLaunch, history: u32) -> (NewSession, 
         .as_ref()
         .map(|dir| dir.as_os_str().as_bytes().to_vec());
     spec.history = Some(history);
+    // The shell asks the moment it starts, before the pane can have attached: its questions are
+    // the pane's to answer ([`crate::open_with::CLIENT_WAIT_MS`]).
+    spec.wait_for_client = Some(crate::open_with::CLIENT_WAIT_MS);
     let pixels =
         |cells: u16, each: u16| u16::try_from(u32::from(cells) * u32::from(each)).unwrap_or(0);
     let size = Size {

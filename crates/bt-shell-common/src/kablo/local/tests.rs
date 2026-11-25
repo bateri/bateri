@@ -40,6 +40,16 @@ fn this_macs_account_is_its_own_and_is_no_servers() {
     assert!(!ACCOUNT.contains('@') && !ACCOUNT.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
+/// A pane's terminal on this Mac keeps its first questions for the pane: the shell asks the moment
+/// it starts, before the pane can have attached
+/// ([`a_program_that_asks_before_its_pane_attached_is_answered_by_the_pane`] over a real kablo).
+#[test]
+fn a_panes_terminal_here_keeps_its_first_questions_for_the_pane() {
+    let options = plain_options("true", Path::new("/"));
+    let (spec, _) = new_session(&options.child_launch(), 100);
+    assert_eq!(spec.wait_for_client, Some(crate::open_with::CLIENT_WAIT_MS));
+}
+
 #[test]
 fn a_step_here_is_sh_in_the_home_directory() {
     let root = TempRoot::new("local-channel");
@@ -905,6 +915,9 @@ struct StandIn {
     /// How late what the app says reaches kablo ([`Late`]): the line of a server that is this
     /// far away.
     late: Option<Duration>,
+    /// What the app says after the request that holds these bytes reaches kablo this much later
+    /// ([`Gap`]): a pane that attaches a moment after its terminal was made.
+    gap: Option<(Vec<u8>, Duration)>,
     /// A holder that connects is in a pane of the app's, and so may be shown a terminal.
     panes: bool,
 }
@@ -934,6 +947,48 @@ impl Write for Late {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.line
             .send((Instant::now(), bytes.to_vec()))
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A line to kablo that holds back what follows one request: what is written after the write that
+/// holds `after` reaches `to` `gap` later, once, and in the order it was written. The request that
+/// makes a terminal carries its program's words, so what it holds back is the pane's attach: the
+/// pane comes a moment after its terminal was made, as one does at a launch that brings back many
+/// tabs, and the program has started and asked by then.
+struct Gap {
+    line: mpsc::Sender<Vec<u8>>,
+}
+
+impl Gap {
+    fn new(mut to: Box<dyn Write + Send>, after: Vec<u8>, gap: Duration) -> Gap {
+        let (line, arrives) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            let (mut seen, mut waited) = (false, false);
+            while let Ok(bytes) = arrives.recv() {
+                if seen && !waited {
+                    thread::sleep(gap);
+                    waited = true;
+                }
+                if to.write_all(&bytes).and_then(|()| to.flush()).is_err() {
+                    break;
+                }
+                seen |= bytes.windows(after.len()).any(|window| window == after);
+            }
+        });
+        Gap { line }
+    }
+}
+
+impl Write for Gap {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.line
+            .send(bytes.to_vec())
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
         Ok(bytes.len())
     }
@@ -997,6 +1052,9 @@ impl Backend for RealMac {
         let mut carried = start(command)?;
         if let Some(late) = self.stand_in.late {
             carried.writer = Box::new(Late::new(carried.writer, late));
+        }
+        if let Some((after, gap)) = &self.stand_in.gap {
+            carried.writer = Box::new(Gap::new(carried.writer, after.clone(), *gap));
         }
         Ok(carried)
     }
@@ -3037,6 +3095,100 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
     assert!(lines[0].ends_with('a'), "{received:?}");
     assert_eq!(lines[1], "x", "nothing but the typed line: {received:?}");
     assert_eq!(lines.len(), 2, "{received:?}");
+
+    service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    waits_for("the session to see the end", || !session.reader_alive());
+    drop(session);
+    service.stop();
+}
+
+/// A program that asks its terminal the moment it starts — the size of a cell in pixels, which
+/// only bateri answers, and who the terminal is — in a pane that attaches half a second after
+/// kablo made the terminal (a launch that brings back many tabs, a Mac under load): both are
+/// answered, once, by bateri. kablo answers a terminal nobody is attached to by itself, who it is
+/// and nothing that needs bateri, and a program that took those answers would do without what
+/// bateri has for the whole of its run.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_that_asks_before_its_pane_attached_is_answered_by_the_pane() {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("asks");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = Arc::new(RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+        streams: Default::default(),
+        stand_in: StandIn {
+            gap: Some((b"ASKS".to_vec(), Duration::from_millis(500))),
+            ..StandIn::default()
+        },
+    });
+    let ledger = Arc::new(Ledger::memory());
+
+    // The program asks before anything else, then writes down, byte by byte, the line it is
+    // typed: the answers come as input, ahead of it.
+    let log = ground.root.join("received");
+    let script = format!(
+        "printf '\\033[16t\\033[c'; printf 'ASKS\\n'; IFS= read -r line; \
+         printf '%s' \"$line\" | od -An -c -v | tr -d ' \\n' >> '{}'; echo >> '{}'; \
+         printf 'DONE\\n'; sleep 30",
+        log.display(),
+        log.display()
+    );
+    let service = Service::start(&service_dir, backend, ledger.clone()).expect("a service");
+    let options = plain_options(&script, &ground.home);
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    let pane = options.pane_uuid.clone().expect("a pane");
+    let stream = service
+        .open_local_wait(&pane, spec, size, Duration::from_secs(30))
+        .expect("a terminal of this Mac");
+    let id = ledger.terminals_of(ACCOUNT).remove(0);
+    ground.kept = Some(PathBuf::from(kablo));
+    ground.made.push(id.clone());
+    let session = bt_core::Session::streamed(
+        options,
+        Arc::new(Ends::default()) as Arc<dyn bt_core::Wake>,
+        stream,
+    )
+    .expect("a session over the stream");
+    waits_for("the program's words", || shows(&session, "ASKS"));
+    session.write(b"a\r");
+    waits_for("the program's log", || {
+        std::fs::read_to_string(&log).is_ok_and(|text| text.lines().count() == 1)
+    });
+    let received = std::fs::read_to_string(&log).expect("the log");
+    assert!(
+        !received.contains("033[?6c"),
+        "kablo answered for the pane: {received:?}"
+    );
+    // The cell, 9 by 18 pixels (`plain_options`): bateri's answer, and only bateri's.
+    assert_eq!(
+        received.matches("033[6;18;9t").count(),
+        1,
+        "the question only bateri answers was answered once: {received:?}"
+    );
+    assert_eq!(
+        received.matches("033[?62;22c").count(),
+        1,
+        "who the terminal is, once: {received:?}"
+    );
+    assert_eq!(
+        received.trim_end().len(),
+        "033[6;18;9t033[?62;22ca".len(),
+        "the two answers and the typed line, nothing else: {received:?}"
+    );
+    assert!(received.trim_end().ends_with('a'), "{received:?}");
 
     service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
     waits_for("the session to see the end", || !session.reader_alive());
