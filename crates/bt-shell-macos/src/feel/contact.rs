@@ -74,11 +74,14 @@ impl Contacts {
         if device == 0 {
             return None;
         }
-        self.slots.iter().position(|slot| {
+        let at = self.slots.iter().position(|slot| {
             slot.device
                 .compare_exchange(0, device, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
-        })
+        })?;
+        // No finger is on a device that was just taken up, whatever the slot held before.
+        self.slots[at].down.store(false, Ordering::Release);
+        Some(at)
     }
 
     /// Stops watching the device in `slot`.
@@ -92,6 +95,10 @@ impl Contacts {
     /// A frame of `device`: whether a finger is on it now. A device that is not watched is passed
     /// over.
     pub(super) fn touch(&self, device: usize, down: bool) {
+        // A free slot has no device: a frame that names none is not one of them.
+        if device == 0 {
+            return;
+        }
         let Some(slot) = self
             .slots
             .iter()
@@ -108,17 +115,20 @@ impl Contacts {
 
     /// Whether a finger is on the device in `slot`.
     pub(super) fn is_down(&self, slot: usize) -> bool {
-        self.slots
-            .get(slot)
-            .is_some_and(|slot| slot.down.load(Ordering::Acquire))
+        self.slots.get(slot).is_some_and(|slot| {
+            slot.device.load(Ordering::Acquire) != 0 && slot.down.load(Ordering::Acquire)
+        })
     }
 
-    /// The slot whose finger came last, among those with one on the glass.
+    /// The slot whose finger came last, among those with one on the glass. A slot that was given
+    /// back is none, whatever a frame that was being read as it was left wrote there.
     pub(super) fn latest_down(&self) -> Option<usize> {
         self.slots
             .iter()
             .enumerate()
-            .filter(|(_, slot)| slot.down.load(Ordering::Acquire))
+            .filter(|(_, slot)| {
+                slot.device.load(Ordering::Acquire) != 0 && slot.down.load(Ordering::Acquire)
+            })
             .max_by_key(|(_, slot)| slot.since.load(Ordering::Acquire))
             .map(|(index, _)| index)
     }
@@ -217,6 +227,9 @@ mod tests {
         contacts.touch(0x99, true);
         assert_eq!(contacts.latest_down(), None);
         assert_eq!(contacts.register(0), None);
+        // A frame that names no device is not a free slot's.
+        contacts.touch(0, true);
+        assert_eq!(contacts.latest_down(), None);
         let slots: Vec<usize> = (1..=MOST_DEVICES)
             .map(|device| contacts.register(device).expect("a slot"))
             .collect();
@@ -226,5 +239,20 @@ mod tests {
         contacts.release(slots[2]);
         assert!(!contacts.is_down(slots[2]), "a released slot has no finger");
         assert_eq!(contacts.register(0x1000), Some(slots[2]));
+    }
+
+    #[test]
+    fn a_slot_given_back_has_no_finger_even_where_a_frame_wrote_it_late() {
+        let contacts = Contacts::new();
+        let slot = contacts.register(0x10).expect("a slot");
+        contacts.touch(0x10, true);
+        contacts.release(slot);
+        // A frame that was being read as the slot was given back lands after it.
+        contacts.slots[slot].down.store(true, Ordering::Release);
+        assert_eq!(contacts.latest_down(), None);
+        assert!(!contacts.is_down(slot));
+        // The next device to take the slot starts with no finger.
+        assert_eq!(contacts.register(0x20), Some(slot));
+        assert!(!contacts.is_down(slot));
     }
 }

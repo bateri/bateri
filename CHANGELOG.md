@@ -15,7 +15,8 @@ of every installed copy. A version without a section is not released.
 ### Added
 
 - **Inspect Page, in the View menu (⌥⌘I).** See how a program's page is built while you work on it: every element with its size, spacing and style, what a screen reader says of it, and how long each frame took. The inspector opens beside the page, and the element you choose is outlined on the page. Where a page shows a browser, ⌥⌘I still opens the browser's tools; open the inspector from the menu there.
-- **Programs can make the trackpad buzz and play sounds.** A page can answer a press with a short vibration under your finger and a sound from your speaker, at the volume you have set. Claude operating a page feels and hears nothing; it is told what the page asked for.
+- **Programs can make the trackpad buzz and play sounds.** A page can answer a press with a short vibration under your finger, on a Force Touch trackpad, and a sound from your speaker, at the volume you have set. When Claude operates a page, nothing vibrates or plays; Claude is told what the page asked for.
+- **`bateri haptic [NAME]` and `bateri sound [NAME]` try them.** Play one of the ready vibrations (with a finger on the trackpad) or one of the ready sounds from a terminal; with no name they list what there is.
 - **For pen authors: `@pencere/query`.** A page can let this new library module keep what it asks of its program (each answer, and whether it is loading, stale or failed) instead of writing that bookkeeping itself.
 
 ### Fixed

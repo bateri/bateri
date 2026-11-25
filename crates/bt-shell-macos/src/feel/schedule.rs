@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use super::steps::Step;
 
 /// How late a piece of a held event may be and still play: past it the piece is dropped, as a
-/// buzz that comes after the moment it was for is not the shape that was asked.
+/// buzz that comes after the moment it was for is not the shape that was asked. A first guess
+/// like the numbers of the steps, to be tried on the device.
 pub(super) const MOST_LATE: Duration = Duration::from_millis(30);
 
 #[derive(Debug)]

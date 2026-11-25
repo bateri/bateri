@@ -445,6 +445,12 @@ fn third_party_license_ships_with_attribution() {
         "pencere-view",
         "tiny-skia",
         "BSD-3-Clause",
+        // The sounds the kit makes and the fonts its drive carries: the notice of the projects
+        // the recipes are written from, and the license of each face (SIL Open Font License).
+        "Cuelume",
+        "pencere-drive: Inter",
+        "pencere-drive: JetBrainsMono",
+        "The Inter Project Authors",
         // The interpreter of the scripting language is built into the binary with the C and
         // C++ runtimes of the toolchain that made it: their notices travel with it (the texts
         // come from the sandbox crate that carries the interpreter).

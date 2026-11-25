@@ -2,6 +2,7 @@
 //! say where a finger is, and a burst played on the motor of the device the finger is on.
 
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -18,6 +19,17 @@ unsafe extern "C" {
     fn CFArrayGetCount(array: *const c_void) -> isize;
     fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
     fn CFRelease(object: *const c_void);
+}
+
+/// How long after the devices were started the frames of a finger that is already on the glass are
+/// waited for: a device sends none before it is started, and a pattern asked for in that time
+/// would find no finger and be dropped, though one rests there. A trackpad sends dozens of frames
+/// a second, so this is some frames.
+pub(super) const FIRST_FRAMES: Duration = Duration::from_millis(40);
+
+/// What is left of that wait, `started` being when the devices were started.
+fn first_frames_left(started: Instant, now: Instant) -> Duration {
+    FIRST_FRAMES.saturating_sub(now.saturating_duration_since(started))
 }
 
 /// Why there is no motor to drive.
@@ -44,6 +56,8 @@ pub(super) struct Motor {
     symbols: Symbols,
     list: *const c_void,
     devices: Vec<Device>,
+    /// When the devices were started.
+    started: Instant,
 }
 
 // SAFETY: the framework's references are plain handles that its functions take from any thread
@@ -51,15 +65,15 @@ pub(super) struct Motor {
 // motor is used from the one player thread after it is made.
 unsafe impl Send for Motor {}
 
-/// The devices of the framework's list, as far as there are functions to read them: each as
-/// its reference and its id.
-fn listed(symbols: &Symbols, list: *const c_void) -> Vec<(*const c_void, u64)> {
-    let Some(device_id) = symbols.device_id else {
-        return Vec::new();
-    };
+/// The devices of the framework's list, each as its reference and its id; `None` where the ids
+/// cannot be read (there is no function for them, or it fails for every device of a list that
+/// is not empty): a list that was not read is not a list of no trackpad, and the system's own
+/// patterns are what is left.
+fn listed(symbols: &Symbols, list: *const c_void) -> Option<Vec<(*const c_void, u64)>> {
+    let device_id = symbols.device_id?;
     // SAFETY: `list` is a `CFArray` the framework gave and is held by the caller.
     let count = unsafe { CFArrayGetCount(list) };
-    (0..count)
+    let read: Vec<_> = (0..count)
         .filter_map(|index| {
             // SAFETY: an index below the count of that array.
             let device = unsafe { CFArrayGetValueAtIndex(list, index) };
@@ -68,7 +82,8 @@ fn listed(symbols: &Symbols, list: *const c_void) -> Vec<(*const c_void, u64)> {
             let done = !device.is_null() && unsafe { device_id(device, &mut id) } == 0;
             done.then_some((device, id))
         })
-        .collect()
+        .collect();
+    (count == 0 || !read.is_empty()).then_some(read)
 }
 
 /// How many devices the framework lists, or `None` where it cannot be asked.
@@ -79,10 +94,10 @@ pub(super) fn count(symbols: &Symbols) -> Option<usize> {
     if list.is_null() {
         return None;
     }
-    let found = listed(symbols, list).len();
+    let found = listed(symbols, list).map(|read| read.len());
     // SAFETY: the list was made by a `Create` function and is released once.
     unsafe { CFRelease(list) };
-    Some(found)
+    found
 }
 
 impl Motor {
@@ -103,8 +118,13 @@ impl Motor {
         if list.is_null() {
             return Err(Unavailable::Unlisted);
         }
+        let Some(found) = listed(&symbols, list) else {
+            // SAFETY: the list was made by a `Create` function and is released once.
+            unsafe { CFRelease(list) };
+            return Err(Unavailable::Unlisted);
+        };
         let mut devices = Vec::new();
-        for (device, id) in listed(&symbols, list) {
+        for (device, id) in found {
             // SAFETY: a device id the framework gave; the actuator is a reference this owns.
             let actuator = unsafe { actuator_create(id) };
             if actuator.is_null() {
@@ -147,6 +167,7 @@ impl Motor {
             symbols,
             list,
             devices,
+            started: Instant::now(),
         })
     }
 
@@ -220,7 +241,18 @@ fn shape(step: &Step) -> Retained<NSDictionary<NSString, AnyObject>> {
 
 impl Driver for Motor {
     fn begin(&mut self) -> Option<usize> {
-        CONTACTS.latest_down()
+        // Only the first pattern asked for after the devices were started waits, and only where
+        // no finger is known to be on the glass.
+        loop {
+            if let Some(target) = CONTACTS.latest_down() {
+                return Some(target);
+            }
+            let left = first_frames_left(self.started, Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(4)));
+        }
     }
 
     fn fire(&mut self, target: usize, step: &Step) -> bool {
@@ -256,5 +288,61 @@ impl Drop for Motor {
         }
         // SAFETY: the list was made by a `Create` function and is released once, after its devices.
         unsafe { CFRelease(self.list) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_foundation::NSNumber;
+
+    unsafe extern "C" fn id_of_any(_device: *const c_void, id: *mut u64) -> i32 {
+        // SAFETY: the caller gives a place for the id.
+        unsafe { *id = 7 };
+        0
+    }
+
+    unsafe extern "C" fn id_of_none(_device: *const c_void, _id: *mut u64) -> i32 {
+        -1
+    }
+
+    #[test]
+    fn the_wait_for_the_first_frames_is_what_is_left_of_it_after_the_devices_started() {
+        let started = Instant::now();
+        assert_eq!(first_frames_left(started, started), FIRST_FRAMES);
+        let half = started + FIRST_FRAMES / 2;
+        assert_eq!(first_frames_left(started, half), FIRST_FRAMES / 2);
+        assert!(first_frames_left(started, started + FIRST_FRAMES).is_zero());
+        assert!(first_frames_left(started, started + FIRST_FRAMES * 3).is_zero());
+        // A clock that reads before the start is the whole of it, not more.
+        assert_eq!(first_frames_left(half, started), FIRST_FRAMES);
+    }
+
+    /// A list of `count` devices that are only handles the fake functions never look through.
+    fn list_of(count: usize) -> Retained<NSArray<NSNumber>> {
+        let numbers: Vec<_> = (0..count).map(|n| NSNumber::new_usize(n + 1)).collect();
+        NSArray::from_retained_slice(&numbers)
+    }
+
+    fn read(device_id: Option<super::super::symbols::DeviceId>, count: usize) -> Option<usize> {
+        let symbols = Symbols {
+            device_id,
+            ..Symbols::default()
+        };
+        let list = list_of(count);
+        listed(&symbols, Retained::as_ptr(&list).cast()).map(|read| read.len())
+    }
+
+    #[test]
+    fn a_list_whose_ids_cannot_be_read_is_not_a_list_of_no_trackpad() {
+        // The ids are read: as many devices as the list has, and none where it has none.
+        assert_eq!(read(Some(id_of_any), 2), Some(2));
+        assert_eq!(read(Some(id_of_any), 0), Some(0));
+        // No function for them, or one that fails for every device of a list that is not empty:
+        // the question was not answered, and the system's own patterns are what is left.
+        assert_eq!(read(None, 2), None);
+        assert_eq!(read(Some(id_of_none), 2), None);
+        // A list that is empty has no device whatever the function does.
+        assert_eq!(read(Some(id_of_none), 0), Some(0));
     }
 }

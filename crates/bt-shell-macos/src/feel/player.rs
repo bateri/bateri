@@ -7,7 +7,9 @@
 
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use objc2::rc::autoreleasepool;
 
 use super::schedule::Schedule;
 use super::steps::Step;
@@ -24,7 +26,8 @@ pub(super) trait Driver: Send + 'static {
 }
 
 enum Command {
-    Play(Vec<Step>),
+    /// A pattern, and where to say whether there was anywhere to play it, if it is wanted said.
+    Play(Vec<Step>, Option<Sender<bool>>),
     Stop,
 }
 
@@ -50,7 +53,15 @@ impl Player {
 
     /// Plays `steps` in place of what plays.
     pub(super) fn play(&self, steps: Vec<Step>) {
-        self.send(Command::Play(steps));
+        self.send(Command::Play(steps, None));
+    }
+
+    /// Plays `steps` in place of what plays and says whether the thread found somewhere to play
+    /// them (a finger on the glass), as it decided it; `None` where it did not say within `within`.
+    pub(super) fn play_told(&self, steps: Vec<Step>, within: Duration) -> Option<bool> {
+        let (tell, told) = mpsc::channel();
+        self.send(Command::Play(steps, Some(tell)));
+        told.recv_timeout(within).ok()
     }
 
     /// Ends what plays.
@@ -87,10 +98,13 @@ fn run(requests: &mpsc::Receiver<Command>, mut driver: impl Driver) {
             None => requests.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         match waited {
-            Ok(Command::Play(steps)) => {
+            Ok(Command::Play(steps, tell)) => {
                 playing = driver
                     .begin()
                     .map(|target| (Schedule::new(steps, Instant::now()), target));
+                if let Some(tell) = tell {
+                    let _ = tell.send(playing.is_some());
+                }
             }
             Ok(Command::Stop) => playing = None,
             Err(RecvTimeoutError::Disconnected) => return,
@@ -100,7 +114,10 @@ fn run(requests: &mpsc::Receiver<Command>, mut driver: impl Driver) {
                 };
                 let mut cut = false;
                 while let Some(step) = schedule.take_due(Instant::now()) {
-                    if !driver.fire(*target, &step) {
+                    // This thread has no run loop to drain what the calls into AppKit and the
+                    // framework autorelease: each burst is its own pool, or they wait for the
+                    // thread to end.
+                    if !autoreleasepool(|_| driver.fire(*target, &step)) {
                         cut = true;
                         break;
                     }
@@ -231,6 +248,14 @@ mod tests {
             heard.recv_timeout(Duration::from_millis(150)).is_err(),
             "cut by the lifted finger"
         );
+    }
+
+    #[test]
+    fn what_the_thread_decided_is_told_to_who_asked_for_it() {
+        let (player, _heard, target) = player(Some(0), None);
+        assert_eq!(player.play_told(vec![tap(0)], WAIT), Some(true));
+        *target.lock().expect("a lock") = None;
+        assert_eq!(player.play_told(vec![tap(0)], WAIT), Some(false));
     }
 
     #[test]

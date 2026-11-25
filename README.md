@@ -230,6 +230,8 @@ bateri split --float --minimized -- PROGRAM      # the same, born as a capsule: 
 bateri move pane p9 --float [--at X,Y] [--size W,H]   # a flat pane floats; --dock puts it back; --at, --size alone move or resize it
 bateri minimize [p9]                             # a floating pane shrinks to a capsule, or opens again
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
+bateri haptic [NAME]                             # a ready vibration on your trackpad, while a finger is on it; no NAME lists them
+bateri sound [NAME]                              # a ready sound from your speaker; no NAME lists them
 bateri split -S prod -- make test                # a terminal on the server prod (full level only); prints p9@prod
 bateri send p9@prod 'q'                          # capture, send-key and wait reach it the same way
 ```

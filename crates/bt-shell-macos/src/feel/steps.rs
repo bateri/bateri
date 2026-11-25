@@ -3,9 +3,11 @@
 //! a time from the start of the pattern.
 //!
 //! Pure: nothing here touches a device, so the numbers a person feels are all here and can be
-//! checked without one. **The two bands below are first guesses, not tuned**: how a sharpness
-//! feels can only be told with a finger on the glass, so the frequencies and the length of a
-//! burst are named constants to change after trying them on the device.
+//! checked without one. **The numbers below are first guesses, not tuned**: how a sharpness
+//! feels can only be told with a finger on the glass, so the frequencies, the length of a burst
+//! and of a piece, the moment two bursts are one and how late a piece may come
+//! ([`super::schedule::MOST_LATE`]) are named constants to change after trying them on the
+//! device.
 
 use std::time::Duration;
 
@@ -15,8 +17,8 @@ use bt_shell_common::native_view::haptic::Pattern;
 pub(super) const DULL_HZ: f32 = 90.0;
 /// The frequency a sharpness of 1 (the crispest, a click) is played at, in hertz.
 pub(super) const CRISP_HZ: f32 = 300.0;
-/// The most strength the motor is asked for: the device's own greatest. Past it the driver stalls
-/// on a long run, so a pattern's strength is held to it and never scaled beyond.
+/// The most strength the motor is asked for: a pattern's strength is held to it and never scaled
+/// beyond. Like the two frequencies above it is a first guess, to be tried with a finger on the glass.
 pub(super) const MOST_LEVEL: f32 = 1.0;
 /// The least strength worth a burst: below it nothing is felt and the call is saved.
 pub(super) const LEAST_LEVEL: f32 = 0.03;
@@ -28,7 +30,9 @@ pub(super) const LONGEST_TAP_MS: f32 = 24.0;
 /// How long each piece is that a held event is cut into, in milliseconds: its strength and sharpness
 /// are those of the middle of the piece.
 pub(super) const PIECE_MS: f32 = 10.0;
-/// Two bursts nearer than this are one moment: the motor takes one at a time, so the stronger plays.
+/// Bursts that start within this of the first of them are one moment, of which the strongest plays:
+/// the bursts of a held event are a piece long, and a burst a few milliseconds from the next is not
+/// a shape a person could tell from one of them.
 pub(super) const SAME_MOMENT_MS: f32 = 4.0;
 
 /// One burst of the motor.
@@ -85,8 +89,20 @@ fn at(seconds: f32) -> Duration {
 /// burst too weak to be felt is dropped, and bursts of one moment ([`SAME_MOMENT_MS`]) are the
 /// strongest of them: an event that begins as a tap and goes on held (`thud`) plays the tap, not
 /// two things at once.
+///
+/// What is kept is bounded by the length of the pattern, not by what it asks for: a pattern may have
+/// 256 events that each last 60 seconds, a million and a half pieces, which are folded into one
+/// another as they are made.
 pub(super) fn plan(pattern: &Pattern) -> Vec<Step> {
-    let mut steps = Vec::new();
+    plan_folding(pattern, FOLD_AT)
+}
+
+/// How many bursts are made before they are folded into one another the first time.
+const FOLD_AT: usize = 4096;
+
+fn plan_folding(pattern: &Pattern, fold_at: usize) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::new();
+    let mut fold_at = fold_at.max(2);
     for event in pattern.events() {
         if event.seconds <= 0.0 {
             let hz = frequency(event.sharpness);
@@ -106,29 +122,50 @@ pub(super) fn plan(pattern: &Pattern) -> Vec<Step> {
         while index < pieces {
             let began_ms = index * PIECE_MS;
             let by = (index + 0.5) / pieces;
-            steps.push(Step {
-                at: at(event.at + began_ms / 1000.0),
-                hz: frequency(lerp(event.sharpness, event.sharpness_end, by)),
-                level: level(lerp(event.intensity, event.intensity_end, by)),
-                ms: PIECE_MS.min(total_ms - began_ms),
-                tap: false,
-            });
+            let strength = level(lerp(event.intensity, event.intensity_end, by));
+            // A piece too weak to be felt is not kept at all.
+            if strength >= LEAST_LEVEL {
+                steps.push(Step {
+                    at: at(event.at + began_ms / 1000.0),
+                    hz: frequency(lerp(event.sharpness, event.sharpness_end, by)),
+                    level: strength,
+                    ms: PIECE_MS.min(total_ms - began_ms),
+                    tap: false,
+                });
+            }
             index += 1.0;
+            if steps.len() >= fold_at {
+                steps = merged(steps);
+                // What is left of a fold may be most of what is asked for: the next one is when
+                // that has doubled, so there are few folds.
+                fold_at = fold_at.max(steps.len() * 2);
+            }
         }
     }
+    merged(steps)
+}
+
+/// `steps` in the order of their times, the ones of one moment ([`SAME_MOMENT_MS`], counted from the
+/// first of them, so that a run of bursts each a little stronger than the last is not one moment
+/// that slides) the strongest of them.
+fn merged(mut steps: Vec<Step>) -> Vec<Step> {
     steps.retain(|step| step.level >= LEAST_LEVEL);
     steps.sort_by_key(|step| step.at);
     let mut kept: Vec<Step> = Vec::with_capacity(steps.len());
+    let mut moment_from = Duration::ZERO;
     for step in steps {
         match kept.last_mut() {
             Some(last)
-                if step.at.saturating_sub(last.at).as_secs_f32() * 1000.0 < SAME_MOMENT_MS =>
+                if step.at.saturating_sub(moment_from).as_secs_f32() * 1000.0 < SAME_MOMENT_MS =>
             {
                 if step.level > last.level {
                     *last = step;
                 }
             }
-            _ => kept.push(step),
+            _ => {
+                moment_from = step.at;
+                kept.push(step);
+            }
         }
     }
     kept
@@ -245,6 +282,23 @@ mod tests {
     }
 
     #[test]
+    fn a_moment_is_counted_from_its_first_burst_and_does_not_slide_with_the_stronger() {
+        let tap = |at_ms: f32, level: f32| Step {
+            at: at(at_ms / 1000.0),
+            hz: 100.0,
+            level,
+            ms: 6.0,
+            tap: true,
+        };
+        // 0, 3 and 6 ms: each a little stronger and each less than a moment from the last, but the
+        // third is a moment and a half from the first.
+        let kept = merged(vec![tap(0.0, 0.2), tap(3.0, 0.3), tap(6.0, 0.4)]);
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert!((kept[0].level - 0.3).abs() < 1e-6);
+        assert!((kept[1].level - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
     fn the_order_is_by_time_whatever_the_order_events_were_given_in() {
         let late_first = Pattern::new([Event::tap(0.3, 0.5, 0.5), Event::tap(0.1, 0.5, 0.5)])
             .expect("a pattern");
@@ -276,6 +330,46 @@ mod tests {
                     && step.hz >= DULL_HZ - 0.01
                     && step.hz <= CRISP_HZ + 0.01),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pattern_of_the_most_events_that_each_last_the_most_seconds_is_bounded_by_its_length() {
+        // Two hundred and fifty-six events of a minute each, begun a hair apart: a million and a half
+        // pieces if they were all kept.
+        let events: Vec<_> = (0..256)
+            .map(|index| {
+                Event::held(
+                    index as f32 * 0.0001,
+                    59.9,
+                    (0.2 + index as f32 / 400.0, 0.9),
+                    (0.5, 0.5),
+                )
+            })
+            .collect();
+        let steps = plan(&Pattern::new(events).expect("a pattern"));
+        assert!(
+            steps.len() <= (60_000.0 / SAME_MOMENT_MS) as usize + 1,
+            "{} bursts",
+            steps.len()
+        );
+        assert!(steps.windows(2).all(|pair| pair[0].at <= pair[1].at));
+        assert!(
+            steps
+                .windows(2)
+                .all(|pair| (pair[1].at - pair[0].at).as_secs_f32() * 1000.0 >= SAME_MOMENT_MS)
+        );
+    }
+
+    #[test]
+    fn folding_early_changes_nothing_a_person_could_tell_for_the_ready_patterns() {
+        for name in NAMES {
+            let pattern = preset(name).expect("a ready pattern");
+            assert_eq!(
+                plan_folding(&pattern, 2),
+                plan(&pattern),
+                "{name} is different when it is folded as it is made"
             );
         }
     }

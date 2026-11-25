@@ -38,6 +38,7 @@ pub mod listing;
 pub mod message;
 pub mod notes;
 pub mod place;
+pub mod ready;
 pub mod relay;
 pub mod serve;
 pub mod summary;

@@ -2,8 +2,10 @@
 //! patterns it has, which the system plays only while a finger is on the glass.
 //!
 //! What is lost is told here and not hidden: a held event is not played (AppKit has no such thing)
-//! and every tap is the same generic click, whatever its strength and sharpness.
+//! and every tap is the same generic click, whatever its strength and sharpness. AppKit is the main
+//! thread's: the click is handed to the main queue, from the thread that times the pattern.
 
+use dispatch2::DispatchQueue;
 use objc2_app_kit::{
     NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
     NSHapticFeedbackPerformer,
@@ -22,10 +24,12 @@ impl Driver for Fallback {
 
     fn fire(&mut self, _target: usize, step: &Step) -> bool {
         if step.tap {
-            NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
-                NSHapticFeedbackPattern::Generic,
-                NSHapticFeedbackPerformanceTime::Now,
-            );
+            DispatchQueue::main().exec_async(|| {
+                NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
+                    NSHapticFeedbackPattern::Generic,
+                    NSHapticFeedbackPerformanceTime::Now,
+                );
+            });
         }
         true
     }

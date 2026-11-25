@@ -28,9 +28,6 @@ pub struct Run {
     began: f64,
     /// How long the wait lasts, in seconds.
     limit: f64,
-    /// A sound of a file the page asked for was being decoded at some look: what the decoder
-    /// finished since is told to the agent before the answer.
-    sounds_waited: bool,
 }
 
 /// Whether the request is answered.
@@ -212,7 +209,6 @@ impl Run {
             done,
             began: ctx.now,
             limit,
-            sounds_waited: false,
         })
     }
 
@@ -263,8 +259,10 @@ impl Run {
                 Step::Pending
             }
             _ => {
-                let resting = reading.rest.resting() && !self.sounds_pending(&ctx, env);
-                if resting || elapsed >= self.limit {
+                // Asked at the limit too, which answers a page that does not come to rest: what
+                // the decoder finished is told through `Held` before the request is over.
+                let waiting = self.sounds_pending(&ctx, env);
+                if (reading.rest.resting() && !waiting) || elapsed >= self.limit {
                     if let Action::Shot { full } = &self.view.action {
                         let mut session = env.session.borrow_mut();
                         session.active = false;
@@ -288,14 +286,14 @@ impl Run {
     /// gives up on a sound that takes too long) and [`REST_LIMIT`]'s.
     fn sounds_pending(&mut self, ctx: &Ctx<'_>, env: &Env<'_>) -> bool {
         if ctx.handle.page().sounds_waiting() {
-            self.sounds_waited = true;
             return true;
         }
-        if self.sounds_waited {
-            // What the decoder finished since the page was drained is told now, through `Held`.
-            (env.drain)();
-        }
-        false
+        // The look takes in what the decoder finished and says none is on its way: what it took in
+        // is told now, through `Held`, as the page is drained (a sound that came between this
+        // request's last drain and the look would be told to the person's speaker otherwise).
+        (env.drain)();
+        // What the drain told may have asked for a file of its own.
+        ctx.handle.page().sounds_waiting()
     }
 
     fn answer(&mut self, pane: Pane<'_>, ctx: &Ctx<'_>, env: &Env<'_>) -> Step {

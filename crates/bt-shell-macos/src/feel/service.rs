@@ -12,9 +12,10 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
-use std::fmt;
+use std::sync::Arc;
 use std::time::Instant;
 
+use bt_shell_common::agent::ready::Outcome;
 use bt_shell_common::native_view::haptic::{self, Haptic, Pattern};
 use bt_shell_common::native_view::sound::{self, Ask, Sound, Voices};
 use bt_shell_common::native_view::sounds;
@@ -27,15 +28,15 @@ use super::Haptics;
 
 /// What vibrates.
 pub trait Engine {
-    /// Plays `pattern` in place of what plays, where a finger is on the glass.
-    fn play(&self, pattern: &Pattern);
+    /// Plays `pattern` in place of what plays, where a finger is on the glass: what came of it.
+    fn play(&self, pattern: &Pattern) -> Outcome;
     /// Ends what plays.
     fn stop(&self);
 }
 
 impl Engine for Haptics {
-    fn play(&self, pattern: &Pattern) {
-        Haptics::play(self, pattern);
+    fn play(&self, pattern: &Pattern) -> Outcome {
+        Haptics::play(self, pattern)
     }
 
     fn stop(&self) {
@@ -45,11 +46,25 @@ impl Engine for Haptics {
 
 /// What plays the sounds: each one numbered, so that the one the rules end can be named.
 pub trait Speaker {
-    /// Starts `sound` over what plays, at `volume` (from 0 to 1), as `id`.
-    fn play(&mut self, id: u64, sound: &Sound, volume: f32);
+    /// Starts `sound` over what plays, at `volume` (from 0 to 1), as `id`: whether it started.
+    fn play(&mut self, id: u64, sound: &Arc<Sound>, volume: f32) -> bool;
     /// Ends the sound `id`, if it still plays.
     fn stop(&mut self, id: u64);
 }
+
+/// A sound that was played, as the data the system plays from.
+struct Prepared {
+    /// The sound, held so that the address that names it is not given to another.
+    sound: Arc<Sound>,
+    data: Retained<NSData>,
+    bytes: usize,
+}
+
+/// The most sounds the system's player keeps ready, and the most bytes of them: a page that plays
+/// one sound over and over (a file it decoded once) is not made to turn every sample into a WAV
+/// file each time, on the thread that draws.
+const MOST_PREPARED: usize = 8;
+const MOST_PREPARED_BYTES: usize = 48 << 20;
 
 /// The system's sound player, `NSSound`, which plays what it is given at the system's volume and
 /// silence: each sound is its samples as a WAV file in memory.
@@ -57,21 +72,56 @@ pub trait Speaker {
 struct SystemSpeaker {
     /// The sounds that were started and may still play: a sound that is let go ends.
     playing: Vec<(u64, Retained<NSSound>)>,
+    /// What was made ready, oldest first.
+    prepared: Vec<Prepared>,
+}
+
+impl SystemSpeaker {
+    /// The data `sound` is played from: made once and kept for the next time the same sound is
+    /// asked for (what the kit varies a little on each play is a sound of its own each time).
+    fn data_of(&mut self, sound: &Arc<Sound>) -> Option<Retained<NSData>> {
+        if let Some(kept) = self
+            .prepared
+            .iter()
+            .find(|kept| Arc::ptr_eq(&kept.sound, sound))
+        {
+            return Some(kept.data.clone());
+        }
+        let wav = sounds::wav(sound)?;
+        let bytes = wav.len();
+        let data = NSData::with_bytes(&wav);
+        if bytes <= MOST_PREPARED_BYTES {
+            let mut held: usize = self.prepared.iter().map(|kept| kept.bytes).sum();
+            while !self.prepared.is_empty()
+                && (self.prepared.len() >= MOST_PREPARED || held + bytes > MOST_PREPARED_BYTES)
+            {
+                held -= self.prepared.remove(0).bytes;
+            }
+            self.prepared.push(Prepared {
+                sound: Arc::clone(sound),
+                data: data.clone(),
+                bytes,
+            });
+        }
+        Some(data)
+    }
 }
 
 impl Speaker for SystemSpeaker {
-    fn play(&mut self, id: u64, sound: &Sound, volume: f32) {
+    fn play(&mut self, id: u64, sound: &Arc<Sound>, volume: f32) -> bool {
         self.playing.retain(|(_, started)| started.isPlaying());
-        let Some(bytes) = sounds::wav(sound) else {
-            return;
+        let Some(data) = self.data_of(sound) else {
+            return false;
         };
-        let data = NSData::with_bytes(&bytes);
         let Some(started) = NSSound::initWithData(NSSound::alloc(), &data) else {
-            return;
+            return false;
         };
         started.setVolume(volume.clamp(0.0, 1.0));
-        started.play();
+        if !started.play() {
+            return false;
+        }
         self.playing.push((id, started));
+        true
     }
 
     fn stop(&mut self, id: u64) {
@@ -79,32 +129,6 @@ impl Speaker for SystemSpeaker {
             let (_, started) = self.playing.remove(at);
             started.stop();
         }
-    }
-}
-
-/// A name that is not one the kit has ready.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnknownName {
-    name: String,
-    known: &'static [&'static str],
-}
-
-impl UnknownName {
-    /// The names there are.
-    #[must_use]
-    pub fn known(&self) -> &'static [&'static str] {
-        self.known
-    }
-}
-
-impl fmt::Display for UnknownName {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            out,
-            "`{}` is not a ready name: {}",
-            self.name,
-            self.known.join(" ")
-        )
     }
 }
 
@@ -179,44 +203,58 @@ impl Feel {
     pub fn haptic(&self, view: u64, ask: &Haptic, felt: bool) {
         match ask {
             Haptic::Play(pattern) => {
-                if !felt {
-                    return;
+                if felt {
+                    self.vibrate(view, pattern);
                 }
-                self.state.borrow_mut().vibrating = Some(view);
-                self.engine.get_or_init(|| (self.open)()).play(pattern);
             }
             Haptic::Stop => self.end_haptic(view),
         }
     }
 
+    /// Starts `pattern` for `view`. The device is opened here, on the thread that asks (the main
+    /// one), the first time a vibration is: the framework is loaded and the trackpads listed once.
+    fn vibrate(&self, view: u64, pattern: &Pattern) -> Outcome {
+        self.state.borrow_mut().vibrating = Some(view);
+        self.engine.get_or_init(|| (self.open)()).play(pattern)
+    }
+
     /// What a view asks of its sounds.
     pub fn sound(&self, view: u64, ask: &Ask) {
-        let now = (self.now)();
         match ask {
             Ask::Play(play) => {
-                let Some(samples) = &play.samples else {
-                    return;
-                };
-                let (id, silenced) = {
-                    let mut state = self.state.borrow_mut();
-                    state.next_sound += 1;
-                    let id = state.next_sound;
-                    let silenced =
-                        state
-                            .voices
-                            .entry(view)
-                            .or_default()
-                            .play(now, id, samples.seconds());
-                    (id, silenced)
-                };
-                let mut speaker = self.speaker.borrow_mut();
-                if let Some(silenced) = silenced {
-                    speaker.stop(silenced);
-                }
-                speaker.play(id, samples, play.volume);
+                self.start_sound(view, play);
             }
-            Ask::Stop => self.end_sounds(view, now),
+            Ask::Stop => self.end_sounds(view, (self.now)()),
         }
+    }
+
+    /// Starts the sound `play` asks for, for `view`: whether it started. A sound that did not start
+    /// is no voice of the view's, so that it does not silence one that plays.
+    fn start_sound(&self, view: u64, play: &sound::Play) -> bool {
+        let Some(samples) = &play.samples else {
+            return false;
+        };
+        let now = (self.now)();
+        let id = {
+            let mut state = self.state.borrow_mut();
+            state.next_sound += 1;
+            state.next_sound
+        };
+        let mut speaker = self.speaker.borrow_mut();
+        if !speaker.play(id, samples, play.volume) {
+            return false;
+        }
+        let silenced = self
+            .state
+            .borrow_mut()
+            .voices
+            .entry(view)
+            .or_default()
+            .play(now, id, samples.seconds());
+        if let Some(silenced) = silenced {
+            speaker.stop(silenced);
+        }
+        true
     }
 
     /// The view is gone: its vibration and its sounds end with it.
@@ -228,35 +266,29 @@ impl Feel {
 
     /// Plays the ready pattern called `name` for the application itself.
     ///
-    /// # Errors
-    /// The name is not one the kit has ready.
-    pub fn play_ready_haptic(&self, name: &str) -> Result<(), UnknownName> {
-        let pattern = haptic::preset(name).ok_or_else(|| UnknownName {
-            name: name.to_owned(),
-            known: &haptic::NAMES,
-        })?;
-        self.haptic(APPLICATION, &Haptic::Play(pattern), true);
-        Ok(())
+    /// What came of it, or `None` where the name is not one the kit has ready.
+    pub fn play_ready_haptic(&self, name: &str) -> Option<Outcome> {
+        let pattern = haptic::preset(name)?;
+        Some(self.vibrate(APPLICATION, &pattern))
     }
 
     /// Plays the ready sound called `name` for the application itself.
     ///
-    /// # Errors
-    /// The name is not one the kit has ready.
-    pub fn play_ready_sound(&self, name: &str) -> Result<(), UnknownName> {
+    /// What came of it, or `None` where the name is not one the kit has ready.
+    pub fn play_ready_sound(&self, name: &str) -> Option<Outcome> {
         let draw = self.state.borrow().next_sound;
-        let samples = sounds::play_of(name, 1.0, draw).ok_or_else(|| UnknownName {
-            name: name.to_owned(),
-            known: &sound::NAMES,
-        })?;
+        let samples = sounds::play_of(name, 1.0, draw)?;
         let play = sound::Play {
             source: sound::Source::Kit(name.to_owned()),
             volume: 1.0,
             pitch: 1.0,
             samples: Some(samples),
         };
-        self.sound(APPLICATION, &Ask::Play(play));
-        Ok(())
+        Some(if self.start_sound(APPLICATION, &play) {
+            Outcome::Played
+        } else {
+            Outcome::Failed
+        })
     }
 
     fn end_haptic(&self, view: u64) {
@@ -306,8 +338,9 @@ mod tests {
     struct Motor(Rc<RefCell<Vec<Heard>>>);
 
     impl Engine for Motor {
-        fn play(&self, pattern: &Pattern) {
+        fn play(&self, pattern: &Pattern) -> Outcome {
             self.0.borrow_mut().push(Heard::Played(pattern.clone()));
+            Outcome::Played
         }
 
         fn stop(&self) {
@@ -325,8 +358,9 @@ mod tests {
     struct Speakers(Rc<RefCell<Vec<Sounded>>>);
 
     impl Speaker for Speakers {
-        fn play(&mut self, id: u64, _sound: &Sound, volume: f32) {
+        fn play(&mut self, id: u64, _sound: &Arc<Sound>, volume: f32) -> bool {
             self.0.borrow_mut().push(Sounded::Started(id, volume));
+            true
         }
 
         fn stop(&mut self, id: u64) {
@@ -469,11 +503,14 @@ mod tests {
         );
         rig.feel.sound(1, &play_sound(5.0, 1.0));
         let heard = rig.speaker.0.borrow().clone();
-        assert_eq!(heard[MOST_VOICES], Sounded::Ended(1));
+        // The new one starts first, so that what does not start silences nothing; the one that
+        // played longest ends at once after.
         assert_eq!(
-            heard[MOST_VOICES + 1],
+            heard[MOST_VOICES],
             Sounded::Started(MOST_VOICES as u64 + 1, 1.0)
         );
+        assert_eq!(heard[MOST_VOICES + 1], Sounded::Ended(1));
+        assert_eq!(heard.len(), MOST_VOICES + 2);
     }
 
     #[test]
@@ -529,11 +566,11 @@ mod tests {
     fn the_ready_names_play_for_the_application_and_a_name_that_is_none_says_which_there_are() {
         let rig = rig();
         for name in haptic::NAMES {
-            rig.feel.play_ready_haptic(name).expect("a ready pattern");
+            assert_eq!(rig.feel.play_ready_haptic(name), Some(Outcome::Played));
         }
         assert_eq!(rig.motor.0.borrow().len(), haptic::NAMES.len());
         for name in sound::NAMES {
-            rig.feel.play_ready_sound(name).expect("a ready sound");
+            assert_eq!(rig.feel.play_ready_sound(name), Some(Outcome::Played));
         }
         assert_eq!(
             rig.speaker
@@ -545,11 +582,37 @@ mod tests {
             sound::NAMES.len()
         );
 
-        let error = rig.feel.play_ready_haptic("nope").expect_err("not a name");
-        assert_eq!(error.known(), haptic::NAMES);
-        assert!(error.to_string().contains("`nope`") && error.to_string().contains("heartbeat"));
-        let error = rig.feel.play_ready_sound("nope").expect_err("not a name");
-        assert!(error.to_string().contains("celebrate"));
+        assert_eq!(rig.feel.play_ready_haptic("nope"), None);
+        assert_eq!(rig.feel.play_ready_sound("nope"), None);
+    }
+
+    /// A speaker that starts nothing: the system could not play what it was given.
+    struct Mute(Rc<RefCell<Vec<u64>>>);
+
+    impl Speaker for Mute {
+        fn play(&mut self, _id: u64, _sound: &Arc<Sound>, _volume: f32) -> bool {
+            false
+        }
+
+        fn stop(&mut self, id: u64) {
+            self.0.borrow_mut().push(id);
+        }
+    }
+
+    #[test]
+    fn a_sound_the_system_could_not_start_is_said_so_and_is_no_voice_of_the_view() {
+        let stopped = Rc::new(RefCell::new(Vec::new()));
+        let feel = Feel::with(
+            Box::new(|| Box::new(Motor::default())),
+            Box::new(Mute(Rc::clone(&stopped))),
+            Box::new(|| 0.0),
+        );
+        assert_eq!(feel.play_ready_sound("tap"), Some(Outcome::Failed));
+        // Nine that did not start have silenced nothing: they were never playing.
+        for _ in 0..=MOST_VOICES {
+            feel.play_ready_sound("tap").expect("a ready sound");
+        }
+        assert!(stopped.borrow().is_empty(), "{:?}", stopped.borrow());
     }
 
     #[test]

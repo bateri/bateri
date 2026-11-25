@@ -150,6 +150,13 @@ pub enum Answer {
     /// from, to be shown beside the pane's tab, and answers; it asks nothing and starts nothing,
     /// so the level has only judged that it is not `off`.
     Message(String),
+    /// `haptic` / `sound`: one of the kit's ready vibrations or sounds, by name, played for the
+    /// person at this computer; with no name, which there are ([`super::ready`]). The shell plays
+    /// it and answers; nothing is asked of a terminal, so the level has only judged that it is not
+    /// `off`.
+    Haptic(Option<String>),
+    /// See [`Answer::Haptic`].
+    Sound(Option<String>),
     /// `focus`, `zoom`, `swap`, `move`, `resize`: the shell decides by what the keyboard is
     /// doing ([`super::arrange`]) and by the level over the layers it touches, then does it.
     Arrange(Arrange),
@@ -231,6 +238,8 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
         Ok(Request::Close(terminal)) => Answer::Close(terminal),
         Ok(Request::Notify(text)) => Answer::Notify(text),
         Ok(Request::Message(text)) => Answer::Message(text),
+        Ok(Request::Haptic(name)) => Answer::Haptic(name),
+        Ok(Request::Sound(name)) => Answer::Sound(name),
         Ok(Request::Arrange(arrange)) => Answer::Arrange(arrange),
         // The machine that asks is no other machine: nothing is reached, and the answer is `here`,
         // which needs no level (the command does it itself, as it does what is its own).
@@ -1317,6 +1326,20 @@ mod tests {
             serve(&server(), None, "bateri 2\nmessage\ntext hi\n", &mut app),
             Answer::Message("hi".to_owned())
         );
+        for (text, answer) in [
+            ("bateri 2\nhaptic\n", Answer::Haptic(None)),
+            (
+                "bateri 2\nhaptic\nname tick\n",
+                Answer::Haptic(Some("tick".to_owned())),
+            ),
+            ("bateri 2\nsound\n", Answer::Sound(None)),
+            (
+                "bateri 2\nsound\nname success\n",
+                Answer::Sound(Some("success".to_owned())),
+            ),
+        ] {
+            assert_eq!(serve(&server(), None, text, &mut app), answer, "{text:?}");
+        }
         // A target that is no name kablo has is no request.
         let Answer::Reply(Reply::Failed(failure)) =
             serve(&server(), None, "bateri 2\nclose\nterminal a b\n", &mut app)
