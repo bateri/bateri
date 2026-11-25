@@ -2014,6 +2014,12 @@ fn born_without_its_terminal(
         link.origin.y + link.size.height <= line.origin.y + 0.5,
         "the link is not under the line: {line:?} {link:?}"
     );
+    // Too narrow for the whole link: its short words, whole, not the long ones cut mid-action.
+    assert_eq!(
+        pane.ordinary_link_text().as_deref(),
+        Some("Open an ordinary shell"),
+        "the narrow pane's link"
+    );
     if let Some(shots) = &shots {
         let png = picture_of(&pane, 2.0).expect("a picture");
         fs::write(shots.join("link-narrow-dark.png"), png).expect("written");
@@ -2025,6 +2031,11 @@ fn born_without_its_terminal(
     assert!(
         link.origin.x >= line.origin.x + line.size.width,
         "the link is not beside the words again: {line:?} {link:?}"
+    );
+    assert_eq!(
+        pane.ordinary_link_text().as_deref(),
+        Some("Open an ordinary shell instead"),
+        "the wide pane's link has its whole words again"
     );
     // Nothing fell to a shell by itself, by time or by a key.
     assert_eq!(waits.chosen.load(Ordering::SeqCst), 0);

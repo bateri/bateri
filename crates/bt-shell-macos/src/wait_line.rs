@@ -542,7 +542,7 @@ impl WaitLine {
         link.setBordered(false);
         // The keyboard stays with the terminal.
         link.setRefusesFirstResponder(true);
-        link.setAttributedTitle(&link_title(&font));
+        link.setAttributedTitle(&link_title(LINK_WORDS, &font));
         link.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewMaxXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
@@ -585,7 +585,7 @@ impl WaitLine {
     /// in it, and a line that is up stands again in a pane of `bounds`.
     pub(crate) fn set_font(&self, font: Retained<NSFont>, bounds: NSRect) {
         self.text.setFont(Some(&font));
-        self.link.setAttributedTitle(&link_title(&font));
+        self.link.setAttributedTitle(&link_title(LINK_WORDS, &font));
         self.bars.set_size(cell_of(&font), font.capHeight());
         self.font.replace(font);
         if !self.row.isHidden() {
@@ -675,13 +675,16 @@ impl WaitLine {
     }
 
     /// Where the link stands: after the words on their line, or under the line when the pane is
-    /// too narrow for both — and shortened there when it is too narrow for the link, never past
-    /// the pane's edge.
+    /// too narrow for both. Under it, a pane too narrow for the whole link gets its short words
+    /// ([`LINK_SHORT`]) rather than words cut in the middle of the action, and only a pane too
+    /// narrow for those too cuts them, never past the pane's edge.
     fn place_link(&self, bounds: NSRect) {
         if self.link.isHidden() {
             return;
         }
-        let fit = self.link.fittingSize();
+        let font = self.font.borrow().clone();
+        self.link.setAttributedTitle(&link_title(LINK_WORDS, &font));
+        let mut fit = self.link.fittingSize();
         let line = self.row.frame();
         let beside = line.origin.x + line.size.width + LINK_GAP;
         let (origin, width) = if beside + fit.width + MARGIN <= bounds.size.width {
@@ -693,9 +696,14 @@ impl WaitLine {
                 fit.width,
             )
         } else {
+            let room = (bounds.size.width - 2.0 * MARGIN).max(0.0);
+            if fit.width > room {
+                self.link.setAttributedTitle(&link_title(LINK_SHORT, &font));
+                fit = self.link.fittingSize();
+            }
             (
                 NSPoint::new(MARGIN, (line.origin.y - fit.height).max(0.0)),
-                fit.width.min((bounds.size.width - 2.0 * MARGIN).max(0.0)),
+                fit.width.min(room),
             )
         };
         self.link
@@ -809,9 +817,13 @@ fn rgba_of(color: &NSColor, view: &NSView) -> Option<[f64; 4]> {
     rgba(&resolved)
 }
 
-/// "Open an ordinary shell instead", in the colour a link has and the font of the words, shortened
-/// at its end where the pane is too narrow for it.
-fn link_title(font: &NSFont) -> Retained<NSAttributedString> {
+/// The link's words, and the ones it has in a pane too narrow for them.
+const LINK_WORDS: &str = "Open an ordinary shell instead";
+const LINK_SHORT: &str = "Open an ordinary shell";
+
+/// `words`, in the colour a link has and the font of the line, cut at their end only where the
+/// pane is too narrow even for the short words.
+fn link_title(words: &str, font: &NSFont) -> Retained<NSAttributedString> {
     let color = NSColor::linkColor();
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
@@ -827,10 +839,7 @@ fn link_title(font: &NSFont) -> Retained<NSAttributedString> {
             ],
             &values,
         );
-        NSAttributedString::new_with_attributes(
-            &NSString::from_str("Open an ordinary shell instead"),
-            &attributes,
-        )
+        NSAttributedString::new_with_attributes(&NSString::from_str(words), &attributes)
     }
 }
 
