@@ -3,10 +3,13 @@
 //! a time from the start of the pattern.
 //!
 //! Pure: nothing here touches a device, so the numbers a person feels are all here and can be
-//! checked without one. **The numbers below are first guesses, not tuned**: how a sharpness
-//! feels can only be told with a finger on the glass, so the frequencies, the length of a burst
-//! and of a piece, the moment two bursts are one and how late a piece may come
-//! ([`super::schedule::MOST_LATE`]) are named constants to change after trying them on the
+//! checked without one. **A strength is the motor's own share**: an `intensity` of 1 is all the
+//! motor gives, 0.3 is a firm tap and 0.18 a light one on the trackpads tried, and the same number
+//! drives the built-in trackpad and an external one alike (there is no gain per device). The ready
+//! patterns are written on that scale. **The frequencies and the lengths are first guesses, not
+//! tuned**: how a sharpness feels can only be told with a finger on the glass, so the frequencies,
+//! the length of a burst and of a piece, the moment two bursts are one and how late a piece may
+//! come ([`super::schedule::MOST_LATE`]) are named constants to change after trying them on the
 //! device.
 
 use std::time::Duration;
@@ -17,8 +20,11 @@ use bt_shell_common::native_view::haptic::Pattern;
 pub(super) const DULL_HZ: f32 = 90.0;
 /// The frequency a sharpness of 1 (the crispest, a click) is played at, in hertz.
 pub(super) const CRISP_HZ: f32 = 300.0;
-/// The most strength the motor is asked for: a pattern's strength is held to it and never scaled
-/// beyond. Like the two frequencies above it is a first guess, to be tried with a finger on the glass.
+/// The most strength the motor is asked for, and the level of an `intensity` of 1: the whole of
+/// what it gives. `intensity` is the share of this, so a level is `intensity * MOST_LEVEL` and a
+/// strength past it is held to it, never scaled beyond. It is 1 because the number *is* the share:
+/// were it less, a page's 1 would be a fraction of the motor and the scale a page is told of
+/// (0.18 light, 0.3 firm, 1 the whole) would no longer be the motor's.
 pub(super) const MOST_LEVEL: f32 = 1.0;
 /// The least strength worth a burst: below it nothing is felt and the call is saved.
 pub(super) const LEAST_LEVEL: f32 = 0.03;
@@ -62,7 +68,8 @@ pub(super) fn frequency(sharpness: f32) -> f32 {
     DULL_HZ * (CRISP_HZ / DULL_HZ).powf(sharpness)
 }
 
-/// The motor's strength for `intensity`: held to what the device gives at most.
+/// The motor's strength for `intensity`, which is the motor's own share: `intensity` of the most it
+/// gives, held to that at most.
 pub(super) fn level(intensity: f32) -> f32 {
     if intensity.is_nan() {
         0.0
@@ -259,7 +266,8 @@ mod tests {
     fn a_tap_and_a_held_event_at_one_moment_are_the_stronger_not_both() {
         let thud = plan(&preset("thud").expect("a ready pattern"));
         assert!(thud[0].tap, "the knock is what plays at the start");
-        assert_eq!(thud[0].level, 1.0);
+        // The ready `thud` is a firm tap, 0.3 of the motor, then a held 0.21 that dies away.
+        assert!((thud[0].level - 0.3).abs() < 1e-6, "{thud:?}");
         assert!(ms(&thud[1]) >= SAME_MOMENT_MS, "{thud:?}");
         assert!(thud.iter().skip(1).all(|step| !step.tap));
         assert!(

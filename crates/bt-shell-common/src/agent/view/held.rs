@@ -107,6 +107,11 @@ impl<'a> Held<'a> {
 
 /// What a pattern is called in what an agent is told: the kit's name for it where it is one the kit
 /// has ready as it is, else how long it is.
+///
+/// A ready pattern a page gave a strength (`{ name = "thud", intensity = 0.5 }`) reaches the host as
+/// the pattern the kit made of it, without its name, so it is not recognized here and is told as a
+/// pattern of its own. Telling its name and strength would take the kit's `Haptic` carrying the
+/// question, not the pattern.
 fn pattern_words(pattern: &Pattern) -> String {
     haptic::NAMES
         .iter()
