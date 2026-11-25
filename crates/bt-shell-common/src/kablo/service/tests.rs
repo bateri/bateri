@@ -7555,6 +7555,8 @@ fn a_terminal_found_again_and_left_running_is_not_named_for_the_pane_that_has_a_
 /// The terminal found again is attached, and the server has not said what runs in it yet, when
 /// the person's choice comes: it has come, and the choice is not taken — what was typed before it
 /// went to the terminal, which is not hidden behind a shell; what is typed after goes there too.
+/// The click ends the pane's wait all the same, at once: the line goes, and the pid comes with the
+/// server's list.
 #[test]
 fn a_choice_that_comes_after_the_terminal_found_again_was_attached_is_not_taken() {
     let back = Comeback::leaves("local-chose-late", b"x\r\n");
@@ -7574,6 +7576,12 @@ fn a_choice_that_comes_after_the_terminal_found_again_was_attached_is_not_taken(
     });
     assert!(!stream.pid.is_settled(), "its list has not come");
     let pid = stream.pid.clone();
+    // What the pane does when its wait is over: the line goes.
+    let wait_over = Arc::new(AtomicBool::new(false));
+    pid.when_settled({
+        let wait_over = Arc::clone(&wait_over);
+        move || wait_over.store(true, Ordering::SeqCst)
+    });
     let status = Arc::clone(&stream.status);
     let ops = Arc::clone(&stream.ops);
     let mut mac = Pane::of(stream);
@@ -7592,6 +7600,13 @@ fn a_choice_that_comes_after_the_terminal_found_again_was_attached_is_not_taken(
             .iter()
             .any(|line| line.contains("chose an ordinary shell after its terminal had come"))
     });
+    // The click did something the person sees: the pane's wait is over before the list comes,
+    // and the pid is still the list's to say.
+    until("the pane's wait over at the click", || {
+        wait_over.load(Ordering::SeqCst)
+    });
+    assert!(!pid.is_settled(), "the list has not come");
+    assert_eq!(pid.get(), None);
     back.world.bridge().release_lists();
     until("the terminal's program", || pid.get().is_some());
     assert!(!status.is_ordinary(), "a shell took the pane");

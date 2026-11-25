@@ -4666,8 +4666,10 @@ impl Core {
     /// over its ends, so the shell writes to the holder's writer and what the holder reads of the
     /// pane goes to the shell ([`Msg::Hold`]). A choice that comes after the terminal has come
     /// as far as the pane — attached, or taking what the pane types — is not taken: the pane
-    /// may have been shown some of it, or typed into it, and the line goes as the terminal is
-    /// shown ([`Core::found`] has its program).
+    /// may have been shown some of it, or typed into it. The click ends the pane's wait all the
+    /// same, at once ([`bt_core::ChildPid::shown`]): the terminal is what the pane shows, and a
+    /// link that goes while the line stays would be a click that did nothing to see. The pid
+    /// follows with the server's list ([`Core::found`]).
     fn choose_ordinary(&mut self, hold: HoldId) {
         let Some(awaiting) = self.awaiting.get_mut(&hold) else {
             return;
@@ -4716,13 +4718,15 @@ impl Core {
                 .is_some_and(|conn| !conn.waits_for_input);
         if arrived {
             // The wait goes on to its end as if the choice had not been made, and the log says
-            // so: a click on the link that did nothing is a question someone asks.
+            // so: a click on the link that did nothing is a question someone asks. On the pane's
+            // screen the wait is over: its line goes now, not when the list comes.
             if let Some(awaiting) = self.awaiting.get_mut(&hold) {
                 awaiting.chosen = false;
                 self.shared.backend.log_line(&format!(
                     "the pane {} chose an ordinary shell after its terminal had come: it is shown its terminal",
                     awaiting.parts.pane.as_str()
                 ));
+                awaiting.parts.pid.shown();
             }
             return;
         }

@@ -4263,7 +4263,9 @@ impl TerminalPane {
     /// The person clicked the link: the owner of the pane's stream gives it an ordinary shell
     /// ([`bt_core::PtyOps::ordinary_instead`]), and what becomes of the terminal is its to say.
     /// Only a click gets here, once; the link goes at the click and the line with the terminal's
-    /// stand-in (the shell is on the stream, [`TerminalPane::terminal_settled`]).
+    /// stand-in (the shell is on the stream, [`TerminalPane::terminal_settled`]) — or, when the
+    /// terminal came first and the choice is not taken, with the owner's word that the pane shows
+    /// its terminal ([`bt_core::ChildPid::shown`]).
     fn open_ordinary_shell(&self) {
         self.ivars().wait_line.withdraw();
         let ops = self.ivars().wait_ops.borrow().clone();

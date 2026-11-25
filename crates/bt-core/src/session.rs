@@ -3161,7 +3161,8 @@ impl Silence {
 /// known is `None`, since what is asked of the process table with it is another process's.
 ///
 /// The cell says when the wait is over ([`ChildPid::when_settled`]), so that what shows the wait
-/// does not ask again and again.
+/// does not ask again and again. The wait the pane shows can be over before the pid is known
+/// ([`ChildPid::shown`]).
 #[derive(Clone, Debug, Default)]
 pub struct ChildPid(Arc<PidCell>);
 
@@ -3169,6 +3170,8 @@ pub struct ChildPid(Arc<PidCell>);
 struct PidCell {
     pid: AtomicU32,
     settled: AtomicBool,
+    /// The terminal is on the pane's screen, its pid still to come ([`ChildPid::shown`]).
+    shown: AtomicBool,
     /// What is done once, when the wait is over.
     hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -3178,6 +3181,7 @@ impl std::fmt::Debug for PidCell {
         f.debug_struct("PidCell")
             .field("pid", &self.pid.load(Ordering::Relaxed))
             .field("settled", &self.settled.load(Ordering::Relaxed))
+            .field("shown", &self.shown.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -3213,6 +3217,21 @@ impl ChildPid {
     /// The wait is over without a pid: no program will have one.
     pub fn settle(&self) {
         self.0.settled.store(true, Ordering::Release);
+        self.tell();
+    }
+
+    /// The terminal is what the pane shows, and its pid is not known yet (a terminal found again
+    /// that the server attached before its list said what runs in it): the wait the pane shows is
+    /// over ([`ChildPid::when_settled`]'s `then` runs now), and the pid is still to be said
+    /// ([`ChildPid::set`]) — [`ChildPid::is_settled`] waits for it, as everything that reads the
+    /// program does.
+    pub fn shown(&self) {
+        self.0.shown.store(true, Ordering::Release);
+        self.tell();
+    }
+
+    /// What waits for the end of the wait is done, once.
+    fn tell(&self) {
         let hook = lock(&self.0.hook).take();
         if let Some(hook) = hook {
             hook();
@@ -3226,10 +3245,12 @@ impl ChildPid {
 
     /// `then` is called once when the wait is over ([`ChildPid::set`], [`ChildPid::settle`]) — at
     /// once, on the caller's thread, when it is over already; else on the thread that ends it.
+    /// The wait the pane shows is over at [`ChildPid::shown`] too, which comes before the pid:
+    /// `then` is what shows the wait, not what reads the program.
     pub fn when_settled(&self, then: impl FnOnce() + Send + 'static) {
         {
             let mut hook = lock(&self.0.hook);
-            if !self.0.settled.load(Ordering::Acquire) {
+            if !self.0.settled.load(Ordering::Acquire) && !self.0.shown.load(Ordering::Acquire) {
                 *hook = Some(Box::new(then));
                 return;
             }
@@ -3415,8 +3436,10 @@ pub trait PtyOps: Send + Sync {
     /// The person chose an ordinary shell in place of the terminal the pane still waits for
     /// ([`ChildPid::is_settled`] is `false`): the owner gives the stream one, and what becomes of
     /// the terminal that was asked for or found is its own to decide — one that was found is
-    /// not ended, one that was made for the pane is when it comes. Said at most once, from the
-    /// main thread; the default does nothing.
+    /// not ended, one that was made for the pane is when it comes. A choice that comes after the
+    /// terminal has (attached before the pid is known) is not taken, and the owner ends the pane's
+    /// wait all the same ([`ChildPid::shown`]). Said at most once, from the main thread; the
+    /// default does nothing.
     fn ordinary_instead(&self) {}
 }
 
@@ -15277,6 +15300,37 @@ mod tests {
             told.load(Ordering::SeqCst),
             2,
             "told at once when it is over"
+        );
+    }
+
+    #[test]
+    fn a_wait_shown_over_before_its_pid_tells_once_and_waits_for_the_pid() {
+        let told = Arc::new(AtomicU32::new(0));
+        let pid = ChildPid::unknown();
+        let counted = Arc::clone(&told);
+        pid.when_settled(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        pid.shown();
+        // The pane's wait is over; what reads the program still waits for its pid.
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        assert!(!pid.is_settled() && pid.get().is_none());
+        let counted = Arc::clone(&told);
+        pid.when_settled(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(
+            told.load(Ordering::SeqCst),
+            2,
+            "told at once when it is shown"
+        );
+        pid.set(4242);
+        assert!(pid.is_settled());
+        assert_eq!(pid.get(), Some(4242));
+        assert_eq!(
+            told.load(Ordering::SeqCst),
+            2,
+            "the pid tells nothing again"
         );
     }
 
