@@ -160,6 +160,12 @@ const MOTION: &[Group] = &[
     ),
 ];
 
+/// The Sound & Haptics page: what vibrates and sounds, then whether programs may.
+const FEEDBACK: &[Group] = &[
+    group(None, &[row(Key::FeedbackHaptics), row(Key::FeedbackSounds)]),
+    group(None, &[row(Key::FeedbackApps)]),
+];
+
 const SHELL: &[Group] = &[
     group(None, &[row(Key::ShellIntegration)]),
     Group {
@@ -244,6 +250,7 @@ pub(super) fn groups(category: Category) -> &'static [Group] {
         Category::Tabs => TABS,
         Category::Cursor => CURSOR,
         Category::Motion => MOTION,
+        Category::Feedback => FEEDBACK,
         Category::Shell => SHELL,
         Category::Keyboard => &[],
         Category::Servers => SERVERS,
@@ -310,6 +317,9 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::DownloadNotify => "Notify when done",
         Key::ClaudeIntegration => "Claude Code",
         Key::ClaudeSkill => "bateri command",
+        Key::FeedbackHaptics => "Trackpad vibrations",
+        Key::FeedbackSounds => "Sounds",
+        Key::FeedbackApps => "Let programs vibrate and play sounds",
     }
 }
 

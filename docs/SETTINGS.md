@@ -75,7 +75,7 @@ according to the keyboard layout; on a Turkish Q keyboard the same key
 carries a different letter, and the menu shows that letter instead. View ▸
 Bigger also shows as `⌘:` on that layout.
 
-bateri ▸ Settings… (Cmd ,) opens the settings window: a sidebar of ten pages on
+bateri ▸ Settings… (Cmd ,) opens the settings window: a sidebar of pages on
 the left and the chosen page on the right. A page is a few titled groups of
 rows. A row has the setting's name, a line under it that says what the current
 value does, and the control on the right; a unit (lines, pt, ×, seconds) stands
@@ -104,6 +104,8 @@ goes with them.
   in an inactive window.
 - **Motion** — Reduce motion, and the motion of a typed or deleted letter, the
   cursor, a shell starting and scrolling.
+- **Sound & Haptics** — three switches: the trackpad's vibrations, sounds, and
+  whether programs' views may use them (see [`[feedback]`](#feedback)).
 - **Shell** — shell integration, what the dock shows (Python environment, Node
   version, listening ports) and what programs on this Mac may do with the
   `bateri` command.
@@ -582,6 +584,23 @@ claude_integration = true
 # command ([commands] level is not "off"), and a Claude Code started from inside
 # another one is left as it is.
 claude_skill = false
+
+[feedback]
+# true | false. The trackpad vibrates: what a program's view asks for and what
+# `bateri haptic` plays. A trackpad's motor is felt only while a finger is on its
+# glass, and only the trackpad the finger is on vibrates. Turning it off ends a
+# vibration that is playing.
+haptics = true
+# true | false. Sounds play, at the volume the Mac is set to (nothing plays while
+# it is muted): what a program's view asks for, in any tab or window, and what
+# `bateri sound` plays. Turning it off ends the sounds that are playing.
+sounds = true
+# true | false. Programs may vibrate the trackpad and play sounds from their view.
+# Off, only what you run yourself (`bateri haptic`, `bateri sound`) and what
+# bateri plays of its own does, and what a program's view is playing ends. An
+# agent that presses a button in a program's view is told what the program asked
+# for, whatever this says.
+apps = true
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
@@ -2409,6 +2428,32 @@ This Mac's level is also the "Programs on this computer may" row in the settings
 once. A server's level is read again at every request the window gets from it, so a change to `full`, `screen` or
 `own` applies to the next command; what a change to or from `off` does to the installed command waits for that
 server's next connection, which is when the command is installed or removed.
+
+### `[feedback]`
+
+```toml
+[feedback]
+haptics = true
+sounds = true
+apps = true
+```
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `haptics` | `true` \| `false` | `true` | the trackpad vibrates: a program's view asks for it, and `bateri haptic NAME` plays a ready pattern |
+| `sounds` | `true` \| `false` | `true` | sounds play: a program's view asks for them, and `bateri sound NAME` plays a ready sound |
+| `apps` | `true` \| `false` | `true` | a program's view may vibrate and sound; off, only your own commands and what bateri plays of its own do |
+
+A vibration is felt only while a finger is on a trackpad's glass, and only that trackpad vibrates; a sound plays
+through the Mac's speaker at the volume the Mac is set to, and not at all while it is muted. A program's view that
+asks for either is not asked for permission: the three keys are there for you to turn it off. They are read at once:
+closing one ends what it no longer lets play (`apps` ends what a program's view plays, not a vibration or a sound you
+started with the command). `stop` requests of a view always go through.
+
+`bateri haptic NAME` and `bateri sound NAME` look at their own key only (`haptics`, `sounds`), because the command is
+yours; when the key is off the command says so on one line and names it (`feedback.haptics`). What an agent learns of a
+view it operates is not changed by any of the three: a view that asks to vibrate or to sound while an agent presses its
+button is told to the agent in the answer, and never played.
 
 ### `[remote]`
 

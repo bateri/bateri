@@ -29,6 +29,7 @@ mod player;
 mod schedule;
 mod service;
 mod steps;
+mod switches;
 mod symbols;
 mod trackpads;
 
@@ -36,6 +37,7 @@ use bt_shell_common::agent::ready::Outcome;
 use bt_shell_common::native_view::haptic::Pattern;
 
 pub use service::{APPLICATION, Engine, Feel, Speaker, is_felt};
+pub use switches::Switches;
 pub use trackpads::{Trackpads, Watch};
 
 use fallback::Fallback;

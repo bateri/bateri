@@ -473,6 +473,25 @@ mod tests {
     }
 
     #[test]
+    fn what_a_person_turns_off_of_the_feedback_is_written_by_the_command_and_back() {
+        let root = Root::new("feedback");
+        assert_eq!(root.run(&["get", "feedback.haptics"]).stdout, "true\n");
+        let ran = root.run(&["set", "feedback.haptics", "false"]);
+        assert_eq!(ran.status, 0, "{}", ran.stderr);
+        assert!(ran.wrote);
+        assert_eq!(root.run(&["get", "feedback.haptics"]).stdout, "false\n");
+        // Each key is its own: the other two are what they were.
+        assert_eq!(root.run(&["get", "feedback.sounds"]).stdout, "true\n");
+        assert_eq!(root.run(&["get", "feedback.apps"]).stdout, "true\n");
+        let ran = root.run(&["reset", "feedback.haptics"]);
+        assert_eq!(ran.status, 0, "{}", ran.stderr);
+        assert_eq!(root.run(&["get", "feedback.haptics"]).stdout, "true\n");
+        // A value that is not a boolean is refused and nothing is written.
+        let ran = root.run(&["set", "feedback.apps", "maybe"]);
+        assert_eq!(ran.status, 64);
+    }
+
+    #[test]
     fn what_widens_bateris_reach_is_read_and_never_written() {
         let root = Root::new("level");
         assert_eq!(root.run(&["get", "commands.level"]).stdout, "own\n");

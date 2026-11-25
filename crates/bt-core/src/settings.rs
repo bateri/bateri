@@ -1683,6 +1683,16 @@ pub struct Settings {
     /// to Claude Code's own files). Off by default; the file turns it on. Doesn't enter
     /// `TerminalOptions`.
     pub agents_claude_skill: bool,
+    /// `[feedback] haptics`: whether the trackpad vibrates at all, for a program's view and for
+    /// the `bateri haptic` command. On by default. Doesn't enter `TerminalOptions`.
+    pub feedback_haptics: bool,
+    /// `[feedback] sounds`: whether sounds play at all, for a program's view and for the
+    /// `bateri sound` command. On by default. Doesn't enter `TerminalOptions`.
+    pub feedback_sounds: bool,
+    /// `[feedback] apps`: whether the programs' views may vibrate and play sounds; off, only what
+    /// the person runs themselves (`bateri haptic`, `bateri sound`) and what bateri plays of its
+    /// own does. On by default. Doesn't enter `TerminalOptions`.
+    pub feedback_apps: bool,
     /// `[terminal] scrollbar`: when the scroll bar shows ([`Scrollbar`]).
     /// Doesn't enter `TerminalOptions`.
     pub scrollbar: Scrollbar,
@@ -1782,6 +1792,9 @@ impl Default for Settings {
             commands_level: CommandLevel::default(),
             agents_claude_integration: true,
             agents_claude_skill: false,
+            feedback_haptics: true,
+            feedback_sounds: true,
+            feedback_apps: true,
             scrollbar: Scrollbar::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -1898,6 +1911,12 @@ pub enum SettingsEdit {
     /// The settings window's "bateri command" of Claude Code ("Teach Claude Code to open panes and
     /// read terminals"): `[agents] claude_skill`.
     AgentsClaudeSkill(bool),
+    /// The settings window's "Trackpad vibrations": `[feedback] haptics`.
+    FeedbackHaptics(bool),
+    /// The settings window's "Sounds": `[feedback] sounds`.
+    FeedbackSounds(bool),
+    /// The settings window's "Programs": `[feedback] apps`.
+    FeedbackApps(bool),
     Scrollbar(Scrollbar),
     Theme(String),
     LightTheme(String),
@@ -2055,6 +2074,9 @@ impl SettingsEdit {
                 ("agents", "claude_integration", "agents.claude_integration")
             }
             Self::AgentsClaudeSkill(_) => ("agents", "claude_skill", "agents.claude_skill"),
+            Self::FeedbackHaptics(_) => ("feedback", "haptics", "feedback.haptics"),
+            Self::FeedbackSounds(_) => ("feedback", "sounds", "feedback.sounds"),
+            Self::FeedbackApps(_) => ("feedback", "apps", "feedback.apps"),
             Self::Scrollbar(_) => ("terminal", "scrollbar", "terminal.scrollbar"),
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
@@ -2187,6 +2209,9 @@ impl SettingsEdit {
             | Self::ShellNodeVersion(on)
             | Self::AgentsClaudeIntegration(on)
             | Self::AgentsClaudeSkill(on)
+            | Self::FeedbackHaptics(on)
+            | Self::FeedbackSounds(on)
+            | Self::FeedbackApps(on)
             | Self::DimUnfocusedSplits(on)
             | Self::FocusFrame(on)
             | Self::ResizeInSteps(on)
@@ -2526,6 +2551,23 @@ claude_integration = true
 # command ([commands] level is not "off"), and a Claude Code started from inside
 # another one is left as it is.
 claude_skill = false
+
+[feedback]
+# true | false. The trackpad vibrates: what a program's view asks for and what
+# `bateri haptic` plays. A trackpad's motor is felt only while a finger is on its
+# glass, and only the trackpad the finger is on vibrates. Turning it off ends a
+# vibration that is playing.
+haptics = true
+# true | false. Sounds play, at the volume the Mac is set to (nothing plays while
+# it is muted): what a program's view asks for, in any tab or window, and what
+# `bateri sound` plays. Turning it off ends the sounds that are playing.
+sounds = true
+# true | false. Programs may vibrate the trackpad and play sounds from their view.
+# Off, only what you run yourself (`bateri haptic`, `bateri sound`) and what
+# bateri plays of its own does, and what a program's view is playing ends. An
+# agent that presses a button in a program's view is told what the program asked
+# for, whatever this says.
+apps = true
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
@@ -3232,6 +3274,40 @@ open_with = "textpen"
             }
             None => {}
         }
+        match section(text, root, "feedback", &mut parsed.diagnostics) {
+            Some(feedback) => {
+                for (key, path, value, kept) in [
+                    (
+                        "haptics",
+                        "feedback.haptics",
+                        &mut parsed.settings.feedback_haptics,
+                        fallback.feedback_haptics,
+                    ),
+                    (
+                        "sounds",
+                        "feedback.sounds",
+                        &mut parsed.settings.feedback_sounds,
+                        fallback.feedback_sounds,
+                    ),
+                    (
+                        "apps",
+                        "feedback.apps",
+                        &mut parsed.settings.feedback_apps,
+                        fallback.feedback_apps,
+                    ),
+                ] {
+                    if let Some(item) = feedback.get(key) {
+                        *value = boolean(text, item, path, kept, &mut parsed.diagnostics);
+                    }
+                }
+            }
+            None if root.contains_key("feedback") => {
+                parsed.settings.feedback_haptics = fallback.feedback_haptics;
+                parsed.settings.feedback_sounds = fallback.feedback_sounds;
+                parsed.settings.feedback_apps = fallback.feedback_apps;
+            }
+            None => {}
+        }
         match section(text, root, "remote", &mut parsed.diagnostics) {
             Some(remote) => {
                 let before = parsed.diagnostics.len();
@@ -3474,6 +3550,9 @@ open_with = "textpen"
             environment: self.shell_python_env != new.shell_python_env
                 || self.shell_node_version != new.shell_node_version,
             keys: self.keys != new.keys,
+            feedback: self.feedback_haptics != new.feedback_haptics
+                || self.feedback_sounds != new.feedback_sounds
+                || self.feedback_apps != new.feedback_apps,
         }
     }
 
@@ -4280,6 +4359,12 @@ pub struct Changes {
     /// [`Settings::keys`] changed: the platform shell writes the shortcuts again — the menu's,
     /// the tab strip's hints. A position in the file is no change ([`KeyEntry`]'s equality).
     pub keys: bool,
+    /// [`Settings::feedback_haptics`], [`Settings::feedback_sounds`] or
+    /// [`Settings::feedback_apps`] changed: the platform shell gives the three to what plays the
+    /// vibration and the sounds, which ends what a switch that closed no longer lets play. One
+    /// field for the three, because they go together; a field of its own, for [`Self::caret`]'s
+    /// reason.
+    pub feedback: bool,
 }
 
 /// Parses the text into a TOML document; a one-line diagnostic if it can't be
@@ -5291,6 +5376,9 @@ mod tests {
             ("commands", "level"),
             ("agents", "claude_integration"),
             ("agents", "claude_skill"),
+            ("feedback", "haptics"),
+            ("feedback", "sounds"),
+            ("feedback", "apps"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -5494,6 +5582,7 @@ mod tests {
                 ports: false,
                 environment: false,
                 keys: false,
+                feedback: false,
             }
         );
         assert_eq!(
@@ -5558,6 +5647,9 @@ mod tests {
             commands_level: CommandLevel::Own,
             agents_claude_integration: true,
             agents_claude_skill: false,
+            feedback_haptics: true,
+            feedback_sounds: true,
+            feedback_apps: true,
             scrollbar: Scrollbar::Always,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -5757,6 +5849,7 @@ mod tests {
             ports: false,
             environment: false,
             keys: false,
+            feedback: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -5995,6 +6088,7 @@ mod tests {
                 ports: false,
                 environment: false,
                 keys: false,
+                feedback: false,
             }
         );
         assert_eq!(
@@ -6157,6 +6251,7 @@ found {found}; using \"spring\""
                 ports: false,
                 environment: false,
                 keys: false,
+                feedback: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -6259,6 +6354,7 @@ found {found}; using \"system\""
                 ports: false,
                 environment: false,
                 keys: false,
+                feedback: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -6876,6 +6972,84 @@ found 1.5; using 0.1"
         .expect("edits");
         assert!(added.starts_with("[font]\nsize = 15\n"), "{added}");
         assert!(clean(&added).agents_claude_skill);
+    }
+
+    #[test]
+    fn feedback_is_on_until_the_file_turns_a_key_off_and_each_key_is_its_own() {
+        let all = Settings::default();
+        assert!(all.feedback_haptics && all.feedback_sounds && all.feedback_apps);
+        let none = clean("");
+        assert!(none.feedback_haptics && none.feedback_sounds && none.feedback_apps);
+        let haptics = clean("[feedback]\nhaptics = false\n");
+        assert!(!haptics.feedback_haptics && haptics.feedback_sounds && haptics.feedback_apps);
+        let sounds = clean("[feedback]\nsounds = false\n");
+        assert!(sounds.feedback_haptics && !sounds.feedback_sounds && sounds.feedback_apps);
+        let apps = clean("[feedback]\napps = false\n");
+        assert!(apps.feedback_haptics && apps.feedback_sounds && !apps.feedback_apps);
+        // A value that is not a boolean is named and keeps the one given (the default: on).
+        for (text, key) in [
+            ("[feedback]\nhaptics = \"off\"\n", "feedback.haptics"),
+            ("[feedback]\nsounds = 0\n", "feedback.sounds"),
+            ("[feedback]\napps = []\n", "feedback.apps"),
+        ] {
+            let (settings, diagnostic) = rejected(text);
+            assert_eq!(settings, Settings::default(), "{text}");
+            assert_eq!(diagnostic.key, Some(key), "{text}");
+        }
+        let current = Settings {
+            feedback_haptics: false,
+            feedback_sounds: false,
+            feedback_apps: false,
+            ..Settings::default()
+        };
+        let parsed =
+            Settings::parse_keeping("[feedback]\nsounds = \"x\"\n", &current).expect("parses");
+        assert!(!parsed.settings.feedback_sounds, "the one given is kept");
+        // The section is not one: what was given is kept, nothing is turned back on.
+        let parsed = Settings::parse_keeping("feedback = 3\n", &current).expect("parses");
+        assert!(
+            !parsed.settings.feedback_haptics
+                && !parsed.settings.feedback_sounds
+                && !parsed.settings.feedback_apps
+        );
+        // Written in place, the rest of the file as it was.
+        let text = "[feedback]\n# mine\nhaptics = true\nfuture = 1\n";
+        let off = Settings::with_edit(text, &SettingsEdit::FeedbackHaptics(false)).expect("edits");
+        assert_eq!(off, "[feedback]\n# mine\nhaptics = false\nfuture = 1\n");
+        assert!(!clean(&off).feedback_haptics);
+        for (edit, key) in [
+            (SettingsEdit::FeedbackSounds(false), "sounds"),
+            (SettingsEdit::FeedbackApps(false), "apps"),
+        ] {
+            let added = Settings::with_edit("[font]\nsize = 15\n", &edit).expect("edits");
+            assert!(added.starts_with("[font]\nsize = 15\n"), "{added}");
+            assert!(added.contains(&format!("{key} = false")), "{added}");
+        }
+    }
+
+    #[test]
+    fn a_change_of_feedback_is_a_change_of_feedback_and_nothing_else() {
+        let before = clean("");
+        for text in [
+            "[feedback]\nhaptics = false\n",
+            "[feedback]\nsounds = false\n",
+            "[feedback]\napps = false\n",
+        ] {
+            let changes = before.changes(&clean(text));
+            assert_eq!(
+                changes,
+                Changes {
+                    feedback: true,
+                    ..Changes::default()
+                },
+                "{text}"
+            );
+        }
+        assert!(
+            !before
+                .changes(&clean("[feedback]\nhaptics = true\n"))
+                .feedback
+        );
     }
 
     #[test]
@@ -8149,6 +8323,7 @@ hosts = [
                     ports: false,
                     environment: false,
                     keys: false,
+                    feedback: false,
                 },
                 "{text}"
             );
@@ -8260,6 +8435,7 @@ hosts = [
                 ports: false,
                 environment: false,
                 keys: false,
+                feedback: false,
             }
         );
         // The same value again is no change.
@@ -8375,6 +8551,7 @@ hosts = [
                 ports: false,
                 environment: false,
                 keys: false,
+                feedback: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -9213,6 +9390,9 @@ cursor = \"spring\"
             SettingsEdit::CommandLevel(level) => settings.commands_level = level,
             SettingsEdit::AgentsClaudeIntegration(on) => settings.agents_claude_integration = on,
             SettingsEdit::AgentsClaudeSkill(on) => settings.agents_claude_skill = on,
+            SettingsEdit::FeedbackHaptics(on) => settings.feedback_haptics = on,
+            SettingsEdit::FeedbackSounds(on) => settings.feedback_sounds = on,
+            SettingsEdit::FeedbackApps(on) => settings.feedback_apps = on,
             SettingsEdit::Scrollbar(scrollbar) => settings.scrollbar = scrollbar,
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,

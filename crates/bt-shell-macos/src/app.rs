@@ -6325,6 +6325,11 @@ impl AppDelegate {
             ),
         };
         self.post_notices(Source::Settings, messages);
+        // What plays is told what the file says before anything is asked of it, as the first
+        // reading is no change `apply_settings` would see.
+        self.ivars()
+            .feel
+            .set_switches(crate::feel::Switches::of(&settings));
         self.ivars().settings.replace(settings);
     }
 
@@ -6959,6 +6964,13 @@ impl AppDelegate {
         // one. Before the slot is written, from `new`, as the arms above.
         if changes.keys {
             self.apply_keys(&new);
+        }
+        // What the vibrations and the sounds may do: what a closed switch no longer lets play
+        // ends here, not at the next ask.
+        if changes.feedback {
+            self.ivars()
+                .feel
+                .set_switches(crate::feel::Switches::of(&new));
         }
         self.ivars().settings.replace(new.clone());
         if ask {

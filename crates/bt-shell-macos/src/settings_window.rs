@@ -182,6 +182,7 @@ enum Category {
     Tabs,
     Cursor,
     Motion,
+    Feedback,
     Shell,
     Keyboard,
     Servers,
@@ -190,13 +191,14 @@ enum Category {
 }
 
 impl Category {
-    const ALL: [Category; 11] = [
+    const ALL: [Category; 12] = [
         Category::General,
         Category::Appearance,
         Category::Font,
         Category::Tabs,
         Category::Cursor,
         Category::Motion,
+        Category::Feedback,
         Category::Shell,
         Category::Keyboard,
         Category::Servers,
@@ -224,6 +226,7 @@ impl Category {
             Category::Tabs => "Tabs and Panes",
             Category::Cursor => "Cursor",
             Category::Motion => "Motion",
+            Category::Feedback => "Sound & Haptics",
             Category::Shell => "Shell",
             Category::Keyboard => "Keyboard",
             Category::Servers => "Servers",
@@ -241,6 +244,7 @@ impl Category {
             Category::Tabs => "rectangle.split.2x1",
             Category::Cursor => "character.cursor.ibeam",
             Category::Motion => "wind",
+            Category::Feedback => "speaker.wave.2",
             Category::Shell => "terminal",
             Category::Keyboard => "keyboard",
             Category::Servers => "network",
@@ -306,13 +310,16 @@ enum Key {
     CommandLevel,
     ClaudeIntegration,
     ClaudeSkill,
+    FeedbackHaptics,
+    FeedbackSounds,
+    FeedbackApps,
     OpenWith,
     OpenLinksWith,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 55] = [
+    const ALL: [Key; 58] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -366,6 +373,9 @@ impl Key {
         Key::CommandLevel,
         Key::ClaudeIntegration,
         Key::ClaudeSkill,
+        Key::FeedbackHaptics,
+        Key::FeedbackSounds,
+        Key::FeedbackApps,
         Key::OpenWith,
         Key::OpenLinksWith,
     ];
@@ -436,6 +446,9 @@ impl Key {
             Key::CommandLevel => "commands.level",
             Key::ClaudeIntegration => "agents.claude_integration",
             Key::ClaudeSkill => "agents.claude_skill",
+            Key::FeedbackHaptics => "feedback.haptics",
+            Key::FeedbackSounds => "feedback.sounds",
+            Key::FeedbackApps => "feedback.apps",
             Key::OpenWith => "apps.open_with",
             Key::OpenLinksWith => "apps.open_links_with",
         }
@@ -938,6 +951,13 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         Key::Ports => Some("Click to list them, \u{2318}-click to open one."),
         Key::ClaudeIntegration => Some("Show its last reply"),
         Key::ClaudeSkill => Some("Teach Claude Code to open panes and read terminals"),
+        Key::FeedbackHaptics => Some("Felt only while a finger is on the trackpad that vibrates."),
+        Key::FeedbackSounds => Some("At the volume the system is set to."),
+        Key::FeedbackApps => Some(if settings.feedback_apps {
+            "A program\u{2019}s view may vibrate the trackpad and play sounds."
+        } else {
+            "Only what you run yourself (bateri haptic, bateri sound) and bateri\u{2019}s own play."
+        }),
         Key::CommandLevel => Some(command_level_note(settings.commands_level)),
         Key::RemoteIntegration => Some(match settings.remote_integration {
             RemoteIntegration::Auto => {
@@ -1819,6 +1839,9 @@ struct Controls {
     node_version: Retained<ThemeSwitch>,
     claude_integration: Retained<ThemeSwitch>,
     claude_skill: Retained<ThemeSwitch>,
+    feedback_haptics: Retained<ThemeSwitch>,
+    feedback_sounds: Retained<ThemeSwitch>,
+    feedback_apps: Retained<ThemeSwitch>,
     /// The Agents page's line on where the reply shows, with the button beside it.
     agent_where: Option<AgentWhere>,
     dim_splits: Retained<ThemeSwitch>,
@@ -2339,6 +2362,9 @@ define_class!(
                 Some(Key::NodeVersion) => Some(SettingsEdit::ShellNodeVersion(on)),
                 Some(Key::ClaudeIntegration) => Some(SettingsEdit::AgentsClaudeIntegration(on)),
                 Some(Key::ClaudeSkill) => Some(SettingsEdit::AgentsClaudeSkill(on)),
+                Some(Key::FeedbackHaptics) => Some(SettingsEdit::FeedbackHaptics(on)),
+                Some(Key::FeedbackSounds) => Some(SettingsEdit::FeedbackSounds(on)),
+                Some(Key::FeedbackApps) => Some(SettingsEdit::FeedbackApps(on)),
                 Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
                 Some(Key::FocusFrame) => Some(SettingsEdit::FocusFrame(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
@@ -2861,6 +2887,9 @@ impl SettingsWindow {
         set_switch(&c.node_version, settings.shell_node_version);
         set_switch(&c.claude_integration, settings.agents_claude_integration);
         set_switch(&c.claude_skill, settings.agents_claude_skill);
+        set_switch(&c.feedback_haptics, settings.feedback_haptics);
+        set_switch(&c.feedback_sounds, settings.feedback_sounds);
+        set_switch(&c.feedback_apps, settings.feedback_apps);
         set_switch(&c.dim_splits, settings.dim_unfocused_splits);
         set_switch(&c.focus_frame, settings.focus_frame);
         set_switch(&c.resize_in_steps, settings.resize_in_steps);
@@ -4142,6 +4171,9 @@ impl SettingsWindow {
         let node_version = self.switch(Key::NodeVersion);
         let claude_integration = self.switch(Key::ClaudeIntegration);
         let claude_skill = self.switch(Key::ClaudeSkill);
+        let feedback_haptics = self.switch(Key::FeedbackHaptics);
+        let feedback_sounds = self.switch(Key::FeedbackSounds);
+        let feedback_apps = self.switch(Key::FeedbackApps);
         let command_level = self.popup::<CommandLevel>(Key::CommandLevel);
 
         let theme_mode = self.theme_mode();
@@ -4281,6 +4313,9 @@ impl SettingsWindow {
             node_version,
             claude_integration,
             claude_skill,
+            feedback_haptics,
+            feedback_sounds,
+            feedback_apps,
             agent_where: None,
             dim_splits,
             focus_frame,
@@ -4809,6 +4844,9 @@ impl Controls {
             Key::NodeVersion => Parts::of(&self.node_version),
             Key::ClaudeIntegration => Parts::of(&self.claude_integration),
             Key::ClaudeSkill => Parts::of(&self.claude_skill),
+            Key::FeedbackHaptics => Parts::of(&self.feedback_haptics),
+            Key::FeedbackSounds => Parts::of(&self.feedback_sounds),
+            Key::FeedbackApps => Parts::of(&self.feedback_apps),
             Key::DimSplits => Parts::of(&self.dim_splits),
             Key::FocusFrame => Parts::of(&self.focus_frame),
             Key::ResizeInSteps => Parts::of(&self.resize_in_steps),
@@ -5412,13 +5450,14 @@ enum SideItem {
 
 impl SideItem {
     /// The sidebar's rows, top to bottom: the pages in order, a gap before Servers.
-    const ALL: [SideItem; 12] = [
+    const ALL: [SideItem; 13] = [
         SideItem::Page(Category::General),
         SideItem::Page(Category::Appearance),
         SideItem::Page(Category::Font),
         SideItem::Page(Category::Tabs),
         SideItem::Page(Category::Cursor),
         SideItem::Page(Category::Motion),
+        SideItem::Page(Category::Feedback),
         SideItem::Page(Category::Shell),
         SideItem::Page(Category::Keyboard),
         SideItem::Gap,
@@ -5819,6 +5858,7 @@ mod tests {
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
                     [agents]\nclaude_integration = []\nclaude_skill = []\n\
+                    [feedback]\nhaptics = []\nsounds = []\napps = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
                     [commands]\nlevel = []\n\
                     [apps]\nopen_with = []\nopen_links_with = []\n\
@@ -5881,6 +5921,9 @@ mod tests {
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
                 Key::ClaudeIntegration => SettingsEdit::AgentsClaudeIntegration(true),
                 Key::ClaudeSkill => SettingsEdit::AgentsClaudeSkill(true),
+                Key::FeedbackHaptics => SettingsEdit::FeedbackHaptics(false),
+                Key::FeedbackSounds => SettingsEdit::FeedbackSounds(false),
+                Key::FeedbackApps => SettingsEdit::FeedbackApps(false),
                 Key::CommandLevel => SettingsEdit::CommandLevel(CommandLevel::Off),
                 Key::OpenWith => SettingsEdit::AppsOpenWith(String::new()),
                 Key::OpenLinksWith => SettingsEdit::AppsOpenLinksWith(String::new()),
@@ -6552,6 +6595,58 @@ mod tests {
         assert_eq!(page_of(Key::DownloadNotify), Category::Servers);
         assert_eq!(page_of(Key::ClaudeIntegration), Category::Agents);
         assert_eq!(page_of(Key::ClaudeSkill), Category::Agents);
+        assert_eq!(page_of(Key::FeedbackHaptics), Category::Feedback);
+        assert_eq!(page_of(Key::FeedbackSounds), Category::Feedback);
+        assert_eq!(page_of(Key::FeedbackApps), Category::Feedback);
+    }
+
+    /// The Sound & Haptics page has the three switches of `[feedback]` and no other row; each is
+    /// named as the file names it, and says what the value does.
+    #[test]
+    fn the_sound_and_haptics_page_is_the_three_feedback_switches() {
+        assert_eq!(Category::Feedback.title(), "Sound & Haptics");
+        assert_eq!(Category::Feedback.symbol(), "speaker.wave.2");
+        let rows: Vec<pages::Item> = pages::groups(Category::Feedback)
+            .iter()
+            .flat_map(|group| group.items.iter().copied())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                pages::Item::Key(Key::FeedbackHaptics),
+                pages::Item::Key(Key::FeedbackSounds),
+                pages::Item::Key(Key::FeedbackApps),
+            ]
+        );
+        assert_eq!(Key::FeedbackHaptics.path(), "feedback.haptics");
+        assert_eq!(Key::FeedbackSounds.path(), "feedback.sounds");
+        assert_eq!(Key::FeedbackApps.path(), "feedback.apps");
+        let resolved = Resolved {
+            reduce: false,
+            scrollbar: ScrollbarMode::Auto,
+        };
+        for key in [Key::FeedbackHaptics, Key::FeedbackSounds, Key::FeedbackApps] {
+            assert!(!pages::label(key).is_empty(), "{key:?}");
+            assert!(
+                row_description(key, &Settings::default(), resolved).is_some(),
+                "{key:?}"
+            );
+        }
+        // The sentence is what the value does now.
+        let off = Settings {
+            feedback_apps: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            row_description(Key::FeedbackApps, &Settings::default(), resolved),
+            Some("A program\u{2019}s view may vibrate the trackpad and play sounds.")
+        );
+        assert_eq!(
+            row_description(Key::FeedbackApps, &off, resolved),
+            Some(
+                "Only what you run yourself (bateri haptic, bateri sound) and bateri\u{2019}s own play."
+            )
+        );
     }
 
     /// The Agents page is the table's: the row is named as the table names its agent, and wears
@@ -6659,10 +6754,11 @@ mod tests {
                 Some(4),
                 Some(5),
                 Some(6),
-                None,
                 Some(7),
+                None,
                 Some(8),
-                Some(9)
+                Some(9),
+                Some(10)
             ]
         );
     }

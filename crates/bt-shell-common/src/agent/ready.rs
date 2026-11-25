@@ -47,6 +47,10 @@ pub enum Outcome {
     Unplayable,
     /// A sound the system could not start.
     Failed,
+    /// A vibration that `[feedback] haptics` keeps from playing.
+    HapticsOff,
+    /// A sound that `[feedback] sounds` keeps from playing.
+    SoundsOff,
 }
 
 /// The answer to `haptic [NAME]` or `sound [NAME]`: with no name, the names there are, one to a
@@ -98,6 +102,12 @@ fn line(name: &str, outcome: Outcome) -> String {
             format!("{name} did not play: nothing in it is one this trackpad can play\n")
         }
         Outcome::Failed => format!("{name} did not play: the system could not start it\n"),
+        Outcome::HapticsOff => format!(
+            "{name} did not play: vibrations are off in bateri's settings (feedback.haptics)\n"
+        ),
+        Outcome::SoundsOff => {
+            format!("{name} did not play: sounds are off in bateri's settings (feedback.sounds)\n")
+        }
     }
 }
 
@@ -149,6 +159,14 @@ mod tests {
             (
                 Outcome::Failed,
                 "tick did not play: the system could not start it\n",
+            ),
+            (
+                Outcome::HapticsOff,
+                "tick did not play: vibrations are off in bateri's settings (feedback.haptics)\n",
+            ),
+            (
+                Outcome::SoundsOff,
+                "tick did not play: sounds are off in bateri's settings (feedback.sounds)\n",
             ),
         ] {
             let mut asked = Vec::new();

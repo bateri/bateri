@@ -10,7 +10,7 @@
 //! The device and the speaker are what a test replaces ([`Engine`], [`Speaker`]): the rules here
 //! are pure, and the real ones are not started until a vibration or a sound is first asked for.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSSound;
 use objc2_foundation::NSData;
 
+use super::switches::{Asker, Switches};
 use super::{Haptics, Told};
 
 /// What vibrates.
@@ -177,6 +178,8 @@ pub struct Feel {
     speaker: RefCell<Box<dyn Speaker>>,
     now: Box<dyn Fn() -> f64>,
     state: RefCell<State>,
+    /// What `[feedback]` lets play ([`Switches`]).
+    switches: Cell<Switches>,
 }
 
 impl Default for Feel {
@@ -211,6 +214,34 @@ impl Feel {
             speaker: RefCell::new(speaker),
             now,
             state: RefCell::new(State::default()),
+            switches: Cell::new(Switches::default()),
+        }
+    }
+
+    /// What `[feedback]` says now: what is closed ends what it no longer lets play (a vibration
+    /// and the sounds of the views it concerned, and of the application's own where the kind
+    /// itself is closed), and what is asked after it is dropped or answered accordingly. Called
+    /// with the file's values when the application starts and each time they change.
+    pub fn set_switches(&self, new: Switches) {
+        let old = self.switches.replace(new);
+        let haptic = old.ends_haptic(new);
+        if haptic.any() {
+            let vibrating = self.state.borrow().vibrating;
+            if let Some(view) = vibrating
+                && haptic.of(view)
+            {
+                self.end_haptic(view);
+            }
+        }
+        let sounds = old.ends_sounds(new);
+        if sounds.any() {
+            let now = (self.now)();
+            let views: Vec<u64> = self.state.borrow().voices.keys().copied().collect();
+            for view in views {
+                if sounds.of(view) {
+                    self.end_sounds(view, now);
+                }
+            }
         }
     }
 
@@ -219,7 +250,7 @@ impl Feel {
     pub fn haptic(&self, view: u64, ask: &Haptic, felt: bool) {
         match ask {
             Haptic::Play(pattern) => {
-                if felt {
+                if felt && self.switches.get().plays_haptic(Asker::of(view)) {
                     self.vibrate(view, pattern, None);
                 } else {
                     // A new vibration takes the place of the view's last, felt or not: the old
@@ -275,7 +306,11 @@ impl Feel {
     pub fn sound(&self, view: u64, ask: &Ask) {
         match ask {
             Ask::Play(play) => {
-                self.start_sound(view, play);
+                // What a closed switch keeps from playing is dropped, as a vibration is where no
+                // finger is on the glass: the page is not told.
+                if self.switches.get().plays_sound(Asker::of(view)) {
+                    self.start_sound(view, play);
+                }
             }
             Ask::Stop => self.end_sounds(view, (self.now)()),
         }
@@ -329,7 +364,11 @@ impl Feel {
         let Some(pattern) = haptic::preset(name) else {
             return false;
         };
-        self.vibrate(APPLICATION, &pattern, Some(told));
+        if self.switches.get().plays_haptic(Asker::Person) {
+            self.vibrate(APPLICATION, &pattern, Some(told));
+        } else {
+            told(Outcome::HapticsOff);
+        }
         true
     }
 
@@ -339,6 +378,9 @@ impl Feel {
     pub fn play_ready_sound(&self, name: &str) -> Option<Outcome> {
         let draw = self.state.borrow().next_sound;
         let samples = sounds::play_of(name, 1.0, draw)?;
+        if !self.switches.get().plays_sound(Asker::Person) {
+            return Some(Outcome::SoundsOff);
+        }
         let play = sound::Play {
             source: sound::Source::Kit(name.to_owned()),
             volume: 1.0,
@@ -848,6 +890,165 @@ mod tests {
         // the engine that was made.
         plugs.feel.view_ended(4);
         assert_eq!(*plugs.log.borrow(), [(1, "played"), (1, "stopped")]);
+    }
+
+    const ALL: Switches = Switches {
+        haptics: true,
+        sounds: true,
+        apps: true,
+    };
+
+    fn started(rig: &Rig) -> usize {
+        rig.speaker
+            .0
+            .borrow()
+            .iter()
+            .filter(|h| matches!(h, Sounded::Started(..)))
+            .count()
+    }
+
+    fn ended(rig: &Rig) -> usize {
+        rig.speaker
+            .0
+            .borrow()
+            .iter()
+            .filter(|h| matches!(h, Sounded::Ended(..)))
+            .count()
+    }
+
+    #[test]
+    fn a_page_vibrates_and_sounds_only_where_its_kind_and_apps_are_on() {
+        for (haptics, sounds, apps) in [
+            (true, true, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let rig = rig();
+            rig.feel.set_switches(Switches {
+                haptics,
+                sounds,
+                apps,
+            });
+            rig.feel.haptic(1, &Haptic::Play(pattern()), true);
+            rig.feel.sound(1, &play_sound(0.1, 1.0));
+            let vibrated = rig
+                .motor
+                .0
+                .borrow()
+                .iter()
+                .any(|heard| matches!(heard, Heard::Played(_)));
+            assert_eq!(vibrated, haptics && apps, "{haptics} {sounds} {apps}");
+            assert_eq!(
+                started(&rig) == 1,
+                sounds && apps,
+                "{haptics} {sounds} {apps}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_persons_command_plays_whatever_apps_says_and_says_which_key_is_closed() {
+        let rig = rig();
+        rig.feel.set_switches(Switches { apps: false, ..ALL });
+        assert_eq!(ready_haptic(&rig.feel, "tick"), Some(Outcome::Played));
+        assert_eq!(rig.feel.play_ready_sound("tap"), Some(Outcome::Played));
+        // Its own key closed: it does not play, and says so; the name that is none is still none.
+        rig.feel.set_switches(Switches {
+            haptics: false,
+            sounds: false,
+            apps: true,
+        });
+        let before = (rig.motor.0.borrow().len(), started(&rig));
+        assert_eq!(ready_haptic(&rig.feel, "tick"), Some(Outcome::HapticsOff));
+        assert_eq!(rig.feel.play_ready_sound("tap"), Some(Outcome::SoundsOff));
+        assert_eq!(ready_haptic(&rig.feel, "nope"), None);
+        assert_eq!(rig.feel.play_ready_sound("nope"), None);
+        assert_eq!(
+            (rig.motor.0.borrow().len(), started(&rig)),
+            before,
+            "nothing played"
+        );
+        // One kind closed does not close the other.
+        rig.feel.set_switches(Switches {
+            haptics: false,
+            ..ALL
+        });
+        assert_eq!(ready_haptic(&rig.feel, "tick"), Some(Outcome::HapticsOff));
+        assert_eq!(rig.feel.play_ready_sound("tap"), Some(Outcome::Played));
+    }
+
+    #[test]
+    fn a_stop_goes_through_whatever_is_closed() {
+        let rig = rig();
+        assert_eq!(ready_haptic(&rig.feel, "tick"), Some(Outcome::Played));
+        assert_eq!(rig.feel.play_ready_sound("tap"), Some(Outcome::Played));
+        // `apps` closed ends no play of the person's; its own stops still reach what plays.
+        rig.feel.set_switches(Switches { apps: false, ..ALL });
+        assert_eq!(ended(&rig), 0);
+        rig.feel.haptic(APPLICATION, &Haptic::Stop, true);
+        rig.feel.sound(APPLICATION, &Ask::Stop);
+        let heard = rig.motor.0.borrow();
+        assert_eq!(heard.last(), Some(&Heard::Stopped));
+        drop(heard);
+        assert_eq!(ended(&rig), 1);
+    }
+
+    #[test]
+    fn closing_a_kind_ends_what_plays_of_it_for_pages_and_for_the_application() {
+        // A page's vibration and sound.
+        let rig = rig();
+        rig.feel.haptic(1, &Haptic::Play(pattern()), true);
+        rig.feel.sound(1, &play_sound(5.0, 1.0));
+        rig.feel.set_switches(Switches {
+            haptics: false,
+            ..ALL
+        });
+        assert_eq!(rig.motor.0.borrow().last(), Some(&Heard::Stopped));
+        assert_eq!(ended(&rig), 0, "the sound is of the kind still open");
+        rig.feel.set_switches(Switches {
+            haptics: false,
+            sounds: false,
+            apps: true,
+        });
+        assert_eq!(ended(&rig), 1);
+        // The application's own.
+        let rig = self::rig();
+        assert_eq!(ready_haptic(&rig.feel, "rumble"), Some(Outcome::Played));
+        assert_eq!(rig.feel.play_ready_sound("tap"), Some(Outcome::Played));
+        rig.feel.set_switches(Switches {
+            haptics: false,
+            sounds: false,
+            apps: true,
+        });
+        assert_eq!(rig.motor.0.borrow().last(), Some(&Heard::Stopped));
+        assert_eq!(ended(&rig), 1);
+    }
+
+    #[test]
+    fn closing_apps_ends_what_pages_play_and_leaves_the_persons_and_the_applications_own() {
+        let rig = rig();
+        // Two views' sounds and the application's own sound, and a page's vibration.
+        rig.feel.sound(1, &play_sound(5.0, 1.0));
+        rig.feel.sound(2, &play_sound(5.0, 1.0));
+        assert_eq!(rig.feel.play_ready_sound("tap"), Some(Outcome::Played));
+        rig.feel.haptic(1, &Haptic::Play(pattern()), true);
+        rig.feel.set_switches(Switches { apps: false, ..ALL });
+        assert_eq!(
+            ended(&rig),
+            2,
+            "the two pages' sounds, not the application's"
+        );
+        assert_eq!(rig.motor.0.borrow().last(), Some(&Heard::Stopped));
+        // The person's own vibration is not a page's.
+        let rig = self::rig();
+        assert_eq!(ready_haptic(&rig.feel, "rumble"), Some(Outcome::Played));
+        rig.feel.set_switches(Switches { apps: false, ..ALL });
+        assert_eq!(rig.motor.0.borrow().len(), 1, "nothing was stopped");
+        // Opening again changes nothing that plays.
+        rig.feel.set_switches(ALL);
+        assert_eq!(rig.motor.0.borrow().len(), 1);
     }
 
     #[test]
