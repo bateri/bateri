@@ -9,6 +9,8 @@
 //! waited for. [`REST_LIMIT`] ends the wait of a page that never comes to rest, and the answer
 //! says what was still going on; that is not a mistake.
 
+use std::time::{Duration, Instant};
+
 use pencere_drive::{FrameAt, Reading, ReadingInput};
 
 use super::act::{Done, perform};
@@ -20,6 +22,10 @@ use kablo_bateri::view::{Action, View, WAIT_DEFAULT};
 /// How long, in seconds, an answer waits for a page to come to rest.
 pub const REST_LIMIT: f64 = 2.0;
 
+/// How long past the limit a sound still being decoded is waited for where the page names no time
+/// it gives up at.
+const SOUNDS_EXTRA: Duration = Duration::from_secs(1);
+
 /// What a request asked the answer to wait for, and what it has been told.
 #[derive(Debug)]
 pub struct Run {
@@ -28,6 +34,9 @@ pub struct Run {
     began: f64,
     /// How long the wait lasts, in seconds.
     limit: f64,
+    /// Past the limit, until when a sound still being decoded is waited for: the time the page
+    /// gives up on the oldest, taken once, when the limit was crossed.
+    sounds_until: Option<Instant>,
 }
 
 /// Whether the request is answered.
@@ -208,6 +217,7 @@ impl Run {
             view: view.clone(),
             done,
             began: ctx.now,
+            sounds_until: None,
             limit,
         })
     }
@@ -259,7 +269,11 @@ impl Run {
                 Step::Pending
             }
             _ => {
-                if reading.rest.resting() || elapsed >= self.limit {
+                // A sound still being decoded is waited for past the limit too, as long as the page
+                // itself waits for it: what it finishes is told through `Held`, and no sound of a
+                // button an agent pressed is played for the person after the answer.
+                let waiting = self.sounds_pending(&ctx, env, elapsed >= self.limit);
+                if !waiting && (reading.rest.resting() || elapsed >= self.limit) {
                     if let Action::Shot { full } = &self.view.action {
                         let mut session = env.session.borrow_mut();
                         session.active = false;
@@ -275,6 +289,33 @@ impl Run {
                 }
             }
         }
+    }
+
+    /// Whether a sound of a file the page asked for is still being decoded, as the images are
+    /// waited for: it is told when it is ready, and a sound told after the request is over is
+    /// played for the person, whom the request was not made by. The wait is the page's own (it
+    /// gives up on a sound that takes too long, within a second of the ask) and goes on past
+    /// [`REST_LIMIT`], but only until the time the page gives up on the oldest sound at when the
+    /// limit is crossed: a page that keeps asking for sounds does not hold the request for ever.
+    fn sounds_pending(&mut self, ctx: &Ctx<'_>, env: &Env<'_>, past_limit: bool) -> bool {
+        // The look takes in what the decoder finished and says whether none is on its way: what it
+        // took in is told now, through `Held`, as the page is drained (a sound that came between
+        // this request's last drain and the look would be told to the person's speaker otherwise),
+        // and what the drain told may have asked for a file of its own.
+        let waiting = ctx.handle.page().sounds_waiting() || {
+            (env.drain)();
+            ctx.handle.page().sounds_waiting()
+        };
+        if !waiting || !past_limit {
+            return waiting;
+        }
+        let until = *self.sounds_until.get_or_insert_with(|| {
+            ctx.handle
+                .page()
+                .sounds_deadline()
+                .unwrap_or_else(|| Instant::now() + SOUNDS_EXTRA)
+        });
+        Instant::now() < until
     }
 
     fn answer(&mut self, pane: Pane<'_>, ctx: &Ctx<'_>, env: &Env<'_>) -> Step {

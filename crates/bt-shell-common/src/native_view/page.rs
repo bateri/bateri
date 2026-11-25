@@ -1000,6 +1000,12 @@ pub(super) mod tests {
         fn link(&mut self, url: String) {
             self.0.borrow_mut().link(&url);
         }
+        fn haptic(&mut self, haptic: crate::native_view::haptic::Haptic) {
+            self.0.borrow_mut().say(format!("haptic {haptic:?}"));
+        }
+        fn sound(&mut self, ask: crate::native_view::sound::Ask) {
+            self.0.borrow_mut().say(format!("sound {ask:?}"));
+        }
         fn menu(&mut self, menu: Menu) {
             self.0.borrow_mut().menu(&menu);
         }
@@ -1038,6 +1044,15 @@ pub(super) mod tests {
         /// The same with the look of the terminal the page reads (`pencere.terminal_look()`) in
         /// `look`, the slot the pane would change.
         pub(in crate::native_view) fn open_with(source: &str, look: LookSlot) -> Self {
+            Self::open_bundled(source, look, None)
+        }
+
+        /// The same with a bundle of files (`assets`) the page can name.
+        pub(in crate::native_view) fn open_bundled(
+            source: &str,
+            look: LookSlot,
+            assets: Option<Arc<dyn Assets>>,
+        ) -> Self {
             let script = Script {
                 path: "page.lua".to_owned(),
                 source: source.as_bytes().to_vec(),
@@ -1048,7 +1063,13 @@ pub(super) mod tests {
                 clock: None,
                 look,
             };
-            let setup = setup(ModuleLimits::default(), 32.0, program, None, Box::new(Even));
+            let setup = setup(
+                ModuleLimits::default(),
+                32.0,
+                program,
+                assets,
+                Box::new(Even),
+            );
             let handle = PageHandle::new(Page::script(script, setup, || {}));
             let log = Rc::new(RefCell::new(Transcript::default()));
             let told = Rc::clone(&log);

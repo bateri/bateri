@@ -996,6 +996,10 @@ pub(crate) struct Ivars {
     /// window's lock and line diagnostics come from here. Written at startup
     /// and at every live read, so even if the window opens later it sees the file's state.
     settings_state: RefCell<settings::FileState>,
+    /// What plays the vibration and the sounds of the views of the application's panes and what
+    /// the application plays itself (`feel`): the trackpad and the speaker are opened when
+    /// something is first played.
+    feel: Rc<crate::feel::Feel>,
     /// The programs `[apps] sources` lists, followed on a thread of their own
     /// ([`bt_shell_common::apps`]): started once the settings are read
     /// ([`AppDelegate::start_apps`]), never in a timed run.
@@ -2808,6 +2812,7 @@ impl AppDelegate {
             scrollbar: Cell::new(None),
             settings_window: RefCell::new(None),
             settings_state: RefCell::new(settings::FileState::Missing),
+            feel: Rc::new(crate::feel::Feel::new()),
             apps: OnceCell::new(),
             openers: RefCell::new(None),
             links_lookup: Cell::new(bt_shell_common::web_links::Lookup::UNREAD),
@@ -2865,6 +2870,11 @@ impl AppDelegate {
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// What plays the vibration and the sounds of the panes' views.
+    pub(crate) fn feel(&self) -> Rc<crate::feel::Feel> {
+        Rc::clone(&self.ivars().feel)
     }
 
     /// Identity of a new window, tab or pane; the counter only goes up.

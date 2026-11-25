@@ -1452,10 +1452,18 @@ fn ask_in(
                 return Reply::Text(format!("shot full={full} seen={seen}"));
             }
             Step::Pending => {
+                // A sound the decoder's thread is at is given the time it takes, and the test's
+                // clock does not run meanwhile (the page gives up on it at its own deadline).
+                let decoding = rig.handle().page().sounds_deadline().is_some();
+                if decoding {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
                 if seen {
                     rig.frame(now);
                 }
-                now += 0.1;
+                if !decoding {
+                    now += 0.1;
+                }
             }
         }
     }
@@ -1720,6 +1728,12 @@ return {
                 return { redraw = true, link = "https://example.com/a" }
             elseif k == "u" then
                 return { redraw = true, pick = { multiple = false } }
+            elseif k == "h" then
+                return { redraw = true, haptic = "success", sound = { "tap", { name = "snap", pitch = 0.8 } } }
+            elseif k == "H" then
+                return { redraw = true, haptic = { events = { { time = 0, kind = "tap", intensity = 1, sharpness = 0.5 } } }, sound = false }
+            elseif k == "x" then
+                return { redraw = true, haptic = false }
             elseif k == "f" then
                 return { redraw = true, keyboard = { field = "q" }, fill = { q = "filled" } }
             elseif k == "k" then
@@ -2104,6 +2118,118 @@ fn keys_go_to_the_page_and_what_it_asks_of_the_host_is_held_back_and_told() {
         !heard.contains("key a"),
         "the first key was pressed: {heard}"
     );
+}
+
+/// The person's trackpad and speaker are not the agent's: a page's vibration and sounds are not
+/// played for a request, and the agent is told what the page asked for instead, at the moment the
+/// page asked.
+#[test]
+fn a_vibration_and_a_sound_the_page_asks_for_are_told_to_the_agent_and_not_played() {
+    let (mut rig, fields) = acting();
+    let _ = rig.lines();
+    let named = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["h".into()]),
+        &fields,
+    ));
+    assert!(
+        named.contains("the page asked to vibrate: success"),
+        "{named}"
+    );
+    assert!(named.contains("the page played the sound tap"), "{named}");
+    assert!(named.contains("the page played the sound snap"), "{named}");
+    let own = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["H".into()]),
+        &fields,
+    ));
+    assert!(
+        own.contains("the page asked to vibrate: a pattern of its own"),
+        "{own}"
+    );
+    assert!(own.contains("the page ended its sounds"), "{own}");
+    let stopped = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["x".into()]),
+        &fields,
+    ));
+    assert!(
+        stopped.contains("the page ended its vibration"),
+        "{stopped}"
+    );
+    // The pane's own host vibrated and played nothing; it was told the ends, which it ends what the
+    // person's page began with.
+    let heard = rig.lines();
+    for line in &heard {
+        assert!(
+            !((line.starts_with("haptic") || line.starts_with("sound")) && line.contains("Play")),
+            "the pane did {line}"
+        );
+    }
+    assert!(heard.iter().any(|line| line == "haptic Stop"), "{heard:?}");
+    assert!(heard.iter().any(|line| line == "sound Stop"), "{heard:?}");
+}
+
+/// A bundle of one file, a sound the page names by path.
+struct OneSound(std::sync::Arc<[u8]>);
+
+impl pencere_sandbox::Assets for OneSound {
+    fn read(&self, path: &str) -> Option<std::sync::Arc<[u8]>> {
+        // The decoder's thread is slower than the page's coming to rest, as a long file is.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        (path == "sounds/ding.wav").then(|| std::sync::Arc::clone(&self.0))
+    }
+
+    fn media_type(&self, _path: &str) -> Option<String> {
+        None
+    }
+}
+
+/// A sound of the page's own file is decoded on a thread of its own and told when it is ready:
+/// the request waits for it, so that it is told to the agent (as the sound of a kit's name is)
+/// and is not played for the person once the request is over.
+#[test]
+fn a_sound_from_a_file_the_page_asks_for_is_waited_for_and_told_to_the_agent() {
+    use crate::native_view::sounds;
+    let tap = sounds::play_of("tap", 1.0, 0).expect("the kit has a tap");
+    let wav = sounds::wav(&tap).expect("a tap is a file");
+    let source = ACT.replace(
+        r#"elseif k == "x" then"#,
+        r#"elseif k == "d" then
+                return { redraw = true, sound = { file = "sounds/ding.wav" } }
+            elseif k == "x" then"#,
+    );
+    let mut rig = PaneRig::open_bundled(
+        &source,
+        crate::native_view::LookSlot::default(),
+        Some(std::sync::Arc::new(OneSound(wav.into()))),
+    );
+    rig.frame(0.0);
+    rig.settle(0.1);
+    let fields = HostFields::holding(&[("q", "api"), ("pw", "hunter2")]);
+    let _ = rig.lines();
+    let told = answered(ask(
+        &mut rig,
+        true,
+        Action::Press(vec!["d".into()]),
+        &fields,
+    ));
+    assert!(
+        told.contains("the page played a sound from sounds/ding.wav"),
+        "{told}"
+    );
+    // Nothing is left to be told afterwards: the pane's own drain has no sound to play.
+    assert!(!rig.handle().page().sounds_waiting());
+    for line in rig.lines() {
+        assert!(!line.starts_with("sound"), "the pane did {line}");
+    }
+    rig.drain_for_agent(&fields.session);
+    for line in rig.lines() {
+        assert!(!line.starts_with("sound"), "the pane did {line}");
+    }
 }
 
 #[test]

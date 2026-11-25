@@ -73,6 +73,7 @@ use bt_shell_common::agent::message::{
 };
 use bt_shell_common::agent::notes::Note;
 use bt_shell_common::agent::place::{Ask, Landed, Landing, Spot};
+use bt_shell_common::agent::ready::{self, Ready};
 use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell};
 use bt_shell_common::agent::summary;
 use bt_shell_common::agent::view as reading;
@@ -277,6 +278,8 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         },
         Answer::Notify(text) => notify(app, letter, &server, from.as_deref(), &text),
         Answer::Message(text) => message(app, letter, &server, from.as_deref(), &text),
+        Answer::Haptic(name) => play_ready(app, letter, Ready::Haptic, name.as_deref()),
+        Answer::Sound(name) => play_ready(app, letter, Ready::Sound, name.as_deref()),
         Answer::Arrange(request) => {
             arrange::arranged(app, letter, &server, from.as_deref(), &request);
         }
@@ -1553,6 +1556,30 @@ fn message(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str
         tab.activity_changed();
     }
     letter.answer(Reply::Done.encode().into_bytes());
+}
+
+/// `bateri haptic` and `bateri sound`: one of the kit's ready vibrations or sounds played for the
+/// person at this computer, by the application's own service (`feel`), whichever machine the
+/// command was run on. With no name the answer lists the names; what came of a name is one line
+/// ([`ready::reply`]). A vibration is answered by the thread that plays it, when it has looked for
+/// a finger (some frames the first time after the trackpads were started): the main thread is not
+/// held for it, and the letter goes with the vibration.
+fn play_ready(app: &AppDelegate, letter: Letter, which: Ready, name: Option<&str>) {
+    let feel = app.feel();
+    if let (Ready::Haptic, Some(name)) = (which, name.filter(|name| which.names().contains(name))) {
+        let said = name.to_owned();
+        let told: crate::feel::Told = Box::new(move |outcome| {
+            letter.answer(ready::said(&said, outcome).encode().into_bytes());
+        });
+        feel.play_ready_haptic(name, told);
+        return;
+    }
+    let reply = ready::reply(which, name, |name| match which {
+        // A name the kit has ready is answered above.
+        Ready::Haptic => None,
+        Ready::Sound => feel.play_ready_sound(name),
+    });
+    letter.answer(reply.encode().into_bytes());
 }
 
 /// How a program that asks to be noticed is told — a server's `bateri notify` and a terminal's

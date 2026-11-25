@@ -79,6 +79,7 @@ TARGET = "aarch64-apple-darwin"
 # sandbox brings: tiny-skia under the SVG renderer, arrayref), which the Free Software
 # Foundation lists as GPL-compatible and which ask only for the notice, given as the crate
 # has it. Anything else without an MIT option stops the script.
+APACHE_WITH_FONTS = "Apache-2.0 AND OFL-1.1"
 OWN_LICENSES = {
     "Apache-2.0", "Zlib", "ISC", "BSD-2-Clause", "BSD-3-Clause",
     "Apache-2.0 WITH LLVM-exception",
@@ -88,6 +89,12 @@ OWN_LICENSES = {
     # the ICU4X crates `yoke` and `zerofrom` are under the Unicode license v3 (permissive,
     # GPL-3 compatible), whose text and copyright line are the crate's own.
     "BSD-3-Clause OR Apache-2.0", "BSD-3-Clause AND MIT", "Unicode-3.0",
+    # pencere's drive (`pencere-drive`, with the sounds and the native views' headless host,
+    # 2026-11-25): the code is Apache-2.0 and the two faces in its `fonts/` (Inter and JetBrains
+    # Mono, which the drive draws a page's picture with, linked only with its `shot` feature, which
+    # bateri does not turn on) are under the SIL Open Font License 1.1. Given as the fonts bateri
+    # ships itself are: the OFL is GPL-3 compatible and asks for the notice that goes with each face.
+    APACHE_WITH_FONTS,
 }
 # Crates of a repository that publishes one license file for several of them, and puts it
 # in one of them only: the crate whose package carries none is given the sibling's text,
@@ -117,7 +124,7 @@ COPYRIGHT = {
 # Crates whose license file is the Apache text alone, with no copyright line of the holder's (the
 # sentences of the license that begin with "copyright" are not one): the line comes from the
 # authors in the crate's `Cargo.toml`.
-COPYRIGHT_FROM_AUTHORS = {"ab_glyph_rasterizer"}
+COPYRIGHT_FROM_AUTHORS = {"ab_glyph_rasterizer", "hound"}
 MIT_TEXT = """Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
@@ -175,11 +182,18 @@ def copyright_lines(pkg):
             continue
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = [l.strip() for l in f if l.strip().lower().startswith("copyright")]
-        # A line without an owner's name ("Copyright (c) 2016--2017") and a
-        # redirect file (Unlicense/COPYING) do not count as a notice; the next
-        # candidate, and the authors last.
+        # A file of the MIT text and the Apache text together (`lewton`) has the holder's line
+        # twice, and the Apache text has two sentences that begin with the word, each at the
+        # start of a wrapped line: neither is a notice.
+        lines = [l for l in dict.fromkeys(lines)
+                 if not l.lower().startswith(("copyright notice that is included",
+                                              "copyright license to reproduce"))]
+        # A line without an owner's name ("Copyright (c) 2016--2017"), the Apache appendix's
+        # template ("Copyright [yyyy] [name of copyright owner]") and a redirect file
+        # (Unlicense/COPYING) do not count as a notice; the next candidate, and the authors last.
         lines = [l for l in lines
-                 if any(ch.isalpha() for ch in l[9:].replace("(c)", "").replace("(C)", ""))]
+                 if "[yyyy]" not in l
+                 and any(ch.isalpha() for ch in l[9:].replace("(c)", "").replace("(C)", ""))]
         if lines:
             return lines
     authors = [a.split(" <")[0] for a in pkg.get("authors") or []]
@@ -210,6 +224,37 @@ def own_license(pkg):
         sys.exit(f"{pkg['name']} {pkg['version']}: license '{expr}' neither offers "
                  "MIT nor is on the allow list")
     return expr
+
+
+def crate_fonts(name, version, root):
+    """The licenses of the font faces a crate under `Apache-2.0 AND OFL-1.1` carries in its
+    `fonts/`, each family's license file as it is (the copyright line it opens with, then the
+    SIL Open Font License 1.1). A face with no license file beside it, or a license file that is
+    not the OFL, stops the script: it is a font nobody has decided on."""
+    folder = os.path.join(root, "fonts")
+    if not os.path.isdir(folder):
+        sys.exit(f"{name} {version}: the license says OFL-1.1 and there is no fonts/ to give it for")
+    names = sorted(os.listdir(folder))
+    licenses = [f for f in names if f.endswith(("-LICENSE.txt", "-OFL.txt"))]
+    faces = [f for f in names if f.endswith((".ttf", ".otf", ".woff", ".woff2"))]
+    families = {f.rsplit("-", 1)[0] for f in licenses}
+    if not licenses or not faces:
+        sys.exit(f"{name} {version}: fonts/ has no face or no license file")
+    # A face is named for its family and nothing else (`InterVariable-Italic.ttf`,
+    # `JetBrainsMono[wght].ttf`): one of another family whose name begins the same
+    # (`InterDisplay-…`) is not covered by this one's license file.
+    for face in faces:
+        if not any(re.fullmatch(re.escape(family) + r"(Variable)?(-Italic)?(\[wght\])?\.\w+", face)
+                   for family in families):
+            sys.exit(f"{name} {version}: the face {face} has no license file beside it")
+    out = []
+    for file in licenses:
+        with open(os.path.join(folder, file), encoding="utf-8", errors="replace") as f:
+            text = f.read().replace("\u00a9", "(c)").rstrip()
+        if OFL_MARK not in text:
+            sys.exit(f"{name} {version}: {file} is not the SIL Open Font License 1.1")
+        out += [f"{name}: {file.rsplit('-', 1)[0]} ({file})", "", text, ""]
+    return out
 
 
 def sibling_license(pkgs, pkg, sibling):
@@ -251,15 +296,20 @@ def main():
         if license == LLVM_LICENSE:
             with_exceptions.append((name, version))
             continue
-        if license == "Apache-2.0":
+        if license in ("Apache-2.0", APACHE_WITH_FONTS):
             text = read_first(root, ("LICENSE-APACHE", "LICENSE-APACHE.md", "LICENSE-APACHE.txt",
                                      "LICENSE", "LICENSE.md", "LICENSE.txt"))
             if text is None or "Apache License" not in text:
                 sys.exit(f"{name} {version}: Apache-2.0 text not found")
             notice = read_first(root, ("NOTICE", "NOTICE.md", "NOTICE.txt"))
+            fonts = crate_fonts(name, version, root) if license == APACHE_WITH_FONTS else []
             out += [RULE, name, pkg.get("repository") or "", *copyright_lines(pkg),
-                    "Licensed under the Apache License, Version 2.0; full text below.",
-                    RULE, "", *([notice, ""] if notice else []), text, "", ""]
+                    "Licensed under the Apache License, Version 2.0; full text below."
+                    if not fonts else
+                    "The code is licensed under the Apache License, Version 2.0, full text below;"
+                    " the fonts it carries under the SIL Open Font License, Version 1.1,"
+                    " full texts after it.",
+                    RULE, "", *([notice, ""] if notice else []), text, "", *fonts, ""]
         else:
             # Zlib, ISC and BSD: the crate's own license file, which carries its
             # copyright line; the license requires the notice verbatim.

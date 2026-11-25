@@ -230,7 +230,7 @@ harfrust = { version = "0.13", default-features = false, features = ["std"] }
 # written once, in kablo, and bateri is a client of it; rewriting it here would be a second
 # copy that drifts. The crate has no dependencies of its own and the same license as
 # bateri (GPL-3.0-or-later); `make audit` fails if the four do not resolve to one commit.
-kablo-proto = { git = "https://github.com/bateri/kablo", rev = "9b117a221605d80bd2845b55725c894cb44709b4" }
+kablo-proto = { git = "https://github.com/bateri/kablo", rev = "1078fe6cfd99b09c8808b9787b0366c5c69e0a39" }
 
 # The text a program in a pane and the app say to each other (`bateri 2`: the requests the `bateri`
 # command makes, the replies the window gives, and the types they are written in). Written once,
@@ -238,7 +238,7 @@ kablo-proto = { git = "https://github.com/bateri/kablo", rev = "9b117a221605d80b
 # side uses, and the command's side is the same code, so the two cannot drift. The same pinned
 # commit as `kablo-proto` and the forks, for the same reason; it has no dependencies of its own
 # but `kablo-proto` (for the validation of a terminal's name).
-kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "9b117a221605d80bd2845b55725c894cb44709b4" }
+kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "1078fe6cfd99b09c8808b9787b0366c5c69e0a39" }
 
 # pencere: the protocol a program in a pane speaks to show its view there, and the kit its
 # native views are made with, from its own repository and one pinned commit, like
@@ -278,15 +278,15 @@ kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "9b117a221605d80
 # All of pencere is Apache-2.0 (GPL-3 compatible), and `rev` must be a commit at or after the
 # relicensing (`75a78e3`). `make audit` fails if `rev` is not a full hash or does not resolve,
 # and if any of them comes from anywhere else.
-pencere-host = { git = "https://github.com/bateri/pencere", rev = "6ec621a389e5c4e9fc1090c05d6a693b7ef9f120" }
-pencere-view = { git = "https://github.com/bateri/pencere", rev = "6ec621a389e5c4e9fc1090c05d6a693b7ef9f120" }
-pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "6ec621a389e5c4e9fc1090c05d6a693b7ef9f120" }
-pencere-drive = { git = "https://github.com/bateri/pencere", rev = "6ec621a389e5c4e9fc1090c05d6a693b7ef9f120" }
+pencere-host = { git = "https://github.com/bateri/pencere", rev = "307a8a2384449135b6a4a43b237e34099f3e6a0e" }
+pencere-view = { git = "https://github.com/bateri/pencere", rev = "307a8a2384449135b6a4a43b237e34099f3e6a0e" }
+pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "307a8a2384449135b6a4a43b237e34099f3e6a0e" }
+pencere-drive = { git = "https://github.com/bateri/pencere", rev = "307a8a2384449135b6a4a43b237e34099f3e6a0e" }
 # And the program's side of the same protocol (`pencere`, the library of pencere's `program/`),
 # at the same `rev`, as a **dev**-dependency of `bt-core` alone: the program the end-to-end tests
 # of a pane run in it (`crates/bt-core/examples/demopen.rs`). It ships nowhere. It brings no crate
 # the build does not have already (`serde`, `serde_json`, `libc` and `pencere-wire`).
-pencere = { git = "https://github.com/bateri/pencere", rev = "6ec621a389e5c4e9fc1090c05d6a693b7ef9f120" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "307a8a2384449135b6a4a43b237e34099f3e6a0e" }
 serde_json = "1"
 # The browser helper's conversation: the control messages, the socket and its
 # handshake, the frames over mach and the release notice, written once in the helper's repository
@@ -324,8 +324,8 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 # dependency decision (2026-10-17, the command palette): the same care as vte's — `make audit`
 # fails if the patch stops applying, and a newer upstream release is merged by hand.
 [patch.crates-io]
-vte = { git = "https://github.com/bateri/kablo", rev = "9b117a221605d80bd2845b55725c894cb44709b4" }
-alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "9b117a221605d80bd2845b55725c894cb44709b4" }
+vte = { git = "https://github.com/bateri/kablo", rev = "1078fe6cfd99b09c8808b9787b0366c5c69e0a39" }
+alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "1078fe6cfd99b09c8808b9787b0366c5c69e0a39" }
 
 # On macOS the default development profile keeps full debug info in object files beside every
 # build ("unpacked") and never removes the ones a rebuild replaces: each edit at the bottom
