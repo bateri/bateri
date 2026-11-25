@@ -125,6 +125,10 @@ impl TabHost {
 }
 
 impl PaneHost for TabHost {
+    fn feel(&self) -> Option<Rc<crate::feel::Feel>> {
+        Some(app::delegate(Self::mtm())?.feel())
+    }
+
     fn title_changed(&self, pane: u64) {
         // The title is from the focused pane; a background pane's news does
         // the same read and rewrites the unchanged title — cheap and branchless.

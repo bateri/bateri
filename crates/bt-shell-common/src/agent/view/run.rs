@@ -28,6 +28,9 @@ pub struct Run {
     began: f64,
     /// How long the wait lasts, in seconds.
     limit: f64,
+    /// A sound of a file the page asked for was being decoded at some look: what the decoder
+    /// finished since is told to the agent before the answer.
+    sounds_waited: bool,
 }
 
 /// Whether the request is answered.
@@ -209,6 +212,7 @@ impl Run {
             done,
             began: ctx.now,
             limit,
+            sounds_waited: false,
         })
     }
 
@@ -259,7 +263,8 @@ impl Run {
                 Step::Pending
             }
             _ => {
-                if reading.rest.resting() || elapsed >= self.limit {
+                let resting = reading.rest.resting() && !self.sounds_pending(&ctx, env);
+                if resting || elapsed >= self.limit {
                     if let Action::Shot { full } = &self.view.action {
                         let mut session = env.session.borrow_mut();
                         session.active = false;
@@ -275,6 +280,22 @@ impl Run {
                 }
             }
         }
+    }
+
+    /// Whether a sound of a file the page asked for is still being decoded, as the images are
+    /// waited for: it is told when it is ready, and a sound told after the request is over is
+    /// played for the person, whom the request was not made by. The wait is the page's own (it
+    /// gives up on a sound that takes too long) and [`REST_LIMIT`]'s.
+    fn sounds_pending(&mut self, ctx: &Ctx<'_>, env: &Env<'_>) -> bool {
+        if ctx.handle.page().sounds_waiting() {
+            self.sounds_waited = true;
+            return true;
+        }
+        if self.sounds_waited {
+            // What the decoder finished since the page was drained is told now, through `Held`.
+            (env.drain)();
+        }
+        false
     }
 
     fn answer(&mut self, pane: Pane<'_>, ctx: &Ctx<'_>, env: &Env<'_>) -> Step {

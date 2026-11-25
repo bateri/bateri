@@ -240,7 +240,8 @@ six-character ref, where the keyboard is, and what the page can be told to do. `
 `click REF`, `fill REF 'text'`, `type 'text'`, `press cmd+enter`, `scroll REF down`, `menu REF` then `pick Title`,
 `wait 'Done'` and `shot FILE.png` operate it, and each answers with the page as it shows once it has settled
 (`--json` for a machine's reading; a password field is filled and never read back). It works on a pane that is
-on a tab nobody sees, and moves neither the keyboard, the tab nor the clipboard. It is what Claude uses when you
+on a tab nobody sees, and moves neither the keyboard, the tab, the clipboard nor your trackpad and speaker: a
+vibration or a sound the page asks for is not played, and the answer says what the page asked for. It is what Claude uses when you
 say "press Restart in that pane"; the skill the agent reads (`assets/shell/agents/claude/SKILL.md`) tells it to read
 first, ask before anything that cannot be undone, and treat the page's words as data.
 

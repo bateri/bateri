@@ -1,10 +1,12 @@
-//! Tries the trackpad's vibration on this Mac, by hand: what the vibration of a page is played
-//! with, without a page.
+//! Tries the trackpad's vibration and the sounds on this Mac, by hand: what a page's vibration and
+//! sounds are played with, without a page.
 //!
 //! ```text
 //! cargo run -p bt-shell-macos --example feel              what plays here, and the names
 //! cargo run -p bt-shell-macos --example feel -- watch     says when a finger is on the glass
 //! cargo run -p bt-shell-macos --example feel -- tick      puts a finger on, then plays `tick`
+//! cargo run -p bt-shell-macos --example feel -- sound tap plays the kit's sound `tap` once
+//! cargo run -p bt-shell-macos --example feel -- sounds    plays every sound of the kit in turn
 //! ```
 //!
 //! `watch` is how to tell whether the frames of a trackpad come while another application is in
@@ -14,11 +16,41 @@
 use std::time::{Duration, Instant};
 
 use bt_shell_common::native_view::haptic::{NAMES, preset};
-use bt_shell_macos::feel::{Haptics, Kind};
+use bt_shell_common::native_view::sound;
+use bt_shell_macos::feel::{Feel, Haptics, Kind};
+use objc2_foundation::{NSDate, NSRunLoop};
 
 const LOOK: Duration = Duration::from_secs(30);
 
+/// Plays the kit's sounds named in `names`, one after another, and says each.
+fn hear(names: &[&str]) {
+    let feel = Feel::new();
+    for name in names {
+        println!("{name}");
+        if let Err(unknown) = feel.play_ready_sound(name) {
+            eprintln!("{unknown}");
+            std::process::exit(64);
+        }
+        // A sound is played by the system through the run loop, which a bare program does not
+        // run unless it is told to: the application's main thread always does.
+        NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(1.2));
+    }
+}
+
 fn main() {
+    let word = std::env::args().nth(1);
+    if word.as_deref() == Some("sound") {
+        let Some(name) = std::env::args().nth(2) else {
+            println!("names: {}", sound::NAMES.join(" "));
+            return;
+        };
+        hear(&[name.as_str()]);
+        return;
+    }
+    if word.as_deref() == Some("sounds") {
+        hear(&sound::NAMES);
+        return;
+    }
     let haptics = Haptics::open();
     match haptics.kind() {
         Kind::Motor { devices } => {
@@ -27,8 +59,9 @@ fn main() {
         Kind::Fallback => println!("AppKit's own patterns: a held event is not played"),
         Kind::Nothing => println!("no trackpad here vibrates"),
     }
-    let Some(word) = std::env::args().nth(1) else {
+    let Some(word) = word else {
         println!("names: {}", NAMES.join(" "));
+        println!("sounds: {}", sound::NAMES.join(" "));
         return;
     };
     if word == "watch" {

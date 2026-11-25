@@ -1,4 +1,5 @@
-//! What a page's vibration is played with: the trackpad's motor.
+//! What a page's vibration and sounds are played with: the trackpad's motor and the speaker, and
+//! the service the application owns that keeps each view's part of them ([`Feel`]).
 //!
 //! **The framework this drives is private.** A Force Touch trackpad has a motor under its glass
 //! that macOS plays three fixed clicks on in public; the shape and strength of a pattern, and which
@@ -25,10 +26,13 @@ mod fallback;
 mod motor;
 mod player;
 mod schedule;
+mod service;
 mod steps;
 mod symbols;
 
 use bt_shell_common::native_view::haptic::Pattern;
+
+pub use service::{APPLICATION, Engine, Feel, Speaker, UnknownName, is_felt};
 
 use fallback::Fallback;
 use motor::Motor;

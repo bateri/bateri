@@ -345,6 +345,12 @@ pub trait PaneHost {
     /// pane moving): the terminal it shows ends with it, on the server. Asked
     /// **before** [`TerminalPane::begin_close`], whose signal lets the terminal go.
     fn end_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// What plays the vibration and the sounds of the pages of this application's panes: one for
+    /// the application, since a view's sound and what the application plays itself are heard
+    /// together. The default is an owner that has none, whose pages are not felt or heard.
+    fn feel(&self) -> Option<Rc<crate::feel::Feel>> {
+        None
+    }
     /// The user is closing the pane and chose to leave the terminal it shows running: it
     /// is not ended, and nothing keeps a record that a quit or a crash would end it by.
     /// Asked **before** [`TerminalPane::begin_close`], as [`PaneHost::end_kept_terminal`].
@@ -2480,6 +2486,10 @@ pub struct PaneIvars {
     /// ([`TerminalPane::wake_unseen_page`]): the number of the delayed block that is the one, and
     /// the time it was armed for (`None`: none is armed).
     unseen_wake: Cell<(u64, Option<f64>)>,
+    /// The clock that drains the page when it gives up on the oldest sound it is still decoding
+    /// ([`TerminalPane::wake_for_sounds`]): the number of the delayed block that is the one, and
+    /// the time it was armed for (`None`: none is armed).
+    sounds_wake: Cell<(u64, Option<Instant>)>,
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
@@ -3358,6 +3368,7 @@ impl TerminalPane {
             look_base: Cell::new(look_base),
             look: LookSlot::new(look_base),
             unseen_wake: Cell::new((0, None)),
+            sounds_wake: Cell::new((0, None)),
             view_waits: RefCell::new(Waits::default()),
             view_owed: RefCell::new(None),
             view_hold: RefCell::new(None),
@@ -6658,6 +6669,8 @@ impl TerminalPane {
         // First: a job's thread waiting at the password sheet holds the helper's
         // worker too — dropping the sender answers it, then `close` is served.
         self.close_password();
+        // The view goes with the pane: what it vibrates and plays ends.
+        self.end_feel();
         // The questions a background tab parked go the way an open sheet
         // goes: answered `Cancel`, each asker clearing its own gate — while
         // the pane can still be found by its blocks.
@@ -7028,6 +7041,9 @@ impl TerminalPane {
     /// terminal's frames come back.
     fn take_page_down(&self) {
         let had_page = self.ivars().page_up.borrow().is_some();
+        if had_page {
+            self.end_feel();
+        }
         if let Some(link) = self.link() {
             link.set_page(None);
         }
@@ -8040,7 +8056,75 @@ impl TerminalPane {
             // out.
             self.page_drew();
             self.wake_unseen_page();
+            self.wake_for_sounds();
         });
+    }
+
+    /// A page that asked for a sound of a file that is not decoded yet is told when it is, and
+    /// gives up on what takes too long at a time of its own saying: the pane drains it then, one
+    /// delayed block on the main queue for the time the page names now (and none while it
+    /// waits for no sound). Anything the decoder finishes wakes the pane before that.
+    fn wake_for_sounds(&self) {
+        if self.is_closed() {
+            return;
+        }
+        let Some(at) = self
+            .page_handle()
+            .and_then(|handle| handle.page().sounds_deadline())
+        else {
+            return;
+        };
+        let (number, armed) = self.ivars().sounds_wake.get();
+        if armed == Some(at) {
+            return;
+        }
+        let number = number.wrapping_add(1);
+        self.ivars().sounds_wake.set((number, Some(at)));
+        // The page drops a sound once the deadline is past, not at it: a millisecond more keeps
+        // a clock that fires at the instant from being armed again at once.
+        let delay = at
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        self.after_on_main(number, delay, Self::sounds_wake_due);
+    }
+
+    /// The clock [`TerminalPane::wake_for_sounds`] armed ran out: if it is still the one, the page
+    /// is drained, which arms the next where it still waits for a sound.
+    fn sounds_wake_due(&self, number: u64) {
+        let (armed, _) = self.ivars().sounds_wake.get();
+        if armed != number {
+            return;
+        }
+        self.ivars().sounds_wake.set((number, None));
+        self.drain_page();
+    }
+
+    /// What the page up asks of the trackpad is played where the person is: in the window they
+    /// work in and the pane the keyboard is in or the pointer is over ([`crate::feel::is_felt`]).
+    fn page_haptic(&self, ask: &bt_shell_common::native_view::haptic::Haptic) {
+        if let Some(feel) = self.host().feel() {
+            let felt = crate::feel::is_felt(
+                self.is_active(),
+                self.holds_keyboard(),
+                self.view().page_pointer_is_over(),
+            );
+            feel.haptic(self.id(), ask, felt);
+        }
+    }
+
+    /// What the page up asks of the speaker: played as the system's volume says, wherever the
+    /// person is (a sound is no touch: it is heard from a window behind the one they work in).
+    fn page_sound(&self, ask: &bt_shell_common::native_view::sound::Ask) {
+        if let Some(feel) = self.host().feel() {
+            feel.sound(self.id(), ask);
+        }
+    }
+
+    /// The vibration and the sounds of the view that goes end with it.
+    fn end_feel(&self) {
+        if let Some(feel) = self.host().feel() {
+            feel.view_ended(self.id());
+        }
     }
 
     /// A pane that is not seen draws no frames, so the page up is woken from here instead: at the
@@ -10209,6 +10293,21 @@ impl PageDriveHost for PageHost<'_> {
         }
     }
 
+    /// The page's vibration: played on the trackpad the finger is on, where the person is
+    /// ([`TerminalPane::page_haptic`]).
+    fn haptic(&mut self, haptic: bt_shell_common::native_view::haptic::Haptic) {
+        if self.up() {
+            self.0.page_haptic(&haptic);
+        }
+    }
+
+    /// The page's sounds, played at the system's volume ([`TerminalPane::page_sound`]).
+    fn sound(&mut self, ask: bt_shell_common::native_view::sound::Ask) {
+        if self.up() {
+            self.0.page_sound(&ask);
+        }
+    }
+
     /// A debug demo is the person's to close (Esc is its key for it). A program's view is the
     /// program's to end — its `dismiss` or `bye`, or ⌃C, which reaches the program — so the page's
     /// wish to close is not carried: a key the page reads for itself does not end what the program
@@ -12068,6 +12167,60 @@ mod tests {
             .find("self.wake_unseen_page()")
             .expect("the clock takes over");
         assert!(seen < woken, "{visibility}");
+    }
+
+    /// What a page asks of the trackpad and the speaker reaches the application's service by the
+    /// one path, keyed by the pane: the vibration only where the person is, the end of the view
+    /// (the page taken down, the pane closing) ends both, and a sound still being decoded is
+    /// drained again when the page gives up on it. A source scan: what it guards needs a window
+    /// server and a page up.
+    #[test]
+    fn what_a_page_asks_of_the_trackpad_and_the_speaker_goes_to_the_service_and_ends_with_the_view()
+    {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let haptic = body("    fn haptic(&mut self, haptic:");
+        assert!(
+            haptic.contains("self.up()") && haptic.contains("self.0.page_haptic(&haptic)"),
+            "{haptic}"
+        );
+        let sound = body("    fn sound(&mut self, ask:");
+        assert!(
+            sound.contains("self.up()") && sound.contains("self.0.page_sound(&ask)"),
+            "{sound}"
+        );
+        // The vibration is felt where the person is, by the one rule the service keeps.
+        let felt = body("    fn page_haptic(");
+        assert!(
+            felt.contains("crate::feel::is_felt(")
+                && felt.contains("self.is_active()")
+                && felt.contains("self.holds_keyboard()")
+                && felt.contains("self.view().page_pointer_is_over()"),
+            "{felt}"
+        );
+        // A sound is no touch: it does not ask where the person is.
+        let heard = body("    fn page_sound(");
+        assert!(!heard.contains("is_active"), "{heard}");
+        // The view's end: the page taken down and the pane closing.
+        let down = body("    fn take_page_down(");
+        assert!(down.contains("self.end_feel()"), "{down}");
+        let quiesce = body("    fn quiesce(");
+        assert!(quiesce.contains("self.end_feel()"), "{quiesce}");
+        let ends = body("    fn end_feel(");
+        assert!(ends.contains("feel.view_ended(self.id())"), "{ends}");
+        // The page's own deadline for a sound it is still decoding.
+        let drain = body("    pub(crate) fn drain_page(");
+        assert!(drain.contains("self.wake_for_sounds();"), "{drain}");
+        let waking = body("    fn wake_for_sounds(");
+        assert!(waking.contains("sounds_deadline()"), "{waking}");
+        assert!(waking.contains("Self::sounds_wake_due"), "{waking}");
+        let due = body("    fn sounds_wake_due(");
+        assert!(due.contains("if armed != number {"), "{due}");
+        assert!(due.contains("self.drain_page()"), "{due}");
     }
 
     /// A link a page of the kit asks to open takes a web view's way: the session holds it to the
