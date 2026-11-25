@@ -75,6 +75,6 @@ fn main() {
         std::thread::sleep(Duration::from_millis(10));
     }
     std::thread::sleep(Duration::from_millis(300));
-    haptics.play(&pattern);
+    haptics.play(&pattern, None);
     std::thread::sleep(Duration::from_secs_f32(pattern.seconds() + 0.5));
 }

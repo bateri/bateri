@@ -1561,11 +1561,22 @@ fn message(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str
 /// `bateri haptic` and `bateri sound`: one of the kit's ready vibrations or sounds played for the
 /// person at this computer, by the application's own service (`feel`), whichever machine the
 /// command was run on. With no name the answer lists the names; what came of a name is one line
-/// ([`ready::reply`]).
+/// ([`ready::reply`]). A vibration is answered by the thread that plays it, when it has looked for
+/// a finger (some frames the first time after the trackpads were started): the main thread is not
+/// held for it, and the letter goes with the vibration.
 fn play_ready(app: &AppDelegate, letter: Letter, which: Ready, name: Option<&str>) {
     let feel = app.feel();
+    if let (Ready::Haptic, Some(name)) = (which, name.filter(|name| which.names().contains(name))) {
+        let said = name.to_owned();
+        let told: crate::feel::Told = Box::new(move |outcome| {
+            letter.answer(ready::said(&said, outcome).encode().into_bytes());
+        });
+        feel.play_ready_haptic(name, told);
+        return;
+    }
     let reply = ready::reply(which, name, |name| match which {
-        Ready::Haptic => feel.play_ready_haptic(name),
+        // A name the kit has ready is answered above.
+        Ready::Haptic => None,
         Ready::Sound => feel.play_ready_sound(name),
     });
     letter.answer(reply.encode().into_bytes());

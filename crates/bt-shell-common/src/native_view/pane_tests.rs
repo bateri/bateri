@@ -2160,13 +2160,17 @@ fn a_vibration_and_a_sound_the_page_asks_for_are_told_to_the_agent_and_not_playe
         stopped.contains("the page ended its vibration"),
         "{stopped}"
     );
-    // Nothing reached the pane's own host: it vibrated and played nothing.
-    for line in rig.lines() {
+    // The pane's own host vibrated and played nothing; it was told the ends, which it ends what the
+    // person's page began with.
+    let heard = rig.lines();
+    for line in &heard {
         assert!(
-            !line.starts_with("haptic") && !line.starts_with("sound"),
+            !((line.starts_with("haptic") || line.starts_with("sound")) && line.contains("Play")),
             "the pane did {line}"
         );
     }
+    assert!(heard.iter().any(|line| line == "haptic Stop"), "{heard:?}");
+    assert!(heard.iter().any(|line| line == "sound Stop"), "{heard:?}");
 }
 
 /// A bundle of one file, a sound the page names by path.

@@ -35,8 +35,11 @@ fn first_frames_left(started: Instant, now: Instant) -> Duration {
 /// Why there is no motor to drive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unavailable {
-    /// The framework lists no device whose motor opens.
+    /// The framework lists no device: no trackpad here vibrates.
     NoDevice,
+    /// The framework lists devices and the motor of none of them opens: the system's own patterns
+    /// are what is left, which a trackpad of its own may still play.
+    Unopened,
     /// The framework gave no list.
     Unlisted,
 }
@@ -123,6 +126,7 @@ impl Motor {
             unsafe { CFRelease(list) };
             return Err(Unavailable::Unlisted);
         };
+        let found_any = !found.is_empty();
         let mut devices = Vec::new();
         for (device, id) in found {
             // SAFETY: a device id the framework gave; the actuator is a reference this owns.
@@ -161,7 +165,11 @@ impl Motor {
         if devices.is_empty() {
             // SAFETY: the list was made by a `Create` function and is released once.
             unsafe { CFRelease(list) };
-            return Err(Unavailable::NoDevice);
+            return Err(if found_any {
+                Unavailable::Unopened
+            } else {
+                Unavailable::NoDevice
+            });
         }
         Ok(Self {
             symbols,

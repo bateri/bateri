@@ -30,8 +30,6 @@ mod service;
 mod steps;
 mod symbols;
 
-use std::time::Duration;
-
 use bt_shell_common::agent::ready::Outcome;
 use bt_shell_common::native_view::haptic::Pattern;
 
@@ -42,9 +40,9 @@ use motor::Motor;
 use player::Player;
 use symbols::{Backend, Facts, Symbols};
 
-/// How long [`Haptics::play`] waits for the thread to say whether it found a finger: the wait for
-/// the first frames ([`motor::FIRST_FRAMES`]) and some for the thread to wake.
-const BEGIN_WAIT: Duration = motor::FIRST_FRAMES.saturating_add(Duration::from_millis(20));
+/// What is told of a vibration that was asked for, when it is known: from the thread that plays or,
+/// where nothing plays, from the one that asked.
+pub type Told = Box<dyn FnOnce(Outcome) + Send>;
 
 /// What plays the vibration, as far as there is anyone to say it to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +72,9 @@ impl Haptics {
             match Motor::open(symbols) {
                 Ok(motor) => (Some(motor.len()), Some(motor)),
                 Err(motor::Unavailable::NoDevice) => (Some(0), None),
-                Err(motor::Unavailable::Unlisted) => (None, None),
+                // A trackpad the framework lists and cannot drive is still one the system may
+                // vibrate: what is not known is not none.
+                Err(motor::Unavailable::Unlisted | motor::Unavailable::Unopened) => (None, None),
             }
         } else {
             (motor::count(&symbols), None)
@@ -117,42 +117,46 @@ impl Haptics {
         matches!(self.kind, Kind::Motor { .. }) && contact::CONTACTS.latest_down().is_some()
     }
 
-    /// Plays `pattern` in place of what plays, if a finger is on the glass now: what was done.
-    ///
-    /// Where the motor is driven, what is said is what the playing thread decided (the answer comes
-    /// back to this one; it is a few microseconds, and some frames the first time after the devices
-    /// were started, where no finger is on the glass), not a second look at the glass that may
-    /// disagree with it.
-    pub fn play(&self, pattern: &Pattern) -> Outcome {
+    /// Plays `pattern` in place of what plays, if a finger is on the glass now. What came of it is
+    /// told to `told`, if there is one: where the motor is driven it is what the playing thread
+    /// decided (a second look at the glass here could disagree with it), told from that thread
+    /// when it has looked, some frames after the devices were started the first time; nobody
+    /// waits for it. Where nothing is to be looked for it is told at once.
+    pub fn play(&self, pattern: &Pattern, told: Option<Told>) {
+        fn tell(told: Option<Told>, outcome: Outcome) {
+            if let Some(told) = told {
+                told(outcome);
+            }
+        }
         let Some(player) = &self.player else {
-            return Outcome::NoTrackpad;
+            return tell(told, Outcome::NoTrackpad);
         };
         let steps = steps::plan(pattern);
         match self.kind {
-            Kind::Nothing => Outcome::NoTrackpad,
+            Kind::Nothing => tell(told, Outcome::NoTrackpad),
             // AppKit's patterns are taps and what is not one is not played.
             Kind::Fallback if !steps.iter().any(|step| step.tap) => {
                 player.stop();
-                Outcome::Unplayable
+                tell(told, Outcome::Unplayable);
             }
             Kind::Fallback => {
                 player.play(steps);
-                Outcome::Handed
+                tell(told, Outcome::Handed);
             }
             Kind::Motor { .. } if steps.is_empty() => {
                 player.stop();
-                Outcome::Unplayable
+                tell(told, Outcome::Unplayable);
             }
-            Kind::Motor { .. } => {
-                let began = player
-                    .play_told(steps, BEGIN_WAIT)
-                    .unwrap_or_else(|| self.finger_on_glass());
-                if began {
-                    Outcome::Played
-                } else {
-                    Outcome::NoFinger
-                }
-            }
+            Kind::Motor { .. } => match told {
+                None => player.play(steps),
+                Some(told) => player.play_then(steps, move |found| {
+                    told(if found {
+                        Outcome::Played
+                    } else {
+                        Outcome::NoFinger
+                    });
+                }),
+            },
         }
     }
 
@@ -203,12 +207,27 @@ mod tests {
 
     const MOTOR: Kind = Kind::Motor { devices: 1 };
 
+    /// What `haptics` says came of `pattern`.
+    fn outcome(haptics: &Haptics, pattern: &Pattern) -> Outcome {
+        let (said, told) = std::sync::mpsc::channel();
+        haptics.play(
+            pattern,
+            Some(Box::new(move |outcome| {
+                let _ = said.send(outcome);
+            })),
+        );
+        told.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("what came of it is told")
+    }
+
     #[test]
     fn where_the_motor_is_driven_what_is_said_is_what_the_thread_found() {
         let resting = Haptics::with(MOTOR, Player::spawn(Resting));
-        assert_eq!(resting.play(&tap()), Outcome::Played);
+        assert_eq!(outcome(&resting, &tap()), Outcome::Played);
         let lifted = Haptics::with(MOTOR, Player::spawn(Silent));
-        assert_eq!(lifted.play(&tap()), Outcome::NoFinger);
+        assert_eq!(outcome(&lifted, &tap()), Outcome::NoFinger);
+        // Nobody is made to wait for it: a vibration nobody asks about is asked for and left.
+        resting.play(&tap(), None);
     }
 
     #[test]
@@ -217,14 +236,14 @@ mod tests {
             Pattern::new([Event::held(0.0, 0.2, (0.8, 0.8), (0.5, 0.5))]).expect("a pattern");
         // AppKit's patterns are taps: a held event is not one.
         let fallback = Haptics::with(Kind::Fallback, Player::spawn(Silent));
-        assert_eq!(fallback.play(&held), Outcome::Unplayable);
-        assert_eq!(fallback.play(&tap()), Outcome::Handed);
+        assert_eq!(outcome(&fallback, &held), Outcome::Unplayable);
+        assert_eq!(outcome(&fallback, &tap()), Outcome::Handed);
         // The motor plays a held event.
         let motor = Haptics::with(MOTOR, Player::spawn(Resting));
-        assert_eq!(motor.play(&held), Outcome::Played);
+        assert_eq!(outcome(&motor, &held), Outcome::Played);
         // What is too weak to be felt is nothing.
         let faint = Pattern::new([Event::tap(0.0, 0.0, 0.5)]).expect("a pattern");
-        assert_eq!(motor.play(&faint), Outcome::Unplayable);
+        assert_eq!(outcome(&motor, &faint), Outcome::Unplayable);
     }
 
     #[test]
@@ -232,12 +251,12 @@ mod tests {
         // Where no trackpad vibrates, nothing is played and it is said.
         let none = Haptics::with(Kind::Nothing, None);
         assert_eq!(none.kind(), Kind::Nothing);
-        assert_eq!(none.play(&tap()), Outcome::NoTrackpad);
+        assert_eq!(outcome(&none, &tap()), Outcome::NoTrackpad);
         // A system that gives no thread plays nothing, whatever it was going to be.
         assert_eq!(Haptics::with(Kind::Fallback, None).kind(), Kind::Nothing);
         // AppKit's patterns are handed over and the system does not say whether it played them.
         let fallback = Haptics::with(Kind::Fallback, Player::spawn(Silent));
-        assert_eq!(fallback.play(&tap()), Outcome::Handed);
+        assert_eq!(outcome(&fallback, &tap()), Outcome::Handed);
         assert!(
             !fallback.finger_on_glass(),
             "the fallback does not know where a finger is"

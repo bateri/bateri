@@ -63,7 +63,7 @@ pub fn reply(
         return Reply::Text(lines);
     };
     match play(name) {
-        Some(outcome) => Reply::Text(line(name, outcome)),
+        Some(outcome) => said(name, outcome),
         None => Reply::Failed(Failure::new(
             Kind::Usage,
             format!(
@@ -73,6 +73,13 @@ pub fn reply(
             ),
         )),
     }
+}
+
+/// The answer to a name that was played, once what came of it is known: for a vibration the
+/// application plays on a thread of its own, which says it when it has looked for a finger.
+#[must_use]
+pub fn said(name: &str, outcome: Outcome) -> Reply {
+    Reply::Text(line(name, outcome))
 }
 
 fn line(name: &str, outcome: Outcome) -> String {
@@ -152,6 +159,12 @@ mod tests {
             assert_eq!(text(answer), said);
             assert_eq!(asked, ["tick"]);
         }
+    }
+
+    #[test]
+    fn what_came_of_a_name_is_said_the_same_whenever_it_is_known() {
+        let at_once = reply(Ready::Haptic, Some("tick"), |_| Some(Outcome::NoFinger));
+        assert_eq!(text(at_once), text(said("tick", Outcome::NoFinger)));
     }
 
     #[test]

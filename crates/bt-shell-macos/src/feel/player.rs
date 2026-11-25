@@ -7,7 +7,7 @@
 
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use objc2::rc::autoreleasepool;
 
@@ -25,9 +25,29 @@ pub(super) trait Driver: Send + 'static {
     fn fire(&mut self, target: usize, step: &Step) -> bool;
 }
 
+/// What is said to whoever asked, once the thread has looked for a finger: whether it found one. A
+/// tell that is dropped unsaid (the thread is gone, or the request never reached it) says no.
+pub(super) struct Tell(Option<Box<dyn FnOnce(bool) + Send>>);
+
+impl Tell {
+    fn say(mut self, found: bool) {
+        if let Some(then) = self.0.take() {
+            then(found);
+        }
+    }
+}
+
+impl Drop for Tell {
+    fn drop(&mut self) {
+        if let Some(then) = self.0.take() {
+            then(false);
+        }
+    }
+}
+
 enum Command {
-    /// A pattern, and where to say whether there was anywhere to play it, if it is wanted said.
-    Play(Vec<Step>, Option<Sender<bool>>),
+    /// A pattern, and what to tell if the one who asked wants to know whether it was played.
+    Play(Vec<Step>, Option<Tell>),
     Stop,
 }
 
@@ -56,12 +76,10 @@ impl Player {
         self.send(Command::Play(steps, None));
     }
 
-    /// Plays `steps` in place of what plays and says whether the thread found somewhere to play
-    /// them (a finger on the glass), as it decided it; `None` where it did not say within `within`.
-    pub(super) fn play_told(&self, steps: Vec<Step>, within: Duration) -> Option<bool> {
-        let (tell, told) = mpsc::channel();
-        self.send(Command::Play(steps, Some(tell)));
-        told.recv_timeout(within).ok()
+    /// Plays `steps` in place of what plays and tells `then`, on this thread's own, whether it found
+    /// somewhere to play them (a finger on the glass): the caller waits for nothing.
+    pub(super) fn play_then(&self, steps: Vec<Step>, then: impl FnOnce(bool) + Send + 'static) {
+        self.send(Command::Play(steps, Some(Tell(Some(Box::new(then))))));
     }
 
     /// Ends what plays.
@@ -103,7 +121,7 @@ fn run(requests: &mpsc::Receiver<Command>, mut driver: impl Driver) {
                     .begin()
                     .map(|target| (Schedule::new(steps, Instant::now()), target));
                 if let Some(tell) = tell {
-                    let _ = tell.send(playing.is_some());
+                    tell.say(playing.is_some());
                 }
             }
             Ok(Command::Stop) => playing = None,
@@ -251,11 +269,37 @@ mod tests {
     }
 
     #[test]
-    fn what_the_thread_decided_is_told_to_who_asked_for_it() {
+    fn what_the_thread_decided_is_told_to_who_asked_for_it_and_nobody_waits_for_it() {
         let (player, _heard, target) = player(Some(0), None);
-        assert_eq!(player.play_told(vec![tap(0)], WAIT), Some(true));
+        let (said, told) = channel();
+        let again = said.clone();
+        player.play_then(vec![tap(0)], move |found| {
+            let _ = said.send(found);
+        });
+        assert_eq!(told.recv_timeout(WAIT), Ok(true));
         *target.lock().expect("a lock") = None;
-        assert_eq!(player.play_told(vec![tap(0)], WAIT), Some(false));
+        player.play_then(vec![tap(0)], move |found| {
+            let _ = again.send(found);
+        });
+        assert_eq!(told.recv_timeout(WAIT), Ok(false));
+    }
+
+    #[test]
+    fn a_tell_that_never_reached_the_thread_says_no() {
+        let (player, _heard, _) = player(Some(0), None);
+        let (said, told) = channel();
+        // The thread is gone: what was asked of it is dropped, and the one who asked is told.
+        drop(player);
+        let dead = {
+            let (commands, requests) = mpsc::channel::<Command>();
+            drop(requests);
+            commands
+        };
+        let tell = Tell(Some(Box::new(move |found| {
+            let _ = said.send(found);
+        })));
+        let _ = dead.send(Command::Play(vec![tap(0)], Some(tell)));
+        assert_eq!(told.recv_timeout(WAIT), Ok(false));
     }
 
     #[test]

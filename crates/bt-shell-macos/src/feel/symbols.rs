@@ -138,7 +138,8 @@ pub(super) struct Facts {
     /// The framework gives what it takes to know that a finger is on a device.
     pub fingers: bool,
     /// How many trackpads there are that vibrate: the number whose motor opened where it was tried,
-    /// else the number the framework lists, else `None` where it was not asked.
+    /// else the number the framework lists, else `None` where it was not asked or lists devices
+    /// whose motors none opens (the system's own patterns may still play on those).
     pub devices: Option<usize>,
 }
 
@@ -233,7 +234,8 @@ mod tests {
         assert_eq!(choose(facts(false, true, Some(1))), Backend::Fallback);
         // The framework is not there at all: AppKit decides for itself.
         assert_eq!(choose(facts(false, false, None)), Backend::Fallback);
-        // The framework is there and no trackpad vibrates (a Mac with none, or whose motor did not open).
+        // The framework is there and lists no trackpad (a Mac with none). One it lists and cannot
+        // drive is `None` here, the system's own.
         assert_eq!(choose(facts(true, true, Some(0))), Backend::Nothing);
         assert_eq!(choose(facts(false, false, Some(0))), Backend::Nothing);
         assert_eq!(choose(facts(true, true, None)), Backend::Fallback);

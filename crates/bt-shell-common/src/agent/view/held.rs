@@ -13,7 +13,8 @@
 //! A vibration and a sound are not played for an agent either: the person is not there to feel or
 //! hear them, and an agent that presses button after button would make the speaker buzz. The
 //! agent is told what the page asked for instead ([`Effects::notes`]), so that it sees the sound
-//! and the vibration come at the right moment.
+//! and the vibration come at the right moment. What the page asks to end is ended: ending plays
+//! nothing, and a button that silences a sound the page began for the person silences it.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -154,18 +155,23 @@ impl Host for Held<'_> {
         self.base.text_size(points);
     }
 
-    /// Not felt: the person's trackpad is not the agent's. Said in the answer.
+    /// Not felt: the person's trackpad is not the agent's. Said in the answer. An end is passed on
+    /// to the pane, which ends what it began for the person.
     fn haptic(&mut self, haptic: Haptic) {
         let said = match haptic {
             Haptic::Play(pattern) => {
                 format!("the page asked to vibrate: {}", pattern_words(&pattern))
             }
-            Haptic::Stop => "the page ended its vibration".to_owned(),
+            Haptic::Stop => {
+                self.base.haptic(Haptic::Stop);
+                "the page ended its vibration".to_owned()
+            }
         };
         self.session.borrow_mut().effects.notes.push(said);
     }
 
-    /// Not played: the person's speaker is not the agent's. Said in the answer.
+    /// Not played: the person's speaker is not the agent's. Said in the answer. An end is passed
+    /// on to the pane, which ends what it began for the person.
     fn sound(&mut self, ask: SoundAsk) {
         let said = match ask {
             SoundAsk::Play(play) => match play.source {
@@ -176,7 +182,10 @@ impl Host for Held<'_> {
                     format!("the page played a sound from {}", super::words(&path, 200))
                 }
             },
-            SoundAsk::Stop => "the page ended its sounds".to_owned(),
+            SoundAsk::Stop => {
+                self.base.sound(SoundAsk::Stop);
+                "the page ended its sounds".to_owned()
+            }
         };
         self.session.borrow_mut().effects.notes.push(said);
     }
