@@ -591,7 +591,7 @@ claude_skill = false
 # glass, and only the trackpad the finger is on vibrates. Turning it off ends a
 # vibration that is playing.
 haptics = true
-# true | false. Sounds play, at the volume the Mac is set to (nothing plays while
+# true | false. Sounds play, at the system's volume (nothing plays while
 # it is muted): what a program's view asks for, in any tab or window, and what
 # `bateri sound` plays. Turning it off ends the sounds that are playing.
 sounds = true
@@ -2445,7 +2445,7 @@ apps = true
 | `apps` | `true` \| `false` | `true` | a program's view may vibrate and sound; off, only your own commands and what bateri plays of its own do |
 
 A vibration is felt only while a finger is on a trackpad's glass, and only that trackpad vibrates; a sound plays
-through the Mac's speaker at the volume the Mac is set to, and not at all while it is muted. A program's view that
+through this computer's speaker at the system's volume, and not at all while it is muted. A program's view that
 asks for either is not asked for permission: the three keys are there for you to turn it off. They are read at once:
 closing one ends what it no longer lets play (`apps` ends what a program's view plays, not a vibration or a sound you
 started with the command). `stop` requests of a view always go through.

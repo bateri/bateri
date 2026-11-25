@@ -2558,7 +2558,7 @@ claude_skill = false
 # glass, and only the trackpad the finger is on vibrates. Turning it off ends a
 # vibration that is playing.
 haptics = true
-# true | false. Sounds play, at the volume the Mac is set to (nothing plays while
+# true | false. Sounds play, at the system's volume (nothing plays while
 # it is muted): what a program's view asks for, in any tab or window, and what
 # `bateri sound` plays. Turning it off ends the sounds that are playing.
 sounds = true
