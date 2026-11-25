@@ -7583,7 +7583,15 @@ fn a_choice_that_comes_after_the_terminal_found_again_was_attached_is_not_taken(
     });
 
     ops.ordinary_instead();
-    thread::sleep(Duration::from_millis(300));
+    // The loop has heard the choice before the list comes, whatever the machine's load.
+    until("the choice heard and not taken", || {
+        back.world
+            .lines
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|line| line.contains("chose an ordinary shell after its terminal had come"))
+    });
     back.world.bridge().release_lists();
     until("the terminal's program", || pid.get().is_some());
     assert!(!status.is_ordinary(), "a shell took the pane");

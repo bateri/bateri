@@ -1534,27 +1534,36 @@ fn make_window(mtm: MainThreadMarker, frame_rect: NSRect) -> Retained<NSWindow> 
 }
 
 /// What the bars did in a second and a fifth, as the animation has them: how many different
-/// heights the middle one was drawn at, its lowest and highest, the biggest jump between two looks
-/// 25 ms apart, and how many looks had the three bars at different heights (they are behind one
-/// another). Where the animation plays and the window draws it is smooth and fills the range; where
-/// it does not, one height (the test window is never visible, and Core Animation could then not
-/// advance it).
+/// heights the middle one was drawn at, its lowest and highest, the fastest it changed between two
+/// looks (parts of the capital a second: a jump is a change faster than the motion goes, however
+/// far apart a busy machine puts the looks), and how many looks had the three bars at different
+/// heights (they are behind one another). Where the animation plays and the window draws it is
+/// smooth and fills the range; where it does not, one height (the test window is never visible,
+/// and Core Animation could then not advance it).
 struct Swing {
     distinct: usize,
     low: f64,
     high: f64,
-    jump: f64,
+    fastest: f64,
     apart: usize,
     looks: usize,
 }
 
+/// The fastest a bar's height changes, parts of the capital a second: from a third of it to all
+/// of it in half a second, eased in and out (`0.42, 0, 0.58, 1`, whose steepest slope is 1.72 times
+/// the even one): 0.7 × 2 × 1.72 = 2.41. A jump of a fifth of the capital between two looks 25 ms
+/// apart is eight a second.
+const FASTEST_SWING: f64 = 2.42;
+
 fn swing(pane: &TerminalPane) -> Swing {
     let mut seen: Vec<i64> = Vec::new();
-    let (mut low, mut high, mut jump, mut apart, mut looks) = (f64::MAX, f64::MIN, 0.0_f64, 0, 0);
-    let mut last: Option<f64> = None;
+    let (mut low, mut high, mut fastest, mut apart, mut looks) =
+        (f64::MAX, f64::MIN, 0.0_f64, 0, 0);
+    let mut last: Option<(f64, Instant)> = None;
     let until = Instant::now() + Duration::from_millis(1200);
     while Instant::now() < until {
         let bars = pane.wait_bars_drawn();
+        let at = Instant::now();
         let middle = bars[1];
         let key = (middle * 1000.0).round() as i64;
         if !seen.contains(&key) {
@@ -1562,10 +1571,13 @@ fn swing(pane: &TerminalPane) -> Swing {
         }
         low = low.min(middle);
         high = high.max(middle);
-        if let Some(before) = last {
-            jump = jump.max((middle - before).abs());
+        if let Some((before, then)) = last {
+            let gap = at.duration_since(then).as_secs_f64();
+            if gap > 0.0 {
+                fastest = fastest.max((middle - before).abs() / gap);
+            }
         }
-        last = Some(middle);
+        last = Some((middle, at));
         looks += 1;
         if (bars[0] - bars[2]).abs() > 0.02 {
             apart += 1;
@@ -1576,7 +1588,7 @@ fn swing(pane: &TerminalPane) -> Swing {
         distinct: seen.len(),
         low,
         high,
-        jump,
+        fastest,
         apart,
         looks,
     }
@@ -1798,8 +1810,8 @@ fn born_without_its_terminal(
             );
             let swing = swing(&pane);
             println!(
-                "pencere: {what}: {} heights, {:.2} to {:.2}, the biggest jump {:.3}, apart in {} of {} looks",
-                swing.distinct, swing.low, swing.high, swing.jump, swing.apart, swing.looks
+                "pencere: {what}: {} heights, {:.2} to {:.2}, at most {:.2} of the capital a second, apart in {} of {} looks",
+                swing.distinct, swing.low, swing.high, swing.fastest, swing.apart, swing.looks
             );
             assert!(
                 swing.distinct >= 20,
@@ -1809,7 +1821,11 @@ fn born_without_its_terminal(
                 swing.high - swing.low >= 0.5,
                 "{what}: the bars do not fall and rise"
             );
-            assert!(swing.jump < 0.2, "{what}: the bars jump");
+            assert!(
+                swing.fastest < 2.0 * FASTEST_SWING,
+                "{what}: the bars jump: {:.2} of the capital a second",
+                swing.fastest
+            );
             assert!(
                 swing.apart * 10 >= swing.looks * 8,
                 "{what}: the bars are not behind one another"

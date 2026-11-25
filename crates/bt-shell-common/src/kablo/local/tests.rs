@@ -2792,7 +2792,10 @@ impl HeldMac {
 /// picture of the screen in place of any. Returns the bytes it was given. Slow is not stuck: what
 /// holds the program back is the pane's reading, byte by byte, and the ring of the terminal never
 /// gets past the pane (the program is far faster than the pane, so the pane is always behind: the
-/// premise, checked: nearly every reading finds a full chunk waiting).
+/// premise, checked: at nearly every reading the pane is behind — it finds a whole chunk waiting
+/// for it, or the account holds back more than a chunk for it. The second is what says it on a
+/// busy machine: there the writer that fills the pane's socket may not have run since the last
+/// reading, and the chunk the reading finds is short while what waits for the pane is a megabyte.)
 fn read_slowly(name: &str, every: Duration, seconds: u64) -> Option<usize> {
     let Some(mut mac) = HeldMac::start(name) else {
         eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
@@ -2808,9 +2811,10 @@ fn read_slowly(name: &str, every: Duration, seconds: u64) -> Option<usize> {
     mac.keep_count();
     let mut master = std::fs::File::from(slow.master.try_clone().expect("a clone"));
     let mut numbered = Numbered::default();
-    let (mut reads, mut full, mut bytes) = (0u32, 0u32, 0usize);
+    let (mut reads, mut full, mut behind, mut bytes) = (0u32, 0u32, 0u32, 0usize);
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(seconds) {
+        let held = mac.service.queued(ACCOUNT).unwrap_or(0);
         let mut chunk = Vec::new();
         take_now(&mut master, &mut chunk, 16 * 1024);
         if let Some(at) = chunk.iter().position(|byte| *byte == 0x1b) {
@@ -2824,6 +2828,7 @@ fn read_slowly(name: &str, every: Duration, seconds: u64) -> Option<usize> {
         }
         reads += 1;
         full += u32::from(chunk.len() >= 16 * 1024);
+        behind += u32::from(chunk.len() >= 16 * 1024 || held >= 64 * 1024);
         bytes += chunk.len();
         numbered
             .feed(&chunk)
@@ -2831,12 +2836,12 @@ fn read_slowly(name: &str, every: Duration, seconds: u64) -> Option<usize> {
         thread::sleep(every);
     }
     eprintln!(
-        "MEASURE slow: {bytes} bytes in {reads} readings {every:?} apart, {full} of them full, {} whole lines, all in order",
+        "MEASURE slow: {bytes} bytes in {reads} readings {every:?} apart, {full} of them full, behind at {behind}, {} whole lines, all in order",
         numbered.next
     );
     assert!(
-        full * 10 >= reads * 9,
-        "the pane kept up with its program: {full} of {reads} readings were full"
+        behind * 10 >= reads * 9,
+        "the pane kept up with its program: behind at {behind} of {reads} readings ({full} full)"
     );
     drop(master);
     drop(slow);
