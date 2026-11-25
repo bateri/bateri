@@ -7663,6 +7663,7 @@ fn an_ordinary_shell_that_takes_over_a_carried_stream_sets_the_modes_back_first(
 /// written and the pane has not taken is bounded, and the shell waits for the pane, as a program
 /// waits for a pane that reads slowly anywhere. Then every byte comes, in order.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn an_ordinary_shell_over_a_carried_stream_waits_for_a_pane_that_reads_nothing() {
     let back = Comeback::leaves("local-chose-flood", b"x\r\n");
     back.world
