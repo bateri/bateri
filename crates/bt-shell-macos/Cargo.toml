@@ -177,6 +177,9 @@ objc2-foundation = { workspace = true, features = [
 # header flag; `Cargo.lock` did not move.
 # The Keyboard page draws each section's rows as one card, a row's part of it in its row view
 # (`NSTableRowView`). Only a header flag; `Cargo.lock` did not move.
+# A page's vibration when the trackpad's motor cannot be driven directly (`feel`): AppKit's own
+# three patterns, played only while a finger is on the glass. Only a header flag; `Cargo.lock`
+# did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSSegmentedControl", "NSSegmentedCell", "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -195,7 +198,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
     "NSGraphicsContext", "NSAffineTransform", "objc2-core-graphics", "NSGraphics", "NSImageRep",
     "NSBitmapImageRep", "NSAccessibilityElement", "NSTextInputContext", "NSColorList",
-    "NSTableRowView",
+    "NSTableRowView", "NSHapticFeedback",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

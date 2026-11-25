@@ -64,8 +64,10 @@ pub use pencere_drive::{
     CarryOut, Drained, Field, Held, Host, Outline, Painted, Placement, Reading, ReadingInput,
     Route, Scrolling, Tip, ZOOM_TEXT, carriable,
 };
-pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script};
+pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script, sounds};
 use pencere_sandbox::{FigureKey, Images, draw_figure, figure_key};
+// What a page asks of the trackpad's motor and of the speaker, and the kit's ready patterns and
+// sounds: the host plays them, and the shell has no other way to name these types.
 pub use pencere_view::{
     Accessible, AccessibleRole, Action, Bars, BrowserAsk, BrowserSlot, BrowserState, Button, Carry,
     Command, Cursor, FieldKind, FieldState, FileEntry, FileSource, Fill, GesturePhase, Id, Input,
@@ -75,6 +77,7 @@ pub use pencere_view::{
 use pencere_view::{
     Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,
 };
+pub use pencere_view::{haptic, sound};
 pub use surfaces::Surfaces;
 pub use transfers::Waits;
 

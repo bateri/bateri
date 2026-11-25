@@ -57,6 +57,7 @@ mod clipboard;
 mod context_menu;
 mod dev_fault;
 pub mod embed;
+pub mod feel;
 mod footer;
 mod hold_service;
 mod hyperlink;
