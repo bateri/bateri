@@ -142,7 +142,10 @@ fn release() -> Option<Bundle> {
 }
 
 /// A private directory with a path short enough for a socket, and what has to be ended when a
-/// test that made terminals ends: its own, by name, never anybody else's.
+/// test that made terminals ends: its own, by name, never anybody else's. Dropping it — at the
+/// end of a test, or when the test panics — ends every process of it ([`Ground::reap`]); a test
+/// that is killed drops nothing, and its processes are ended when its process is gone
+/// ([`lifeline`]).
 struct Ground {
     root: PathBuf,
     sockets: PathBuf,
@@ -152,9 +155,47 @@ struct Ground {
     made: Vec<SessionId>,
 }
 
+/// The start of the path of every ground of the process `pid`: what a program run from one of them
+/// has at the start of its command line.
+fn grounds_of(pid: u32) -> String {
+    format!("/tmp/bt-lk-{pid}-")
+}
+
+/// What the grounds of this process leave running is ended when the process is gone, however it
+/// went: a test that panics drops its ground ([`Ground::reap`]), but one that is killed (the gate
+/// kills a test binary that says nothing for minutes) drops nothing, and kablo's daemons and what
+/// they run are no children of the test's process, to be killed with it. Started once, by the
+/// first ground: a shell apart from this process (the one that starts it ends at once, so it is no
+/// child of this process and a kill of the process's family does not reach it) waits for the
+/// process to be gone, then ends by their process ids the processes that run a program from one of
+/// its grounds, and ends itself.
+fn lifeline() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = Command::new("/bin/sh")
+            .args(["-c", &lifeline_script(std::process::id())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    });
+}
+
+/// The script of [`lifeline`] for the process `pid`.
+fn lifeline_script(pid: u32) -> String {
+    format!(
+        "( while kill -0 {pid} 2>/dev/null; do sleep 1; done; \
+           ps -A -o pid=,args= | awk -v from='{}' 'index($2, from) == 1 {{ print $1 }}' | \
+           while read -r leftover; do kill -9 \"$leftover\" 2>/dev/null; done \
+         ) </dev/null >/dev/null 2>&1 &",
+        grounds_of(pid)
+    )
+}
+
 impl Ground {
     fn new(name: &str) -> Ground {
-        let root = PathBuf::from(format!("/tmp/bt-lk-{}-{name}", std::process::id()));
+        lifeline();
+        let root = PathBuf::from(format!("{}{name}", grounds_of(std::process::id())));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -249,10 +290,13 @@ impl Drop for Ground {
 }
 
 impl Ground {
-    /// What is left of this ground's sessions. An ended session is kept for a client that has
+    /// What is left of this ground's processes. An ended session is kept for a client that has
     /// been told how it ended, so the warden of a terminal a test ended stays; it is this
-    /// ground's by its socket directory (`--dir`), which no other ground has, and its relay and
-    /// program hang up with it.
+    /// ground's by its socket directory (`--dir`), which no other ground has. A program of the
+    /// ground (its kablo, put below its home) that runs on is this ground's by its own path: the
+    /// command a test ran over the connection (`kablo bateri … package watch`) is no child of a
+    /// warden, and outlived the ground before (one for every run of the tests). Whatever any of
+    /// them started goes with it.
     fn reap(&self) {
         let Ok(listing) = Command::new("ps")
             .args(["-axo", "pid=,ppid=,command="])
@@ -271,23 +315,34 @@ impl Ground {
             })
             .collect();
         let dir = self.sockets.to_string_lossy();
-        let wardens: Vec<u32> = rows
+        let root = format!("{}/", self.root.to_string_lossy());
+        let mut ours: std::collections::BTreeSet<u32> = rows
             .iter()
             .filter(|(_, _, line)| {
-                line.contains(" warden --id ")
-                    && line
-                        .split_whitespace()
-                        .skip_while(|word| *word != "--dir")
-                        .nth(1)
-                        == Some(dir.as_ref())
+                let mut words = line.split_whitespace().skip(2);
+                let program = words.next().unwrap_or_default();
+                program.starts_with(&root)
+                    || line.contains(" warden --id ")
+                        && words.skip_while(|word| *word != "--dir").nth(1) == Some(dir.as_ref())
             })
             .map(|(pid, _, _)| *pid)
             .collect();
-        for (pid, ppid, _) in &rows {
-            if wardens.contains(pid) || (wardens.contains(ppid) && *pid > 1) {
-                // SAFETY: a signal to a warden found by this ground's own socket directory, or
-                // to a child of one.
-                unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+        loop {
+            let started: Vec<u32> = rows
+                .iter()
+                .filter(|(pid, ppid, _)| !ours.contains(pid) && ours.contains(ppid))
+                .map(|(pid, _, _)| *pid)
+                .collect();
+            if started.is_empty() {
+                break;
+            }
+            ours.extend(started);
+        }
+        for pid in ours {
+            if pid > 1 && pid != std::process::id() {
+                // SAFETY: a signal to a process of this ground: one that runs a program from its
+                // directory or is a warden of its socket directory, or one any of them started.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
             }
         }
     }
@@ -4052,6 +4107,102 @@ impl Here {
         self.service
             .streams()
             .command(ACCOUNT, command, Duration::from_secs(30))
+    }
+}
+
+/// Starts `sleep` for ten minutes as a program of `dir` (its command line starts with `dir/sleep`,
+/// as a kablo put below a ground's home does; a copy of a program of the system is not allowed to
+/// run), apart from this process (the shell that starts it ends at once, as kablo's daemons are
+/// apart from what started them): its process id.
+fn sleep_apart(dir: &Path) -> String {
+    let program = dir.join("sleep");
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec -a \"$0\" /bin/sleep 600 </dev/null >/dev/null 2>&1 & echo $!",
+            &program.to_string_lossy(),
+        ])
+        .output()
+        .expect("sh");
+    let pid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
+    pid
+}
+
+/// A ground's end ends every process that runs a program of the ground, whoever started it: a
+/// command a test ran over the connection (the package watch) was no child of a warden and outlived
+/// every run of the tests.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_ground_ends_a_program_of_its_own_that_nothing_of_it_started() {
+    let ground = Ground::new("ends-its-own");
+    let pid = sleep_apart(&ground.home);
+    assert!(alive(&pid));
+    drop(ground);
+    let ended = (0..200).any(|_| {
+        thread::sleep(Duration::from_millis(10));
+        !alive(&pid)
+    });
+    if !ended {
+        let _ = Command::new("kill").args(["-9", &pid]).status();
+    }
+    assert!(ended, "the program of the ground runs on");
+}
+
+/// A test that is killed drops no ground: what it left running from its grounds is ended when its
+/// process is gone, and nothing else.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn what_a_killed_test_left_running_from_its_grounds_ends_with_its_process() {
+    // A process that stands for the test that is killed, and a program left from its ground.
+    let mut test = Command::new("/bin/sleep")
+        .arg("2")
+        .spawn()
+        .expect("a stand-in for the test");
+    let ground = PathBuf::from(format!("{}lifeline", grounds_of(test.id())));
+    let left = sleep_apart(&ground.join("h"));
+    // And one of another ground, that is not its.
+    let other = TempRoot::new("not-a-ground");
+    let kept = sleep_apart(&other.0);
+    // Whatever this test ends with, neither runs on after it.
+    let _ended = Leftovers(
+        vec![
+            (left.clone(), ground.join("h/sleep")),
+            (kept.clone(), other.0.join("sleep")),
+        ],
+        ground.clone(),
+    );
+    let _ = Command::new("/bin/sh")
+        .args(["-c", &lifeline_script(test.id())])
+        .status()
+        .expect("the lifeline");
+    thread::sleep(Duration::from_millis(500));
+    assert!(alive(&left), "ended while the test was there");
+    let _ = test.wait();
+    waits_for("what it left to end", || !alive(&left));
+    assert!(alive(&kept), "a program of no ground of it was ended");
+}
+
+/// The processes a test started apart from itself, by their ids and the program each runs, and a
+/// folder of its own: ended and removed when the test is, however it ends. A process id is ended
+/// only while it still runs that program (an id is given again once its process is gone).
+struct Leftovers(Vec<(String, PathBuf)>, PathBuf);
+
+impl Drop for Leftovers {
+    fn drop(&mut self) {
+        for (pid, program) in &self.0 {
+            let runs = Command::new("ps")
+                .args(["-o", "args=", "-p", pid])
+                .output()
+                .is_ok_and(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .starts_with(program.to_string_lossy().as_ref())
+                });
+            if runs {
+                let _ = Command::new("kill").args(["-9", pid]).status();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.1);
     }
 }
 
