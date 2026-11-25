@@ -12,21 +12,23 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-11-25
+
 ### Added
 
-- **Inspect Page, in the View menu (⌥⌘I).** See how a program's page is built while you work on it: every element with its size, spacing and style, what a screen reader says of it, and how long each frame took. The inspector opens beside the page, and the element you choose is outlined on the page. Where a page shows a browser, ⌥⌘I still opens the browser's tools; open the inspector from the menu there.
-- **Programs can make the trackpad buzz and play sounds.** A page can answer a press with a short vibration under your finger, on a Force Touch trackpad, and a sound from your speaker, at the volume you have set. When Claude operates a page, nothing vibrates or plays; Claude is told what the page asked for. Settings ▸ Sound & Haptics turns the vibrations, the sounds, or programs' use of them off.
-- **`bateri haptic [NAME]` and `bateri sound [NAME]` try them.** Play one of the ready vibrations (with a finger on the trackpad) or one of the ready sounds from a terminal; with no name they list what there is.
-- **For pen authors: `@pencere/query`.** A page can let this new library module keep what it asks of its program (each answer, and whether it is loading, stale or failed) instead of writing that bookkeeping itself.
+- **Inspect Page, in the View menu (⌥⌘I).** See how a program's page is built while you work on it: each element's size, spacing and style, what a screen reader says of it, and how long each frame took. The element you choose is outlined on the page.
+- **Programs can buzz the trackpad and play sounds.** A program's page can answer a press with a short vibration under your finger on a Force Touch trackpad, and with a sound at your volume. Settings ▸ Sound & Haptics turns them off.
+- **`bateri haptic` and `bateri sound` try them from a terminal.** Give the name of a ready vibration (with a finger on the trackpad) or sound to play it; with no name they list what there is.
+- **For pen authors: `@pencere/query`.** A library module that keeps what a page asks of its program, each answer and whether it is loading, stale or failed, so the page does not have to.
 
 ### Fixed
 
-- **What a new pane's shell asks at its start is answered by bateri.** When a pane came a moment late, at a busy launch for example, a shell or an editor that asked the terminal what it can do at once could get the answer of a plainer terminal and do without pictures or colours for the whole of its run.
-- **A new pane opens at once and no longer falls back to an ordinary shell for being slow.** The pane is there the moment you open it and what you type waits for the terminal; after two seconds it says it is still starting, and after ten it offers to open an ordinary shell instead. It becomes an ordinary shell by itself only when the terminal is refused or kablo cannot be reached, and then says why.
-- **A pane that stops reading no longer freezes the panes beside it.** A program that floods a pane nobody is reading used to hold every other pane and the next new one; they carry on now, and the pane catches up when it reads again.
-- **A program's view that fails while it draws, reads the keyboard or speaks no longer closes bateri.** The view stops behind a small card with one button, Reopen; the program keeps running and your other tabs and panes carry on.
-- **A program no longer waits for ever for a file with nothing left to send.** A program on this Mac that asked for an empty file, or for the rest of a file it already had whole, could now and then wait without end; it now gets the end of the file.
-- **A crash no longer reopens the program that caused it.** If bateri quits unexpectedly, the views that were open come back behind a small card with one button, Reopen, instead of opening again by themselves and crashing again. After two launches that never settled, bateri keeps your windows and offers to open them with one button.
+- **A new pane's shell gets bateri's answers.** When a pane opened a moment late, a shell or editor asking what the terminal can do could get a plainer terminal's answer and go without pictures or colours.
+- **A new pane opens at once.** What you type waits for the terminal to start; if it is slow, the pane says so and offers an ordinary shell instead of switching to one by itself.
+- **A pane that stops reading no longer freezes the others.** A program flooding it used to hold every other pane; now they carry on, and it catches up when it reads again.
+- **A program's view that fails no longer closes bateri.** It stops behind a small card with a Reopen button; the program and your other panes keep running.
+- **A program no longer waits forever for a file with nothing left to send.** Asking for an empty file, or for the rest of one it already had, now gets the end of the file.
+- **A crash no longer reopens the program that caused it.** After an unexpected quit, the views that were open come back behind a Reopen card instead of crashing again.
 
 ## [0.33.0] - 2026-11-24
 
