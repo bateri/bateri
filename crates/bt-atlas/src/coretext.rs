@@ -256,6 +256,11 @@ impl FontSystem for CoreText {
         (font, returned.to_string())
     }
 
+    fn postscript_name(font: &Self::Font) -> Option<String> {
+        // SAFETY: `font` is alive; a pure read.
+        Some(unsafe { font.post_script_name() }.to_string())
+    }
+
     fn open_default(size: f64) -> (Self::Font, String) {
         for name in PREFERRED {
             let (font, returned) = Self::open(name, size);

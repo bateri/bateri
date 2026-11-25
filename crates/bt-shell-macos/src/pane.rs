@@ -2322,7 +2322,7 @@ pub struct PaneIvars {
     /// frame path; shown by [`TerminalPane::set_link_target`].
     link_label: (Retained<LinkLabel>, Retained<NSTextField>),
     /// What the pane says of its terminal of this Mac while it is on its way — a dim line in the
-    /// top left corner with a turning ring beside it, shown once, two seconds after the pane was
+    /// top left corner led by three moving bars, shown once, two seconds after the pane was
     /// born without it ([`TerminalPane::wait_for_terminal`]), and, ten seconds in, a link to an
     /// ordinary shell instead ([`TerminalPane::open_ordinary_shell`]). AppKit's, outside the frame
     /// path; the line takes no hit.
@@ -2628,6 +2628,8 @@ define_class!(
         #[unsafe(method(viewFrameDidChange:))]
         fn view_frame_did_change(&self, _n: &NSNotification) {
             self.refresh_geometry();
+            // The line of a wait stands again in the pane's new size, its link within it.
+            self.ivars().wait_line.fit(self.bounds());
             // A card in the corner is made for the pane's size, width and height: it is told of
             // the new size on the next turn of the loop, outside of the layout this runs in.
             if self.ivars().corner_card.borrow().is_some()
@@ -4270,7 +4272,7 @@ impl TerminalPane {
         }
     }
 
-    /// The wait for the terminal is over: the line, the ring and the link go.
+    /// The wait for the terminal is over: the line, its bars and the link go.
     fn terminal_settled(&self) {
         self.ivars().wait_line.hide();
         self.ivars().wait_ops.borrow_mut().take();
@@ -4288,13 +4290,26 @@ impl TerminalPane {
 
     /// Whether the bars of the wait are to move (the line is up and Reduce Motion is off).
     pub fn wait_bars_turn(&self) -> bool {
-        self.ivars().wait_line.is_turning()
+        self.ivars().wait_line.is_moving()
     }
 
     /// Whether every bar has its animation in a window: what a pane put back in a window must
     /// still have.
     pub fn wait_bars_play(&self) -> bool {
         self.ivars().wait_line.is_playing()
+    }
+
+    /// How low and how high the animation of each bar of the wait goes, as parts of the tallest
+    /// the bars are now (`None` for a bar that has none): an animation made for an earlier font
+    /// is off.
+    pub fn wait_bars_reach(&self) -> Vec<Option<(f64, f64)>> {
+        self.ivars().wait_line.reach()
+    }
+
+    /// When the animation of each bar of the wait begins, in Core Animation's time base (`None`
+    /// for a bar that has none): an animation put again begins where the one before it did.
+    pub fn wait_bars_begins(&self) -> Vec<Option<f64>> {
+        self.ivars().wait_line.begins()
     }
 
     /// Takes the animation off the bars of the wait, as a layer may lose it when its window

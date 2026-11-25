@@ -332,7 +332,7 @@ pub(crate) struct RawMetrics {
 /// match**: CoreText opens that too, but the family name differs, and that
 /// name names a single face of the family — the setting asks for a family
 /// (`docs/SETTINGS.md`).
-pub(crate) fn same_family(returned: &str, requested: &str) -> bool {
+pub fn same_family(returned: &str, requested: &str) -> bool {
     returned.to_lowercase() == requested.to_lowercase()
 }
 
@@ -350,20 +350,55 @@ pub(crate) fn same_family(returned: &str, requested: &str) -> bool {
 /// [`FontSystem::open`] gives the font **together** with the family name it
 /// actually opened; the system's own default chain belongs to the backend.
 pub(crate) fn open_chain(family: Option<&str>, point_size: f64) -> (Font, Option<FontIssue>) {
+    let (font, opened, found) = chain_font(family, point_size);
     let Some(requested) = family else {
-        return (crate::app_fonts::open_default(point_size).0, None);
+        return (font, None);
     };
-    let (font, returned) = Backend::open(requested, point_size);
-    if !same_family(&returned, requested) {
-        let (font, using) = crate::app_fonts::open_default(point_size);
+    if !found {
         let issue = FontIssue::FamilyNotFound {
             requested: requested.to_owned(),
-            using,
+            using: opened,
         };
         return (font, Some(issue));
     }
-    let issue = (!monospaced(&font)).then_some(FontIssue::NotMonospaced { family: returned });
+    let issue = (!monospaced(&font)).then_some(FontIssue::NotMonospaced { family: opened });
     (font, issue)
+}
+
+/// The font the chain opens for `family`, the family it is, and whether it is the one asked for
+/// (`false` for a family that does not open by its name, whose place the default takes).
+fn chain_font(family: Option<&str>, point_size: f64) -> (Font, String, bool) {
+    if let Some(requested) = family {
+        let (font, returned) = Backend::open(requested, point_size);
+        if same_family(&returned, requested) {
+            return (font, returned, true);
+        }
+    }
+    let (font, opened) = crate::app_fonts::open_default(point_size);
+    (font, opened, family.is_none())
+}
+
+/// The face the grid opens for `family` ([`open_chain`]: the family when it opens by its name,
+/// else the app's own or the system's default): what another surface set "in the terminal's font"
+/// opens, so that it is the very face the grid draws and not a chain of its own beside this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainFace {
+    /// The family's name, as the font system spells it.
+    pub family: String,
+    /// The PostScript name of the regular face — the one face, where a family name has several;
+    /// `None` on a font system that does not name one.
+    pub postscript: Option<String>,
+}
+
+/// [`ChainFace`] of `family`.
+pub fn chain_face(family: Option<&str>) -> ChainFace {
+    // The face does not depend on the size.
+    const PROBE_SIZE: f64 = 12.0;
+    let (font, family, _) = chain_font(family, PROBE_SIZE);
+    ChainFace {
+        family,
+        postscript: Backend::postscript_name(&font),
+    }
 }
 
 /// Whether the chain takes `font` as monospaced — the one question behind the

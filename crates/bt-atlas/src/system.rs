@@ -54,6 +54,12 @@ pub(crate) trait FontSystem {
     /// the requested one is missing, with the name of the family it opened.
     fn open_default(size: f64) -> (Self::Font, String);
 
+    /// The PostScript name of the font's face, where the font system has one: the name of
+    /// that one face, by which another font system of the platform opens the same face.
+    fn postscript_name(_font: &Self::Font) -> Option<String> {
+        None
+    }
+
     /// Derives `face` from `regular`; `None` unless the returned font really
     /// carries the requested style (a silent substitution is not a face).
     /// Never called with [`Face::Regular`].

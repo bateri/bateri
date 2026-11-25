@@ -1582,6 +1582,28 @@ fn swing(pane: &TerminalPane) -> Swing {
     }
 }
 
+/// Whether two lists of the moments the bars' animations begin are the same: each bar's animation
+/// put again begins where the one before it did, and none is missing.
+fn same_begins(before: &[Option<f64>], after: &[Option<f64>]) -> bool {
+    before.len() == after.len()
+        && before
+            .iter()
+            .zip(after)
+            .all(|(before, after)| match (before, after) {
+                (Some(before), Some(after)) => (before - after).abs() < 1e-6,
+                _ => false,
+            })
+}
+
+/// Whether every bar's animation goes from its lowest to its highest in the height the bars are
+/// now (a third of the capital to all of it).
+fn reaches_the_capital(reach: &[Option<(f64, f64)>]) -> bool {
+    reach.len() == 3
+        && reach.iter().all(|reach| {
+            reach.is_some_and(|(low, high)| (low - 0.3).abs() < 0.01 && (high - 1.0).abs() < 0.01)
+        })
+}
+
 /// Where a click at `point` (in the pane's coordinates) lands, as a view: the name of its class.
 fn hit_by_a_click(pane: &TerminalPane, point: NSPoint) -> (String, bool) {
     // SAFETY: the pane is in a window's view tree on the main thread.
@@ -1761,12 +1783,18 @@ fn born_without_its_terminal(
         // where the pane stands in a window, and not where it does not.
         let content = window.contentView().expect("a window has a content view");
         let other_window = make_window(mtm, frame_rect);
-        let is_back = |what: &str| {
+        let is_back = |what: &str, began: &[Option<f64>]| {
             spin_for(0.3);
             assert!(pane.wait_bars_turn(), "{what}: the bars are to move");
             assert!(
                 pane.wait_bars_play(),
                 "{what}: the bars lost their animation"
+            );
+            // Put again where they would be: the same beginning, so no bar jumps.
+            assert!(
+                same_begins(began, &pane.wait_bars_begins()),
+                "{what}: the bars began again: {began:?} then {:?}",
+                pane.wait_bars_begins()
             );
             let swing = swing(&pane);
             println!(
@@ -1789,36 +1817,60 @@ fn born_without_its_terminal(
         };
         // Each time the animation is taken off the bars while the pane is out of its place (as a
         // layer may lose it when its window changes), and the pane must put it again.
+        let began = pane.wait_bars_begins();
+        assert!(began.iter().all(Option::is_some), "{began:?}");
         pane.removeFromSuperview();
         pane.wait_bars_drop_animation();
         spin_for(0.3);
         assert!(!pane.wait_bars_play(), "out of every window nothing plays");
         content.addSubview(&pane);
-        is_back("a tab put in the background and chosen again");
+        is_back("a tab put in the background and chosen again", &began);
         pane.setHidden(true);
         pane.wait_bars_drop_animation();
         spin_for(0.3);
         pane.setHidden(false);
-        is_back("a pane hidden and shown");
+        is_back("a pane hidden and shown", &began);
         let split = NSView::initWithFrame(NSView::alloc(mtm), frame_rect);
         content.addSubview(&split);
         pane.removeFromSuperview();
         pane.wait_bars_drop_animation();
         split.addSubview(&pane);
-        is_back("a split");
+        is_back("a split", &began);
         pane.removeFromSuperview();
         pane.wait_bars_drop_animation();
         other_window
             .contentView()
             .expect("a window has a content view")
             .addSubview(&pane);
-        is_back("a tab moved to another window");
+        is_back("a tab moved to another window", &began);
         pane.removeFromSuperview();
         pane.wait_bars_drop_animation();
         split.removeFromSuperview();
         content.addSubview(&pane);
-        is_back("and back");
+        is_back("and back", &began);
         other_window.close();
+        // The font grows while the bars move (View ▸ Bigger): they move in the new height, in
+        // their phase; and back.
+        assert!(reaches_the_capital(&pane.wait_bars_reach()));
+        let (_, small, _) = pane.wait_frames();
+        // SAFETY: the pane's own action of View ▸ Bigger, with no sender.
+        let _: () = unsafe { msg_send![&*pane, makeFontBigger: None::<&AnyObject>] };
+        spin_for(0.2);
+        let (_, big, _) = pane.wait_frames();
+        assert!(
+            big.expect("the bars").size.height > small.expect("the bars").size.height,
+            "the font did not grow"
+        );
+        assert!(
+            reaches_the_capital(&pane.wait_bars_reach()),
+            "the bars move in the height of the font before: {:?}",
+            pane.wait_bars_reach()
+        );
+        assert!(same_begins(&began, &pane.wait_bars_begins()));
+        // SAFETY: the pane's own action of View ▸ Actual Size, with no sender.
+        let _: () = unsafe { msg_send![&*pane, resetFontSize: None::<&AnyObject>] };
+        spin_for(0.2);
+        assert!(reaches_the_capital(&pane.wait_bars_reach()));
         // Reduce Motion, while the line shows: the bars stand at different heights, and move
         // again when the person lets them.
         pane.set_reduce_motion(true);
@@ -1924,6 +1976,40 @@ fn born_without_its_terminal(
     println!("pencere: a click on the link reaches {name}");
     assert_eq!(name, "BateriJumpButton");
     assert!(is_the_panes);
+    // The pane is made narrow, as a split makes it: the line and the link stand in it again — the
+    // link under the line, shortened — and nothing of them is past the pane's edge, over the pane
+    // beside it. Made wide again, the link is beside the words again.
+    let wide = pane.frame().size;
+    let narrow = 220.0;
+    pane.setFrameSize(NSSize::new(narrow, wide.height));
+    spin_for(0.2);
+    let (line, _, link) = pane.wait_frames();
+    let (line, link) = (line.expect("the line"), link.expect("the link"));
+    println!("pencere: in a pane {narrow} wide the line is {line:?} and the link {link:?}");
+    assert!(
+        line.origin.x + line.size.width <= narrow - 8.0 + 0.5,
+        "the line runs past the pane: {line:?}"
+    );
+    assert!(
+        link.origin.x + link.size.width <= narrow - 8.0 + 0.5,
+        "the link runs past the pane: {link:?}"
+    );
+    assert!(
+        link.origin.y + link.size.height <= line.origin.y + 0.5,
+        "the link is not under the line: {line:?} {link:?}"
+    );
+    if let Some(shots) = &shots {
+        let png = picture_of(&pane, 2.0).expect("a picture");
+        fs::write(shots.join("link-narrow-dark.png"), png).expect("written");
+    }
+    pane.setFrameSize(wide);
+    spin_for(0.2);
+    let (line, _, link) = pane.wait_frames();
+    let (line, link) = (line.expect("the line"), link.expect("the link"));
+    assert!(
+        link.origin.x >= line.origin.x + line.size.width,
+        "the link is not beside the words again: {line:?} {link:?}"
+    );
     // Nothing fell to a shell by itself, by time or by a key.
     assert_eq!(waits.chosen.load(Ordering::SeqCst), 0);
     // The bars move beside the link as they moved without it.

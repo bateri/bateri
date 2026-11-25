@@ -113,6 +113,10 @@ pub use bt_atlas::monospaced_families;
 /// before the first atlas and the Font list. Re-exported for the same reason.
 pub use bt_atlas::{AppFace, AppFonts, app_default_family, app_fonts, register_app_fonts};
 
+/// The face the grid opens for a family, and the rule names of families are compared by: for a
+/// surface set in the terminal's own font (a pane's wait line). Re-exported for the same reason.
+pub use bt_atlas::{ChainFace, chain_face, same_family};
+
 /// What the selected font offers in OpenType features — the settings window's
 /// and the palette's rows. Re-exported for the same reason.
 pub use bt_atlas::{FontFeature, font_features, lacking_features};

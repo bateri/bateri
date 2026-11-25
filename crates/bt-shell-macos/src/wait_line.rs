@@ -20,7 +20,13 @@
 //! nothing while they move. It stops with the line (the terminal has come), and while Reduce
 //! Motion is on the bars do not move at all but stand at different heights. A layer's animation
 //! does not outlive the view's window (a tab put in the background, a split, a tab moved from one
-//! window to another), so it is put again where the view enters one.
+//! window to another), so it is put again where the view enters one — where the bars would be had
+//! it never gone: every bar's animation begins at the same moment, the one the bars first moved
+//! at, so an animation put again goes on in the same phase and the bars do not jump.
+//!
+//! **The line stays in its pane.** It is laid out again when the pane's size changes (a split, a
+//! narrower window), the words shortened and the link moved under the line and shortened when the
+//! pane is too narrow for them: nothing of it stands over the pane beside it.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -32,8 +38,8 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAutoresizingMaskOptions, NSColor, NSFont, NSFontAttributeName,
-    NSFontDescriptor, NSFontFamilyAttribute, NSForegroundColorAttributeName, NSLineBreakMode,
-    NSStringDrawing, NSTextField, NSView,
+    NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSStringDrawing, NSTextField, NSView,
 };
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{
@@ -106,6 +112,10 @@ pub(crate) struct BarsState {
     cell: Cell<f64>,
     /// How tall the tallest is: the font's capital, points.
     top: Cell<f64>,
+    /// When the bars began to move, in Core Animation's own time base: every animation put on
+    /// them begins there, so that one put again goes on where the bars would be. Forgotten when
+    /// they stop.
+    epoch: Cell<Option<f64>>,
 }
 
 define_class!(
@@ -169,6 +179,7 @@ impl WaitBars {
             moving: Cell::new(false),
             cell: Cell::new(0.0),
             top: Cell::new(0.0),
+            epoch: Cell::new(None),
         });
         // SAFETY: `NSView`'s designated initializer; the ivars are set.
         let this: Retained<Self> = unsafe {
@@ -188,12 +199,14 @@ impl WaitBars {
         this
     }
 
-    /// The bars stand in a cell `width` points wide, the tallest of them `top` points.
+    /// The bars stand in a cell `width` points wide, the tallest of them `top` points; bars that
+    /// move go on moving in that height (the animation is made for a height), in their phase.
     fn set_size(&self, width: f64, top: f64) {
         self.ivars().cell.set(width);
         self.ivars().top.set(top);
         self.setFrameSize(NSSize::new(width, top));
         self.place();
+        self.settle();
     }
 
     /// Where the bars stand, and how tall: each in its own place, bottom on the view's bottom,
@@ -240,9 +253,12 @@ impl WaitBars {
         CATransaction::commit();
     }
 
-    /// The bars move, or stand.
+    /// The bars move, or stand (and when they move again, they start again).
     fn set_moving(&self, on: bool) {
         self.ivars().moving.set(on);
+        if !on {
+            self.ivars().epoch.set(None);
+        }
         self.place();
         self.settle();
     }
@@ -260,14 +276,20 @@ impl WaitBars {
             }
             return;
         }
-        let now = layers[0].convertTime_fromLayer(CACurrentMediaTime(), None);
+        let epoch = self.ivars().epoch.get().unwrap_or_else(|| {
+            let now = CACurrentMediaTime();
+            self.ivars().epoch.set(Some(now));
+            now
+        });
         let top = self.ivars().top.get();
         for (index, bar) in layers.iter().enumerate() {
             // The first bar is the furthest on and each is `LAG_SECS` behind the one before: the
-            // wave runs from left to right, and none waits for its turn to begin.
-            let begin = now - (layers.len() - 1 - index) as f64 * LAG_SECS;
+            // wave runs from left to right, and none waits for its turn to begin. From the same
+            // moment whenever it is put: the animation repeats without end, so one put again is
+            // where the one before it would be now.
+            let begin = epoch - (layers.len() - 1 - index) as f64 * LAG_SECS;
             let animation = breathing(top);
-            animation.setBeginTime(begin);
+            animation.setBeginTime(bar.convertTime_fromLayer(begin, None));
             bar.addAnimation_forKey(&animation, Some(key()));
         }
     }
@@ -294,6 +316,46 @@ impl WaitBars {
     /// Whether the bars are to move.
     pub(crate) fn is_moving(&self) -> bool {
         self.ivars().moving.get()
+    }
+
+    /// How low and how high each bar's animation goes, as parts of the tallest the bars are now:
+    /// an animation made for another height (a font that changed) is off. `None` for a bar that
+    /// has none.
+    pub(crate) fn reach(&self) -> Vec<Option<(f64, f64)>> {
+        let top = self.ivars().top.get();
+        self.ivars()
+            .layers
+            .borrow()
+            .iter()
+            .map(|bar| {
+                // SAFETY: a plain read of a layer this view made.
+                let animation = unsafe { bar.animationForKey(key()) }?;
+                // SAFETY: the animation is the `CABasicAnimation` `breathing` made, whose two
+                // values are the `NSNumber`s it was given.
+                let (from, to): (Option<Retained<NSNumber>>, Option<Retained<NSNumber>>) = unsafe {
+                    (
+                        msg_send![&*animation, fromValue],
+                        msg_send![&*animation, toValue],
+                    )
+                };
+                Some((from?.doubleValue() / top, to?.doubleValue() / top))
+            })
+            .collect()
+    }
+
+    /// When each bar's animation begins, in Core Animation's own time base: the same for an
+    /// animation put again as for the one before it. `None` for a bar that has none.
+    pub(crate) fn begins(&self) -> Vec<Option<f64>> {
+        self.ivars()
+            .layers
+            .borrow()
+            .iter()
+            .map(|bar| {
+                // SAFETY: a plain read of a layer this view made.
+                let animation = unsafe { bar.animationForKey(key()) }?;
+                Some(bar.convertTime_toLayer(animation.beginTime(), None))
+            })
+            .collect()
     }
 
     /// The heights the bars stand at, as parts of the tallest: what each layer's model says,
@@ -384,47 +446,35 @@ fn rgba(color: &CGColor) -> Option<[f64; 4]> {
     })
 }
 
-/// The font the words of the line are set in: the terminal's, by the terminal's own rule. The
-/// family the person's `font.family` names, else the one the app ships (JetBrains Mono, where its
-/// fonts are registered for the process), else the system's monospaced font; a family that does
-/// not open by its name is the same as none. The size is the terminal's, held between
-/// [`FONT_LEAST`] and [`FONT_MOST`].
+/// The font the words of the line are set in: the terminal's, the very face the grid opens
+/// ([`bt_gpu::chain_face`]: the family the person's `font.family` names when it opens by its name,
+/// else the one the app ships where its fonts are registered for the process, else the system's
+/// chain). The size is the terminal's, held between [`FONT_LEAST`] and [`FONT_MOST`].
 pub(crate) fn line_font(font: &FontOptions) -> Retained<NSFont> {
     resolve(
         font.family.as_deref(),
-        bt_gpu::app_default_family(),
         font.size.clamp(FONT_LEAST, FONT_MOST),
     )
 }
 
-/// [`line_font`] of the families it was given: `family`, then `default`, then the system's
+/// [`line_font`] of the family `family` at `size`: the face the grid opens, else the system's
 /// monospaced font.
-pub(crate) fn resolve(family: Option<&str>, default: Option<&str>, size: f64) -> Retained<NSFont> {
-    [family, default]
-        .into_iter()
-        .flatten()
-        .find_map(|name| open_family(name, size))
+pub(crate) fn resolve(family: Option<&str>, size: f64) -> Retained<NSFont> {
+    let face = bt_gpu::chain_face(family);
+    face.postscript
+        .as_deref()
+        .and_then(|name| open_face(name, &face.family, size))
         .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0))
 }
 
-/// The font of the family `name` at `size`, if AppKit has a family of that name: what it
-/// answers for a family it does not know is some other font, and that is not this one.
-fn open_family(name: &str, size: f64) -> Option<Retained<NSFont>> {
-    let attributes: Retained<
-        NSDictionary<objc2_app_kit::NSFontDescriptorAttributeName, AnyObject>,
-    > = {
-        let family = NSString::from_str(name);
-        let values: [&AnyObject; 1] = [family.as_ref()];
-        // SAFETY: AppKit's family attribute key (an extern static), with the `NSString` it
-        // documents as its value.
-        unsafe { NSDictionary::from_slices(&[NSFontFamilyAttribute], &values) }
-    };
-    // SAFETY: attributes of the types the descriptor documents.
-    let descriptor =
-        unsafe { NSFontDescriptor::fontDescriptorWithFontAttributes(Some(&attributes)) };
-    let font = NSFont::fontWithDescriptor_size(&descriptor, size)?;
+/// The face named `postscript` at `size`, if AppKit opens it as a face of `family` by the
+/// terminal's own rule ([`bt_gpu::same_family`]). By its name: AppKit's matching of a family by a
+/// descriptor alone now and then answered nothing while other threads asked it for fonts too, and
+/// a name is the one face, with nothing to match.
+fn open_face(postscript: &str, family: &str, size: f64) -> Option<Retained<NSFont>> {
+    let font = NSFont::fontWithName_size(&NSString::from_str(postscript), size)?;
     let opened = font.familyName()?.to_string();
-    opened.eq_ignore_ascii_case(name).then_some(font)
+    bt_gpu::same_family(&opened, family).then_some(font)
 }
 
 /// A font as the family it is, whether it has one width for every character, and the width of one
@@ -543,6 +593,14 @@ impl WaitLine {
         }
     }
 
+    /// The pane is `bounds` now (a split, a narrower window): a line that is up stands again in
+    /// it, and so does its link.
+    pub(crate) fn fit(&self, bounds: NSRect) {
+        if !self.row.isHidden() {
+            self.layout(bounds);
+        }
+    }
+
     /// The line says `words`, in the corner of a pane of `bounds`; the bars move unless the
     /// person has Reduce Motion on.
     pub(crate) fn show(&self, words: &str, bounds: NSRect) {
@@ -553,7 +611,7 @@ impl WaitLine {
     }
 
     /// The line stands in the corner of a pane of `bounds`: the bars in a cell, a space, the
-    /// words; the bars on the words' baseline.
+    /// words; the bars on the words' baseline. Words that do not fit the pane are shortened.
     fn layout(&self, bounds: NSRect) {
         let font = self.font.borrow();
         let cell = cell_of(&font);
@@ -616,7 +674,9 @@ impl WaitLine {
         }
     }
 
-    /// Where the link stands: after the words on their line, or under the line.
+    /// Where the link stands: after the words on their line, or under the line when the pane is
+    /// too narrow for both — and shortened there when it is too narrow for the link, never past
+    /// the pane's edge.
     fn place_link(&self, bounds: NSRect) {
         if self.link.isHidden() {
             return;
@@ -624,16 +684,22 @@ impl WaitLine {
         let fit = self.link.fittingSize();
         let line = self.row.frame();
         let beside = line.origin.x + line.size.width + LINK_GAP;
-        let origin = if beside + fit.width + MARGIN <= bounds.size.width {
-            NSPoint::new(
-                beside,
-                line.origin.y + (line.size.height - fit.height) / 2.0,
+        let (origin, width) = if beside + fit.width + MARGIN <= bounds.size.width {
+            (
+                NSPoint::new(
+                    beside,
+                    line.origin.y + (line.size.height - fit.height) / 2.0,
+                ),
+                fit.width,
             )
         } else {
-            NSPoint::new(MARGIN, (line.origin.y - fit.height).max(0.0))
+            (
+                NSPoint::new(MARGIN, (line.origin.y - fit.height).max(0.0)),
+                fit.width.min((bounds.size.width - 2.0 * MARGIN).max(0.0)),
+            )
         };
         self.link
-            .setFrame(NSRect::new(origin, NSSize::new(fit.width, fit.height)));
+            .setFrame(NSRect::new(origin, NSSize::new(width, fit.height)));
     }
 
     /// The words of the line, while it shows.
@@ -647,13 +713,23 @@ impl WaitLine {
     }
 
     /// Whether the bars are to move.
-    pub(crate) fn is_turning(&self) -> bool {
+    pub(crate) fn is_moving(&self) -> bool {
         self.bars.is_moving()
     }
 
     /// Whether the bars' animation is on every bar, in a window.
     pub(crate) fn is_playing(&self) -> bool {
         self.bars.is_playing()
+    }
+
+    /// How low and how high each bar's animation goes (see [`WaitBars::reach`]).
+    pub(crate) fn reach(&self) -> Vec<Option<(f64, f64)>> {
+        self.bars.reach()
+    }
+
+    /// When each bar's animation begins (see [`WaitBars::begins`]).
+    pub(crate) fn begins(&self) -> Vec<Option<f64>> {
+        self.bars.begins()
     }
 
     /// Takes the animation off the bars (see [`WaitBars::drop_animation`]).
@@ -733,15 +809,22 @@ fn rgba_of(color: &NSColor, view: &NSView) -> Option<[f64; 4]> {
     rgba(&resolved)
 }
 
-/// "Open an ordinary shell instead", in the colour a link has and the font of the words.
+/// "Open an ordinary shell instead", in the colour a link has and the font of the words, shortened
+/// at its end where the pane is too narrow for it.
 fn link_title(font: &NSFont) -> Retained<NSAttributedString> {
     let color = NSColor::linkColor();
-    let values: [&AnyObject; 2] = [color.as_ref(), font.as_ref()];
-    // SAFETY: AppKit's two attribute keys (extern statics), each with the value type it
-    // documents — an `NSColor` and an `NSFont`.
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    let values: [&AnyObject; 3] = [color.as_ref(), font.as_ref(), paragraph.as_ref()];
+    // SAFETY: AppKit's three attribute keys (extern statics), each with the value type it
+    // documents — an `NSColor`, an `NSFont` and an `NSParagraphStyle`.
     unsafe {
         let attributes = NSDictionary::<NSAttributedStringKey, AnyObject>::from_slices(
-            &[NSForegroundColorAttributeName, NSFontAttributeName],
+            &[
+                NSForegroundColorAttributeName,
+                NSFontAttributeName,
+                NSParagraphStyleAttributeName,
+            ],
             &values,
         );
         NSAttributedString::new_with_attributes(
@@ -759,32 +842,47 @@ mod tests {
     /// has to give: the system's, a family that exists, a family that does not.
     #[test]
     fn the_font_of_the_line_has_one_width_for_every_character() {
-        for (family, default) in [
-            (None, None),
-            (Some("Menlo"), None),
-            (Some("a family nobody has"), None),
-            (Some("a family nobody has"), Some("Menlo")),
-            (None, Some("a family nobody has either")),
-        ] {
-            let font = resolve(family, default, 13.0);
+        for family in [None, Some("Menlo"), Some("a family nobody has")] {
+            let font = resolve(family, 13.0);
             assert!(
                 font.isFixedPitch(),
-                "{family:?} {default:?} opened {:?}",
+                "{family:?} opened {:?}",
                 font.familyName()
             );
         }
     }
 
-    /// A family that exists opens as itself, and one that does not is not some other font under
-    /// its name.
+    /// A face opens by its name as itself, of its family by the terminal's rule (any case), and
+    /// a name nobody has, or a face of another family, is not some other font under it.
     #[test]
-    fn a_family_opens_by_its_name_or_not_at_all() {
-        let menlo = open_family("Menlo", 13.0).expect("Menlo is on every Mac");
-        assert_eq!(
-            menlo.familyName().map(|name| name.to_string()).as_deref(),
-            Some("Menlo")
-        );
-        assert!(open_family("a family nobody has", 13.0).is_none());
+    fn a_face_opens_by_its_name_or_not_at_all() {
+        let menlo = open_face("Menlo-Regular", "menlo", 13.0).expect("Menlo is on every Mac");
+        assert_eq!(menlo.fontName().to_string(), "Menlo-Regular");
+        assert!(open_face("NobodysFace-Regular", "Menlo", 13.0).is_none());
+        assert!(open_face("Menlo-Regular", "Courier", 13.0).is_none());
+    }
+
+    /// The words are set in the very face the terminal's grid opens, by the terminal's own chain
+    /// and case rule: the family written (in any case), and for none and for one that does not
+    /// exist the chain's default — here, with the app's fonts not registered, the system's chain.
+    #[test]
+    fn the_line_is_set_in_the_face_the_terminal_opens() {
+        let mut options = FontOptions::default();
+        for family in [
+            None,
+            Some("Menlo"),
+            Some("menlo"),
+            Some("a family nobody has"),
+        ] {
+            options.family = family.map(str::to_owned);
+            let face = bt_gpu::chain_face(family);
+            let font = line_font(&options);
+            assert_eq!(
+                Some(font.fontName().to_string()),
+                face.postscript,
+                "{family:?}: the terminal opens {face:?}"
+            );
+        }
     }
 
     /// The size follows the terminal's, between two limits.
@@ -821,7 +919,7 @@ mod tests {
         );
         assert!(STILL.iter().all(|height| (LOW..=HIGH).contains(height)));
         // The capital of a terminal font fits the line it stands in.
-        let font = resolve(Some("Menlo"), None, 13.0);
+        let font = resolve(Some("Menlo"), 13.0);
         assert!(font.capHeight() > 0.0 && font.capHeight() < font.pointSize());
     }
 }

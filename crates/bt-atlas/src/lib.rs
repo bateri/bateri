@@ -69,8 +69,8 @@ pub use features::{FontFeature, font_features, lacking_features};
 use raster::DrawResult;
 pub use raster::RuleKind;
 use rules::Faces;
+pub use rules::{ChainFace, chain_face, family_issue, monospaced_families, same_family};
 pub use rules::{Face, FontIssue, Metrics, SizeClass};
-pub use rules::{family_issue, monospaced_families};
 use system::{Backend, Font, FontSystem};
 pub use text::{
     Family, FontId, GlyphEntry, PlacedGlyph, SUBPIXELS, ShapedText, TextAtlas, TextStyle,
