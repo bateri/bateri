@@ -3286,9 +3286,13 @@ bare letter) is refused with the reason, and macOS refusing the keys is said und
   named alone (`"option"`, the same as `"option+option"`) for tapping it twice. The window's own shortcut is in
   every application, so a `[keys]` line with the same keys is told so in Settings ▸ Keyboard.
 - **A tap of a chord asks for nothing.** The twice-tapped modifier watches the modifier keys, which macOS lets
-  a program do after you allow it in System Settings ▸ Privacy & Security ▸ Input Monitoring; the Hotkey Window page
-  shows where that stands and opens the pane for you. Another application that holds the same keys can keep them:
-  bateri tells you when macOS refuses them, not when another application is first.
+  a program do after you allow it in System Settings ▸ Privacy & Security ▸ Input Monitoring. bateri asks once,
+  when you record the double tap in Settings, never at launch; until you allow it the shortcut row says so, and its
+  **Allow Input Monitoring…** button asks again and opens the pane. Coming back to bateri from there turns the
+  shortcut on. The watch only hears that a modifier changed, and that a key, a click or a scroll came between the
+  two taps (which spoils them: ⌥e is not half of ⌥⌥); it reads no key and changes no event. Another application
+  that holds the same keys can keep them: bateri tells you when macOS refuses them, not when another application
+  is first.
 - **`bateri config` does not write `shortcut`** (`set` and `reset` end with status 77, `get` and `list` read it).
   A program should not take a key from every application, and a modifier tapped twice asks for a permission:
   that is the person's to set, in Settings.

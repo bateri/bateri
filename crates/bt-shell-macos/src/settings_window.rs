@@ -2724,6 +2724,15 @@ define_class!(
             self.choose_folder_for(key);
         }
 
+        /// The shortcut row's Allow Input Monitoring…: asks for the permission a double tap needs
+        /// and, if it is still not given, opens the System Settings pane that gives it.
+        #[unsafe(method(allowListening:))]
+        fn allow_listening(&self, _sender: Option<&AnyObject>) {
+            if let Some(delegate) = app::delegate(self.mtm()) {
+                delegate.allow_listening(true);
+            }
+        }
+
         /// The Agents page's Open Tabs and Panes: the page Details under a tab is on, with its
         /// row lit.
         #[unsafe(method(showTabsPage:))]
@@ -3053,7 +3062,8 @@ impl SettingsWindow {
         self.ivars().folders.replace(files.download_dir.clone());
 
         let status = status(state, write);
-        c.hotkey_shortcut.show(settings, !status.locked);
+        let waiting = app::delegate(self.mtm()).is_some_and(|app| app.hotkey_waits_for_access());
+        c.hotkey_shortcut.show(settings, !status.locked, waiting);
         // The Agents page's line on where the reply shows follows Tab Details and the tabs'
         // position; its button is a way to the page they are on, so the lock leaves it alone.
         if let Some(line) = &c.agent_where {
@@ -4380,7 +4390,14 @@ impl SettingsWindow {
         let tab_details = self.segmented::<TabDetails>(Key::TabDetails);
         let minimized_panes = self.segmented::<MinimizedPanes>(Key::MinimizedPanes);
         let resize_in_steps = self.switch(Key::ResizeInSteps);
-        let hotkey_shortcut = hotkey::ShortcutRow::new(self.mtm());
+        let hotkey_shortcut = hotkey::ShortcutRow::new(
+            self.mtm(),
+            self.button(
+                "Allow Input Monitoring\u{2026}",
+                Some(Key::HotkeyShortcut),
+                sel!(allowListening:),
+            ),
+        );
         let hotkey_position = self.popup::<HotkeyPosition>(Key::HotkeyPosition);
         let hotkey_screen = self.popup::<HotkeyScreen>(Key::HotkeyScreen);
         let hotkey_spaces = self.popup::<HotkeySpaces>(Key::HotkeySpaces);

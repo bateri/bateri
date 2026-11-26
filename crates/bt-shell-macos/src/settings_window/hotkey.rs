@@ -21,7 +21,7 @@ use bt_shell_common::shortcuts::{Tapped, glyphs};
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSView};
+use objc2_app_kit::{NSApplication, NSButton, NSView};
 
 use super::recorder::{Recorded, ShortcutRecorder};
 use crate::app;
@@ -73,13 +73,17 @@ pub(super) fn prompt(shortcut: Option<Shortcut>) -> String {
         .unwrap_or_else(|| NONE.to_owned())
 }
 
-/// The shortcut's row: the field, and what it was told to say.
+/// The shortcut's row: the field, the button that sends the person to the permission a double tap
+/// needs (seen only while the key waits for it), and what the field was told to say.
 pub(super) struct ShortcutRow {
     recorder: Retained<ShortcutRecorder>,
+    allow: Retained<NSButton>,
+    view: Retained<NSView>,
 }
 
 impl ShortcutRow {
-    pub(super) fn new(mtm: MainThreadMarker) -> Self {
+    /// `allow` is the window's button for the permission (it holds the action).
+    pub(super) fn new(mtm: MainThreadMarker, allow: Retained<NSButton>) -> Self {
         let recorder = ShortcutRecorder::new(mtm, NONE, |heard| {
             // Told inside the event that made it: the work is done a turn later.
             DispatchQueue::main().exec_async(move || {
@@ -88,19 +92,30 @@ impl ShortcutRow {
                 work(mtm, heard);
             });
         });
-        Self { recorder }
+        allow.setHidden(true);
+        let view = super::hstack(mtm, &[&recorder, &allow], 8.0);
+        Self {
+            recorder,
+            allow,
+            view,
+        }
     }
 
-    /// The field, to put in the row.
+    /// The field and its button, to put in the row.
     pub(super) fn view(&self) -> Retained<NSView> {
-        Retained::into_super(self.recorder.clone())
+        self.view.clone()
     }
 
-    /// Says what the file holds, and whether the field may be used (the file is not locked).
-    pub(super) fn show(&self, settings: &Settings, enabled: bool) {
+    /// Says what the file holds, and whether the field may be used (the file is not locked);
+    /// `waiting` is the key waiting for the permission to hear a double tap, which the button
+    /// answers.
+    pub(super) fn show(&self, settings: &Settings, enabled: bool, waiting: bool) {
         self.recorder
             .set_prompt(&prompt(settings.hotkey_window.shortcut));
         self.recorder.set_enabled(enabled);
+        self.allow.setHidden(!waiting);
+        self.allow.setEnabled(enabled);
+        super::ink_button(&self.allow, enabled);
     }
 
     /// The note of the last key refused, if the field is still waiting for another.
@@ -129,6 +144,11 @@ fn work(mtm: MainThreadMarker, heard: Recorded) {
                 delegate
                     .save_edits(&[SettingsEdit::HotkeyShortcut(shortcut)])
                     .ok();
+            }
+            // A double tap is heard by a listening tap, which needs the person's permission: asked
+            // here, where the person just chose it, and nowhere at launch.
+            if matches!(shortcut, Some(Shortcut::Twice(_))) {
+                delegate.allow_listening(false);
             }
         }
     }

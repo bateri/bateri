@@ -1127,7 +1127,7 @@ pub(crate) struct Ivars {
     hotkey_pinned: Cell<bool>,
     /// The system's hold on the hotkey window's key: built **only** by an instance that owns the
     /// keys ([`AppDelegate::apply_global_keys`]), never in a timed run, a test or the agent's copy.
-    global_keys: RefCell<Option<crate::global_keys::CarbonKeys>>,
+    global_keys: RefCell<Option<crate::global_keys::SystemKeys>>,
     /// What the system holds of it, and why it does not when it does not.
     hotkey_registration: RefCell<bt_shell_common::hotkey::Registration>,
     /// This launch is the arrival of an update from the bateri before kablo: its update's
@@ -1318,6 +1318,8 @@ define_class!(
         #[unsafe(method(applicationDidBecomeActive:))]
         fn did_become_active(&self, _notification: &NSNotification) {
             crate::agent::seen();
+            // Coming back from System Settings, where the double tap may have been allowed.
+            self.hotkey_access_may_have_changed();
         }
 
         /// Another application came to the front: the hotkey window, in sight and not pinned,

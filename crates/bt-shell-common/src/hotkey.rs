@@ -480,6 +480,22 @@ impl Registration {
         }
     }
 
+    /// Asks again for what was asked and not held because the permission to hear a double tap
+    /// was not there: the person has allowed it since (the Settings button, or coming back from
+    /// System Settings). Nothing else is asked twice, so a key another application holds is not
+    /// asked for again until the settings change.
+    pub fn retry(&mut self, keys: &mut dyn GlobalKeys, settings: &Settings, instance: &Instance) {
+        if self.waits_for_access() && keys.listen_access() == Access::Granted {
+            self.attempted = None;
+            self.sync(keys, settings, instance);
+        }
+    }
+
+    /// Whether the key asked for is not held for want of the permission to hear a double tap.
+    pub fn waits_for_access(&self) -> bool {
+        self.problem == Some(Refusal::NoListening)
+    }
+
     /// What the system holds now.
     pub fn held(&self) -> Option<Binding> {
         self.held
@@ -522,6 +538,42 @@ pub fn refusal_note(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
         "hotkey_window.shortcut: {}",
         refusal_text(refusal, shortcut)
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// The double tap: the count a listen-only tap feeds.
+
+/// The count of the one modifier the hotkey window waits for, fed by the system's listening tap
+/// ([`crate::shortcuts::Taps`] is the one machine behind every double press: the live trigger
+/// and the recorder use it too, so the three cannot disagree on what a double press is). The
+/// tap's thresholds are the application's (`arrange::taps()`): none is written here.
+#[derive(Clone, Debug)]
+pub struct DoubleTap {
+    wanted: Modifier,
+    taps: crate::shortcuts::Taps,
+}
+
+impl DoubleTap {
+    /// A count that answers the second tap of `wanted`.
+    pub fn new(wanted: Modifier, taps: crate::shortcuts::Taps) -> Self {
+        Self { wanted, taps }
+    }
+
+    /// The modifiers held after a change, at `at` (seconds): whether this change was the second
+    /// quick tap of the one modifier waited for. Another modifier's double tap, fn's, and a first
+    /// tap are not.
+    pub fn flags(&mut self, at: f64, held: crate::shortcuts::Held) -> bool {
+        use crate::shortcuts::{Step, Tapped};
+        matches!(
+            self.taps.flags(at, held),
+            Step::Twice(Tapped::Modifier(modifier)) if modifier == self.wanted
+        )
+    }
+
+    /// A key, a click or a scroll: whatever was being counted is lost.
+    pub fn interrupt(&mut self) {
+        self.taps.interrupt();
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -608,6 +660,12 @@ pub mod fake {
     impl GlobalKeys for Keys {
         fn bind(&mut self, binding: Option<Binding>) -> Result<(), Refusal> {
             self.calls.push(binding);
+            // A double tap is heard by a listening tap, which the system builds only for an
+            // application that was allowed.
+            if matches!(binding, Some(Binding::Twice(_))) && self.access == Access::NotGranted {
+                self.held = None;
+                return Err(Refusal::NoListening);
+            }
             if let Some(refusal) = self.refuse
                 && binding.is_some()
             {
@@ -1156,6 +1214,103 @@ mod tests {
         assert_eq!(carbon_modifiers(Mods::NONE), 0);
         assert_eq!(crate::keys::us_code_of('a'), Some(0));
         assert_eq!(crate::keys::us_code_of(';'), Some(41));
+    }
+
+    fn twice_settings() -> Settings {
+        settings_with("option")
+    }
+
+    /// A double tap is asked of a listening tap and a chord of the key registration: the setting
+    /// decides which, and a change from one to the other lets the old one go first.
+    #[test]
+    fn a_single_modifier_asks_for_the_tap_and_a_chord_does_not() {
+        let mut keys = fake::Keys::default();
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &twice_settings(), &owner());
+        assert_eq!(keys.calls, [Some(Binding::Twice(Modifier::Option))]);
+        registration.sync(&mut keys, &settings_with("cmd+f1"), &owner());
+        assert_eq!(keys.calls.len(), 2);
+        assert!(matches!(keys.calls[1], Some(Binding::Chord(_))));
+        // Taking the shortcut away lets the tap go.
+        registration.sync(&mut keys, &twice_settings(), &owner());
+        registration.sync(&mut keys, &Settings::default(), &owner());
+        assert_eq!(keys.calls.last(), Some(&None));
+        assert_eq!(keys.held, None);
+    }
+
+    /// Without the permission the tap is not built, and what was asked waits for it: told as a
+    /// refusal that Settings answers with its button, and asked again (once) when it is given.
+    #[test]
+    fn a_double_tap_waits_for_the_permission_and_is_held_when_it_is_given() {
+        let settings = twice_settings();
+        let mut keys = fake::Keys {
+            access: Access::NotGranted,
+            ..fake::Keys::default()
+        };
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &settings, &owner());
+        assert_eq!(registration.problem(), Some(Refusal::NoListening));
+        assert!(registration.waits_for_access());
+        assert_eq!(registration.held(), None);
+        // Still not given: asking again changes nothing and calls nothing.
+        registration.retry(&mut keys, &settings, &owner());
+        assert_eq!(keys.calls.len(), 1);
+        // Given: held.
+        keys.access = Access::Granted;
+        registration.retry(&mut keys, &settings, &owner());
+        assert_eq!(registration.held(), Some(Binding::Twice(Modifier::Option)));
+        assert_eq!(registration.problem(), None);
+        assert!(!registration.waits_for_access());
+        // A refusal that is not the permission's is not asked again by a retry.
+        let mut refused = fake::Keys {
+            refuse: Some(Refusal::Refused(-9878)),
+            ..fake::Keys::default()
+        };
+        let mut registration = Registration::new();
+        registration.sync(&mut refused, &settings_with("cmd+f1"), &owner());
+        registration.retry(&mut refused, &settings_with("cmd+f1"), &owner());
+        assert_eq!(refused.calls.len(), 1);
+    }
+
+    /// The count answers the second quick tap of the modifier waited for, and of no other; a key,
+    /// a click or a scroll spoils it.
+    #[test]
+    fn the_count_answers_the_second_tap_of_its_own_modifier_only() {
+        use crate::shortcuts::{Held, Taps};
+        let held = |modifier| Held {
+            mods: Mods::NONE.with(modifier),
+            function: false,
+        };
+        let none = Held::default();
+        let count = |wanted| DoubleTap::new(wanted, Taps::new(0.3, 0.5));
+        let tap = |count: &mut DoubleTap, key, at: f64| {
+            let first = count.flags(at, key);
+            first | count.flags(at + 0.1, none)
+        };
+        // Option twice, quickly: the second release is the hit.
+        let mut option = count(Modifier::Option);
+        assert!(!tap(&mut option, held(Modifier::Option), 1.0));
+        assert!(tap(&mut option, held(Modifier::Option), 1.3));
+        // The same count does not answer for shift's double tap, nor for a tap too late.
+        let mut other = count(Modifier::Option);
+        assert!(!tap(&mut other, held(Modifier::Shift), 1.0));
+        assert!(!tap(&mut other, held(Modifier::Shift), 1.3));
+        let mut late = count(Modifier::Option);
+        assert!(!tap(&mut late, held(Modifier::Option), 1.0));
+        assert!(!tap(&mut late, held(Modifier::Option), 3.0));
+        // A key between the taps spoils the count (⌥e is not half of ⌥⌥).
+        let mut keyed = count(Modifier::Option);
+        assert!(!tap(&mut keyed, held(Modifier::Option), 1.0));
+        keyed.interrupt();
+        assert!(!tap(&mut keyed, held(Modifier::Option), 1.3));
+        // fn is never the shortcut's.
+        let mut function = count(Modifier::Option);
+        let fn_held = Held {
+            mods: Mods::NONE,
+            function: true,
+        };
+        assert!(!tap(&mut function, fn_held, 1.0));
+        assert!(!tap(&mut function, fn_held, 1.3));
     }
 
     #[test]
