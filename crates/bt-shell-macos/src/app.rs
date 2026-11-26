@@ -4077,6 +4077,18 @@ impl AppDelegate {
             .focused_pane()
             .session()
             .map_or_else(|| self.resolve_theme(), |session| session.theme());
+        // A window cascades from the one it left. The hotkey window's corner is no place to
+        // start from (it may be a strip along the bottom or the right of a screen): from the
+        // front normal window, or the middle of the screen when there is none.
+        let front = from
+            .is_hotkey()
+            .then(|| self.first_normal_window())
+            .flatten();
+        let after = if from.is_hotkey() {
+            front.as_deref()
+        } else {
+            Some(from)
+        };
         // The hotkey window's size and place are a strip along the edge of a screen (or the middle
         // of one): not what a normal window is born with. **A tab that leaves it gets what ⌘N
         // gives** — the first size and the cascade — and, dragged out, its title row under the
@@ -4145,7 +4157,7 @@ impl AppDelegate {
         window.set_content_edge(self.settings().content_edge);
         match (at, frame) {
             (Some(_), Some(frame)) => window.show_at(frame),
-            _ => window.show_after(Some(from)),
+            _ => window.show_after(after),
         }
         if self.ivars().run.is_some() {
             window.float_for_timed_run();

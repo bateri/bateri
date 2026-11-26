@@ -110,8 +110,10 @@ impl Taps {
         }
     }
 
-    /// When the press that began the count in progress went down (seconds, as `flags` was told),
-    /// if a count is in progress: a key held down, or a first tap waiting for its pair.
+    /// When the press that began the count in progress went down (seconds, as `flags` was told):
+    /// a key held down, or a first tap that waited for its pair. A first tap whose wait ran out
+    /// keeps the time until the next press, which begins a count of its own (and the pair that
+    /// did not come is no count: `flags` ignores it).
     pub fn began(&self) -> Option<f64> {
         self.began
     }

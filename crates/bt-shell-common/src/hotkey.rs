@@ -644,7 +644,7 @@ impl Registration {
     }
 
     /// A field of Settings starts (`true`) or stops listening for a shortcut. While it listens
-    /// the system holds **nothing** (a chord's registration and a double tap's tap are let go),
+    /// the system holds **nothing** (a chord's registration and a double tap's monitors are let go),
     /// so the key the window has now is heard by the field like any other, and pressing it does
     /// not show or hide the window. When it stops, what the settings ask is held again. Why a
     /// key was not held stays as it was, so the page does not change under the field.
@@ -687,8 +687,13 @@ impl Registration {
         self.problem
     }
 
-    /// The line the settings' diagnostics carry about it (empty when all is well).
+    /// The line the settings' diagnostics carry about it (empty when all is well, and while a
+    /// field of Settings listens: what was refused then was the shortcut that is being replaced,
+    /// and it would be told with the name of the new one).
     pub fn notices(&self, shortcut: Option<Shortcut>) -> Vec<String> {
+        if self.quiet {
+            return Vec::new();
+        }
         self.problem
             .map(|refusal| vec![refusal_note(refusal, shortcut)])
             .unwrap_or_default()
@@ -753,12 +758,19 @@ pub fn spoils_count(since_press_ms: u64, since_input_ms: u64) -> bool {
 }
 
 /// How long before an event the last key, click or scroll was, when the system was asked
-/// `lag` seconds **after** the event (a main thread that was busy delivers it late):
-/// `since_input_now` is the system's answer. An input that came after the event is none that
-/// came before it, so the answer is as old as can be.
-pub fn input_age_at_event(since_input_now: f64, lag: f64) -> f64 {
-    let age = since_input_now - lag.max(0.0);
-    if age < 0.0 { f64::INFINITY } else { age }
+/// `lag` seconds **after** the event (a main thread that was busy delivers it late): `ages_now`
+/// are the system's answers, one for each kind of input (it tells the last of each kind). A kind
+/// whose last input came after the event says nothing of before it and is left out, so a click
+/// that came in the lag does not hide a key that came before the event. The youngest of the
+/// rest is the answer, as old as can be when there is none. (What stays hidden is an input of the
+/// same kind that came in the lag over an earlier one: the system keeps only the last.)
+pub fn input_age_at_event(ages_now: &[f64], lag: f64) -> f64 {
+    let lag = lag.max(0.0);
+    ages_now
+        .iter()
+        .map(|age| age - lag)
+        .filter(|age| *age >= 0.0)
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Seconds as whole milliseconds, never below nothing and never past what a `u64` holds.
@@ -1762,7 +1774,7 @@ mod tests {
     }
 
     /// While a field of Settings listens the system holds nothing (the chord's registration, the
-    /// double tap's tap), the key the window has is the field's to hear, and what the settings
+    /// double tap's monitors), the key the window has is the field's to hear, and what the settings
     /// ask is held again when it stops — the shortcut that was recorded, if one was.
     #[test]
     fn nothing_is_held_while_a_field_listens_and_the_settings_are_held_again_after() {
@@ -1835,7 +1847,35 @@ mod tests {
         assert_eq!(registration.problem(), Some(Refusal::Refused(-9878)));
     }
 
-    /// A double tap goes the same way: its tap is let go while the field listens, and it is built
+    /// What was refused when the old shortcut was asked is not told again while the field
+    /// listens (it would carry the name of the shortcut being recorded); it is told when the
+    /// field stops and the new one is asked.
+    #[test]
+    fn a_refusal_is_not_told_with_the_name_of_the_key_that_replaced_it() {
+        let (first, second) = (settings_with("cmd+f1"), settings_with("cmd+f2"));
+        let mut keys = fake::Keys {
+            refuse: Some(Refusal::Refused(-9878)),
+            ..fake::Keys::default()
+        };
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &first, &owner());
+        assert_eq!(registration.notices(first_shortcut(&first)).len(), 1);
+        registration.set_quiet(&mut keys, &first, &owner(), true);
+        // The new shortcut was written while the field listened: nothing is told about the old.
+        registration.sync(&mut keys, &second, &owner());
+        assert!(registration.notices(first_shortcut(&second)).is_empty());
+        // The field stops: the new key is asked, and refused too: told, with its own name.
+        assert!(registration.set_quiet(&mut keys, &second, &owner(), false));
+        let told = registration.notices(first_shortcut(&second));
+        assert_eq!(told.len(), 1);
+        assert!(told[0].contains("cmd+f2"), "{told:?}");
+    }
+
+    fn first_shortcut(settings: &Settings) -> Option<Shortcut> {
+        settings.hotkey_window.shortcut
+    }
+
+    /// A double tap goes the same way: its monitors are let go while the field listens, and are made
     /// again after; taken away while the field listens, it is not built again.
     #[test]
     fn a_double_tap_comes_down_with_the_field_and_with_remove() {
@@ -2078,12 +2118,19 @@ mod tests {
     /// the event, and what came before is as old as it was then.
     #[test]
     fn the_age_of_an_input_is_told_as_of_the_event() {
-        assert_eq!(input_age_at_event(0.50, 0.0), 0.50);
-        assert!((input_age_at_event(0.50, 0.125) - 0.375).abs() < 1e-9);
+        assert_eq!(input_age_at_event(&[0.50], 0.0), 0.50);
+        assert!((input_age_at_event(&[0.50], 0.125) - 0.375).abs() < 1e-9);
         // The last input came after the event (age less than the lag): none before it.
-        assert!(input_age_at_event(0.05, 0.10).is_infinite());
+        assert!(input_age_at_event(&[0.05], 0.10).is_infinite());
         // A negative lag (a clock that went back a hair) is none.
-        assert_eq!(input_age_at_event(0.50, -0.01), 0.50);
+        assert_eq!(input_age_at_event(&[0.50], -0.01), 0.50);
+        // Each kind is told by itself: a click that came after the event (0.05 s ago, the event
+        // 0.10 s ago) does not hide the key that came before it (0.30 s ago); the youngest of
+        // what came before is the answer.
+        let both = input_age_at_event(&[0.30, 0.05, f64::INFINITY], 0.10);
+        assert!((both - 0.20).abs() < 1e-9, "{both}");
+        assert!((input_age_at_event(&[0.40, 0.30], 0.10) - 0.20).abs() < 1e-9);
+        assert!(input_age_at_event(&[], 0.0).is_infinite());
         assert_eq!(millis(0.0), 0);
         assert_eq!(millis(-1.0), 0);
         assert_eq!(millis(f64::NAN), 0);

@@ -4,8 +4,11 @@
 //!   the system's own, delivered to the application that registered it), and it takes the key away
 //!   from every other application while it is held.
 //! - **One modifier tapped twice** is heard by the system's **event monitors**, and asks for **no
-//!   permission** (measured on macOS 26.4, by a process with no Input Monitoring and no
-//!   Accessibility): a global monitor (`addGlobalMonitorForEventsMatchingMask:`, the other
+//!   permission**. Measured on macOS 26.4 only, by a process with no Input Monitoring and no
+//!   Accessibility: the oldest system bateri runs on (14) is not measured, and Apple's
+//!   documentation says a global monitor hears key events only with the Accessibility
+//!   permission, which a modifier change is not. A global monitor
+//!   (`addGlobalMonitorForEventsMatchingMask:`, the other
 //!   applications') and a local one (bateri's own windows') both get the modifier changes, and
 //!   feed the count the whole application uses ([`bt_shell_common::hotkey::DoubleTap`] over
 //!   `arrange::taps()`), with the thresholds of the live trigger and of Settings' recorder. A
@@ -15,7 +18,9 @@
 //!   permission, so the system is **asked** at each modifier change how long ago the last of them
 //!   was (`CGEventSourceSecondsSinceLastEventType`, which needs no permission either) and the
 //!   count takes it from there ([`bt_shell_common::hotkey::spoils_count`]). No key's meaning is
-//!   read, no event changed.
+//!   read, no event changed. A system that gives no global monitor says so
+//!   ([`Refusal::Refused`]); one that gives it and never delivers an event cannot be told from
+//!   code, only by trying the shortcut.
 //!
 //! This takes keys from the person's Mac, which is why a test, the gate, the smoke and the
 //! agent's copy never build it ([`bt_shell_common::hotkey::owns_global_keys`], and
@@ -202,31 +207,28 @@ const SPOILERS: [CGEventType; 5] = [
     CGEventType::ScrollWheel,
 ];
 
-/// How long ago the last key, click or scroll was, in seconds, as the system tells it (any
-/// application's: the combined session's). Needs no permission.
-fn last_input_age() -> f64 {
-    SPOILERS
-        .into_iter()
-        .map(|kind| {
-            CGEventSource::seconds_since_last_event_type(
-                CGEventSourceStateID::CombinedSessionState,
-                kind,
-            )
-        })
-        .fold(f64::INFINITY, f64::min)
+/// How long ago the last key, click and scroll was, in seconds, each told by itself as the
+/// system tells it (any application's: the combined session's). Needs no permission.
+fn last_input_ages() -> [f64; SPOILERS.len()] {
+    SPOILERS.map(|kind| {
+        CGEventSource::seconds_since_last_event_type(
+            CGEventSourceStateID::CombinedSessionState,
+            kind,
+        )
+    })
 }
 
 /// What a modifier change is to the count: whether it was the second quick tap. `at` is the
 /// event's own time, in seconds since boot, as the live trigger's `NSEvent.timestamp` says it
 /// (and not the time this runs: a main thread that was busy would run two taps one after the
 /// other and the count would see them quick), `now` the time the system was asked, and
-/// `since_input` its answer ([`last_input_age`]). Told twice, a change is no second tap: the count
+/// `ages` its answers ([`last_input_ages`]). Told twice, a change is no second tap: the count
 /// compares the modifiers held. A count that is being changed already (never, on one thread) says
 /// no.
-fn counted(count: &RefCell<DoubleTap>, at: f64, now: f64, since_input: f64, held: Held) -> bool {
+fn counted(count: &RefCell<DoubleTap>, at: f64, now: f64, ages: &[f64], held: Held) -> bool {
     count
         .try_borrow_mut()
-        .is_ok_and(|mut count| count.flags(at, held, input_age_at_event(since_input, now - at)))
+        .is_ok_and(|mut count| count.flags(at, held, input_age_at_event(ages, now - at)))
 }
 
 /// A modifier change heard by a monitor: told to the count, and the main queue is told when it
@@ -235,7 +237,7 @@ fn heard(count: &RefCell<DoubleTap>, event: &NSEvent) {
     let at = event.timestamp();
     let now = NSProcessInfo::processInfo().systemUptime();
     let held = crate::arrange::held_keys(event.modifierFlags());
-    if counted(count, at, now, last_input_age(), held) {
+    if counted(count, at, now, &last_input_ages(), held) {
         DispatchQueue::main().exec_async(|| {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -254,9 +256,10 @@ struct Monitors {
 }
 
 impl Monitors {
-    /// Starts the monitors of `count`. No permission is asked for: a monitor of modifier changes
-    /// is given to any application.
-    fn start(count: DoubleTap) -> Monitors {
+    /// Starts the monitors of `count`; `None` when the system gives no monitor (none is left
+    /// behind). No permission is asked for: a monitor of modifier changes is given to any
+    /// application. The monitors call back on the main thread, where the marker says this runs.
+    fn start(_mtm: MainThreadMarker, count: DoubleTap) -> Option<Monitors> {
         let count = Rc::new(RefCell::new(count));
         let others = {
             let count = Rc::clone(&count);
@@ -287,7 +290,13 @@ impl Monitors {
                 ),
             )
         };
-        Monitors { global, local }
+        // One without the other would hear half the taps: both or none (a monitor that was made
+        // goes with the value dropped here).
+        let (global, local) = (global?, local?);
+        Some(Monitors {
+            global: Some(global),
+            local: Some(local),
+        })
     }
 }
 
@@ -306,14 +315,17 @@ impl Drop for Monitors {
 /// The system's hold on the key, one at a time. The handler is installed with the first chord and
 /// stays; the key is let go and held again at each change.
 pub(crate) struct SystemKeys {
+    /// Where this is built and used: the monitors call back on the main thread.
+    mtm: MainThreadMarker,
     handler: Ref,
     hot_key: Ref,
     monitors: Option<Monitors>,
 }
 
 impl SystemKeys {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(mtm: MainThreadMarker) -> Self {
         Self {
+            mtm,
             handler: std::ptr::null_mut(),
             hot_key: std::ptr::null_mut(),
             monitors: None,
@@ -371,7 +383,9 @@ impl GlobalKeys for SystemKeys {
             Binding::Chord(chord) => chord,
             Binding::Twice(modifier) => {
                 let count = DoubleTap::new(modifier, arrange::taps());
-                self.monitors = Some(Monitors::start(count));
+                // The system gave no monitor: the shortcut is not heard, and the row says so.
+                self.monitors =
+                    Some(Monitors::start(self.mtm, count).ok_or(Refusal::Refused(PARAM_ERR))?);
                 return Ok(());
             }
         };
@@ -437,7 +451,7 @@ mod tests {
             .iter()
             .filter(|&&(at, down, since_input)| {
                 let held = if down { option() } else { Held::default() };
-                counted(count, at, at, since_input, held)
+                counted(count, at, at, &[since_input], held)
             })
             .count()
     }
@@ -511,7 +525,7 @@ mod tests {
         let hit = |at: f64, down: bool| {
             let held = if down { option() } else { Held::default() };
             let now = at + 0.2;
-            counted(&count, at, now, now - 1.30, held)
+            counted(&count, at, now, &[now - 1.30], held)
         };
         assert!(!hit(1.00, true));
         assert!(!hit(1.07, false));
@@ -533,7 +547,7 @@ mod tests {
                 CGEventType::ScrollWheel,
             ]
         );
-        assert!(last_input_age() >= 0.0);
+        assert!(last_input_ages().iter().all(|age| *age >= 0.0));
     }
 
     /// The modifier changes a monitor hears are read as the application's own modifier flags

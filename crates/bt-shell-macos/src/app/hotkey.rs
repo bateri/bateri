@@ -430,7 +430,8 @@ impl AppDelegate {
         work: impl FnOnce(&mut crate::global_keys::SystemKeys) -> R,
     ) -> R {
         let mut keys = self.ivars().global_keys.borrow_mut();
-        work(keys.get_or_insert_with(crate::global_keys::SystemKeys::new))
+        let mtm = self.mtm();
+        work(keys.get_or_insert_with(|| crate::global_keys::SystemKeys::new(mtm)))
     }
 
     /// Brings the system's hold on the key to what `settings` ask: at launch and when
@@ -481,7 +482,7 @@ impl AppDelegate {
     }
 
     /// What the system holds follows whether a field of Settings listens for a shortcut: while it
-    /// does, **nothing is held** (the registration of a chord, the tap of a double tap), so the
+    /// does, **nothing is held** (the registration of a chord, the monitors of a double tap), so the
     /// field hears the key the window has like any other and it does not show or hide the window
     /// ([`Registration::set_quiet`]). It is asked again when the field starts or stops listening,
     /// the Settings window gains or loses the keyboard or closes, and bateri comes forward or
@@ -502,8 +503,7 @@ impl AppDelegate {
             )
         });
         // The key is held again here, a turn after the settings were written: what the system
-        // said about it (another application's key, the permission a double tap waits for) is
-        // told now, and the page shows it, as when the settings change. Only then: the calls
+        // said about it (a key it refused) is told now, and the page shows it, as when the settings change. Only then: the calls
         // that find nothing changed (every activation of bateri, every key change of a window)
         // tell and redraw nothing.
         if resumed {
@@ -940,7 +940,7 @@ mod tests {
         assert!(code.contains("CGEventSourceStateID::CombinedSessionState"));
         assert!(code.contains("input_age_at_event("));
         let heard = body_of(code, "fn heard(", "");
-        assert!(heard.contains("last_input_age()"));
+        assert!(heard.contains("last_input_ages()"));
         assert!(heard.contains("event.timestamp()"), "the event's own time");
         assert!(code.contains("arrange::taps()"));
         assert!(
@@ -1222,7 +1222,11 @@ mod tests {
         );
         assert!(around.contains("from.is_hotkey()"));
         assert!(around.contains("window::initial_rect()"));
-        assert!(around.contains("window.show_after(Some(from))"));
+        // The new window cascades from a normal window: the one it left, and from the front normal
+        // one when it left the hotkey window (a strip along an edge, whose corner is no place for
+        // a window to start from).
+        assert!(around.contains("self.first_normal_window()"));
+        assert!(around.contains("window.show_after(after)"));
         // The window left without a tab closes without a pin, and without bringing the
         // application it came from to the front; a close by the last tab's exit lets go of the
         // pin too.
