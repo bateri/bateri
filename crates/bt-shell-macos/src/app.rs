@@ -5147,6 +5147,8 @@ impl AppDelegate {
                 activity: window.activity(),
                 groups,
                 id: Some(window.number()),
+                // The hotkey window is written by Phase 2 (`TerminalWindow::hotkey`).
+                hotkey: None,
             });
         }
         (Saved { windows }, histories)

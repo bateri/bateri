@@ -33,9 +33,14 @@ use toml_edit::{Document, Item, TableLike};
 use crate::session::{Osc52, TerminalOptions};
 
 mod font_features;
+mod hotkey;
 mod keys;
 mod plain;
 
+pub use hotkey::{
+    HOTKEY_DEFAULT_NAME, HOTKEY_SIZE_RANGE, HotkeyPosition, HotkeyScreen, HotkeySpaces,
+    HotkeyWindowSettings,
+};
 pub use keys::{
     Chord, Key, KeyEntry, MAX_SHORTCUTS, Modifier, Mods, NamedKey, Shortcut, ShortcutError,
 };
@@ -1703,6 +1708,9 @@ pub struct Settings {
     pub remote_files: RemoteFiles,
     /// `[remote] stats` and `stats_interval` ([`RemoteStatsSettings`]).
     pub remote_stats: RemoteStatsSettings,
+    /// `[hotkey_window]`: the window a shortcut slides in from the edge of the screen
+    /// ([`HotkeyWindowSettings`]). Doesn't enter `TerminalOptions`.
+    pub hotkey_window: HotkeyWindowSettings,
     /// `[remote] integration`: whether a plain `ssh` sets up the shell
     /// integration on the server, and whether it asks first. The host's own
     /// entry comes first ([`Self::integration_for`]). Like `osc52`, a
@@ -1799,6 +1807,7 @@ impl Default for Settings {
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
+            hotkey_window: HotkeyWindowSettings::default(),
             remote_integration: RemoteIntegration::default(),
             apps_sources: DEFAULT_APP_SOURCES
                 .iter()
@@ -2009,6 +2018,11 @@ pub enum SettingsEdit {
     RemoteStats(RemoteStatsMode),
     /// Seconds.
     StatsInterval(u8),
+    /// `[hotkey_window] depth`, in percent of the screen: the drag of the edge opposite the one
+    /// the window comes from ([`HOTKEY_SIZE_RANGE`]).
+    HotkeyDepth(u8),
+    /// `[hotkey_window] span`, in percent of the screen ([`HOTKEY_SIZE_RANGE`]).
+    HotkeySpan(u8),
     /// One feature choice of `family` (`ss01 = true` under `[font.features."Family"]`):
     /// `Some` writes the line, `None` removes it (the font's own default again). The family
     /// is found ignoring case and written as given when its table is new. Everything else in
@@ -2146,6 +2160,8 @@ impl SettingsEdit {
             Self::DownloadNotify(_) => ("remote", "download_notify", "remote.download_notify"),
             Self::RemoteStats(_) => ("remote", "stats", "remote.stats"),
             Self::StatsInterval(_) => ("remote", "stats_interval", "remote.stats_interval"),
+            Self::HotkeyDepth(_) => ("hotkey_window", "depth", "hotkey_window.depth"),
+            Self::HotkeySpan(_) => ("hotkey_window", "span", "hotkey_window.span"),
             // The key is the command's name, which a constant cannot hold: the writers
             // ([`keys::with_shortcut`], [`keys::without_shortcuts`]) take it from the variant.
             Self::Shortcut { .. } | Self::DefaultShortcuts { .. } => ("keys", "", "keys"),
@@ -2194,6 +2210,7 @@ impl SettingsEdit {
             Self::DownloadConflict(conflict) => conflict.name().into(),
             Self::RemoteStats(mode) => mode.name().into(),
             Self::StatsInterval(seconds) => i64::from(*seconds).into(),
+            Self::HotkeyDepth(percent) | Self::HotkeySpan(percent) => i64::from(*percent).into(),
             // The line's value; a removal writes none and never asks.
             Self::Shortcut { shortcuts, .. } => keys::value_of(shortcuts.as_deref()),
             Self::DefaultShortcuts { .. } => String::new().into(),
@@ -2646,12 +2663,44 @@ open_with = "textpen"
 # installed, the address opens in your own browser.
 # open_links_with = "browserpen"
 
+[hotkey_window]
+# A bateri window, with its tabs, that slides in from the edge of the screen on a
+# shortcut, in any application, and goes away on the same shortcut. What runs in it
+# keeps running while it is away. Settings > Hotkey Window records the shortcut.
+# Window > Show Hotkey Window, the command palette and `bateri hotkey` open it too.
+# A key with a modifier (ctrl, option or cmd; shift alone is not enough) such as
+# "option+space", a function key (f1 to f20), or one modifier named alone, "option",
+# for tapping it twice. "" is none.
+shortcut = ""
+# "top" | "bottom" | "left" | "right" | "center". The edge it slides in from; "center"
+# opens it in the middle of the screen.
+position = "top"
+# How far in from the edge, in percent of the screen (10 to 100): its height at the top
+# and at the bottom and in the center, its width at the left and at the right. Dragging
+# the opposite edge writes it.
+depth = 50
+# How far along the edge, in percent of the screen (10 to 100): its width at the top,
+# at the bottom and in the center, its height at the left and at the right.
+span = 100
+# "pointer" | "primary". The screen it opens on: the one the pointer is on, or the one
+# with the menu bar.
+screen = "pointer"
+# "follow" | "stay". "follow" opens it in the Space in front, "stay" in the one it was
+# opened in.
+spaces = "follow"
+# true | false. Hide it when another window or another application is clicked; Window >
+# Pin Hotkey Window keeps it until bateri quits.
+hide_on_click_away = true
+# true | false. Slide in and out; off, it appears and goes away at once. Reduce motion
+# turns it off too.
+animate = true
+
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
 # all). A name left out keeps the command's own shortcut, "" leaves it with
 # none, and a list gives it two. Modifiers: ctrl, option, shift, cmd; the key
 # comes last: a character, or left, right, up, down, tab, return, space,
-# escape, backspace, delete, home, end, pageup, pagedown, f1 to f12, plus.
+# escape, backspace, delete, home, end, pageup, pagedown, f1 to f20, plus.
 # A shortcut of only modifiers (select_tab = "option") sets the modifiers of
 # every item of a family such as the tabs' digits. One modifier twice
 # ("shift+shift") is that key tapped twice.
@@ -3424,6 +3473,22 @@ open_with = "textpen"
             }
             None => {}
         }
+        // A key of `[hotkey_window]` that cannot be read keeps what `fallback` had for it, alone;
+        // a section that is the wrong kind reads nothing and the whole of it stays.
+        match section(text, root, "hotkey_window", &mut parsed.diagnostics) {
+            Some(hotkey) => {
+                parsed.settings.hotkey_window = hotkey::read(
+                    text,
+                    hotkey,
+                    &fallback.hotkey_window,
+                    &mut parsed.diagnostics,
+                );
+            }
+            None if root.contains_key("hotkey_window") => {
+                parsed.settings.hotkey_window = fallback.hotkey_window;
+            }
+            None => {}
+        }
         // A line of `[keys]` that cannot be read is dropped alone and its command keeps what
         // `fallback` had for it — the shortcut it was running with, or its default if it had
         // none (the first read has no `fallback` entries); the other lines are read as usual.
@@ -3532,6 +3597,7 @@ open_with = "textpen"
             caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
             remote: self.remote_hosts != new.remote_hosts || self.remote_files != new.remote_files,
             stats: self.remote_stats != new.remote_stats,
+            hotkey: self.hotkey_window != new.hotkey_window,
             scrollbar: self.scrollbar != new.scrollbar,
             content_edge: self.content_edge != new.content_edge,
             contrast: self.minimum_contrast != new.minimum_contrast,
@@ -4301,6 +4367,10 @@ pub struct Changes {
     /// sampling interval go to every pane. **Not** folded into
     /// [`Self::remote`]: that field re-sends the pattern list to every session.
     pub stats: bool,
+    /// [`Settings::hotkey_window`] changed: the platform shell registers the shortcut again and
+    /// the window takes its place and size (an open one at once). A field of its own, for
+    /// [`Self::caret`]'s reason.
+    pub hotkey: bool,
     /// [`Settings::scrollbar`] changed: the platform shell resolves it again
     /// (with the system's preference) and gives the panes the resolved form.
     /// A field of its own, for [`Self::caret`]'s reason: the key doesn't
@@ -5568,6 +5638,7 @@ mod tests {
                 caret: false,
                 remote: false,
                 stats: false,
+                hotkey: false,
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
@@ -5654,6 +5725,7 @@ mod tests {
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
+            hotkey_window: HotkeyWindowSettings::default(),
             remote_integration: RemoteIntegration::default(),
             apps_sources: Settings::default().apps_sources,
             apps_sources_whole: true,
@@ -5835,6 +5907,7 @@ mod tests {
             caret: false,
             remote: false,
             stats: false,
+            hotkey: false,
             scrollbar: false,
             content_edge: false,
             contrast: false,
@@ -6074,6 +6147,7 @@ mod tests {
                 caret: false,
                 remote: false,
                 stats: false,
+                hotkey: false,
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
@@ -6237,6 +6311,7 @@ found {found}; using \"spring\""
                 caret: false,
                 remote: false,
                 stats: false,
+                hotkey: false,
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
@@ -6340,6 +6415,7 @@ found {found}; using \"system\""
                 caret: false,
                 remote: false,
                 stats: false,
+                hotkey: false,
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
@@ -8309,6 +8385,7 @@ hosts = [
                     caret: false,
                     remote: false,
                     stats: false,
+                    hotkey: false,
                     scrollbar: false,
                     content_edge: false,
                     contrast: false,
@@ -8421,6 +8498,7 @@ hosts = [
                 caret: false,
                 remote: false,
                 stats: false,
+                hotkey: false,
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
@@ -8537,6 +8615,7 @@ hosts = [
                 caret: false,
                 remote: false,
                 stats: false,
+                hotkey: false,
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
@@ -9468,6 +9547,8 @@ cursor = \"spring\"
             SettingsEdit::DownloadNotify(on) => settings.remote_files.download_notify = on,
             SettingsEdit::RemoteStats(mode) => settings.remote_stats.mode = mode,
             SettingsEdit::StatsInterval(seconds) => settings.remote_stats.interval = seconds,
+            SettingsEdit::HotkeyDepth(percent) => settings.hotkey_window.depth = percent,
+            SettingsEdit::HotkeySpan(percent) => settings.hotkey_window.span = percent,
             SettingsEdit::Shortcut { name, shortcuts } => {
                 settings.keys.retain(|entry| entry.name != name);
                 if let Some(shortcuts) = shortcuts {

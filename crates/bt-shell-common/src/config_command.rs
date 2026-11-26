@@ -19,8 +19,10 @@
 //! `[keys]` and a font's features are no keys here: Settings and the file change them.
 //!
 //! **What widens bateri's reach is read, never written here** ([`SETTINGS_ONLY`]): the reach of
-//! the `bateri` command itself, setting bateri up on a server without asking, and teaching Claude
-//! Code the command. Settings changes them, where a person does. This is not a boundary — a
+//! the `bateri` command itself, setting bateri up on a server without asking, teaching Claude
+//! Code the command, and the hotkey window's shortcut, which takes a key from every application
+//! (and a modifier tapped twice asks for a permission). Settings changes them, where a person
+//! does. This is not a boundary — a
 //! program in a terminal can write the file — only the command not doing it. A terminal on a
 //! server never gets here: the app refuses it before.
 
@@ -32,11 +34,13 @@ use bt_core::{PlainKey, PlainValue, Settings, plain_key, plain_keys};
 use crate::settings::{self, FILE_NAME, Unwritten};
 
 /// The keys `bateri config` reads and does not write: each widens what bateri, or a program in
-/// it, reaches.
-const SETTINGS_ONLY: [&str; 3] = [
+/// it, reaches — or, `hotkey_window.shortcut`, takes a key from every application, and a modifier
+/// tapped twice opens a permission question.
+const SETTINGS_ONLY: [&str; 4] = [
     "commands.level",
     "remote.integration",
     "agents.claude_skill",
+    "hotkey_window.shortcut",
 ];
 
 /// What a `bateri config` did: what to print, how it ends, and whether the file was written (the
@@ -497,6 +501,7 @@ mod tests {
         assert_eq!(root.run(&["get", "commands.level"]).stdout, "own\n");
         assert_eq!(root.run(&["get", "remote.integration"]).stdout, "ask\n");
         assert_eq!(root.run(&["get", "claude_skill"]).stdout, "false\n");
+        assert_eq!(root.run(&["get", "hotkey_window.shortcut"]).stdout, "\n");
         for words in [
             &["set", "level", "full"][..],
             &["reset", "commands.level"],
@@ -504,6 +509,8 @@ mod tests {
             &["reset", "remote.integration"],
             &["set", "claude_skill", "true"],
             &["reset", "agents.claude_skill"],
+            &["set", "hotkey_window.shortcut", "option+space"],
+            &["reset", "hotkey_window.shortcut"],
         ] {
             let ran = root.run(words);
             assert_eq!(ran.status, 77, "{words:?}");

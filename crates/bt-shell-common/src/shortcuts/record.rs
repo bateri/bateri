@@ -279,6 +279,14 @@ fn taken_by_note(
     }
 }
 
+/// What the recorder says of the Hotkey Window's own key.
+fn hotkey_note(key: &str) -> String {
+    format!(
+        "{key} is the Hotkey Window’s, in every application, so bateri would never get it. \
+         Try another key, or change the Hotkey Window’s in Settings ▸ Hotkey Window."
+    )
+}
+
 /// The words of a double press: the note under the row and the button's verb.
 fn words_twice(
     page: &Page,
@@ -288,6 +296,7 @@ fn words_twice(
 ) -> (Option<String>, Option<&'static str>) {
     let key = glyphs(&Shortcut::Twice(modifier)).unwrap_or_default();
     match verdict {
+        Verdict::HotkeyWindow => (Some(hotkey_note(&key)), None),
         Verdict::TakenBy(owner) => (
             Some(taken_by_note(page, owner, &key, &|shortcut| {
                 *shortcut == Shortcut::Twice(modifier)
@@ -398,6 +407,7 @@ fn words(
         }
         // A double press is worded apart ([`words_twice`]).
         Verdict::Dictation | Verdict::FamilyTwice(_) | Verdict::FunctionTwice => (None, None),
+        Verdict::HotkeyWindow => (Some(hotkey_note(key)), None),
         Verdict::FamilyShift(_) => (
             Some(format!(
                 "⇧ makes a digit type another character (⇧1 types !), and the menu cannot tell it \
@@ -412,6 +422,7 @@ fn words(
                 Clash::Command(other) => format!("{}’s shortcut", title(other.name)),
                 Clash::MacOs(mac) => format!("kept by macOS {}", mac.reason),
                 Clash::LineEditing(line) => format!("the key that {}", line.effect),
+                Clash::HotkeyWindow => "the Hotkey Window’s, in every application".to_owned(),
             };
             (
                 Some(format!(

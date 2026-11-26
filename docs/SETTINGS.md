@@ -287,11 +287,13 @@ $ bateri config path
   without its quotes; a setting that is not set (`font.family`) exits 1.
 - **What it does not change**: the lists and tables — `[remote] hosts`,
   `[apps] sources`, the shortcuts of [`[keys]`](#keys-1) and a font's
-  `[font.features]` — are changed in Settings or in the file. Three settings
-  that widen what bateri reaches are read but not changed by the command:
+  `[font.features]` — are changed in Settings or in the file. Four settings
+  are read but not changed by the command:
   `commands.level` (the reach of the `bateri` command itself),
-  `remote.integration` (setting bateri up on a server without asking) and
-  `agents.claude_skill` (teaching Claude Code the command). Settings changes
+  `remote.integration` (setting bateri up on a server without asking),
+  `agents.claude_skill` (teaching Claude Code the command) and
+  `hotkey_window.shortcut` (a key taken from every application, and a
+  modifier tapped twice asks for a permission). Settings changes
   them. This is not a lock — a program in a terminal can still edit the file —
   only the command leaving them to you.
 - **Only this computer's terminals** use it. In a terminal on a server it says
@@ -679,12 +681,44 @@ open_with = "textpen"
 # installed, the address opens in your own browser.
 # open_links_with = "browserpen"
 
+[hotkey_window]
+# A bateri window, with its tabs, that slides in from the edge of the screen on a
+# shortcut, in any application, and goes away on the same shortcut. What runs in it
+# keeps running while it is away. Settings > Hotkey Window records the shortcut.
+# Window > Show Hotkey Window, the command palette and `bateri hotkey` open it too.
+# A key with a modifier (ctrl, option or cmd; shift alone is not enough) such as
+# "option+space", a function key (f1 to f20), or one modifier named alone, "option",
+# for tapping it twice. "" is none.
+shortcut = ""
+# "top" | "bottom" | "left" | "right" | "center". The edge it slides in from; "center"
+# opens it in the middle of the screen.
+position = "top"
+# How far in from the edge, in percent of the screen (10 to 100): its height at the top
+# and at the bottom and in the center, its width at the left and at the right. Dragging
+# the opposite edge writes it.
+depth = 50
+# How far along the edge, in percent of the screen (10 to 100): its width at the top,
+# at the bottom and in the center, its height at the left and at the right.
+span = 100
+# "pointer" | "primary". The screen it opens on: the one the pointer is on, or the one
+# with the menu bar.
+screen = "pointer"
+# "follow" | "stay". "follow" opens it in the Space in front, "stay" in the one it was
+# opened in.
+spaces = "follow"
+# true | false. Hide it when another window or another application is clicked; Window >
+# Pin Hotkey Window keeps it until bateri quits.
+hide_on_click_away = true
+# true | false. Slide in and out; off, it appears and goes away at once. Reduce motion
+# turns it off too.
+animate = true
+
 [keys]
 # A command's shortcut, by the command's name (Settings > Keyboard lists them
 # all). A name left out keeps the command's own shortcut, "" leaves it with
 # none, and a list gives it two. Modifiers: ctrl, option, shift, cmd; the key
 # comes last: a character, or left, right, up, down, tab, return, space,
-# escape, backspace, delete, home, end, pageup, pagedown, f1 to f12, plus.
+# escape, backspace, delete, home, end, pageup, pagedown, f1 to f20, plus.
 # A shortcut of only modifiers (select_tab = "option") sets the modifiers of
 # every item of a family such as the tabs' digits. One modifier twice
 # ("shift+shift") is that key tapped twice.
@@ -3168,7 +3202,7 @@ the command's name.
   `option`, `shift` and `cmd`, in any order, one of each. The key is one
   character (`d`, `]`, `-`, `ş`) or a name: `left`, `right`, `up`, `down`,
   `tab`, `return`, `space`, `escape`, `backspace`, `delete`, `home`, `end`,
-  `pageup`, `pagedown`, `f1` to `f12` and `plus` for the plus key, which
+  `pageup`, `pagedown`, `f1` to `f20` and `plus` for the plus key, which
   would otherwise be the joiner. A symbol typed with Shift is the key plus
   `shift`: `shift+cmd+]`, never `cmd+}`. A key is the character it types, so on
   a keyboard that is not a US layout it is the character that layout types.
@@ -3200,6 +3234,65 @@ the command's name.
 
 The names, the comments and the keys bateri does not know stay where they are
 when Settings ▸ Keyboard writes the file: it changes only the lines you change.
+
+## Hotkey window
+
+```toml
+[hotkey_window]
+shortcut = "option+space"
+position = "top"
+depth = 50
+span = 100
+```
+
+A bateri window, with its tabs and splits, that slides in from the edge of the screen on one shortcut,
+whatever application is in front, and goes away on the same shortcut. What runs in it keeps running while it is away:
+a note in vim, an agent, a long `ssh`. It is a window like the others, with a tab row of its own; a click on the
+Dock's icon while it is the only window opens a normal one.
+
+It has **no shortcut until you record one**: Settings ▸ Hotkey Window takes the keys you press. Until then Window ▸
+Show Hotkey Window, the command palette and `bateri hotkey` open it. A tap of the shortcut shows the window when
+it is away and hides it when it is in front; with the window shown but another bateri window in front, it brings
+it in front.
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `shortcut` | string | `""` | what shows and hides the window from any application; `""` is none |
+| `position` | `"top"` \| `"bottom"` \| `"left"` \| `"right"` \| `"center"` | `"top"` | the edge it slides in from; `"center"` opens it in the middle and slides it from the top |
+| `depth` | 10 to 100 | `50` | how far in from the edge, in percent of the screen |
+| `span` | 10 to 100 | `100` | how far along the edge, in percent of the screen |
+| `screen` | `"pointer"` \| `"primary"` | `"pointer"` | the screen it opens on: the one the pointer is on, or the one with the menu bar |
+| `spaces` | `"follow"` \| `"stay"` | `"follow"` | `"follow"` opens it in the Space in front, `"stay"` in the one it was opened in |
+| `hide_on_click_away` | `true` \| `false` | `true` | hide it when the focus leaves it for another window or another application |
+| `animate` | `true` \| `false` | `true` | slide in and out; Reduce motion turns the slide off too |
+
+`depth` and `span` count from the edge the window comes from, so the same two numbers read the same on every edge:
+
+| `position` | `depth` is its | `span` is its |
+|---|---|---|
+| `top`, `bottom` | height | width |
+| `left`, `right` | width | height |
+| `center` | height | width |
+
+The sizes are shares of the screen's usable area, the menu bar and the Dock left out. Drag the edge opposite the one
+it comes from (all four edges of a `center` window) and the new share is written to the file.
+
+- **The shortcut** is a chord with `ctrl`, `option` or `cmd` and a key (`option+space`, `shift+cmd+k`; `shift` alone
+  is not enough, the key would be taken from every application), a function key from `f1` to `f20`, or one modifier
+  named alone (`"option"`, the same as `"option+option"`) for tapping it twice. The window's own shortcut is in
+  every application, so a `[keys]` line with the same keys is told so in Settings ▸ Keyboard.
+- **A tap of a chord asks for nothing.** The twice-tapped modifier watches the modifier keys, which macOS lets
+  a program do after you allow it in System Settings ▸ Privacy & Security ▸ Input Monitoring; the Hotkey Window page
+  shows where that stands and opens the pane for you. Another application that holds the same keys can keep them:
+  bateri tells you when macOS refuses them, not when another application is first.
+- **`bateri config` does not write `shortcut`** (`set` and `reset` end with status 77, `get` and `list` read it).
+  A program should not take a key from every application, and a modifier tapped twice asks for a permission:
+  that is the person's to set, in Settings.
+- **Hiding.** The window goes away when you click another application or another bateri window, unless a sheet, the
+  palette, Settings or a menu of bateri's own took the focus. Window ▸ Pin Hotkey Window keeps it in front until
+  you unpin it or quit; `hide_on_click_away = false` is the same for good.
+- **The last tab closed** closes the window; the next tap opens a fresh one in your home folder. The window is
+  saved with the session and comes back hidden.
 
 ## Themes
 

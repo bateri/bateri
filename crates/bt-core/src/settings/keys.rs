@@ -151,13 +151,13 @@ pub enum NamedKey {
     End,
     PageUp,
     PageDown,
-    /// F1–F12.
+    /// F1–F20.
     F(u8),
 }
 
 impl NamedKey {
     /// The number of function keys.
-    pub const FUNCTION_KEYS: u8 = 12;
+    pub const FUNCTION_KEYS: u8 = 20;
 
     const FIXED: [(&'static str, NamedKey); 14] = [
         ("left", Self::Left),
@@ -372,6 +372,51 @@ impl Shortcut {
         Ok(Self::Chord(Chord::new(mods, parse_key(key)?)))
     }
 
+    /// A shortcut that works in **every** application ([`Self::for_global`]) from its text:
+    /// `[hotkey_window] shortcut`'s reading, and the recorder's of the Settings page.
+    pub fn parse_global(text: &str) -> Result<Self, ShortcutError> {
+        Self::parse(text)?.for_global()
+    }
+
+    /// This shortcut as one that works in every application, or why it cannot be. **The one
+    /// rule**: the file's reading and the page's recorder both ask it.
+    ///
+    /// - A chord needs a modifier other than Shift alone, or is a function key (F1–F20, with any
+    ///   modifiers or none): a bare letter or a Shift letter would be swallowed in every
+    ///   application.
+    /// - One modifier twice is that key tapped twice, and so is **one modifier's name alone**
+    ///   (`"option"`): it comes back as [`Shortcut::Twice`].
+    /// - Several modifiers alone are no global shortcut: they would be a family's.
+    pub fn for_global(self) -> Result<Self, ShortcutError> {
+        match self {
+            Self::Twice(_) => Ok(self),
+            Self::Mods(mods) => {
+                let mut held = mods.iter();
+                match (held.next(), held.next()) {
+                    (Some(modifier), None) => Ok(Self::Twice(modifier)),
+                    _ => Err(ShortcutError::new(
+                        "modifiers alone are no shortcut for every application: name one \
+                         modifier to tap it twice (\"option\"), or add a key"
+                            .to_owned(),
+                    )),
+                }
+            }
+            Self::Chord(chord) => {
+                let function = matches!(chord.key, Key::Named(NamedKey::F(_)));
+                if function || !chord.mods.without(Modifier::Shift).is_empty() {
+                    Ok(self)
+                } else {
+                    Err(ShortcutError::new(
+                        "a shortcut for every application needs ctrl, option or cmd with its \
+                         key, or is a function key (f1 to f20): the key alone, or with shift, \
+                         would be taken from every application"
+                            .to_owned(),
+                    ))
+                }
+            }
+        }
+    }
+
     fn mods_of(modifiers: &[Modifier]) -> Result<Mods, ShortcutError> {
         let mut mods = Mods::NONE;
         for modifier in modifiers {
@@ -409,7 +454,7 @@ fn parse_key(text: &str) -> Result<Key, ShortcutError> {
     NamedKey::from_name(&text).map(Key::Named).ok_or_else(|| {
         ShortcutError::new(format!(
             "`{text}` is not a key (one character, or left, right, up, down, tab, return, \
-             space, escape, backspace, delete, home, end, pageup, pagedown, f1 to f12, plus)"
+             space, escape, backspace, delete, home, end, pageup, pagedown, f1 to f20, plus)"
         ))
     })
 }
@@ -848,7 +893,7 @@ mod tests {
             ("shift+shift+shift", "`shift` is written twice"),
             ("meta+d", "`meta` is not a modifier"),
             ("cmd+enter", "`enter` is not a key"),
-            ("cmd+f13", "`f13` is not a key"),
+            ("cmd+f21", "`f21` is not a key"),
             ("cmd+f01", "`f01` is not a key"),
             ("cmd+\u{f729}", "not a key that can be written"),
             ("cmd+ ", "`+` has nothing"),

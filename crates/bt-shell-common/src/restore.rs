@@ -12,7 +12,9 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). **Every version the writer still writes is read**: version 9 gave a tab its floating
+//! {index}`). **Every version the writer still writes is read**: version 10 gave a window the kind it
+//! is — a normal one or a hotkey window ([`crate::hotkey`]) — and its name (a `W` line's last field:
+//! `-`, or `hotkey:{name}`), version 9 gave a tab its floating
 //! cards ([`crate::floating`]: an `F {x} {y} {width} {height} {0|1} {shape}` line each, right after the
 //! tab's `T` line and before its panes, back to front; the four numbers are shares of the tab's
 //! content area, the bit says the card is a capsule, the shape is a tree over the tab's pane
@@ -37,7 +39,8 @@
 //! asked for by a program on the server (it closes with its terminal, or says who asked), 7 once
 //! a window hides its side column or shows Activity, 8 once anything has a number, 9 once a tab
 //! has a floating card (no tab has one in most sessions, so the app writes 9 only then and 8
-//! otherwise) — so a session that uses
+//! otherwise), 10 once a window is a hotkey window (which is rare too: with none, a session is
+//! written as it was, byte for byte) — so a session that uses
 //! nothing new stays readable by the bateri before
 //! it, whose reader drops any other number and, with it, the saved layout. Every window the app
 //! saves has its number, so the app writes 8 always and a bateri from before numbers does not
@@ -103,11 +106,17 @@ use crate::tabs::Tabs;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-session";
 
-/// The format's current version: a tab holds floating cards beside its flat tree (an `F` line
-/// each). The writer says it only for a session where a tab has one, the one before
-/// ([`NUMBERED`]) otherwise. The ones before it are read too; any other number is not read (a
-/// newer bateri's file after a downgrade is dropped, not misread).
-pub const VERSION: u32 = 9;
+/// The format's current version: a window says what kind it is (the last field of its `W` line),
+/// a normal one or a hotkey window with its name. The writer says it only for a session where a
+/// window is a hotkey window, the one before ([`FLOATING`]) or the ones before that otherwise.
+/// The ones before it are read too; any other number is not read (a newer bateri's file after a
+/// downgrade is dropped, not misread).
+pub const VERSION: u32 = 10;
+
+/// The version before the hotkey window: a tab holds floating cards beside its flat tree (an `F`
+/// line each). The writer says it for a session where a tab has one and no window is a hotkey
+/// window, the one before ([`NUMBERED`]) otherwise.
+const FLOATING: u32 = 9;
 
 /// The version before floating cards: a window, a group and a tab each carry the number it is
 /// known by (`w1`, `g1`, `t3`, [`crate::ids`]). Every session of the app without a floating card
@@ -210,6 +219,9 @@ pub struct SavedWindow {
     /// The window's tab groups in the order they are listed; none for a plain list of tabs. The
     /// tabs name theirs by index ([`SavedTab::group`]).
     pub groups: Vec<SavedGroup>,
+    /// The name of the hotkey window this is ([`crate::hotkey::DEFAULT_NAME`]); `None` for a
+    /// normal window. A hotkey window is saved with the session and comes back hidden.
+    pub hotkey: Option<String>,
 }
 
 /// A group of a window's tabs.
@@ -696,6 +708,7 @@ impl SavedWindow {
             column_hidden: false,
             activity: false,
             groups: Vec::new(),
+            hotkey: None,
         })
     }
 
@@ -845,6 +858,21 @@ fn parse_id(token: &str) -> Option<Option<u64>> {
     (number > 0 && number.to_string() == token).then_some(Some(number))
 }
 
+/// What kind a window is: `-` for a normal one, `hotkey:{name}` for a hotkey window (the name
+/// escaped, so no token holds a space). The word before the colon is the kind, so another kind
+/// can be added without a field more.
+fn render_kind(hotkey: Option<&str>) -> String {
+    hotkey.map_or("-".to_owned(), |name| format!("hotkey:{}", escape(name)))
+}
+
+fn parse_kind(token: &str) -> Option<Option<String>> {
+    if token == "-" {
+        return Some(None);
+    }
+    let name = unescape(token.strip_prefix("hotkey:")?)?;
+    (!name.is_empty()).then_some(Some(name))
+}
+
 fn parse_bit(token: &str) -> Option<bool> {
     match token {
         "0" => Some(false),
@@ -898,8 +926,11 @@ impl Saved {
             .iter()
             .flat_map(|window| &window.tabs)
             .any(|tab| !tab.cards.is_empty());
-        let version = if floating {
+        let hotkey = self.windows.iter().any(|window| window.hotkey.is_some());
+        let version = if hotkey {
             VERSION
+        } else if floating {
+            FLOATING
         } else if current {
             NUMBERED
         } else if flagged {
@@ -947,6 +978,11 @@ impl Saved {
                 out.push(' ');
                 out.push_str(&render_id(window.id));
             }
+            // The kind sits last: a window's line has no field of any length after it.
+            if version >= VERSION {
+                out.push(' ');
+                out.push_str(&render_kind(window.hotkey.as_deref()));
+            }
             out.push('\n');
             if version >= GROUPED {
                 for group in &window.groups {
@@ -985,7 +1021,7 @@ impl Saved {
                 tab.shape.render(&mut out);
                 out.push('\n');
                 // The cards stand between the tab's line and its panes, back to front.
-                if version >= VERSION {
+                if version >= FLOATING {
                     for card in &tab.cards {
                         let [x, y, width, height] = card.area;
                         out.push_str(&format!(
@@ -1052,7 +1088,7 @@ impl Saved {
         }
         let version = header.next()?.parse::<u32>().ok()?;
         if ![
-            UNNAMED, NAMED, SIDED, GROUPED, KEPT, ASKED, FLAGGED, NUMBERED, VERSION,
+            UNNAMED, NAMED, SIDED, GROUPED, KEPT, ASKED, FLAGGED, NUMBERED, FLOATING, VERSION,
         ]
         .contains(&version)
             || header.next().is_some()
@@ -1088,7 +1124,7 @@ impl Saved {
                 // The cards come right after the tab's line, before its first pane.
                 "F" => {
                     let tab = windows.last_mut()?.tabs.last_mut()?;
-                    if version < VERSION || !tab.panes.is_empty() {
+                    if version < FLOATING || !tab.panes.is_empty() {
                         return None;
                     }
                     tab.cards.push(parse_card(&mut tokens)?);
@@ -1185,6 +1221,12 @@ fn parse_window<'a>(
     } else {
         None
     };
+    // Versions before 10 have no kinds: every window is a normal one.
+    let hotkey = if version >= VERSION {
+        parse_kind(tokens.next()?)?
+    } else {
+        None
+    };
     Some(SavedWindow {
         id,
         frame,
@@ -1195,6 +1237,7 @@ fn parse_window<'a>(
         column_hidden,
         activity,
         groups: Vec::new(),
+        hotkey,
     })
 }
 
@@ -1823,6 +1866,7 @@ mod tests {
             column_hidden: false,
             activity: false,
             groups: Vec::new(),
+            hotkey: None,
         }
     }
 
@@ -2245,6 +2289,44 @@ mod tests {
         "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
     );
 
+    /// [`V9_FIXTURE`]'s session with a hotkey window after the two: the cards stay, and every `W`
+    /// line says its kind in the last field (`-`, or `hotkey:` and the name). The version says 10.
+    const V10_FIXTURE: &str = concat!(
+        "bateri-session 10\n",
+        "W 120.5 -30 800 600.25 1 1 260.5 1 0 1 -\n",
+        "G api\\sserver 0 2 1\n",
+        "G ünï 1 - 2\n",
+        "T 0 - - - 1 L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
+        "T 1 2 - 0 2 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - - -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod - +ada@prod:2222 b-0123456789abcdef0123456789abcdef 1 +Claude\s(t4) -p 2222 ada@prod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + - -\n",
+        "T 0 - - 0 3 L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\n",
+        // A tab with no number: the field is there and says so.
+        "T 0 - - 1 - L 0\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - - -\n",
+        "W 120.5 -30 800 600.25 0 0 - 0 1 2 -\n",
+        "T 0 - - - 7 L 0\n",
+        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
+        "\n",
+        // The cards come right after the tab's line, back to front, before its panes.
+        "T 3 - - - 8 L 0\n",
+        "F 0.225 0.2 0.55 0.6 0 L 1\n",
+        "F 0.1 0.15 0.3 0.4 1 S v 0.5 L 2 L 3\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - - -\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
+        // The hotkey window: its own line, its tabs below it, no key, saved hidden.
+        "W 0 540 1440 360 0 0 - 0 0 3 hotkey:default\n",
+        "T 0 - - - 9 L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\n",
+    );
+
     /// [`rich_numbered`] with the tab of [`V9_FIXTURE`] added to its last window.
     fn rich_floating() -> Saved {
         let mut saved = rich_numbered();
@@ -2280,6 +2362,91 @@ mod tests {
             ],
         });
         saved
+    }
+
+    /// [`rich_floating`] with a hotkey window after its windows: one tab, no key.
+    fn rich_hotkey() -> Saved {
+        let mut saved = rich_floating();
+        let mut hotkey = window(vec![{
+            let mut tab = single("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+            tab.id = Some(9);
+            tab
+        }]);
+        hotkey.id = Some(3);
+        hotkey.frame = Frame {
+            x: 0.0,
+            y: 540.0,
+            width: 1440.0,
+            height: 360.0,
+        };
+        hotkey.hotkey = Some("default".to_owned());
+        saved.windows.push(hotkey);
+        saved
+    }
+
+    #[test]
+    fn the_hotkey_version_is_read_byte_for_byte() {
+        assert_eq!(Saved::parse(V10_FIXTURE), Some(rich_hotkey()));
+        let saved = Saved::parse(V10_FIXTURE).expect("version 10");
+        let kinds: Vec<Option<&str>> = saved
+            .windows
+            .iter()
+            .map(|window| window.hotkey.as_deref())
+            .collect();
+        assert_eq!(kinds, [None, None, Some("default")]);
+        // Version 10 holds what version 9 did: the cards are in it.
+        assert_eq!(saved.windows[1].tabs[1].cards.len(), 2);
+    }
+
+    #[test]
+    fn a_session_with_a_hotkey_window_is_written_as_version_ten_and_one_without_is_not() {
+        assert_eq!(rich_hotkey().render(), V10_FIXTURE);
+        // Without it the file is what it was, byte for byte: version 9 with a card, 8 without.
+        let mut without = rich_hotkey();
+        without.windows.pop();
+        assert_eq!(without.render(), V9_FIXTURE);
+        assert_eq!(rich_numbered().render(), V8_FIXTURE);
+        // A hotkey window alone makes the file 10, cards or none, numbers or none.
+        for mut saved in [rich_numbered(), rich()] {
+            let mut hotkey = window(vec![single("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")]);
+            hotkey.hotkey = Some("default".to_owned());
+            saved.windows.push(hotkey);
+            let text = saved.render();
+            assert!(text.starts_with("bateri-session 10\n"), "{text}");
+            assert_eq!(Saved::parse(&text), Some(saved));
+        }
+        // A name is a token like any other text: no space gets through.
+        let mut named = rich();
+        named.windows[0].hotkey = Some("dropdown one".to_owned());
+        assert!(named.render().contains(" hotkey:dropdown\\sone\n"));
+        assert_eq!(Saved::parse(&named.render()), Some(named));
+    }
+
+    #[test]
+    fn a_window_kind_that_is_not_exactly_understood_makes_the_file_none() {
+        let last = " 3 hotkey:default\n";
+        let bad = |kind: &str| V10_FIXTURE.replacen(last, &format!(" 3 {kind}\n"), 1);
+        assert!(Saved::parse(&bad("hotkey:default")).is_some());
+        assert!(Saved::parse(&bad("-")).is_some());
+        for kind in [
+            "hotkey:",
+            "hotkey",
+            "default",
+            "+default",
+            "hotkey:a:b\\",
+            "quake:default",
+        ] {
+            assert_eq!(Saved::parse(&bad(kind)), None, "{kind}");
+        }
+        // The field is missing: from a line of a file that says 10.
+        assert_eq!(Saved::parse(&V10_FIXTURE.replacen(last, " 3\n", 1)), None);
+        // A file of version 9 has no kinds: a tenth field is not read there as one, and a
+        // window of version 10 with nothing after its number is not a window.
+        assert_eq!(
+            Saved::parse(&V10_FIXTURE.replacen("bateri-session 10", "bateri-session 9", 1)),
+            None,
+            "the hotkey window's line is longer than a version 9 line"
+        );
     }
 
     #[test]

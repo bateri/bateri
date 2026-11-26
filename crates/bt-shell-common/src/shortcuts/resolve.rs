@@ -85,6 +85,11 @@ pub struct Resolved {
     pub diagnostics: Vec<Diagnostic>,
     /// The keys two commands share, in the order they are first met.
     pub conflicts: Vec<Conflict>,
+    /// The Hotkey Window's shortcut (`[hotkey_window] shortcut`): a key of **every** application,
+    /// registered with the system, so the menu never gets it. No command has it and the recorder
+    /// refuses it ([`Verdict::HotkeyWindow`]); a `[keys]` line that has it is said
+    /// ([`Resolved::problems`]).
+    pub hotkey: Option<Shortcut>,
 }
 
 /// What a family takes: only modifiers, and none of the family's items on a key that cannot
@@ -236,6 +241,7 @@ pub fn resolve(settings: &Settings) -> Resolved {
         bindings,
         diagnostics,
         conflicts,
+        hotkey: settings.hotkey_window.shortcut,
     }
 }
 
@@ -338,7 +344,51 @@ impl Resolved {
                 message,
             });
         }
+        if let Some(key) = self.hotkey {
+            let shown = super::mapping::glyphs(&key).unwrap_or_else(|| key.to_string());
+            for command in self.held_by_hotkey() {
+                let line = match self.binding(command.name).map(|binding| binding.source) {
+                    Some(Source::File(line)) => line,
+                    _ => None,
+                };
+                out.push(Diagnostic {
+                    key: Some("keys"),
+                    line,
+                    message: format!(
+                        "`{}` has {shown}, which is the Hotkey Window's in every application; \
+                         the menu never gets it",
+                        command.name
+                    ),
+                });
+            }
+        }
         out
+    }
+
+    /// The commands that have the Hotkey Window's key, in the menu's order: they never run from
+    /// it. A family has it when one of its items does.
+    pub fn held_by_hotkey(&self) -> Vec<&'static Command> {
+        let Some(key) = self.hotkey else {
+            return Vec::new();
+        };
+        self.bindings
+            .iter()
+            .filter(|binding| {
+                binding
+                    .shortcuts
+                    .iter()
+                    .any(|shortcut| match (shortcut, key) {
+                        (Shortcut::Twice(_), _) => *shortcut == key,
+                        (_, Shortcut::Chord(chord)) => binding
+                            .command
+                            .items(shortcut)
+                            .iter()
+                            .any(|item| item.chord == chord),
+                        _ => false,
+                    })
+            })
+            .map(|binding| binding.command)
+            .collect()
     }
 
     /// Every command with the shortcuts it has, in the menu's order.
@@ -990,5 +1040,51 @@ mod tests {
         // A command that is not a family has none to give.
         assert_eq!(resolved.family_mods("split_right"), None);
         assert_eq!(resolved.family_mods("nothing"), None);
+    }
+
+    #[test]
+    fn a_line_that_has_the_hotkey_windows_key_is_said_and_the_key_is_no_ones() {
+        let text = "[hotkey_window]\nshortcut = \"shift+cmd+k\"\n[keys]\n\
+                    copy_last_output = \"shift+cmd+k\"\nselect_tab = \"option\"\n";
+        let parsed = Settings::parse(text).expect("TOML");
+        assert_eq!(parsed.diagnostics, Vec::new());
+        let resolved = resolve(&parsed.settings);
+        let holders: Vec<&str> = resolved
+            .held_by_hotkey()
+            .iter()
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(holders, ["copy_last_output"]);
+        let problems = resolved.problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].message.contains("Hotkey Window"),
+            "{problems:?}"
+        );
+        assert_eq!(problems[0].line, Some(4), "the line of the command's own");
+        // The page says it on the command's row alone.
+        // Nothing is said while the hotkey window has no shortcut, or a free one.
+        for free in ["", "shortcut = \"f12\"\n"] {
+            let text =
+                format!("[hotkey_window]\n{free}[keys]\ncopy_last_output = \"shift+cmd+k\"\n");
+            let parsed = Settings::parse(&text).expect("TOML");
+            let resolved = resolve(&parsed.settings);
+            assert!(resolved.held_by_hotkey().is_empty(), "{text}");
+            assert!(resolved.problems().is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_double_tap_of_the_hotkey_window_is_held_by_a_command_that_has_it_too() {
+        let text =
+            "[hotkey_window]\nshortcut = \"option\"\n[keys]\ncommand_palette = \"option+option\"\n";
+        let parsed = Settings::parse(text).expect("TOML");
+        let resolved = resolve(&parsed.settings);
+        let holders: Vec<&str> = resolved
+            .held_by_hotkey()
+            .iter()
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(holders, ["command_palette"]);
     }
 }

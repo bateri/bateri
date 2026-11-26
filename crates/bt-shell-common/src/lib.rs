@@ -67,6 +67,7 @@ pub mod gesture;
 pub mod grid;
 pub mod groups;
 pub mod hold;
+pub mod hotkey;
 pub mod icon;
 pub mod ids;
 pub mod jobs;

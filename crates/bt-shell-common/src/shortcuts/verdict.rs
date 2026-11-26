@@ -200,6 +200,8 @@ pub enum Clash {
     Command(&'static Command),
     MacOs(&'static MacKey),
     LineEditing(&'static LineKey),
+    /// The Hotkey Window's shortcut, which works in every application.
+    HotkeyWindow,
 }
 
 /// The verdict on a pressed key.
@@ -209,6 +211,9 @@ pub enum Verdict {
     Free,
     /// Another command has the key.
     TakenBy(&'static Command),
+    /// The Hotkey Window has the key, in every application: the menu would never get it. Not
+    /// given away from here; it is changed in Settings ▸ Hotkey Window.
+    HotkeyWindow,
     /// The key edits the line you type.
     LineEditing(&'static LineKey),
     /// ⌃ without ⌘: the key goes to the program in the terminal.
@@ -240,6 +245,7 @@ impl Verdict {
         matches!(
             self,
             Self::MacOs(_)
+                | Self::HotkeyWindow
                 | Self::NeedsModifier
                 | Self::FamilyNeedsKey(_)
                 | Self::FamilyClash { .. }
@@ -316,6 +322,8 @@ impl Resolved {
         let target = by_name(command)?;
         let verdict = if let Some(family) = target.family {
             Verdict::FamilyTwice(family)
+        } else if self.hotkey == Some(Shortcut::Twice(modifier)) {
+            Verdict::HotkeyWindow
         } else if let Some(owner) = self.owner_of_twice(modifier, target.name) {
             Verdict::TakenBy(owner)
         } else if matches!(modifier, Modifier::Ctrl | Modifier::Cmd) {
@@ -334,6 +342,9 @@ impl Resolved {
             Some(Refusal::MacOs(key)) => return Verdict::MacOs(key),
             Some(Refusal::NeedsModifier) => return Verdict::NeedsModifier,
             None => {}
+        }
+        if self.hotkey == Some(Shortcut::Chord(*pressed)) {
+            return Verdict::HotkeyWindow;
         }
         if let Some(owner) = self.owner_of(pressed, target.name) {
             return Verdict::TakenBy(owner);
@@ -362,6 +373,12 @@ impl Resolved {
                 return Verdict::FamilyClash {
                     chord,
                     with: Clash::MacOs(key),
+                };
+            }
+            if self.hotkey == Some(Shortcut::Chord(chord)) {
+                return Verdict::FamilyClash {
+                    chord,
+                    with: Clash::HotkeyWindow,
                 };
             }
             if let Some(owner) = self.owner_of(&chord, target.name) {
@@ -754,6 +771,52 @@ mod tests {
         assert_eq!(
             resolved.owner_of(&chord("cmd+j"), "").map(|c| c.name),
             Some("split_down")
+        );
+    }
+
+    #[test]
+    fn the_hotkey_windows_key_is_refused_to_every_command() {
+        let mut settings = Settings::default();
+        settings.hotkey_window.shortcut = Some(Shortcut::parse_global("shift+cmd+k").unwrap());
+        let resolved = resolve(&settings);
+        let ruling = resolved
+            .judge("copy_last_output", &chord("shift+cmd+k"))
+            .expect("a command");
+        assert_eq!(ruling.verdict, Verdict::HotkeyWindow);
+        assert!(ruling.verdict.is_refused() && !ruling.verdict.needs_confirmation());
+        assert_eq!(ruling.verdict.takes_from(), None);
+        // The other keys are as free as they were.
+        assert_eq!(
+            resolved
+                .judge("copy_last_output", &chord("shift+cmd+j"))
+                .map(|ruling| ruling.verdict),
+            Some(Verdict::Free)
+        );
+        // A family's item that would be the key is refused as a clash.
+        settings.hotkey_window.shortcut = Some(Shortcut::parse_global("option+1").unwrap());
+        let resolved = resolve(&settings);
+        let ruling = resolved
+            .judge("select_tab", &chord("option+2"))
+            .expect("a family");
+        assert!(matches!(
+            ruling.verdict,
+            Verdict::FamilyClash {
+                with: Clash::HotkeyWindow,
+                ..
+            }
+        ));
+        // A double tap.
+        settings.hotkey_window.shortcut = Some(Shortcut::Twice(Modifier::Option));
+        let resolved = resolve(&settings);
+        let twice = resolved
+            .judge_twice("copy_last_output", Modifier::Option)
+            .expect("a command");
+        assert_eq!(twice.verdict, Verdict::HotkeyWindow);
+        assert_eq!(
+            resolved
+                .judge_twice("copy_last_output", Modifier::Shift)
+                .map(|ruling| ruling.verdict),
+            Some(Verdict::Free)
         );
     }
 }

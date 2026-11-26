@@ -406,6 +406,14 @@ impl Page {
                         others.join(" and ")
                     ));
                 }
+                if let Some(key) = resolved.hotkey
+                    && resolved.held_by_hotkey().contains(&row.command)
+                {
+                    said.push(format!(
+                        "{} is the Hotkey Window’s in every application: the menu never gets it.",
+                        glyphs(&key).unwrap_or_default()
+                    ));
+                }
                 // The menu bar has no way to show a double press: say so, or the row reads as a
                 // command that has no menu key.
                 if !row.chips.is_empty() && !row.in_menu_bar() {
@@ -767,6 +775,21 @@ mod tests {
         assert!(only.row("split_right").expect("a row").note.is_none());
         let (beside, _) = page("split_down = [\"cmd+j\", \"shift+shift\"]\n");
         assert!(beside.row("split_down").expect("a row").note.is_none());
+    }
+
+    #[test]
+    fn a_row_that_has_the_hotkey_windows_key_says_so() {
+        let text = "[hotkey_window]\nshortcut = \"cmd+j\"\n[keys]\nsplit_down = \"cmd+j\"\n";
+        let settings = Settings::parse(text).expect("TOML").settings;
+        let resolved = resolve(&settings);
+        let page = Page::new(&menu(), &resolved);
+        let note = page.row("split_down").expect("a row").note.clone();
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("Hotkey Window")),
+            "{note:?}"
+        );
+        assert!(page.row("split_right").expect("a row").note.is_none());
     }
 
     #[test]

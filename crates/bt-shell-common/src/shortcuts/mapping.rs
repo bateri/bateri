@@ -80,7 +80,7 @@ fn named_of(c: char) -> Option<NamedKey> {
         ' ' => NamedKey::Space,
         '\u{1b}' => NamedKey::Escape,
         '\u{8}' | '\u{7f}' => NamedKey::Backspace,
-        function @ '\u{F704}'..='\u{F70F}' => {
+        function @ '\u{F704}'..='\u{F717}' => {
             NamedKey::F(u8::try_from(u32::from(function) - FUNCTION_KEY_BASE).ok()?)
         }
         _ => return None,
