@@ -15,6 +15,7 @@ of every installed copy. A version without a section is not released.
 ### Added
 
 - **A hotkey window.** One shortcut slides a bateri window in from the edge of the screen over whatever you are doing, and the same shortcut sends it away. What runs in it keeps running. Settings ▸ Hotkey Window sets the shortcut (a key, or a modifier tapped twice; Remove takes it away), the edge, the size and what makes it hide.
+- **Move a tab or a split to the hotkey window.** Window ▸ Move Tab to Hotkey Window and Move Split to Hotkey Window, a tab's right-click menu and the command palette send what you are doing there, and while it is pinned a tab dropped on its bar joins it. Drag the single title of the hotkey window out and the tab becomes a window of its own.
 - **`bateri hotkey` opens it from a terminal or a launcher.** `show`, `hide`, `toggle`, `pin` and `unpin`, from a terminal or by the full path from Raycast or Shortcuts. `bateri ls` marks the window.
 
 ## [0.34.0] - 2026-11-25

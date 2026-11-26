@@ -3734,11 +3734,20 @@ impl AppDelegate {
     /// says so: a move a program on a server asked for does not take the keyboard to the window
     /// ([`bt_shell_common::agent::arrange`]).
     pub(crate) fn make_move_raising(&self, wanted: Move, raise: bool) -> bool {
-        let mut world = self.world();
-        if matches!(wanted, Move::MergeAllWindows { .. }) {
-            // The hotkey window is the person's to call, not a window of the work: its tabs stay.
-            world.retain(|window| !self.window(window.id).is_some_and(|w| w.is_hotkey()));
+        // A move to the hotkey window with no window there and no screen to make one on would
+        // take the tabs out of their window and have nowhere to put them: a beep, nothing moved.
+        if matches!(
+            wanted,
+            Move::TabToHotkeyWindow { .. }
+                | Move::PaneToHotkeyWindow { .. }
+                | Move::TabsToHotkeyWindow { .. }
+                | Move::GroupToHotkeyWindow { .. }
+        ) && !self.hotkey_window_can_be_made()
+        {
+            crate::sheets::beep();
+            return false;
         }
+        let world = self.world();
         match moves::plan(&world, wanted, self) {
             Ok(mut plan) => {
                 if !raise {
@@ -3901,6 +3910,16 @@ impl AppDelegate {
                 self.open_window_around(&from, hands.tabs.remove(index), at, window);
                 true
             }
+            Step::OpenHotkeyWindow { window, from, tab } => {
+                let Some(index) = hands.tabs.iter().position(|held| held.id() == tab) else {
+                    return false;
+                };
+                let Some(from) = self.window(from) else {
+                    return false;
+                };
+                self.open_hotkey_window_around(&from, hands.tabs.remove(index), window);
+                true
+            }
             Step::MoveTab { window, tab, index } => {
                 if let Some(window) = self.window(window) {
                     window.move_tab(tab, index);
@@ -4027,17 +4046,20 @@ impl AppDelegate {
         })
     }
 
-    /// [`Self::window_at`] for a carried pane or tab that **lands**: a hotkey window is no place
-    /// to drop one (it is out of sight half the time, and what went there would be where nobody
-    /// looks), unless it is the window the carry started in — inside it everything works as in
-    /// any window.
+    /// [`Self::window_at`] for a carried pane or tab that **lands**: the hotkey window takes
+    /// what is let go on it while it is in sight — a window of the screen like any other, and
+    /// the move is the one every way into it comes to ([`moves::Move::TabToHotkeyWindow`]) —
+    /// and not while it is on its way out or away (a window that slides out is still ordered
+    /// in for the length of the slide, and what went there would be where nobody looks). The
+    /// window the carry started in is always the answer: inside it everything works as in any
+    /// window.
     pub(crate) fn drop_window_at(
         &self,
         screen: NSPoint,
         from: u64,
     ) -> Option<Retained<TerminalWindow>> {
         self.window_at(screen)
-            .filter(|window| !window.is_hotkey() || window.id() == from)
+            .filter(|window| window.takes_drop_from(from))
     }
 
     /// **The applier: a window around a tab** ([`moves::Step::OpenWindow`]):
@@ -6004,6 +6026,9 @@ impl AppDelegate {
             Act::MoveTabToNewWindow(id) => {
                 self.make_move(Move::TabToNewWindow { tab: id, at: None });
             }
+            Act::MoveTabToHotkeyWindow(id) => {
+                self.make_move(Move::TabToHotkeyWindow { tab: id });
+            }
             Act::CloseTab(id) => {
                 if let Some((_, window)) = tab_window(id) {
                     window.raise();
@@ -6039,6 +6064,13 @@ impl AppDelegate {
                     && let Some(group) = target.group_numbered(group)
                 {
                     target.move_group_to_new_window(group);
+                }
+            }
+            Act::MoveGroupToHotkeyWindow { window, group } => {
+                if let Some(target) = self.window(window)
+                    && let Some(group) = target.group_numbered(group)
+                {
+                    self.make_move(Move::GroupToHotkeyWindow { window, group });
                 }
             }
             Act::CloseGroup { window, group } => {

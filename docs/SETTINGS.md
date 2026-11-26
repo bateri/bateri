@@ -3321,6 +3321,17 @@ change the settings file could not take.
   window is saved with the session and comes back hidden. **Move Tab to New Window** is open for the window's only
   tab, unlike a normal window's: the tab (with what runs in it) goes to a normal window of the size ⌘N gives, and the
   hotkey window, left with nothing, closes the same way.
+- **Moving things in.** Window ▸ **Move Tab to Hotkey Window** and **Move Split to Hotkey Window** (also in a tab's
+  right-click menu, **Move N Tabs to Hotkey Window** for picked tabs, **Move Group to Hotkey Window** in the palette)
+  send the tab, split or group there, with what runs in it. The window slides in with the tab selected; when it is
+  not there yet it is made around the tab, at the size and edge Settings give it, and no home shell is started. A
+  tab dropped on its bar while it is in sight joins it as it would join any window (a click on another bateri window
+  hides the window first, so that is a pinned window, or one with `hide_on_click_away = false`), and `bateri move … --window`
+  names it by its number as it names any window. The window's own tabs have no such item (they are there), and
+  Merge All Windows leaves it alone. Undo Move closes a hotkey window the move made and gives the tab back.
+  **Drag the window's single title** out and the tab becomes a window of its own where you let go (or joins the
+  bar of the window you let go on); Esc leaves it as it was. **Move Split to New Window** is open there with one
+  tab of one split, as Move Tab to New Window is.
 - **From outside bateri.** `bateri hotkey [toggle|show|hide|pin|unpin]` does what the shortcut does (none is
   `toggle`; `pin` shows the window and keeps it in front until `unpin` or until the window closes), from a terminal
   of this computer or from no terminal at all, so a launcher or a shortcut of another tool can run it by its full path,

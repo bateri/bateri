@@ -781,12 +781,22 @@ pub(crate) fn install(
             item(mtm, "Move Split to New Window", sel!(movePaneToNewWindow:)),
             item(
                 mtm,
+                "Move Split to Hotkey Window",
+                sel!(movePaneToHotkeyWindow:),
+            ),
+            item(
+                mtm,
                 "Move Split to Previous Tab",
                 sel!(movePaneToPreviousTab:),
             ),
             item(mtm, "Move Split to Next Tab", sel!(movePaneToNextTab:)),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Move Tab to New Window", sel!(detachTab:)),
+            item(
+                mtm,
+                "Move Tab to Hotkey Window",
+                sel!(moveTabToHotkeyWindow:),
+            ),
             item(mtm, "Merge All Windows", sel!(mergeWindows:)),
             NSMenuItem::separatorItem(mtm),
             // The hotkey window (`[hotkey_window]`): shown from here as from its shortcut, and

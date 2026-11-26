@@ -68,6 +68,9 @@ pub struct TabFacts {
     pub key: Option<String>,
     /// It is the tab on screen in the key window.
     pub here: bool,
+    /// Its window is the hotkey window: its tabs are there already, and have no Move to Hotkey
+    /// Window ([`crate::moves::can_go_to_hotkey_window`]).
+    pub hotkey: bool,
 }
 
 /// What the palette is told of one group, or of the ungrouped tabs of a window that has groups.
@@ -87,6 +90,8 @@ pub struct GroupFacts {
     /// Its tabs are the ones the window shows now.
     pub shown: bool,
     pub other_window: Option<usize>,
+    /// Its window is the hotkey window ([`TabFacts::hotkey`]).
+    pub hotkey: bool,
 }
 
 /// Everything the tabs page and the tabs' rows at the root are made from.
@@ -392,6 +397,17 @@ pub fn actions(scope: &Scope, places: &Places) -> Vec<Row> {
             rows.push(
                 action("moveToNewWindow", "Move Tab to New Window").keywords("detach pop out"),
             );
+            if crate::moves::can_go_to_hotkey_window(
+                places
+                    .tabs
+                    .iter()
+                    .any(|other| tab_id(other.tab) == *id && other.hotkey),
+            ) {
+                rows.push(
+                    action("moveToHotkeyWindow", "Move Tab to Hotkey Window")
+                        .keywords("quake dropdown visor send"),
+                );
+            }
             rows.push(action("closeTab", "Close Tab").keywords("kill exit"));
             rows
         }
@@ -406,14 +422,27 @@ pub fn actions(scope: &Scope, places: &Places) -> Vec<Row> {
             if !known {
                 return Vec::new();
             }
-            vec![
+            let mut rows = vec![
                 action("newTabInGroup", "New Tab in Group").keywords("open shell create"),
                 action("renameGroup", "Rename Group…").keywords("title name label"),
                 action("ungroup", "Ungroup").keywords("dissolve"),
                 action("moveGroupToNewWindow", "Move Group to New Window")
                     .keywords("detach pop out"),
-                action("closeGroup", "Close Group").keywords("kill exit"),
-            ]
+            ];
+            let hotkey = parse_group(id).is_some_and(|(window, group)| {
+                places
+                    .groups
+                    .iter()
+                    .any(|g| g.window == window && g.group == group && g.hotkey)
+            });
+            if crate::moves::can_go_to_hotkey_window(hotkey) {
+                rows.push(
+                    action("moveGroupToHotkeyWindow", "Move Group to Hotkey Window")
+                        .keywords("quake dropdown visor send"),
+                );
+            }
+            rows.push(action("closeGroup", "Close Group").keywords("kill exit"));
+            rows
         }
         _ => Vec::new(),
     }
@@ -461,6 +490,7 @@ pub enum Act {
     MoveTabToNewGroup(u64),
     RemoveTabFromGroup(u64),
     MoveTabToNewWindow(u64),
+    MoveTabToHotkeyWindow(u64),
     CloseTab(u64),
     NewTabInGroup {
         window: u64,
@@ -475,6 +505,10 @@ pub enum Act {
         group: u64,
     },
     MoveGroupToNewWindow {
+        window: u64,
+        group: u64,
+    },
+    MoveGroupToHotkeyWindow {
         window: u64,
         group: u64,
     },
@@ -512,6 +546,7 @@ pub fn act(id: &str, scope: Option<&Scope>, modifier: Modifier) -> Option<Act> {
                 "moveToNewGroup" => Act::MoveTabToNewGroup(tab),
                 "removeFromGroup" => Act::RemoveTabFromGroup(tab),
                 "moveToNewWindow" => Act::MoveTabToNewWindow(tab),
+                "moveToHotkeyWindow" => Act::MoveTabToHotkeyWindow(tab),
                 "closeTab" => Act::CloseTab(tab),
                 other => Act::MoveTabToGroup {
                     tab,
@@ -527,6 +562,7 @@ pub fn act(id: &str, scope: Option<&Scope>, modifier: Modifier) -> Option<Act> {
                 "renameGroup" => Act::RenameGroup { window, group },
                 "ungroup" => Act::Ungroup { window, group },
                 "moveGroupToNewWindow" => Act::MoveGroupToNewWindow { window, group },
+                "moveGroupToHotkeyWindow" => Act::MoveGroupToHotkeyWindow { window, group },
                 "closeGroup" => Act::CloseGroup { window, group },
                 _ => return None,
             })
@@ -555,6 +591,7 @@ mod tests {
             other_window: None,
             key: None,
             here: false,
+            hotkey: false,
         }
     }
 
@@ -569,6 +606,7 @@ mod tests {
             back_to: None,
             shown: false,
             other_window: None,
+            hotkey: false,
         }
     }
 
@@ -812,6 +850,7 @@ mod tests {
                 "Move to New Group…",
                 "Remove from Group",
                 "Move Tab to New Window",
+                "Move Tab to Hotkey Window",
                 "Close Tab",
             ]
         );
@@ -837,6 +876,7 @@ mod tests {
                 "Rename Group…",
                 "Ungroup",
                 "Move Group to New Window",
+                "Move Group to Hotkey Window",
                 "Close Group",
             ]
         );
@@ -920,5 +960,49 @@ mod tests {
         );
         assert!(score(&row, "pi@lab").is_some());
         assert!(score(&tab_row(&tab(5, "api")), "rasp").is_none());
+    }
+
+    #[test]
+    fn a_tab_and_a_group_have_a_move_to_the_hotkey_window_unless_they_are_in_it() {
+        let mut places = places(2);
+        places.tabs[0].group = Some((1, "ops".to_owned()));
+        places.groups = vec![group(Some(1), "ops")];
+        let titles = |places: &Places, scope: Scope| -> Vec<String> {
+            actions(&scope, places)
+                .into_iter()
+                .map(|row| row.title)
+                .collect()
+        };
+        let hotkey_row = "Move Tab to Hotkey Window".to_owned();
+        assert!(titles(&places, Scope::TabActions("tab.1".to_owned())).contains(&hotkey_row));
+        // Chosen, it is the move.
+        let scope = Scope::TabActions("tab.1".to_owned());
+        assert_eq!(
+            act("act.moveToHotkeyWindow", Some(&scope), Modifier::None),
+            Some(Act::MoveTabToHotkeyWindow(1))
+        );
+        let group_scope = Scope::GroupActions(group_id(1, Some(1)));
+        assert!(
+            titles(&places, group_scope.clone())
+                .contains(&"Move Group to Hotkey Window".to_owned())
+        );
+        assert_eq!(
+            act(
+                "act.moveGroupToHotkeyWindow",
+                Some(&group_scope),
+                Modifier::None
+            ),
+            Some(Act::MoveGroupToHotkeyWindow {
+                window: 1,
+                group: 1
+            })
+        );
+        // In the hotkey window: there already.
+        for facts in &mut places.tabs {
+            facts.hotkey = true;
+        }
+        places.groups[0].hotkey = true;
+        assert!(!titles(&places, scope).contains(&hotkey_row));
+        assert!(!titles(&places, group_scope).contains(&"Move Group to Hotkey Window".to_owned()));
     }
 }

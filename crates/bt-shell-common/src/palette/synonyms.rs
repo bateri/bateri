@@ -31,6 +31,14 @@ const WORDS: &[(&str, &str)] = &[
         "quake dropdown drop-down visor guake slide terminal toggle",
     ),
     ("pinHotkeyWindow", "keep stay float sticky unpin"),
+    (
+        "moveTabToHotkeyWindow",
+        "quake dropdown drop-down visor guake slide send window tab",
+    ),
+    (
+        "movePaneToHotkeyWindow",
+        "quake dropdown drop-down visor guake slide send pane split",
+    ),
     ("showTabList", "list overview all switch"),
     ("goToTab", "switch jump recent previous window"),
     ("goToFolder", "directory cd path open project change"),

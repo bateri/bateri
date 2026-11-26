@@ -373,6 +373,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     command("move_split_to_new_tab", "movePaneToNewTab", &[]),
     command("move_split_to_new_window", "movePaneToNewWindow", &[]),
+    command("move_split_to_hotkey_window", "movePaneToHotkeyWindow", &[]),
     command(
         "move_split_to_previous_tab",
         "movePaneToPreviousTab",
@@ -384,6 +385,7 @@ pub const COMMANDS: &[Command] = &[
         &["option+shift+cmd+]"],
     ),
     command("move_tab_to_new_window", "detachTab", &[]),
+    command("move_tab_to_hotkey_window", "moveTabToHotkeyWindow", &[]),
     command("merge_all_windows", "mergeWindows", &[]),
     // The hotkey window's two menu commands: no key by default (its own shortcut is global and
     // lives in `[hotkey_window] shortcut`, which Settings records).
@@ -692,11 +694,13 @@ mod tests {
         // join the menu: Command History…, Themes… and Open Themes Folder (which the theme
         // list builds every time it opens), Open All in New Tab, Go to Waiting Tab, New
         // Floating Pane (Float Pane has ⌥⌘↩) and Remove bateri from Host; and the hotkey window's
-        // two, Show and Pin.
-        assert_eq!(none.len(), 28 + 7 + 2, "{none:?}");
+        // four, Show and Pin, and Move Tab and Move Split to it.
+        assert_eq!(none.len(), 28 + 7 + 2 + 2, "{none:?}");
         for new in [
             "show_hotkey_window",
             "pin_hotkey_window",
+            "move_tab_to_hotkey_window",
+            "move_split_to_hotkey_window",
             "command_history",
             "themes",
             "open_themes_folder",

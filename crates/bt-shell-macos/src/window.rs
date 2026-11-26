@@ -1079,8 +1079,20 @@ define_class!(
             } else if action == Some(sel!(detachTab:)) {
                 // Move Tab to New Window: a window's only tab stays, **except the hotkey
                 // window's** — taking what was begun in the quick window out into one that stays
-                // is the move it is for ([`moves::Move::TabToNewWindow`]).
-                self.ivars().order.borrow().len() > 1 || self.is_hotkey()
+                // is the move it is for ([`moves::Move::TabToNewWindow`]). The planner's own
+                // question.
+                moves::can_open_window_of(self.ivars().order.borrow().len(), 1, self.is_hotkey())
+            } else if [
+                sel!(moveTabToHotkeyWindow:),
+                sel!(movePaneToHotkeyWindow:),
+                sel!(movePickedToHotkeyWindow:),
+            ]
+            .into_iter()
+            .any(|to| action == Some(to))
+            {
+                // Move Tab / Split to Hotkey Window: not in the hotkey window itself, whose tabs
+                // are there already ([`moves::can_go_to_hotkey_window`]).
+                moves::can_go_to_hotkey_window(self.is_hotkey())
             } else if [
                 sel!(showNextTab:),
                 sel!(showPreviousTab:),
@@ -1182,9 +1194,15 @@ define_class!(
             {
                 self.ivars().order.borrow().len() > 1
             } else if action == Some(sel!(movePaneToNewWindow:)) {
-                // A tab's only pane is the tab (Move Tab to New Window); a
-                // lone pane of a lone tab has nothing to leave.
-                tab.panes().len() > 1 || self.ivars().order.borrow().len() > 1
+                // A tab's only pane is the tab (Move Tab to New Window, which is open for the
+                // hotkey window's only tab too, [`moves::can_open_window_of`]); a lone pane of a
+                // lone tab has nothing to leave.
+                tab.panes().len() > 1
+                    || moves::can_open_window_of(
+                        self.ivars().order.borrow().len(),
+                        1,
+                        self.is_hotkey(),
+                    )
             } else {
                 // A group item says for itself; an unknown item is `true`.
                 self.validate_group_item(item).unwrap_or(true)
@@ -1567,6 +1585,43 @@ define_class!(
                     window.make_move(Move::TabToNewWindow { tab: id, at: None });
                 });
             }
+        }
+
+        /// Window ▸ Move Tab to Hotkey Window (the selected tab) and the chip menu's (the
+        /// chip's): the tab, with what runs in it, goes to the hotkey window, which slides in
+        /// with it selected ([`moves::Move::TabToHotkeyWindow`]); where there is none, it is born
+        /// around the tab. A turn later, as the other moves.
+        #[unsafe(method(moveTabToHotkeyWindow:))]
+        fn move_tab_to_hotkey_window(&self, sender: Option<&AnyObject>) {
+            if let Some(id) = self.menu_tab(sender) {
+                self.later(move |window| {
+                    window.make_move(Move::TabToHotkeyWindow { tab: id });
+                });
+            }
+        }
+
+        /// Window ▸ Move Split to Hotkey Window: the focused pane goes to the hotkey window as a
+        /// tab of its own (a tab's only pane takes its tab).
+        #[unsafe(method(movePaneToHotkeyWindow:))]
+        fn move_pane_to_hotkey_window(&self, _sender: Option<&AnyObject>) {
+            let pane = self.selected_tab().focused_pane().id();
+            self.later(move |window| {
+                window.make_move(Move::PaneToHotkeyWindow { pane });
+            });
+        }
+
+        /// The picked tabs' menu: Move N Tabs to Hotkey Window.
+        #[unsafe(method(movePickedToHotkeyWindow:))]
+        fn move_picked_to_hotkey_window(&self, _sender: Option<&AnyObject>) {
+            self.later(|window| {
+                let tabs = window.bar().picks();
+                if window.make_move(Move::TabsToHotkeyWindow {
+                    window: window.id(),
+                    tabs,
+                }) {
+                    window.bar().drop_picks();
+                }
+            });
         }
 
         /// Window ▸ Show Next Tab (⇧⌘], ⌃⇥): the selected tab's right
@@ -5115,6 +5170,7 @@ impl TerminalWindow {
                         .find(|(listed, _)| *listed == tab.id())
                         .map(|(_, hint)| hint.clone()),
                     here: key && selected == Some(tab.id()),
+                    hotkey: self.is_hotkey(),
                 }
             })
             .collect();
@@ -5143,6 +5199,7 @@ impl TerminalWindow {
                         .and_then(|tab| self.tab(tab))
                         .and_then(|tab| tab.session_title()),
                     shown: shown == of,
+                    hotkey: self.is_hotkey(),
                     other_window,
                 });
             };

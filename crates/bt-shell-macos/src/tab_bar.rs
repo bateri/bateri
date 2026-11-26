@@ -5773,6 +5773,9 @@ pub(crate) struct BarIvars {
     hovered: Cell<Option<u64>>,
     /// The press on a chip that is, or may become, a drag.
     drag: Cell<Option<Dragging>>,
+    /// The press on the hotkey window's single title, which may pull the tab out of the window:
+    /// where it was (the bar's space) and the tab ([`TabBar::arm_title_pull`]).
+    title_press: Cell<Option<(NSPoint, u64)>>,
     /// A tab carried over this bar from another window: the place it would be
     /// inserted at, where the chips open a gap ([`TabBar::open_gap`]).
     gap: Cell<Option<usize>>,
@@ -5956,9 +5959,23 @@ define_class!(
         /// system's setting says.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            self.arm_title_pull(event);
             if let Some(window) = self.window() {
                 move_window(&window, event);
             }
+        }
+
+        /// The pointer moves with the button down on the hotkey window's single title: past the
+        /// slop the tab is carried out of the window ([`Self::pull_title`]).
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.pull_title(event);
+        }
+
+        /// The button is let go with nothing carried: the press was a click.
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {
+            self.ivars().title_press.set(None);
         }
 
         /// A right click on the single tab's title: the tab's own menu, as on a chip — the way
@@ -6100,6 +6117,7 @@ impl TabBar {
             shown: RefCell::new(Shown::default()),
             hovered: Cell::new(None),
             drag: Cell::new(None),
+            title_press: Cell::new(None),
             gap: Cell::new(None),
             glide: Cell::new(false),
             palette: Cell::new(None),
@@ -7046,6 +7064,7 @@ impl TabBar {
         add("Close Other Tabs", sel!(closeOtherTabs:));
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add("Move Tab to New Window", sel!(detachTab:));
+        add("Move Tab to Hotkey Window", sel!(moveTabToHotkeyWindow:));
         // The tab on screen is the one it would join: its own chip has
         // nothing to merge into.
         if !window.is_selected(tab) {
@@ -7122,6 +7141,13 @@ impl TabBar {
             window,
             &counted("Move", count, " to New Window"),
             sel!(detachPicked:),
+            0,
+        ));
+        menu.addItem(&window_item(
+            mtm,
+            window,
+            &counted("Move", count, " to Hotkey Window"),
+            sel!(movePickedToHotkeyWindow:),
             0,
         ));
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -7540,6 +7566,49 @@ impl TabBar {
         } else {
             iv.drag.set(Some(drag));
         }
+    }
+
+    /// A press on the single title of **the hotkey window**, which no press moves (its place is
+    /// its screen edge's): it may become the pull that takes the tab out ([`Self::pull_title`]).
+    /// Not a double click, not while a name is typed or the window holds a question.
+    fn arm_title_pull(&self, event: &NSEvent) {
+        let iv = self.ivars();
+        iv.title_press.set(None);
+        if !self
+            .window()
+            .is_some_and(|window| crate::window::is_hotkey_panel(&window))
+            || !self.lone_title(iv.shown.borrow().tabs.len())
+            || event.clickCount() != 1
+            || iv.renaming.get().is_some()
+            || !self
+                .terminal_window()
+                .is_some_and(|window| window.selection_free())
+        {
+            return;
+        }
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        if let Some(tab) = self.tab_under(point) {
+            iv.title_press.set(Some((point, tab)));
+        }
+    }
+
+    /// The pointer moved with the button down on the hotkey window's single title: past the slop
+    /// the tab is carried in a drag session as a chip's is ([`Self::tear_off`]). Let go over
+    /// another window's bar it joins that window, over nothing it becomes a window of its own
+    /// under the pointer ([`moves::Move::TabToNewWindow`]), and the hotkey window, left with
+    /// nothing, closes; Esc, or let go on its own bar, leaves it as it was. A click, a right
+    /// click (the tab's menu) and the rest of the row are not a pull.
+    fn pull_title(&self, event: &NSEvent) {
+        let iv = self.ivars();
+        let Some((from, tab)) = iv.title_press.get() else {
+            return;
+        };
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        if (at.x - from.x).hypot(at.y - from.y) < tabs::DRAG_SLOP {
+            return;
+        }
+        iv.title_press.set(None);
+        self.tear_off(tab, false, event);
     }
 
     /// The tab leaves the bar: a drag session carries it (`tab_drag`), and the application keeps
@@ -8014,7 +8083,7 @@ impl TabBar {
         };
         let Some(window) = self
             .terminal_window()
-            .filter(|window| window.selection_free())
+            .filter(|window| window.selection_free() && window.takes_drop_from(carried.window()))
         else {
             self.clear_drop();
             return NSDragOperation::None;
@@ -8042,6 +8111,9 @@ impl TabBar {
         let (Some(window), Some(app)) = (self.terminal_window(), app::delegate(self.mtm())) else {
             return false;
         };
+        if !window.takes_drop_from(carried.window()) {
+            return false;
+        }
         let point = self.convertPoint_fromView(info.draggingLocation(), None);
         if let Some(landed) = self.aim(&carried, &window, point).landed {
             app.tab_dropped(window.id(), landed);

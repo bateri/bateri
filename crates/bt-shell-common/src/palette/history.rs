@@ -846,6 +846,7 @@ mod tests {
             other_window: None,
             key: None,
             here: false,
+            hotkey: false,
         }
     }
 

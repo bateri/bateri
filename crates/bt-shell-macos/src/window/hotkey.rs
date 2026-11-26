@@ -244,6 +244,14 @@ impl TerminalWindow {
             .is_some_and(|state| state.shown.get())
     }
 
+    /// Whether what is carried from window `from` is taken here when let go: any normal window
+    /// takes it, and the hotkey window while it is **in sight** — a window that slides out is
+    /// ordered in for the length of the slide, and what went there would be where nobody looks —
+    /// or when the carry began in it.
+    pub(crate) fn takes_drop_from(&self, from: u64) -> bool {
+        !self.is_hotkey() || self.hotkey_shown() || self.id() == from
+    }
+
     /// Whether the window has the keyboard.
     pub(crate) fn is_key_window(&self) -> bool {
         self.ivars().window.isKeyWindow()

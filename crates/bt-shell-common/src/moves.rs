@@ -186,6 +186,24 @@ pub enum Move {
     /// Window, a pane let go over no window. A tab's only pane is the tab: it moves as in
     /// [`Move::TabToNewWindow`].
     PaneToNewWindow { pane: u64, at: Option<(f64, f64)> },
+    /// Tab `tab` goes to the hotkey window — Move Tab to Hotkey Window, in the menu, the chip's
+    /// menu and the palette. **The one rule of moving into the hotkey window** (see
+    /// [`to_hotkey_window`]): the same for a tab named by its window's id (a tab let go on its
+    /// bar, `bateri move tab --window`) and for one that names no window. Where the hotkey
+    /// window is already there, hidden or in sight, the tab joins its strip at the end, selected,
+    /// and the window comes forward; where it is not, it is born around the tab, which is its
+    /// only one (the shell does not open a home shell for it). A window's only tab may go: the
+    /// window it leaves closes. The hotkey window's own tabs are there already.
+    TabToHotkeyWindow { tab: u64 },
+    /// Pane `pane` goes to the hotkey window as a tab of its own — Move Split to Hotkey Window.
+    /// A tab's only pane is the tab: it moves as [`Move::TabToHotkeyWindow`] says.
+    PaneToHotkeyWindow { pane: u64 },
+    /// Tabs `tabs` of window `window` go to the hotkey window, ungrouped, in the order they had
+    /// ([`Move::TabToHotkeyWindow`] for the rest).
+    TabsToHotkeyWindow { window: u64, tabs: Vec<u64> },
+    /// Group `group` of window `window` goes to the hotkey window as a group of its own, with its
+    /// name ([`Move::TabToHotkeyWindow`] for the rest).
+    GroupToHotkeyWindow { window: u64, group: GroupId },
     /// Tab `tab` takes place `index` in window `window`'s strip — a tab dragged along its own
     /// strip, or let go on another window's, where it leaves its window whole and comes up
     /// selected.
@@ -352,6 +370,11 @@ pub enum Step {
         tab: u64,
         at: Option<(f64, f64)>,
     },
+    /// The held tab `tab` is the one tab of the hotkey window `window`, which is born around it
+    /// and slides in: the window's own size and place, the edge the settings name, not `from`'s
+    /// (the window the tab left; the theme and the side column's width are its). The panes
+    /// are not started again: they go on.
+    OpenHotkeyWindow { window: u64, from: u64, tab: u64 },
     /// The panes the steps before took join tab `tab` of window `window`, laid out as `tree`.
     /// The tab is not selected by it.
     AdoptPanes { window: u64, tab: u64, tree: Tree },
@@ -408,6 +431,10 @@ pub fn plan(world: &[Window], wanted: Move, host: &dyn Host) -> Result<Plan, Ref
         } => pane_to_new_tab(world, pane, window, gap, target, host),
         Move::TabToNewWindow { tab, at } => tab_to_new_window(world, tab, at, host),
         Move::PaneToNewWindow { pane, at } => pane_to_new_window(world, pane, at, host),
+        Move::TabToHotkeyWindow { .. }
+        | Move::PaneToHotkeyWindow { .. }
+        | Move::TabsToHotkeyWindow { .. }
+        | Move::GroupToHotkeyWindow { .. } => to_hotkey_window(world, wanted, host),
         Move::TabToStrip { tab, window, index } => tab_to_strip(world, tab, window, index),
         Move::MergeAllWindows { into } => merge_all_windows(world, into),
         Move::RegroupTabs {
@@ -812,6 +839,176 @@ fn pane_to_new_tab(
     })
 }
 
+/// Whether a window of `tabs_in_window` tabs lets `leaving` of them go to a window of their own:
+/// a window's only tabs stay (it would close and another just like it open), **except the hotkey
+/// window's** (bateri's own decision): what opens is a normal window and the hotkey window
+/// closes — the move people want of it, taking what they began in the quick window out into one
+/// that stays. The one place the menus, the palette and the planner ask.
+pub fn can_open_window_of(tabs_in_window: usize, leaving: usize, hotkey: bool) -> bool {
+    leaving < tabs_in_window || hotkey
+}
+
+/// Whether the tabs and panes of a window can go to the hotkey window at all: not those that
+/// are there already (`hotkey`: the window is the hotkey window). The one place the menus, the
+/// palette and the planner ask.
+pub fn can_go_to_hotkey_window(hotkey: bool) -> bool {
+    !hotkey
+}
+
+/// The hotkey window among `world`, hidden or in sight; there is one at most.
+fn hotkey_window(world: &[Window]) -> Option<&Window> {
+    world.iter().find(|window| window.hotkey)
+}
+
+/// **The one rule of moving into the hotkey window** ([`Move::TabToHotkeyWindow`]).
+///
+/// Where the window is there, what goes is what a tab or pane named by that window's id would
+/// be: the same planners ([`tab_to_strip`], [`pane_to_new_tab`], [`tabs_to_window`],
+/// [`group_to_window`]) at the end of its strip, so that a bar let go on, `bateri move … --window`
+/// and the menu never disagree (a question the window holds, a window that is gone, a tab in it
+/// already). Where it is not, it is born around what goes ([`Step::OpenHotkeyWindow`]).
+fn to_hotkey_window(world: &[Window], wanted: Move, host: &dyn Host) -> Result<Plan, Refusal> {
+    match wanted {
+        Move::TabToHotkeyWindow { tab } => {
+            let (from, _) = holding_tab(world, tab).ok_or(Refusal::Quiet)?;
+            if !can_go_to_hotkey_window(from.hotkey) {
+                return Err(Refusal::Quiet);
+            }
+            match hotkey_window(world) {
+                Some(panel) => tab_to_strip(world, tab, panel.id, panel.order.len()),
+                None => hotkey_window_of(from, vec![tab], None, None, host),
+            }
+        }
+        Move::PaneToHotkeyWindow { pane } => {
+            let (from, source) = holding_pane(world, pane).ok_or(Refusal::Quiet)?;
+            if !can_go_to_hotkey_window(from.hotkey) {
+                return Err(Refusal::Quiet);
+            }
+            if let Some(panel) = hotkey_window(world) {
+                return pane_to_new_tab(world, pane, panel.id, panel.order.len(), None, host);
+            }
+            // No window there: a tab's only pane is the tab.
+            if source.panes().len() == 1 {
+                return to_hotkey_window(world, Move::TabToHotkeyWindow { tab: source.tab }, host);
+            }
+            if from.asking {
+                return Err(Refusal::Beep);
+            }
+            let tab = host.fresh_id();
+            let window = host.fresh_id();
+            // Undo Move takes the pane back from the window it made, and closes that window.
+            Ok(Plan {
+                steps: vec![
+                    Step::ReleasePane {
+                        window: from.id,
+                        tab: source.tab,
+                        pane,
+                    },
+                    Step::Wrap {
+                        window: from.id,
+                        tab,
+                    },
+                    Step::OpenHotkeyWindow {
+                        window,
+                        from: from.id,
+                        tab,
+                    },
+                ],
+                after: Vec::new(),
+                undo: Some(Record {
+                    scenes: vec![from.scene(&[source.tab])],
+                    born: vec![window],
+                }),
+            })
+        }
+        Move::TabsToHotkeyWindow { window, tabs } => {
+            let from = window_named(world, window)?;
+            let tabs = in_strip(from, &tabs);
+            if tabs.is_empty() || !can_go_to_hotkey_window(from.hotkey) {
+                return Err(Refusal::Quiet);
+            }
+            match hotkey_window(world) {
+                Some(panel) => tabs_to_window(
+                    world,
+                    window,
+                    &tabs,
+                    panel.id,
+                    Target::Loose { before: None },
+                ),
+                None => hotkey_window_of(from, tabs, None, None, host),
+            }
+        }
+        Move::GroupToHotkeyWindow { window, group } => {
+            let from = window_named(world, window)?;
+            let remade = from.groups.group(group).ok_or(Refusal::Quiet)?.remade();
+            if !can_go_to_hotkey_window(from.hotkey) {
+                return Err(Refusal::Quiet);
+            }
+            match hotkey_window(world) {
+                Some(panel) => group_to_window(world, window, group, panel.id, panel.groups.len()),
+                None => {
+                    let tabs = from.groups.cluster(&from.order, Some(group));
+                    let resident = from.groups.resident(Some(group));
+                    hotkey_window_of(from, tabs, Some(remade), resident, host)
+                }
+            }
+        }
+        _ => Err(Refusal::Quiet),
+    }
+}
+
+/// The hotkey window, born around `tabs` of `from`, grouped under `group` if a name is given: the
+/// first tab opens it and the rest join it, as in [`new_window_of`]. Unlike a window of its own, a
+/// window that is only these tabs may go (it closes: the tabs are in the hotkey window now), and
+/// then there is nothing to undo; otherwise Undo Move takes them back and closes the window.
+fn hotkey_window_of(
+    from: &Window,
+    tabs: Vec<u64>,
+    group: Option<Target<u64>>,
+    resident: Option<u64>,
+    host: &dyn Host,
+) -> Result<Plan, Refusal> {
+    if tabs.is_empty() {
+        return Err(Refusal::Quiet);
+    }
+    if from.asking {
+        return Err(Refusal::Beep);
+    }
+    let window = host.fresh_id();
+    let shown = shown_among(from, &tabs, resident);
+    let mut steps = releases(from, &tabs);
+    steps.push(Step::OpenHotkeyWindow {
+        window,
+        from: from.id,
+        tab: tabs[0],
+    });
+    steps.extend(tabs[1..].iter().map(|&tab| Step::AdoptTab {
+        window,
+        tab,
+        slot: Slot::End,
+    }));
+    if let Some(target) = group {
+        steps.push(Step::Regroup {
+            window,
+            tabs: tabs.clone(),
+            target,
+        });
+    }
+    steps.push(from.close_if_emptied());
+    let closes = from.closes_without(tabs.len());
+    Ok(Plan {
+        steps,
+        after: (shown != tabs[0])
+            .then_some(Step::Select { window, tab: shown })
+            .into_iter()
+            .collect(),
+        undo: (!closes).then(|| Record {
+            scenes: vec![from.scene(&tabs)],
+            born: vec![window],
+        }),
+    })
+}
+
 fn tab_to_new_window(
     world: &[Window],
     tab: u64,
@@ -824,7 +1021,7 @@ fn tab_to_new_window(
     // window and the hotkey window closes — the move people want of it, taking what they began
     // in the quick window out into one that stays. The next show opens a fresh one.
     let only = from.closes_without(1);
-    if (only && !from.hotkey) || from.asking {
+    if !can_open_window_of(from.order.len(), 1, from.hotkey) || from.asking {
         return Err(Refusal::Beep);
     }
     let mut steps = vec![
@@ -945,7 +1142,15 @@ fn merge_all_windows(world: &[Window], into: u64) -> Result<Plan, Refusal> {
         .iter()
         .find(|window| window.id == into)
         .ok_or(Refusal::Quiet)?;
-    let others: Vec<&Window> = world.iter().filter(|window| window.id != into).collect();
+    // The hotkey window is the person's to call, not a window of the work: it is no window to
+    // gather into, and its tabs stay.
+    if target.hotkey {
+        return Err(Refusal::Quiet);
+    }
+    let others: Vec<&Window> = world
+        .iter()
+        .filter(|window| window.id != into && !window.hotkey)
+        .collect();
     if others.is_empty() {
         return Err(Refusal::Quiet);
     }
@@ -1293,7 +1498,7 @@ fn new_window_of(
     if tabs.is_empty() {
         return Err(Refusal::Quiet);
     }
-    if from.closes_without(tabs.len()) || from.asking {
+    if !can_open_window_of(from.order.len(), tabs.len(), from.hotkey) || from.asking {
         return Err(Refusal::Beep);
     }
     let window = host.fresh_id();
@@ -1317,13 +1522,20 @@ fn new_window_of(
             target,
         });
     }
+    // Only the hotkey window may give all its tabs ([`can_open_window_of`]): it is left without
+    // one and closes, as it does when its only tab goes ([`tab_to_new_window`]), and there is
+    // nothing to put back.
+    let closes = from.closes_without(tabs.len());
+    if closes {
+        steps.push(from.close_if_emptied());
+    }
     Ok(Plan {
         steps,
         after: (shown != tabs[0])
             .then_some(Step::Select { window, tab: shown })
             .into_iter()
             .collect(),
-        undo: Some(Record {
+        undo: (!closes).then(|| Record {
             scenes: vec![from.scene(&tabs)],
             born: vec![window],
         }),
@@ -4216,5 +4428,545 @@ mod tests {
             tab: 11,
             pane: 102
         }));
+    }
+
+    // ─── The hotkey window as a place to move to ─────────────────────────────────
+
+    /// The hotkey window, id 9: its one tab, 90, holds pane 900.
+    fn panel() -> Window {
+        let mut panel = window(9, vec![shape(90, Tree::Leaf(900), 900)], 90);
+        panel.hotkey = true;
+        panel
+    }
+
+    /// [`world`] with the hotkey window beside its two windows, hidden or in sight (a move cannot
+    /// tell).
+    fn with_panel() -> Vec<Window> {
+        let mut world = world();
+        world.push(panel());
+        world
+    }
+
+    /// What a move comes to, or why not.
+    fn came_to(world: &[Window], wanted: Move) -> Result<Plan, Refusal> {
+        plan(world, wanted, &roomy(world))
+    }
+
+    /// **One rule.** Where the hotkey window is there, a tab that names no window for it goes as
+    /// one let go on its bar or named by `bateri move tab --window` does: the same plan, the same
+    /// refusals.
+    #[test]
+    fn a_tab_goes_to_the_hotkey_window_that_is_there_as_one_named_by_its_id_would() {
+        let world = with_panel();
+        let end = world[2].order.len();
+        let named = Move::TabToStrip {
+            tab: 11,
+            window: 9,
+            index: end,
+        };
+        let unnamed = Move::TabToHotkeyWindow { tab: 11 };
+        let planned = came_to(&world, unnamed.clone()).unwrap();
+        assert_eq!(planned, came_to(&world, named.clone()).unwrap());
+        assert_eq!(
+            planned.steps,
+            vec![
+                Step::ReleaseTab { window: 1, tab: 11 },
+                Step::AdoptTab {
+                    window: 9,
+                    tab: 11,
+                    slot: Slot::At(end)
+                },
+                Step::CloseIfEmptied { window: 1 },
+            ]
+        );
+        // It comes up selected and the window comes forward (the shell shows a hidden one).
+        assert_eq!(planned.after, vec![Step::Raise { window: 9 }]);
+        assert_eq!(planned.undo, None);
+        // The same refusals: a question in the window it leaves or in the hotkey window, a tab
+        // that is not there.
+        for (what, at) in [("source asking", 0), ("hotkey window asking", 2)] {
+            let mut asking = world.clone();
+            asking[at].asking = true;
+            assert_eq!(
+                came_to(&asking, unnamed.clone()),
+                Err(Refusal::Beep),
+                "{what}"
+            );
+            assert_eq!(
+                came_to(&asking, named.clone()),
+                Err(Refusal::Beep),
+                "{what}"
+            );
+        }
+        let gone = Move::TabToHotkeyWindow { tab: 77 };
+        assert_eq!(came_to(&world, gone), Err(Refusal::Quiet));
+    }
+
+    #[test]
+    fn a_pane_goes_to_the_hotkey_window_that_is_there_as_one_named_by_its_id_would() {
+        let world = with_panel();
+        let end = world[2].order.len();
+        let unnamed = came_to(&world, Move::PaneToHotkeyWindow { pane: 101 }).unwrap();
+        let named = came_to(
+            &world,
+            Move::PaneToNewTab {
+                pane: 101,
+                window: 9,
+                gap: end,
+                target: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(unnamed, named);
+        assert!(unnamed.steps.contains(&Step::AdoptTab {
+            window: 9,
+            tab: NEW,
+            slot: Slot::At(end)
+        }));
+        assert_eq!(unnamed.after[0], Step::Raise { window: 9 });
+        // Undo Move takes it back: the window it leaves and the hotkey window are both pictured.
+        assert_eq!(unnamed.undo.unwrap().scenes.len(), 2);
+        // A tab's only pane goes as the id-named move takes it, too.
+        assert_eq!(
+            came_to(&world, Move::PaneToHotkeyWindow { pane: 110 }).unwrap(),
+            came_to(
+                &world,
+                Move::PaneToNewTab {
+                    pane: 110,
+                    window: 9,
+                    gap: end,
+                    target: None,
+                }
+            )
+            .unwrap()
+        );
+        // A window holding a question refuses.
+        let mut asking = world.clone();
+        asking[0].asking = true;
+        assert_eq!(
+            came_to(&asking, Move::PaneToHotkeyWindow { pane: 101 }),
+            Err(Refusal::Beep)
+        );
+    }
+
+    /// With no hotkey window the move makes one around what goes: no home shell, nothing
+    /// started again.
+    #[test]
+    fn with_no_hotkey_window_one_is_born_around_the_tab() {
+        let world = world();
+        let planned = came_to(&world, Move::TabToHotkeyWindow { tab: 11 }).unwrap();
+        assert_eq!(
+            planned.steps,
+            vec![
+                Step::ReleaseTab { window: 1, tab: 11 },
+                Step::OpenHotkeyWindow {
+                    window: NEW,
+                    from: 1,
+                    tab: 11
+                },
+                Step::CloseIfEmptied { window: 1 },
+            ]
+        );
+        // The window it leaves goes on, so the move can be undone: the window it made closes.
+        let record = planned.undo.unwrap();
+        assert_eq!(record.born, vec![NEW]);
+        assert_eq!(record.scenes.len(), 1);
+        // A pane that is not a tab's only one is wrapped in a tab of its own first.
+        let pane = came_to(&world, Move::PaneToHotkeyWindow { pane: 101 }).unwrap();
+        assert_eq!(
+            pane.steps,
+            vec![
+                Step::ReleasePane {
+                    window: 1,
+                    tab: 10,
+                    pane: 101
+                },
+                Step::Wrap {
+                    window: 1,
+                    tab: NEW
+                },
+                Step::OpenHotkeyWindow {
+                    window: NEW + 1,
+                    from: 1,
+                    tab: NEW
+                },
+            ]
+        );
+        assert_eq!(pane.undo.unwrap().born, vec![NEW + 1]);
+        let mut asking = world.clone();
+        asking[0].asking = true;
+        assert_eq!(
+            came_to(&asking, Move::TabToHotkeyWindow { tab: 11 }),
+            Err(Refusal::Beep)
+        );
+    }
+
+    /// The source's only tab, in the last normal window, may go (a normal window's only tab may
+    /// not make a window of its own): the window closes, the hotkey window is what is left.
+    #[test]
+    fn the_only_tab_of_the_last_normal_window_goes_and_the_window_closes() {
+        let mut one = vec![window(1, vec![shape(10, Tree::Leaf(100), 100)], 10)];
+        assert_eq!(
+            came_to(&one, Move::TabToNewWindow { tab: 10, at: None }),
+            Err(Refusal::Beep)
+        );
+        let born = came_to(&one, Move::TabToHotkeyWindow { tab: 10 }).unwrap();
+        assert_eq!(
+            born.steps,
+            vec![
+                Step::ReleaseTab { window: 1, tab: 10 },
+                Step::OpenHotkeyWindow {
+                    window: NEW,
+                    from: 1,
+                    tab: 10
+                },
+                Step::CloseIfEmptied { window: 1 },
+            ]
+        );
+        // Nothing to undo: the window it came from is gone.
+        assert_eq!(born.undo, None);
+        // A pane that is the only pane of the only tab is the tab.
+        assert_eq!(
+            came_to(&one, Move::PaneToHotkeyWindow { pane: 100 }).unwrap(),
+            born
+        );
+        one.push(panel());
+        let joined = came_to(&one, Move::TabToHotkeyWindow { tab: 10 }).unwrap();
+        assert_eq!(
+            joined.steps.last(),
+            Some(&Step::CloseIfEmptied { window: 1 })
+        );
+        assert_eq!(joined.undo, None);
+    }
+
+    /// The hotkey window may give **all** its tabs (a group, or the tabs picked): it is left
+    /// without one and closes, and there is nothing to put back. A normal window may not.
+    #[test]
+    fn the_hotkey_window_that_gives_all_its_tabs_closes_with_nothing_to_undo() {
+        let mut one = grouped();
+        one[0].hotkey = true;
+        let all: Vec<u64> = one[0].order.ids().to_vec();
+        let api = gid(&one[0], "api");
+        for wanted in [
+            Move::TabsToNewWindow {
+                window: 1,
+                tabs: all.clone(),
+                at: None,
+            },
+            Move::GroupToNewWindow {
+                window: 1,
+                group: api,
+                at: None,
+            },
+        ] {
+            let planned = came_to(&one, wanted.clone());
+            // A group that is not all the tabs leaves the window open, with the record.
+            let planned = planned.unwrap();
+            let gone = planned.steps.contains(&Step::CloseIfEmptied { window: 1 });
+            assert_eq!(gone, planned.undo.is_none(), "{wanted:?}");
+        }
+        let planned = came_to(
+            &one,
+            Move::TabsToNewWindow {
+                window: 1,
+                tabs: all.clone(),
+                at: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            planned.steps.last(),
+            Some(&Step::CloseIfEmptied { window: 1 })
+        );
+        assert_eq!(planned.undo, None);
+        // A normal window gives none of them: its last tab stays.
+        one[0].hotkey = false;
+        assert_eq!(
+            came_to(
+                &one,
+                Move::TabsToNewWindow {
+                    window: 1,
+                    tabs: all,
+                    at: None
+                }
+            ),
+            Err(Refusal::Beep)
+        );
+    }
+
+    #[test]
+    fn what_is_in_the_hotkey_window_is_there_already() {
+        let mut world = with_panel();
+        world[2]
+            .tabs
+            .push(shape(91, split(Tree::Leaf(910), Tree::Leaf(911)), 910));
+        world[2].order.append(91);
+        for wanted in [
+            Move::TabToHotkeyWindow { tab: 91 },
+            Move::PaneToHotkeyWindow { pane: 911 },
+            Move::PaneToHotkeyWindow { pane: 900 },
+            Move::TabsToHotkeyWindow {
+                window: 9,
+                tabs: vec![90, 91],
+            },
+        ] {
+            assert_eq!(
+                came_to(&world, wanted.clone()),
+                Err(Refusal::Quiet),
+                "{wanted:?}"
+            );
+        }
+        assert!(!can_go_to_hotkey_window(true));
+        assert!(can_go_to_hotkey_window(false));
+    }
+
+    #[test]
+    fn several_tabs_go_to_the_hotkey_window_together_and_a_group_keeps_its_name() {
+        let world = grouped();
+        let api = gid(&world[0], "api");
+        // No hotkey window: it is born around the first, the rest join, the one that was on screen
+        // is shown.
+        let tabs = vec![11, 12];
+        let born = came_to(
+            &world,
+            Move::TabsToHotkeyWindow {
+                window: 1,
+                tabs: tabs.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            born.steps,
+            vec![
+                Step::ReleaseTab { window: 1, tab: 11 },
+                Step::ReleaseTab { window: 1, tab: 12 },
+                Step::OpenHotkeyWindow {
+                    window: NEW,
+                    from: 1,
+                    tab: 11
+                },
+                Step::AdoptTab {
+                    window: NEW,
+                    tab: 12,
+                    slot: Slot::End
+                },
+                Step::CloseIfEmptied { window: 1 },
+            ]
+        );
+        assert_eq!(born.undo.as_ref().unwrap().born, vec![NEW]);
+        let group = came_to(
+            &world,
+            Move::GroupToHotkeyWindow {
+                window: 1,
+                group: api,
+            },
+        )
+        .unwrap();
+        // It is a group of its own in the new window, under its name.
+        assert!(group.steps.iter().any(|step| matches!(
+            step,
+            Step::Regroup {
+                window: NEW,
+                target: Target::New(name) | Target::Numbered(name, _),
+                ..
+            } if name == "api"
+        )));
+        // With one there, they go where a bar's drop of them goes: its end, ungrouped, and a
+        // group as a group.
+        let mut with = world.clone();
+        with.push(panel());
+        let joined = came_to(
+            &with,
+            Move::TabsToHotkeyWindow {
+                window: 1,
+                tabs: tabs.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            joined,
+            came_to(
+                &with,
+                Move::TabsToWindow {
+                    window: 1,
+                    tabs,
+                    into: 9,
+                    target: Target::Loose { before: None },
+                }
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            came_to(
+                &with,
+                Move::GroupToHotkeyWindow {
+                    window: 1,
+                    group: api
+                }
+            )
+            .unwrap(),
+            came_to(
+                &with,
+                Move::GroupToWindow {
+                    window: 1,
+                    group: api,
+                    into: 9,
+                    to: 0
+                }
+            )
+            .unwrap()
+        );
+        // A group that is gone, tabs that are not there: nothing to move.
+        assert_eq!(
+            came_to(
+                &with,
+                Move::GroupToHotkeyWindow {
+                    window: 1,
+                    group: stray()
+                }
+            ),
+            Err(Refusal::Quiet)
+        );
+        assert_eq!(
+            came_to(
+                &with,
+                Move::TabsToHotkeyWindow {
+                    window: 1,
+                    tabs: vec![99]
+                }
+            ),
+            Err(Refusal::Quiet)
+        );
+    }
+
+    /// A pane that floats, or is a capsule, goes as a pane does: it is released from its card.
+    #[test]
+    fn a_floating_or_minimized_pane_goes_to_the_hotkey_window_as_any_pane() {
+        for minimized in [false, true] {
+            let mut world = world();
+            let mut card = Card::of(102, Area::opening());
+            card.minimized = minimized;
+            world[0].tabs[0].cards = vec![card];
+            for with in [world.clone(), {
+                let mut with = world.clone();
+                with.push(panel());
+                with
+            }] {
+                let planned = came_to(&with, Move::PaneToHotkeyWindow { pane: 102 }).unwrap();
+                assert_eq!(
+                    planned.steps[0],
+                    Step::ReleasePane {
+                        window: 1,
+                        tab: 10,
+                        pane: 102
+                    },
+                    "minimized {minimized}"
+                );
+                // What it was in is pictured for Undo Move: the card too.
+                let scene = &planned.undo.as_ref().unwrap().scenes[0];
+                assert_eq!(scene.shape(10).unwrap().cards.len(), 1);
+            }
+        }
+    }
+
+    /// Undo Move after a move that made the hotkey window closes it and gives the pane back.
+    #[test]
+    fn undo_move_closes_the_hotkey_window_a_move_made() {
+        let world = world();
+        let planned = came_to(&world, Move::PaneToHotkeyWindow { pane: 101 }).unwrap();
+        let record = planned.undo.unwrap();
+        // What the shell made of it: the pane in a tab of its own, in the new hotkey window.
+        let mut after = world.clone();
+        after[0].tabs[0].tree = Tree::Leaf(100);
+        let mut born = window(NEW + 1, vec![shape(NEW, Tree::Leaf(101), 101)], NEW);
+        born.hotkey = true;
+        after.push(born);
+        assert!(standing(&after, &record));
+        let back = undoing(&after, record).unwrap();
+        assert!(
+            back.steps
+                .contains(&Step::CloseIfEmptied { window: NEW + 1 })
+        );
+        // The hotkey window is gone the next time: the picture does not stand.
+        let record = came_to(&world, Move::PaneToHotkeyWindow { pane: 101 })
+            .unwrap()
+            .undo
+            .unwrap();
+        assert_eq!(undo(&world, &record), Err(Refusal::Stale));
+    }
+
+    /// Merge All Windows gathers the work's windows: the hotkey window's tabs stay, and it is not
+    /// one to gather into.
+    #[test]
+    fn merge_all_windows_leaves_the_hotkey_window_alone() {
+        let world = with_panel();
+        let planned = came_to(&world, Move::MergeAllWindows { into: 1 }).unwrap();
+        assert!(planned.steps.iter().all(|step| match step {
+            Step::ReleaseTab { window, .. } | Step::CloseIfEmptied { window } => *window != 9,
+            _ => true,
+        }));
+        assert!(
+            planned
+                .steps
+                .contains(&Step::ReleaseTab { window: 2, tab: 20 })
+        );
+        assert_eq!(
+            came_to(&world, Move::MergeAllWindows { into: 9 }),
+            Err(Refusal::Quiet)
+        );
+        // With nothing but the hotkey window beside it there is nothing to merge.
+        let mut lone = vec![world[0].clone(), panel()];
+        assert_eq!(
+            came_to(&lone, Move::MergeAllWindows { into: 1 }),
+            Err(Refusal::Quiet)
+        );
+        lone.pop();
+        assert_eq!(
+            came_to(&lone, Move::MergeAllWindows { into: 1 }),
+            Err(Refusal::Quiet)
+        );
+    }
+
+    /// Move Split to New Window in the hotkey window with one tab of one pane: the pane is the tab,
+    /// and the tab goes (the panel is left without a tab and closes); in a normal window the same
+    /// pane stays.
+    #[test]
+    fn the_hotkey_windows_only_split_goes_to_a_window_of_its_own() {
+        let mut only = vec![panel()];
+        let planned = came_to(
+            &only,
+            Move::PaneToNewWindow {
+                pane: 900,
+                at: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            planned,
+            came_to(&only, Move::TabToNewWindow { tab: 90, at: None }).unwrap()
+        );
+        assert!(planned.steps.contains(&Step::CloseIfEmptied { window: 9 }));
+        only[0].hotkey = false;
+        assert_eq!(
+            came_to(
+                &only,
+                Move::PaneToNewWindow {
+                    pane: 900,
+                    at: None
+                }
+            ),
+            Err(Refusal::Beep)
+        );
+    }
+
+    /// A window's only tab may go to a window of its own only from the hotkey window; the menus
+    /// and the planner ask the one function.
+    #[test]
+    fn the_hotkey_windows_only_tab_may_go_to_a_window_of_its_own_and_no_other_windows() {
+        assert!(can_open_window_of(2, 1, false));
+        assert!(!can_open_window_of(1, 1, false));
+        assert!(!can_open_window_of(2, 2, false));
+        assert!(can_open_window_of(1, 1, true));
+        assert!(can_open_window_of(3, 3, true));
     }
 }

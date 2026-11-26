@@ -346,6 +346,69 @@ impl AppDelegate {
         Ok(())
     }
 
+    /// Whether a move to the hotkey window can be made now: the window is there, or there is a
+    /// screen to make one on. A move is refused before it is planned otherwise: it would take
+    /// the tabs out of their window with nowhere to put them.
+    pub(crate) fn hotkey_window_can_be_made(&self) -> bool {
+        self.hotkey_window().is_some()
+            || self.hotkey_slide(&self.settings().hotkey_window).is_some()
+    }
+
+    /// **The applier: the hotkey window around a tab** ([`moves::Step::OpenHotkeyWindow`]): the
+    /// window `id` is born around `moved`, a tab that has left `from` and is its only one, at the
+    /// size and place the settings give it, out of sight, then slid in as a tap would
+    /// ([`Self::open_hotkey_window`]). No home shell is opened for it and no shell is started
+    /// or told to end: the tab's panes go on. The theme is that of the tab's focused pane, the
+    /// side column's width and the run `from`'s. With no screen to put it on the tab stays with
+    /// the window it left.
+    pub(crate) fn open_hotkey_window_around(
+        &self,
+        from: &TerminalWindow,
+        moved: Retained<TerminalTab>,
+        id: u64,
+    ) {
+        let settings = self.settings().hotkey_window;
+        let Some(slide) = self.hotkey_slide(&settings) else {
+            eprintln!("bateri: could not show the hotkey window: there is no screen");
+            from.adopt_tab(&moved, crate::window::Placement::End);
+            return;
+        };
+        self.watch_desktops();
+        // Said before the window is there: in front of it is the application the person is in
+        // (bateri itself when the move was made here: nobody to give the front back to).
+        let previous = frontmost_other(self.mtm());
+        let theme = moved
+            .focused_pane()
+            .session()
+            .map_or_else(|| self.resolve_theme(), |session| session.theme());
+        let window = TerminalWindow::with_tab(
+            self.mtm(),
+            id,
+            (None, Some(HOTKEY_DEFAULT_NAME)),
+            from.run(),
+            moved,
+            Some(rect_of(slide.shown)),
+            from.side_width(),
+        );
+        window.set_notice(&self.ivars().notices.borrow().subtitle());
+        self.ivars().windows.borrow_mut().push(window.clone());
+        window.set_theme(theme);
+        window.set_content_edge(self.settings().content_edge);
+        // At its final size and out of sight: the panes see that size first, and the slide
+        // brings it in. The tab comes up as the selected one of its new window, as in any window
+        // built around a tab that came from another ([`TerminalWindow::show_arrived`]): its
+        // views were hidden when it left.
+        window.place_hidden(rect_of(slide.shown));
+        window.show_arrived();
+        self.layout_changed();
+        window.slide_in(
+            &slide,
+            rules::desktops(self.hotkey_hiding()),
+            self.hotkey_animates(&settings),
+            previous,
+        );
+    }
+
     // -----------------------------------------------------------------------------------------
     // The system's key.
 
@@ -840,10 +903,27 @@ mod tests {
                 .contains("self.can_merge_windows()")
         );
         assert!(body("    pub(crate) fn merge_all_windows(").contains("!window.is_hotkey()"));
-        assert!(body("    pub(crate) fn make_move_raising(").contains("MergeAllWindows"));
-        // A tab is not dropped on it, unless it is the window the carry started in.
+        // The planner leaves the hotkey window out of the merge ([`moves::Move::MergeAllWindows`]):
+        // the shell does not filter its windows first.
+        assert!(!body("    pub(crate) fn make_move_raising(").contains("is_hotkey"));
+        // A tab is dropped on it while it is in sight, or when it is the window the carry started in.
         let drop = body("    pub(crate) fn drop_window_at(");
-        assert!(drop.contains("!window.is_hotkey() || window.id() == from"));
+        assert!(drop.contains("window.takes_drop_from(from)"));
+        let takes = body_of(
+            include_str!("../window/hotkey.rs"),
+            "    pub(crate) fn takes_drop_from(",
+            "    ",
+        );
+        assert!(takes.contains("!self.is_hotkey() || self.hotkey_shown() || self.id() == from"));
+        // The bar's own drop asks the same of the window.
+        assert!(
+            body_of(
+                include_str!("../tab_bar.rs"),
+                "    fn carried_over(",
+                "    "
+            )
+            .contains("takes_drop_from(carried.window())")
+        );
         for (source, name) in [
             (include_str!("../pane_drag.rs"), "app.drop_window_at("),
             (include_str!("../tab_merge.rs"), "self.drop_window_at("),
@@ -1198,7 +1278,9 @@ mod tests {
         );
         let validate = body_of(window, "        fn validate_menu_item(", "        ");
         assert!(validate.contains("sel!(detachTab:)"));
-        assert!(validate.contains("|| self.is_hotkey()"));
+        // The planner's own question, which the move asks too ([`moves::can_open_window_of`]).
+        assert!(validate.contains("moves::can_open_window_of("));
+        assert!(validate.contains("self.is_hotkey()"));
         // The window it opens is made as ⌘N makes one: no hotkey name, the first size, the
         // cascade from the window it left, and the side column's width of that window.
         let around = body_of(app, "    fn open_window_around(", "    ");
@@ -1223,6 +1305,82 @@ mod tests {
         assert!(
             body_of(hotkey, "    pub(crate) fn hotkey_window_ended(", "    ")
                 .contains("self.set_hotkey_pin(false)")
+        );
+    }
+
+    /// **Moving to the hotkey window is one rule** ([`moves::Move::TabToHotkeyWindow`]): the Window
+    /// menu, the chip menu, the picked tabs' menu, the palette, a drop on the panel's bar and the
+    /// agent's `move … --window` all come to it; the lone title pulls the tab out. A source scan:
+    /// the windows are AppKit's.
+    #[test]
+    fn every_way_to_the_hotkey_window_comes_to_the_one_move() {
+        let window = include_str!("../window.rs");
+        let window = window.split("#[cfg(test)]").next().expect("the code");
+        let app = include_str!("../app.rs");
+        let bar = include_str!("../tab_bar.rs");
+        let menu = include_str!("../menu.rs");
+        // The three actions each make the move; the picked ones take the strip's picks.
+        for (action, wanted) in [
+            ("fn move_tab_to_hotkey_window(", "Move::TabToHotkeyWindow"),
+            ("fn move_pane_to_hotkey_window(", "Move::PaneToHotkeyWindow"),
+            (
+                "fn move_picked_to_hotkey_window(",
+                "Move::TabsToHotkeyWindow",
+            ),
+        ] {
+            assert!(
+                body_of(window, &format!("        {action}"), "        ").contains(wanted),
+                "{action}"
+            );
+        }
+        // They are grey in the hotkey window, where the tabs are there already.
+        let validate = body_of(window, "        fn validate_menu_item(", "        ");
+        assert!(validate.contains("moves::can_go_to_hotkey_window(self.is_hotkey())"));
+        for selector in [
+            "moveTabToHotkeyWindow:",
+            "movePaneToHotkeyWindow:",
+            "movePickedToHotkeyWindow:",
+        ] {
+            assert!(
+                validate.contains(&format!("sel!({selector})")),
+                "{selector}"
+            );
+        }
+        // The menu bar, the chip's menu and the picked tabs' menu list them; the palette too.
+        assert!(menu.contains("sel!(moveTabToHotkeyWindow:)"));
+        assert!(menu.contains("sel!(movePaneToHotkeyWindow:)"));
+        assert!(bar.contains("sel!(moveTabToHotkeyWindow:)"));
+        assert!(bar.contains("sel!(movePickedToHotkeyWindow:)"));
+        assert!(app.contains("Act::MoveTabToHotkeyWindow(id)"));
+        assert!(app.contains("Act::MoveGroupToHotkeyWindow"));
+        // A move with nowhere to put it is refused before it is planned.
+        let raising = body_of(app, "    pub(crate) fn make_move_raising(", "    ");
+        assert!(raising.contains("hotkey_window_can_be_made()"));
+        // The window is born by the one step, around the tab that left: no new shell.
+        let step = body_of(app, "            Step::OpenHotkeyWindow {", "            ");
+        assert!(step.contains("open_hotkey_window_around("));
+        let born = body_of(
+            include_str!("hotkey.rs"),
+            "    pub(crate) fn open_hotkey_window_around(",
+            "    ",
+        );
+        assert!(born.contains("TerminalWindow::with_tab("));
+        assert!(born.contains("window.slide_in("));
+        assert!(born.contains("window.show_arrived()"), "the tab comes up");
+        assert!(
+            !born.contains("open_window_as("),
+            "no home shell is started"
+        );
+        // The title pulls the tab out only in the hotkey window, and by the drag a chip's is.
+        let arm = body_of(bar, "    fn arm_title_pull(", "    ");
+        assert!(arm.contains("is_hotkey_panel("));
+        assert!(arm.contains("self.lone_title("));
+        let pull = body_of(bar, "    fn pull_title(", "    ");
+        assert!(pull.contains("self.tear_off("));
+        assert!(pull.contains("tabs::DRAG_SLOP"));
+        // A drop reaches the panel only while it is in sight.
+        assert!(
+            body_of(app, "    pub(crate) fn drop_window_at(", "    ").contains("takes_drop_from(")
         );
     }
 
