@@ -732,9 +732,10 @@ impl AppDelegate {
     }
 
     /// The Settings window's level against the hotkey window: over it while a hotkey window is in
-    /// sight, an ordinary window after ([`rules::settings_level`]). Asked when the panel comes or
-    /// goes and when Settings opens, so the window the person changes the hotkey window's
-    /// settings in is never under the window they see the result in.
+    /// sight and bateri is in front, an ordinary window otherwise ([`rules::settings_level`]).
+    /// Asked when the panel comes or goes, when Settings opens and when bateri comes to the front
+    /// or goes behind, so the window the person changes the hotkey window's settings in is never
+    /// under the window they see the result in, and never over another application.
     pub(crate) fn sync_settings_level(&self) {
         let Some(settings) = self.ivars().settings_window.borrow().clone() else {
             return;
@@ -743,7 +744,8 @@ impl AppDelegate {
             .windows()
             .iter()
             .any(|window| window.is_hotkey() && window.hotkey_shown());
-        settings.set_level(rules::settings_level(in_sight));
+        let in_front = NSApplication::sharedApplication(self.mtm()).isActive();
+        settings.set_level(rules::settings_level(in_sight, in_front));
     }
 
     /// Window ▸ Pin Hotkey Window: toggled, in memory.
@@ -1328,11 +1330,11 @@ mod tests {
     fn the_settings_window_is_over_the_panel_while_it_is_in_sight() {
         use objc2_app_kit::{NSFloatingWindowLevel, NSNormalWindowLevel};
         assert!(
-            crate::settings_window::level_of(bt_shell_common::hotkey::settings_level(true))
+            crate::settings_window::level_of(bt_shell_common::hotkey::settings_level(true, true))
                 > NSFloatingWindowLevel
         );
         assert_eq!(
-            crate::settings_window::level_of(bt_shell_common::hotkey::settings_level(false)),
+            crate::settings_window::level_of(bt_shell_common::hotkey::settings_level(false, true)),
             NSNormalWindowLevel
         );
         let on_window = include_str!("../window/hotkey.rs");
@@ -1355,8 +1357,17 @@ mod tests {
         let code = code.split("#[cfg(test)]").next().expect("the code");
         assert!(
             body_of(code, "    pub(crate) fn sync_settings_level(", "    ")
-                .contains("rules::settings_level(in_sight)")
+                .contains("rules::settings_level(in_sight, in_front)")
         );
+        // bateri coming to the front and going behind each ask again: a pinned panel over
+        // another application does not keep the Settings window over it.
+        let app = include_str!("../app.rs");
+        for hook in ["    fn did_become_active(", "    fn did_resign_active("] {
+            assert!(
+                body_of(app, hook, "        ").contains("self.sync_settings_level()"),
+                "{hook}"
+            );
+        }
     }
 
     /// The focus hiding a window is final: the desktop change that comes after it (some 300 ms

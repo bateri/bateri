@@ -386,13 +386,16 @@ pub enum SettingsLevel {
     Normal,
     /// Over the hotkey window, which floats: the person who changes the window's settings sees
     /// the result at once, with the Settings window beside it and not under it (the panel is
-    /// half the screen). The Settings window floats with it only while the panel is in sight.
+    /// half the screen). The Settings window floats with it only while the panel is in sight
+    /// and bateri is in front: a pinned panel stays over another application, the Settings
+    /// window does not.
     AbovePanel,
 }
 
-/// The level of the Settings window when a hotkey window is (not) in sight.
-pub fn settings_level(panel_in_sight: bool) -> SettingsLevel {
-    if panel_in_sight {
+/// The level of the Settings window when a hotkey window is (not) in sight and bateri is (not)
+/// the application in front.
+pub fn settings_level(panel_in_sight: bool, in_front: bool) -> SettingsLevel {
+    if panel_in_sight && in_front {
         SettingsLevel::AbovePanel
     } else {
         SettingsLevel::Normal
@@ -1468,8 +1471,11 @@ mod tests {
 
     #[test]
     fn the_settings_window_is_over_the_panel_while_the_panel_is_in_sight_and_ordinary_after() {
-        assert_eq!(settings_level(true), SettingsLevel::AbovePanel);
-        assert_eq!(settings_level(false), SettingsLevel::Normal);
+        assert_eq!(settings_level(true, true), SettingsLevel::AbovePanel);
+        assert_eq!(settings_level(false, true), SettingsLevel::Normal);
+        // A pinned panel over another application: the Settings window does not float with it.
+        assert_eq!(settings_level(true, false), SettingsLevel::Normal);
+        assert_eq!(settings_level(false, false), SettingsLevel::Normal);
     }
 
     #[test]

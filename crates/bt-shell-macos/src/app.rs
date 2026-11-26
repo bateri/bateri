@@ -1320,6 +1320,8 @@ define_class!(
             crate::agent::seen();
             // A field of Settings that was listening when bateri went behind listens again.
             Self::hotkey_quiet_later();
+            // Over a hotkey window in sight again.
+            self.sync_settings_level();
         }
 
         /// Another application came to the front: the hotkey window, in sight and not pinned,
@@ -1329,6 +1331,8 @@ define_class!(
             self.hotkey_active_lost();
             // Nobody listens in a bateri that is behind: its key is the system's again.
             Self::hotkey_quiet_later();
+            // A pinned panel stays over the application in front; the Settings window does not.
+            self.sync_settings_level();
         }
 
         /// The Dock icon was clicked. **If there is no window at all** a new
