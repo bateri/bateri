@@ -695,7 +695,7 @@ impl AppDelegate {
 
     /// `bateri hotkey ACTION`, from a terminal or from none: the window as the action says, through
     /// the one entrance ([`Self::toggle_hotkey`]). `pin` shows the window too — a pin on a window
-    /// that is not there would be nothing to see — and keeps it until `unpin` or the quit. The
+    /// that is not there would be nothing to see — and keeps it until `unpin`, the window's close or the quit. The
     /// answer is the window that could not be shown, when it could not: the one who asked is a
     /// program that would take the window for there.
     pub(crate) fn hotkey_asked(&self, action: HotkeyAction) -> Result<(), String> {
@@ -716,6 +716,13 @@ impl AppDelegate {
             HotkeyAction::Unpin => self.set_hotkey_pin(false),
         }
         Ok(())
+    }
+
+    /// The hotkey window ended — its last tab exited or closed, or moved out to a window of its
+    /// own: **the pin was the window's** and goes with it, so the next window, fresh, is not
+    /// pinned. The global key's registration is the application's and stays as it is.
+    pub(crate) fn hotkey_window_ended(&self) {
+        self.set_hotkey_pin(false);
     }
 
     /// Window ▸ Pin Hotkey Window: toggled, in memory.
@@ -1153,6 +1160,54 @@ mod tests {
         // application it was in is on the desktop the person left.
         assert!(
             body_of(code, "    fn follow_hotkey(", "    ").contains("window.raise_hotkey(None)")
+        );
+    }
+
+    /// The hotkey window's only tab may leave for a window of its own, and the window that is
+    /// left closes without leaving anything behind: a normal window (the size ⌘N gives, not the
+    /// panel's strip, with none of the panel's marks), no pin, no application to give the front
+    /// back to. A source scan: the move and the windows are AppKit's, with no window to try
+    /// them in.
+    #[test]
+    fn a_hotkey_windows_only_tab_leaves_for_a_normal_window_and_nothing_stays_behind() {
+        let window = include_str!("../window.rs");
+        let app = include_str!("../app.rs");
+        let hotkey = include_str!("hotkey.rs");
+        let hotkey = hotkey.split("#[cfg(test)]").next().expect("the code");
+        let on_window = include_str!("../window/hotkey.rs");
+        let on_window = on_window.split("#[cfg(test)]").next().expect("the code");
+        // The move's own rule is told it is the hotkey window, and the menu is not grey for it.
+        assert!(
+            body_of(window, "    pub(crate) fn picture(", "    ")
+                .contains("hotkey: self.is_hotkey()")
+        );
+        let validate = body_of(window, "        fn validate_menu_item(", "        ");
+        assert!(validate.contains("sel!(detachTab:)"));
+        assert!(validate.contains("|| self.is_hotkey()"));
+        // The window it opens is made as ⌘N makes one: no hotkey name, the first size, the
+        // cascade from the window it left, and the side column's width of that window.
+        let around = body_of(app, "    fn open_window_around(", "    ");
+        assert!(
+            around.contains("(None, None)"),
+            "no hotkey name: a plain window"
+        );
+        assert!(around.contains("from.is_hotkey()"));
+        assert!(around.contains("window::initial_rect()"));
+        assert!(around.contains("window.show_after(Some(from))"));
+        // The window left without a tab closes without a pin, and without bringing the
+        // application it came from to the front; a close by the last tab's exit lets go of the
+        // pin too.
+        assert!(
+            body_of(app, "    fn close_if_emptied(", "    ")
+                .contains("window.hotkey_forget_previous()")
+        );
+        assert!(
+            body_of(on_window, "    pub(crate) fn hotkey_closing(", "    ")
+                .contains("app.hotkey_window_ended()")
+        );
+        assert!(
+            body_of(hotkey, "    pub(crate) fn hotkey_window_ended(", "    ")
+                .contains("self.set_hotkey_pin(false)")
         );
     }
 

@@ -1076,10 +1076,14 @@ define_class!(
                     close_title(tab.panes().len()).to_owned()
                 }));
                 true
+            } else if action == Some(sel!(detachTab:)) {
+                // Move Tab to New Window: a window's only tab stays, **except the hotkey
+                // window's** — taking what was begun in the quick window out into one that stays
+                // is the move it is for ([`moves::Move::TabToNewWindow`]).
+                self.ivars().order.borrow().len() > 1 || self.is_hotkey()
             } else if [
                 sel!(showNextTab:),
                 sel!(showPreviousTab:),
-                sel!(detachTab:),
                 sel!(closeOtherTabs:),
             ]
             .into_iter()
@@ -3647,6 +3651,7 @@ impl TerminalWindow {
             asking: !self.selection_free(),
             // The title row's bar shows one group at a time; the column lists them all.
             one_cluster: !self.bar().is_side(),
+            hotkey: self.is_hotkey(),
         }
     }
 

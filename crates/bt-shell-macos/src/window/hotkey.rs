@@ -507,6 +507,14 @@ impl TerminalWindow {
         NSApplication::sharedApplication(self.mtm()).activate();
     }
 
+    /// The window lets go of the application it was to give the front back to (its only tab left
+    /// for another window of bateri: the person goes there).
+    pub(crate) fn hotkey_forget_previous(&self) {
+        if let Some(state) = self.ivars().hotkey.as_ref() {
+            state.previous.take();
+        }
+    }
+
     /// The window closes (its last tab went, or the application quits): what it owed the person
     /// is paid — the application they were in comes to the front if the window was the one in
     /// sight. The quit gives nothing back: bateri is going.
@@ -517,6 +525,10 @@ impl TerminalWindow {
         state.turn.set(state.turn.get() + 1);
         let was_shown = state.shown.replace(false);
         let previous = state.previous.take();
+        // The pin was this window's: the next one, fresh, is not pinned.
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.hotkey_window_ended();
+        }
         // Only the window the person was typing in gives the front back: a pinned one that
         // something else has the keyboard from ends without taking it from there.
         let in_front =
@@ -552,6 +564,40 @@ pub(crate) fn panel_problems(mtm: MainThreadMarker) -> Vec<String> {
             .styleMask()
             .contains(NSWindowStyleMask::Miniaturizable),
         "a plain window lost Minimize",
+    );
+    // What a tab that leaves the hotkey window is given is this window (`with_tab` with no
+    // hotkey name): the traffic lights shown, movable, at the ordinary level, in the window
+    // cycle and in one Space — none of the panel's marks.
+    for button in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        check(
+            plain
+                .standardWindowButton(button)
+                .is_some_and(|button| !button.isHidden()),
+            "a plain window's traffic light is not in sight",
+        );
+    }
+    check(plain.isMovable(), "a plain window cannot be moved");
+    check(
+        plain.level() != NSFloatingWindowLevel,
+        "a plain window floats like the panel",
+    );
+    check(
+        !plain.collectionBehavior().intersects(
+            NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::IgnoresCycle
+                | NSWindowCollectionBehavior::MoveToActiveSpace,
+        ),
+        "a plain window carries the panel's collection behavior",
+    );
+    check(
+        !plain
+            .styleMask()
+            .contains(NSWindowStyleMask::NonactivatingPanel),
+        "a plain window is a non-activating panel",
     );
 
     let first = NSScreen::screens(mtm).firstObject();
@@ -610,18 +656,36 @@ pub(crate) fn panel_problems(mtm: MainThreadMarker) -> Vec<String> {
         );
     }
     // The frames: the slide starts beyond the screen's edge and AppKit must leave it there.
+    // AppKit puts a window on whole points: half a point of the rules' frame (a depth of 50% of
+    // a screen whose visible height is odd) is no move.
+    let near = |got: crate::restore::Frame, wanted: crate::restore::Frame| {
+        (got.x - wanted.x).abs() <= 1.0
+            && (got.y - wanted.y).abs() <= 1.0
+            && (got.width - wanted.width).abs() <= 1.0
+            && (got.height - wanted.height).abs() <= 1.0
+    };
     panel.setFrame_display(rect_of(slide.away), false);
     check(
-        frame_of(panel.frame()) == slide.away,
-        "the frame beyond the edge was moved onto the screen",
+        near(frame_of(panel.frame()), slide.away),
+        &format!(
+            "the frame beyond the edge was moved onto the screen (wanted {:?}, got {:?}; visible {:?})",
+            slide.away,
+            frame_of(panel.frame()),
+            screen.visible
+        ),
     );
     panel.setFrame_display(rect_of(slide.shown), false);
     check(
-        frame_of(panel.frame()) == slide.shown,
-        "the shown frame is not the rules' frame",
+        near(frame_of(panel.frame()), slide.shown),
+        &format!(
+            "the shown frame is not the rules' frame (wanted {:?}, got {:?})",
+            slide.shown,
+            frame_of(panel.frame())
+        ),
     );
     check(
-        panel.frame().size == rect_of(slide.away).size,
+        (panel.frame().size.width - rect_of(slide.away).size.width).abs() <= 1.0
+            && (panel.frame().size.height - rect_of(slide.away).size.height).abs() <= 1.0,
         "the slide changes the size, not only the place",
     );
     // Window ▸ Minimize and Zoom, and Enter Full Screen, are grey for it: asked of the panel as

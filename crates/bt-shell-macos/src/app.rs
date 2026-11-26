@@ -4042,8 +4042,8 @@ impl AppDelegate {
 
     /// **The applier: a window around a tab** ([`moves::Step::OpenWindow`]):
     /// window `id` around `moved`, a tab that has left `from` — the size and
-    /// place `from` has (or, with `at`, its title row under that screen
-    /// point), `from`'s side column width, the theme of its focused pane, shown and brought up
+    /// place `from` has, or those of ⌘N when `from` is the hotkey window (or, with `at`, its
+    /// title row under that screen point), `from`'s side column width, the theme of its focused pane, shown and brought up
     /// ([`TerminalWindow::show_arrived`]). No shell is started or told to end.
     /// A layout edge.
     fn open_window_around(
@@ -4057,7 +4057,15 @@ impl AppDelegate {
             .focused_pane()
             .session()
             .map_or_else(|| self.resolve_theme(), |session| session.theme());
-        let source = from.ns_window().frame();
+        // The hotkey window's size and place are a strip along the edge of a screen (or the middle
+        // of one): not what a normal window is born with. **A tab that leaves it gets what ⌘N
+        // gives** — the first size and the cascade — and, dragged out, its title row under the
+        // pointer ([`moves::Move::TabToNewWindow`]).
+        let source = if from.is_hotkey() {
+            window::initial_rect()
+        } else {
+            from.ns_window().frame()
+        };
         let frame = match at {
             Some(at) => {
                 // The pointer lands in the middle of the title row, the window's one copy of it;
@@ -4094,12 +4102,13 @@ impl AppDelegate {
                     height: source.size.height,
                 };
                 let placed = clamp_frame(wanted, &self.visible_frames());
-                NSRect::new(
+                Some(NSRect::new(
                     NSPoint::new(placed.x, placed.y),
                     NSSize::new(placed.width, placed.height),
-                )
+                ))
             }
-            None => source,
+            None if from.is_hotkey() => None,
+            None => Some(source),
         };
         let window = TerminalWindow::with_tab(
             self.mtm(),
@@ -4107,17 +4116,16 @@ impl AppDelegate {
             (None, None),
             from.run(),
             moved,
-            Some(frame),
+            frame,
             from.side_width(),
         );
         window.set_notice(&self.ivars().notices.borrow().subtitle());
         self.ivars().windows.borrow_mut().push(window.clone());
         window.set_theme(theme);
         window.set_content_edge(self.settings().content_edge);
-        if at.is_some() {
-            window.show_at(frame);
-        } else {
-            window.show_after(Some(from));
+        match (at, frame) {
+            (Some(_), Some(frame)) => window.show_at(frame),
+            _ => window.show_after(Some(from)),
         }
         if self.ivars().run.is_some() {
             window.float_for_timed_run();
@@ -4415,6 +4423,9 @@ impl AppDelegate {
         if window.tab_count() > 0 {
             return false;
         }
+        // A hotkey window whose only tab went to another window of bateri: that window is where
+        // the person goes, not back to the application they came from.
+        window.hotkey_forget_previous();
         self.unlist_window(window.id());
         window.close();
         true

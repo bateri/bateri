@@ -75,6 +75,9 @@ pub struct Window {
     /// following the tabs ([`Move::RegroupTabs`]). `false` for a window that lists every tab
     /// (the side column) and for a host that keeps no groups.
     pub one_cluster: bool,
+    /// The hotkey window: a window that comes and goes by a shortcut, whose only tab may leave it
+    /// for a window of its own (the window then closes, and the next show opens a fresh one).
+    pub hotkey: bool,
 }
 
 impl Window {
@@ -817,25 +820,33 @@ fn tab_to_new_window(
 ) -> Result<Plan, Refusal> {
     let (from, _) = holding_tab(world, tab).ok_or(Refusal::Quiet)?;
     // A window's only tab stays where it is: the window would close and another just like it
-    // open.
-    if from.closes_without(1) || from.asking {
+    // open. **Except the hotkey window's** (bateri's own decision): what opens is a normal
+    // window and the hotkey window closes — the move people want of it, taking what they began
+    // in the quick window out into one that stays. The next show opens a fresh one.
+    let only = from.closes_without(1);
+    if (only && !from.hotkey) || from.asking {
         return Err(Refusal::Beep);
+    }
+    let mut steps = vec![
+        Step::ReleaseTab {
+            window: from.id,
+            tab,
+        },
+        Step::OpenWindow {
+            window: host.fresh_id(),
+            from: from.id,
+            tab,
+            at,
+        },
+    ];
+    // The window left without a tab closes, as it does when a tab goes to another strip.
+    if only {
+        steps.push(from.close_if_emptied());
     }
     // Nothing to undo: a window is not a picture Undo Move can paint again, and the tab leaving
     // its strip drops the record there was.
     Ok(Plan {
-        steps: vec![
-            Step::ReleaseTab {
-                window: from.id,
-                tab,
-            },
-            Step::OpenWindow {
-                window: host.fresh_id(),
-                from: from.id,
-                tab,
-                at,
-            },
-        ],
+        steps,
         after: Vec::new(),
         undo: None,
     })
@@ -1515,6 +1526,7 @@ mod tests {
             tabs,
             asking: false,
             one_cluster: false,
+            hotkey: false,
         }
     }
 
@@ -2088,11 +2100,46 @@ mod tests {
         let lone = Move::TabToNewWindow { tab: 20, at: None };
         let mut alone = world.clone();
         alone[1] = window(2, vec![shape(20, Tree::Leaf(200), 200)], 20);
-        assert_eq!(super::plan(&alone, lone, &host), Err(Refusal::Beep));
+        assert_eq!(super::plan(&alone, lone.clone(), &host), Err(Refusal::Beep));
         world[0].asking = true;
         assert_eq!(
             super::plan(&world, Move::TabToNewWindow { tab: 10, at: None }, &host),
             Err(Refusal::Beep)
+        );
+
+        // The hotkey window's only tab goes: a window of its own opens and the hotkey window,
+        // left without a tab, closes (bateri's own decision; a window that asks still holds it).
+        alone[1].hotkey = true;
+        let at = Some((10.0, 20.0));
+        let host = roomy(&alone);
+        let plan = super::plan(&alone, Move::TabToNewWindow { tab: 20, at }, &host).unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![
+                Step::ReleaseTab { window: 2, tab: 20 },
+                Step::OpenWindow {
+                    window: NEW,
+                    from: 2,
+                    tab: 20,
+                    at
+                },
+                Step::CloseIfEmptied { window: 2 },
+            ]
+        );
+        assert_eq!(plan.undo, None);
+        alone[1].asking = true;
+        assert_eq!(super::plan(&alone, lone.clone(), &host), Err(Refusal::Beep));
+        // With another tab beside it, the hotkey window's tab leaves as any tab does: the window
+        // stays.
+        let mut two = world.clone();
+        two[0].asking = false;
+        two[0].hotkey = true;
+        let plan = super::plan(&two, Move::TabToNewWindow { tab: 10, at: None }, &host).unwrap();
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::CloseIfEmptied { .. }))
         );
     }
 

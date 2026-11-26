@@ -25,7 +25,8 @@
 //! to the focused pane (`pane::TerminalPane`, `BateriView`'s parent view);
 //! `closeTab:`, `closeWindow:`, `selectTab:`, `showNextTab:`,
 //! `showPreviousTab:`, `showTabList:` and `detachTab:` (all grey with a single
-//! tab), `renameTab:` (a lone tab is named from here too), `splitRight:`,
+//! tab — but the hotkey window's only tab may move out to a window of its own),
+//! `renameTab:` (a lone tab is named from here too), `splitRight:`,
 //! `splitDown:` and the splits' navigation/layout actions
 //! (`selectPreviousSplit:`, `selectNextSplit:`, `selectSplit:`,
 //! `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`; grey with a single pane)

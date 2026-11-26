@@ -707,7 +707,7 @@ screen = "pointer"
 # opened in.
 spaces = "follow"
 # true | false. Hide it when another window or another application is clicked; Window >
-# Pin Hotkey Window keeps it until bateri quits.
+# Pin Hotkey Window keeps it until you unpin it, the window closes or bateri quits.
 hide_on_click_away = true
 # true | false. Slide in and out; off, it appears and goes away at once. Reduce motion
 # turns it off too. Where the way in is another screen, it fades in place instead.
@@ -3308,17 +3308,19 @@ change the settings file could not take.
   that is the person's to set, in Settings.
 - **Hiding.** The window goes away when you click another application or another bateri window, unless a sheet, the
   palette, Settings or a menu of bateri's own took the focus. Window ▸ Pin Hotkey Window keeps it in front until
-  you unpin it or quit; `hide_on_click_away = false` is the same for good.
+  you unpin it, the window closes or you quit; `hide_on_click_away = false` is the same for good.
 - **Spaces.** With `spaces = "follow"`, going to another desktop while the window is in sight does not hide it: it
   comes to the desktop you are on, with the keyboard. A window kept in sight — pinned, or with
   `hide_on_click_away = false` — is on every desktop instead, and the keyboard stays with the application you go
   to: what you type there does not land in the terminal. The application you were in is forgotten when the window
   comes along (it is on the desktop you left), so the next tap brings nobody forward. With `"stay"` the window stays on its desktop, and goes away when another application comes to the front, as it does anywhere.
-- **The last tab closed** closes the window; the next tap opens a fresh one in your home folder. The window is
-  saved with the session and comes back hidden.
+- **The last tab closed** closes the window; the next tap opens a fresh one in your home folder, not pinned. The
+  window is saved with the session and comes back hidden. **Move Tab to New Window** is open for the window's only
+  tab, unlike a normal window's: the tab (with what runs in it) goes to a normal window of the size ⌘N gives, and the
+  hotkey window, left with nothing, closes the same way.
 - **From outside bateri.** `bateri hotkey [toggle|show|hide|pin|unpin]` does what the shortcut does (none is
-  `toggle`; `pin` shows the window and keeps it in front until `unpin`), from a terminal of this computer or from no
-  terminal at all, so a launcher or a shortcut of another tool can run it by its full path,
+  `toggle`; `pin` shows the window and keeps it in front until `unpin` or until the window closes), from a terminal
+  of this computer or from no terminal at all, so a launcher or a shortcut of another tool can run it by its full path,
   `~/.local/share/bateri/shell/bin/bateri hotkey`. Two limits: that folder is not on your `PATH`, and it is not
   written while `[commands] level` is `"off"`, which refuses the command too. A terminal on a server is refused: the
   screen is this computer's. `bateri ls` marks the window: `(hotkey)` after its number, and `"hotkey": true` in

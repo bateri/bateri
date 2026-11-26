@@ -2723,7 +2723,7 @@ screen = "pointer"
 # opened in.
 spaces = "follow"
 # true | false. Hide it when another window or another application is clicked; Window >
-# Pin Hotkey Window keeps it until bateri quits.
+# Pin Hotkey Window keeps it until you unpin it, the window closes or bateri quits.
 hide_on_click_away = true
 # true | false. Slide in and out; off, it appears and goes away at once. Reduce motion
 # turns it off too. Where the way in is another screen, it fades in place instead.
