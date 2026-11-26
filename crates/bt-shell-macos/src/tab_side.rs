@@ -447,7 +447,7 @@ impl TabBar {
         };
         let bounds = self.bounds();
         let corner = card::window_corner_pt(self.window().as_deref());
-        let head = tabs::Head::row(bounds.size.width, top, corner);
+        let head = tabs::Head::row(bounds.size.width, top, corner, self.lights_in_row());
         iv.strip.setFrame(NSRect::new(NSPoint::ZERO, bounds.size));
         iv.mask.clear(&iv.strip);
         for header in iv.headers.take() {
@@ -871,6 +871,7 @@ impl TabBar {
             warning: !iv.shown.borrow().notice.is_empty(),
             tally: !iv.shown.borrow().counts.is_empty(),
             corner: card::window_corner_pt(self.window().as_deref()),
+            lights: self.lights_in_row(),
         }
     }
 
@@ -2037,6 +2038,7 @@ mod tests {
             warning: false,
             tally: false,
             corner: 0.0,
+            lights: true,
         }
     }
 

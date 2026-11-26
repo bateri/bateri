@@ -6323,6 +6323,16 @@ impl TabBar {
         self.draw_card();
     }
 
+    /// Whether the window's traffic lights stand in its title row: a window that hides them (the
+    /// hotkey window) gives their room to the bar, the strip's start ([`Self::leading`]) and the
+    /// side column's sidebar button (`tabs::Head::start`) alike. Full screen keeps them: the
+    /// column's head does not move as the window enters or leaves it.
+    pub(super) fn lights_in_row(&self) -> bool {
+        self.window()
+            .and_then(|window| window.standardWindowButton(NSWindowButton::ZoomButton))
+            .is_none_or(|zoom| !zoom.isHidden())
+    }
+
     /// Where the strip may start: past the zoom button, or at the gap alone
     /// in full screen, where the lights live in another window.
     fn leading(&self) -> f64 {
@@ -9518,6 +9528,7 @@ mod tests {
                 warning: false,
                 tally: false,
                 corner: 20.5,
+                lights: true,
             }
             .layout()
         };

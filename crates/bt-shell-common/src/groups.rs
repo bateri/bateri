@@ -2668,6 +2668,7 @@ mod tests {
                 warning: false,
                 tally: false,
                 corner: 20.5,
+                lights: true,
             }
             .layout_with(&items.iter().map(Item::entry).collect::<Vec<_>>());
             assert_eq!(layout.rows.len(), listed.len());
@@ -2691,6 +2692,7 @@ mod tests {
             warning: false,
             tally: false,
             corner: 20.5,
+            lights: true,
         }
         .layout_with(&items.iter().map(Item::entry).collect::<Vec<_>>())
     }

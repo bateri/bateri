@@ -1226,6 +1226,10 @@ pub struct Side {
     /// corner is square (full screen). The caller gives what it measured for its window
     /// ([`Fit::of`]).
     pub corner: f64,
+    /// The window's traffic lights stand in the column's head: the sidebar button stands right of
+    /// them. A window that hides them (the hotkey window) has the button meet its top-left corner
+    /// as New Tab meets the top-right one in the title row ([`Head::start`]).
+    pub lights: bool,
 }
 
 impl Side {
@@ -1265,7 +1269,7 @@ impl Side {
             .then(|| Rect::new(fit.inset, foot, BUTTON, BUTTON));
         let list_end = warning.map_or(self.height, |button| button.y) - EDGE;
         let mut list = Rect::new(0.0, self.top, width, (list_end - self.top).max(0.0));
-        let head = Head::of(self.top);
+        let head = Head::of(self.top, Head::start(self.lights, self.corner));
         let new_tab = Rect::new(width - EDGE - BUTTON, head.y, BUTTON, BUTTON);
         let activity = Rect::new(new_tab.x - BUTTON_GAP - BUTTON, head.y, BUTTON, BUTTON);
 
@@ -1386,7 +1390,8 @@ pub struct Counts {
 pub struct Head {
     /// The buttons' top: centred in the title row.
     pub y: f64,
-    /// The sidebar button, [`LIGHTS_GAP`] right of the traffic lights.
+    /// The sidebar button, [`LIGHTS_GAP`] right of the traffic lights, or in the window's top-left
+    /// corner when it has none ([`Head::start`]).
     pub sidebar: Rect,
     /// New Tab, in the window's top-right corner ([`Fit::of`]); `None` in the column's head,
     /// where New Tab stands at the column's end ([`Column::new_tab`]).
@@ -1397,10 +1402,22 @@ pub struct Head {
 }
 
 impl Head {
-    /// The head's buttons in a title row `top` high: the column's head ([`Side::layout`]).
-    pub fn of(top: f64) -> Self {
+    /// Where the sidebar button starts: [`LIGHTS_GAP`] right of the traffic lights, or, in a
+    /// window that hides them, as far from its left edge as New Tab is from the right one in a
+    /// corner of radius `corner` ([`Fit::of`]) — the lights' room does not stay empty.
+    pub fn start(lights: bool, corner: f64) -> f64 {
+        if lights {
+            LIGHTS_END + LIGHTS_GAP
+        } else {
+            Fit::of(corner).inset
+        }
+    }
+
+    /// The head's buttons in a title row `top` high, the sidebar button at `start`
+    /// ([`Head::start`]): the column's head ([`Side::layout`]).
+    pub fn of(top: f64, start: f64) -> Self {
         let y = ((top - BUTTON) / 2.0).max(0.0);
-        let sidebar = Rect::new(LIGHTS_END + LIGHTS_GAP, y, BUTTON, BUTTON);
+        let sidebar = Rect::new(start, y, BUTTON, BUTTON);
         Self {
             y,
             sidebar,
@@ -1411,9 +1428,10 @@ impl Head {
 
     /// The title row of a window `width` wide while its column hides: the sidebar button, New
     /// Tab meeting the window's top-right corner of radius `corner` as the bar's `+` does
-    /// ([`Fit::of`]), and the name between them, centred on the window.
-    pub fn row(width: f64, top: f64, corner: f64) -> Self {
-        let head = Self::of(top);
+    /// ([`Fit::of`]), and the name between them, centred on the window. `lights` is
+    /// [`Side::lights`].
+    pub fn row(width: f64, top: f64, corner: f64, lights: bool) -> Self {
+        let head = Self::of(top, Self::start(lights, corner));
         let fit = Fit::of(corner);
         let new_tab = Rect::new(width - fit.inset - BUTTON, head.y, BUTTON, BUTTON);
         let middle = width / 2.0;
@@ -5144,6 +5162,7 @@ mod tests {
             warning: false,
             tally: false,
             corner: 20.5,
+            lights: true,
         }
     }
 
@@ -5218,7 +5237,7 @@ mod tests {
 
     #[test]
     fn a_hidden_columns_title_row_centres_the_name_between_its_buttons() {
-        let row = Head::row(1000.0, 40.0, 20.5);
+        let row = Head::row(1000.0, 40.0, 20.5, true);
         assert_eq!(
             row.sidebar,
             Rect::new(84.0, 6.0, 28.0, 28.0),
@@ -5230,7 +5249,40 @@ mod tests {
         assert_eq!(row.title, Span::new(120.0, 760.0));
         assert_eq!(row.title.x + row.title.width / 2.0, 500.0);
         // A window too narrow for any name gives it none.
-        assert_eq!(Head::row(200.0, 40.0, 20.5).title.width, 0.0);
+        assert_eq!(Head::row(200.0, 40.0, 20.5, true).title.width, 0.0);
+    }
+
+    /// A window that hides its traffic lights (the hotkey window) does not keep their room empty:
+    /// the sidebar button meets the top-left corner as New Tab meets the top-right one, in the
+    /// column's head and in the title row of a hidden column, and nothing else of the column moves.
+    #[test]
+    fn without_traffic_lights_the_sidebar_button_takes_their_place() {
+        let lit = side(600.0, 3).layout();
+        let unlit = Side {
+            lights: false,
+            ..side(600.0, 3)
+        }
+        .layout();
+        let inset = Fit::of(side(600.0, 3).corner).inset;
+        assert_eq!(
+            unlit.sidebar,
+            Rect {
+                x: inset,
+                ..lit.sidebar
+            }
+        );
+        assert_eq!(
+            (unlit.rows.clone(), unlit.activity, unlit.new_tab),
+            (lit.rows.clone(), lit.activity, lit.new_tab)
+        );
+        // The hidden column's title row: the button mirrors New Tab across the window.
+        let row = Head::row(1000.0, 40.0, 20.5, false);
+        let new_tab = row.new_tab.expect("the title row has New Tab");
+        assert_eq!(row.sidebar.x, 1000.0 - new_tab.x - BUTTON);
+        assert_eq!(row.sidebar.y, new_tab.y);
+        // The name stays centred on the window, with the room the button gave back.
+        assert_eq!(row.title.x + row.title.width / 2.0, 500.0);
+        assert!(row.title.width > Head::row(1000.0, 40.0, 20.5, true).title.width);
     }
 
     #[test]

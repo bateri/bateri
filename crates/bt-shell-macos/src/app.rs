@@ -4075,6 +4075,7 @@ impl AppDelegate {
                         warning: false,
                         tally: false,
                         corner: 0.0,
+                        lights: true,
                     }
                     .layout();
                     column
