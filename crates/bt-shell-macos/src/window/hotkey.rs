@@ -26,7 +26,9 @@
 
 use std::time::Instant;
 
-use bt_shell_common::hotkey::{HideCause, SLIDE_MILLIS, Slide, restores_previous};
+use bt_shell_common::hotkey::{
+    Desktop, Desktops, HideCause, SLIDE_MILLIS, Slide, restores_previous,
+};
 use dispatch2::DispatchTime;
 use objc2::runtime::Bool;
 use objc2::{ClassType, sel};
@@ -143,7 +145,7 @@ fn configure(window: &NSWindow) {
     // behind, and the focus rules are the window's own ([`TerminalWindow::focus_lost`]).
     window.setHidesOnDeactivate(false);
     window.setLevel(NSFloatingWindowLevel);
-    window.setCollectionBehavior(behavior(true));
+    window.setCollectionBehavior(behavior(Desktops::Front));
     // The slide is the only animation: no fade or zoom of AppKit's own on ordering in.
     window.setAnimationBehavior(NSWindowAnimationBehavior::None);
     // No lights: it is not closed, minimized or zoomed by them. The row they stood in is the
@@ -164,15 +166,15 @@ fn configure(window: &NSWindow) {
 }
 
 /// The panel's `collectionBehavior`: over a full-screen application's Space (`fullScreenAuxiliary`),
-/// out of the window cycle (`ignoresCycle`), and with the person's Space when `follow`
-/// (`[hotkey_window] spaces`).
-pub(crate) fn behavior(follow: bool) -> NSWindowCollectionBehavior {
+/// out of the window cycle (`ignoresCycle`), and on the desktops [`Desktops`] says
+/// (`[hotkey_window] spaces` and what keeps the window in sight).
+pub(crate) fn behavior(desktops: Desktops) -> NSWindowCollectionBehavior {
     let always =
         NSWindowCollectionBehavior::FullScreenAuxiliary | NSWindowCollectionBehavior::IgnoresCycle;
-    if follow {
-        always | NSWindowCollectionBehavior::MoveToActiveSpace
-    } else {
-        always
+    match desktops {
+        Desktops::Its => always,
+        Desktops::Front => always | NSWindowCollectionBehavior::MoveToActiveSpace,
+        Desktops::Every => always | NSWindowCollectionBehavior::CanJoinAllSpaces,
     }
 }
 
@@ -247,6 +249,16 @@ impl TerminalWindow {
         self.ivars().window.isKeyWindow()
     }
 
+    /// Where the window is, to the desktop in front: the system's own answer, read now
+    /// (`isOnActiveSpace`). Meant for a window in sight: one out of sight is on none.
+    pub(crate) fn desktop(&self) -> Desktop {
+        if self.ivars().window.isOnActiveSpace() {
+            Desktop::Here
+        } else {
+            Desktop::Elsewhere
+        }
+    }
+
     /// The window's frame as a rule frame.
     pub(crate) fn frame_now(&self) -> crate::restore::Frame {
         frame_of(self.ivars().window.frame())
@@ -269,7 +281,7 @@ impl TerminalWindow {
     pub(crate) fn slide_in(
         &self,
         slide: &Slide,
-        follow: bool,
+        desktops: Desktops,
         animate: bool,
         previous: Option<Retained<NSRunningApplication>>,
     ) {
@@ -284,7 +296,7 @@ impl TerminalWindow {
             state.previous.replace(previous);
         }
         let window = self.ivars().window.clone();
-        window.setCollectionBehavior(behavior(follow));
+        window.setCollectionBehavior(behavior(desktops));
         let (away, shown) = (rect_of(slide.away), rect_of(slide.shown));
         let fades = animate && slide.fade;
         if fades {
@@ -463,11 +475,18 @@ impl TerminalWindow {
         }
     }
 
+    /// The desktops the window belongs to changed (the pin came or went): only its Space policy.
+    pub(crate) fn set_desktops(&self, desktops: Desktops) {
+        self.ivars()
+            .window
+            .setCollectionBehavior(behavior(desktops));
+    }
+
     /// The settings changed while the window is in sight: its new frame and Space policy at once,
     /// with no slide.
-    pub(crate) fn replace(&self, slide: &Slide, follow: bool) {
+    pub(crate) fn replace(&self, slide: &Slide, desktops: Desktops) {
         let window = &self.ivars().window;
-        window.setCollectionBehavior(behavior(follow));
+        window.setCollectionBehavior(behavior(desktops));
         window.setFrame_display(rect_of(slide.shown), true);
         self.ivars().root.lay_out();
     }

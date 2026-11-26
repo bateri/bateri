@@ -11,10 +11,10 @@
 use bt_core::{HOTKEY_DEFAULT_NAME, HotkeySpaces, HotkeyWindowSettings, SettingsEdit};
 use bt_shell_common::agent::message::HotkeyAction;
 use bt_shell_common::hotkey::{
-    self as rules, Candidate, GlobalKeys as _, KeyTaker, Lost, Presence, Step, Verb,
+    self as rules, Candidate, GlobalKeys as _, KeyTaker, Leaving, Lost, Presence, Step, Verb,
 };
 use dispatch2::DispatchQueue;
-use objc2_app_kit::NSScreen;
+use objc2_app_kit::{NSScreen, NSWorkspaceActiveSpaceDidChangeNotification};
 
 use super::*;
 use crate::window::{frame_of, frontmost_other, rect_of};
@@ -25,6 +25,44 @@ const AGENT_CHECK_BUNDLE: &str = "dev.bateri.agent-check";
 /// System Settings ▸ Privacy & Security ▸ Input Monitoring: where a double tap is allowed.
 const INPUT_MONITORING_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
+
+thread_local! {
+    /// The object the system tells that the desktop in front changed: made when the first window
+    /// is shown and kept for the life of the application (the notification centre does not own
+    /// its observers).
+    static DESKTOP_WATCHER: OnceCell<Retained<DesktopWatcher>> = const { OnceCell::new() };
+}
+
+define_class!(
+    // SAFETY: NSObject subclassing has no requirements; `DesktopWatcher` has no ivars and
+    // implements no `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriDesktopWatcher"]
+    struct DesktopWatcher;
+
+    unsafe impl NSObjectProtocol for DesktopWatcher {}
+
+    impl DesktopWatcher {
+        /// `NSWorkspaceActiveSpaceDidChangeNotification`, posted on the main thread when the
+        /// person goes to another desktop. The notification is not looked at: what a window
+        /// does is asked of it ([`AppDelegate::hotkey_desktop_changed`]).
+        #[unsafe(method(activeSpaceDidChange:))]
+        fn active_space_did_change(&self, _note: Option<&AnyObject>) {
+            if let Some(app) = delegate(self.mtm()) {
+                app.hotkey_desktop_changed();
+            }
+        }
+    }
+);
+
+impl DesktopWatcher {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: NSObject's `init` takes no arguments and the ivars are set.
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 impl AppDelegate {
     // -----------------------------------------------------------------------------------------
@@ -249,13 +287,14 @@ impl AppDelegate {
 
     /// The window slides in on the screen the settings and the pointer choose.
     fn slide_in_hotkey(&self, window: &TerminalWindow) -> Result<(), String> {
+        self.watch_desktops();
         let settings = self.settings().hotkey_window;
         let slide = self
             .hotkey_slide(&settings)
             .ok_or_else(|| "there is no screen".to_owned())?;
         window.slide_in(
             &slide,
-            settings.spaces == HotkeySpaces::Follow,
+            rules::desktops(self.hotkey_hiding()),
             self.hotkey_animates(&settings),
             frontmost_other(self.mtm()),
         );
@@ -283,6 +322,7 @@ impl AppDelegate {
     /// The first tap with no window: a new one, one tab in the home folder, at its final size and
     /// out of sight, then slid in.
     fn open_hotkey_window(&self) -> Result<(), String> {
+        self.watch_desktops();
         let settings = self.settings().hotkey_window;
         let slide = self
             .hotkey_slide(&settings)
@@ -299,7 +339,7 @@ impl AppDelegate {
         )?;
         window.slide_in(
             &slide,
-            settings.spaces == HotkeySpaces::Follow,
+            rules::desktops(self.hotkey_hiding()),
             self.hotkey_animates(&settings),
             previous,
         );
@@ -496,11 +536,14 @@ impl AppDelegate {
     // -----------------------------------------------------------------------------------------
     // The focus leaving.
 
-    /// Whether the focus leaving hides the window now ([`rules::Hiding`]).
+    /// What decides whether the focus leaving hides the window now, or the window follows the
+    /// person ([`rules::Hiding`]).
     fn hotkey_hiding(&self) -> rules::Hiding {
+        let settings = self.settings().hotkey_window;
         rules::Hiding {
-            hide_on_click_away: self.settings().hotkey_window.hide_on_click_away,
+            hide_on_click_away: settings.hide_on_click_away,
             pinned: self.ivars().hotkey_pinned.get(),
+            follow: settings.spaces == HotkeySpaces::Follow,
         }
     }
 
@@ -536,9 +579,73 @@ impl AppDelegate {
         } else {
             Lost::Key { to: taker }
         };
-        if rules::hides_on(lost, self.hotkey_hiding()) {
-            self.hide_hotkey(&window, rules::HideCause::FocusLeft);
+        self.hotkey_focus_left(&window, lost);
+    }
+
+    /// The window in sight lost the focus: what it does is [`rules::leaving`]'s — hidden, kept,
+    /// or (in `follow`, with the window left on the desktop the person went from) brought to the
+    /// one they are on. **The one place both ways of losing the focus come to**: the key window
+    /// changing ([`Self::hotkey_focus_settled`]) and the application stopping to be active
+    /// ([`Self::hotkey_active_lost`]) are both what a desktop change brings, in an order the
+    /// system does not promise.
+    fn hotkey_focus_left(&self, window: &TerminalWindow, lost: Lost) {
+        match rules::leaving(lost, self.hotkey_hiding(), window.desktop()) {
+            Leaving::Hides => self.hide_hotkey(window, rules::HideCause::FocusLeft),
+            Leaving::Follows => self.follow_hotkey(window),
+            Leaving::Stays => {}
         }
+    }
+
+    /// The window comes to the desktop in front, in sight and with the keyboard
+    /// (`makeKeyAndOrderFront`, as Ghostty's `.move`). **The application it was to give the front
+    /// back to is let go**: it was on the desktop the person left, and asking it to the front
+    /// would take the person back there.
+    fn follow_hotkey(&self, window: &TerminalWindow) {
+        window.raise_hotkey(None);
+    }
+
+    /// The person went to another desktop (`NSWorkspace`): a window in sight that is still on the
+    /// old one comes along when [`rules::follows`] says so. The window losing the key may have
+    /// brought it already (its own order is not promised): the window that is on the desktop in
+    /// front is left as it is. **One that the focus hid stays hidden**: activating an
+    /// application whose window is on another desktop deactivates this one while the desktop in
+    /// front is still the old one, and the desktop changes some 300 ms later (measured on a Mac);
+    /// a window brought back then would cover that application and leave the keyboard in it.
+    pub(crate) fn hotkey_desktop_changed(&self) {
+        let hiding = self.hotkey_hiding();
+        for window in self
+            .windows()
+            .into_iter()
+            .filter(|window| window.is_hotkey())
+        {
+            if window.hotkey_shown() && rules::follows(hiding, window.desktop()) {
+                self.follow_hotkey(&window);
+            }
+        }
+    }
+
+    /// Asks the system to tell when the desktop in front changes, once, from the first time a
+    /// window is shown.
+    fn watch_desktops(&self) {
+        DESKTOP_WATCHER.with(|slot| {
+            slot.get_or_init(|| {
+                let watcher = DesktopWatcher::new(self.mtm());
+                let center = NSWorkspace::sharedWorkspace().notificationCenter();
+                // SAFETY: `activeSpaceDidChange:` is defined on the watcher's class and takes
+                // a single `Option<&AnyObject>`; the watcher lives in the slot above for the
+                // process's lifetime, so the centre's non-owning reference does not dangle.
+                // The constant is a name AppKit exposes.
+                unsafe {
+                    center.addObserver_selector_name_object(
+                        &watcher,
+                        sel!(activeSpaceDidChange:),
+                        Some(NSWorkspaceActiveSpaceDidChangeNotification),
+                        None,
+                    );
+                }
+                watcher
+            });
+        });
     }
 
     /// Who has the keyboard in `window`'s place: a surface of its own, another terminal window,
@@ -557,14 +664,28 @@ impl AppDelegate {
     }
 
     /// Another application came to the front ([`Lost::Active`]): every hotkey window in sight
-    /// goes, unless the pin or the setting keeps it.
+    /// goes, unless the pin or the setting keeps it — or, in `follow`, comes to the desktop the
+    /// person went to. Asked in the next turn, as the key window's loss is
+    /// ([`Self::hotkey_key_resigned`]): by then the system has told the window which desktop it
+    /// is on, and an application that is the active one again (the window was brought along, which
+    /// activates it) lost nothing.
     pub(crate) fn hotkey_active_lost(&self) {
-        if !rules::hides_on(Lost::Active, self.hotkey_hiding()) {
+        DispatchQueue::main().exec_async(|| {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.hotkey_active_settled();
+            }
+        });
+    }
+
+    fn hotkey_active_settled(&self) {
+        if NSApplication::sharedApplication(self.mtm()).isActive() {
             return;
         }
         for window in self.windows() {
             if window.hotkey_shown() {
-                self.hide_hotkey(&window, rules::HideCause::FocusLeft);
+                self.hotkey_focus_left(&window, Lost::Active);
             }
         }
     }
@@ -590,17 +711,30 @@ impl AppDelegate {
             }
             HotkeyAction::Pin => {
                 self.try_toggle_hotkey(Verb::Show)?;
-                self.ivars().hotkey_pinned.set(true);
+                self.set_hotkey_pin(true);
             }
-            HotkeyAction::Unpin => self.ivars().hotkey_pinned.set(false),
+            HotkeyAction::Unpin => self.set_hotkey_pin(false),
         }
         Ok(())
     }
 
     /// Window ▸ Pin Hotkey Window: toggled, in memory.
     pub(crate) fn toggle_hotkey_pin(&self) {
-        let pinned = &self.ivars().hotkey_pinned;
-        pinned.set(!pinned.get());
+        self.set_hotkey_pin(!self.ivars().hotkey_pinned.get());
+    }
+
+    /// The pin, and with it the desktops the windows belong to ([`rules::desktops`]): in
+    /// `follow` a pinned window is on every desktop, an unpinned one on the one in front.
+    fn set_hotkey_pin(&self, pinned: bool) {
+        self.ivars().hotkey_pinned.set(pinned);
+        let desktops = rules::desktops(self.hotkey_hiding());
+        for window in self
+            .windows()
+            .into_iter()
+            .filter(|window| window.is_hotkey())
+        {
+            window.set_desktops(desktops);
+        }
     }
 
     /// Whether the hotkey window is pinned now.
@@ -629,7 +763,7 @@ impl AppDelegate {
         let settings = new.hotkey_window;
         // On its own screen: the pointer is wherever the person was when they changed a setting.
         if let Some(slide) = self.hotkey_slide_here(&window, &settings) {
-            window.replace(&slide, settings.spaces == HotkeySpaces::Follow);
+            window.replace(&slide, rules::desktops(self.hotkey_hiding()));
         }
     }
 }
@@ -974,14 +1108,29 @@ mod tests {
         assert_eq!(code.matches("self.slide_out_hotkey(").count(), 1);
         for place in [
             "    pub(crate) fn try_toggle_hotkey(",
-            "    fn hotkey_focus_settled(",
-            "    pub(crate) fn hotkey_active_lost(",
+            "    fn hotkey_focus_left(",
         ] {
             assert!(
                 body_of(code, place, "    ").contains("self.hide_hotkey("),
                 "{place}"
             );
         }
+        // Both ways of losing the focus come to the one place that asks the rule, and a desktop
+        // change is read there by both.
+        for place in [
+            "    fn hotkey_focus_settled(",
+            "    fn hotkey_active_settled(",
+        ] {
+            assert!(
+                body_of(code, place, "    ").contains("hotkey_focus_left("),
+                "{place}"
+            );
+        }
+        assert!(body_of(code, "    fn hotkey_focus_left(", "    ").contains("rules::leaving("));
+        assert!(
+            body_of(code, "    pub(crate) fn hotkey_desktop_changed(", "    ")
+                .contains("rules::follows(")
+        );
         // The window's own ends ask it too: the close, and the wait that keeps another window of
         // bateri from coming forward while the application before is being given the front.
         let window = include_str!("../window/hotkey.rs");
@@ -994,12 +1143,31 @@ mod tests {
         assert!(ended.contains("another_window_would_come_forward()"));
         assert!(ended.contains("HANDOVER_WAIT"));
         assert!(code.contains("HideCause::Asked"));
-        assert_eq!(code.matches("HideCause::FocusLeft").count(), 2);
+        assert_eq!(code.matches("HideCause::FocusLeft").count(), 1);
         assert_eq!(
             code.matches("raise_hotkey(frontmost_other(self.mtm()))")
                 .count(),
             2
         );
+        // A window that follows the person to another desktop lets the record go: the
+        // application it was in is on the desktop the person left.
+        assert!(
+            body_of(code, "    fn follow_hotkey(", "    ").contains("window.raise_hotkey(None)")
+        );
+    }
+
+    /// The focus hiding a window is final: the desktop change that comes after it (some 300 ms
+    /// after the switch to an application whose window is on another desktop) brings nothing back.
+    /// A source scan of the one place that reads the notice.
+    #[test]
+    fn a_hide_the_focus_made_is_not_undone_by_a_desktop_notice() {
+        let code = include_str!("hotkey.rs");
+        let code = code.split("#[cfg(test)]").next().expect("the code");
+        let changed = body_of(code, "    pub(crate) fn hotkey_desktop_changed(", "    ");
+        assert!(changed.contains("window.hotkey_shown() && rules::follows("));
+        assert!(!changed.contains("slide_in_hotkey"), "{changed}");
+        assert!(!code.contains("comes_back"));
+        assert!(!code.contains("env::var"));
     }
 
     /// A window that is in sight is laid out again on its own screen: a setting that changed, an
@@ -1058,7 +1226,11 @@ mod tests {
         // by the entrance; pinned or let go in the one place the pin is kept.
         let asked = body_of(hotkey, "    pub(crate) fn hotkey_asked(", "    ");
         assert_eq!(asked.matches("self.try_toggle_hotkey(").count(), 4);
-        assert_eq!(asked.matches("hotkey_pinned.set(").count(), 2);
+        assert_eq!(asked.matches("self.set_hotkey_pin(").count(), 2);
+        // The pin is written in one place, which gives the windows their desktops with it.
+        let code = hotkey.split("#[cfg(test)]").next().unwrap_or_default();
+        assert_eq!(code.matches("hotkey_pinned.set(").count(), 1);
+        assert!(body_of(hotkey, "    fn set_hotkey_pin(", "    ").contains("window.set_desktops("));
         assert!(
             body_of(
                 include_str!("../agent.rs"),
@@ -1067,12 +1239,16 @@ mod tests {
             )
             .contains("app.hotkey_asked(action)")
         );
-        // The focus leaving asks the rules too, and what took the key is settled a turn later.
-        assert!(
-            body_of(hotkey, "    fn hotkey_focus_settled(", "    ").contains("rules::hides_on(")
-        );
+        // The focus leaving asks the rules too (the one place both ways of losing it come to,
+        // [`rules::leaving`]), and what took the key, or whether the application is still the
+        // active one, is settled a turn later.
+        assert!(body_of(hotkey, "    fn hotkey_focus_left(", "    ").contains("rules::leaving("));
         assert!(
             body_of(hotkey, "    pub(crate) fn hotkey_key_resigned(", "    ")
+                .contains("exec_async(")
+        );
+        assert!(
+            body_of(hotkey, "    pub(crate) fn hotkey_active_lost(", "    ")
                 .contains("exec_async(")
         );
     }

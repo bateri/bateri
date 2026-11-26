@@ -3264,7 +3264,7 @@ because `bateri hotkey hide` was run while it did not have the keyboard, brings 
 | `depth` | 10 to 100 | `50` | how far in from the edge, in percent of the screen |
 | `span` | 10 to 100 | `100` | how far along the edge, in percent of the screen |
 | `screen` | `"pointer"` \| `"primary"` | `"pointer"` | the screen it opens on: the one the pointer is on, or the one with the menu bar |
-| `spaces` | `"follow"` \| `"stay"` | `"follow"` | `"follow"` opens it in the Space in front, `"stay"` in the one it was opened in |
+| `spaces` | `"follow"` \| `"stay"` | `"follow"` | `"follow"` opens it in the Space in front and brings it along when you go to another Space while it is in sight (a pinned one is on every Space); `"stay"` opens it in the one it was opened in, and leaving that Space hides it |
 | `hide_on_click_away` | `true` \| `false` | `true` | hide it when the focus leaves it for another window or another application |
 | `animate` | `true` \| `false` | `true` | slide in and out; Reduce motion turns the slide off too; where the way in is another screen the window fades in place instead |
 
@@ -3309,6 +3309,11 @@ change the settings file could not take.
 - **Hiding.** The window goes away when you click another application or another bateri window, unless a sheet, the
   palette, Settings or a menu of bateri's own took the focus. Window ▸ Pin Hotkey Window keeps it in front until
   you unpin it or quit; `hide_on_click_away = false` is the same for good.
+- **Spaces.** With `spaces = "follow"`, going to another desktop while the window is in sight does not hide it: it
+  comes to the desktop you are on, with the keyboard. A window kept in sight — pinned, or with
+  `hide_on_click_away = false` — is on every desktop instead, and the keyboard stays with the application you go
+  to: what you type there does not land in the terminal. The application you were in is forgotten when the window
+  comes along (it is on the desktop you left), so the next tap brings nobody forward. With `"stay"` the window stays on its desktop, and goes away when another application comes to the front, as it does anywhere.
 - **The last tab closed** closes the window; the next tap opens a fresh one in your home folder. The window is
   saved with the session and comes back hidden.
 - **From outside bateri.** `bateri hotkey [toggle|show|hide|pin|unpin]` does what the shortcut does (none is

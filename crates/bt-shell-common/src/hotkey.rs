@@ -306,9 +306,13 @@ pub struct Hiding {
     pub hide_on_click_away: bool,
     /// Window ▸ Pin Hotkey Window: in memory only, gone with the application.
     pub pinned: bool,
+    /// `[hotkey_window] spaces = "follow"`: the window comes along when the person goes to
+    /// another desktop.
+    pub follow: bool,
 }
 
-/// Whether `lost` hides the window. A pin, or `hide_on_click_away = false`, hides on nothing.
+/// Whether `lost` hides the window, **on the desktop it is on**. A pin, or
+/// `hide_on_click_away = false`, hides on nothing.
 pub fn hides_on(lost: Lost, hiding: Hiding) -> bool {
     if hiding.pinned || !hiding.hide_on_click_away {
         return false;
@@ -316,6 +320,75 @@ pub fn hides_on(lost: Lost, hiding: Hiding) -> bool {
     match lost {
         Lost::Active => true,
         Lost::Key { to } => to == KeyTaker::OtherTerminal,
+    }
+}
+
+/// Where the window in sight is, to the desktop (Space) the person is on now. The system's own
+/// answer (`isOnActiveSpace`), read when the question is asked: the window is on the old desktop
+/// after the person went to another one, until it is brought along.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Desktop {
+    /// On the desktop in front.
+    Here,
+    /// On another one: the person went away from it.
+    Elsewhere,
+}
+
+/// What the focus leaving, with the desktop it happened on, does to the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leaving {
+    /// Nothing: the window stays where it is.
+    Stays,
+    /// The window goes ([`HideCause::FocusLeft`]).
+    Hides,
+    /// The window comes to the desktop the person is on, with the keyboard ([`follows`]).
+    Follows,
+}
+
+/// Which desktops (Spaces) the window belongs to: the Space part of its `collectionBehavior`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Desktops {
+    /// The one it was opened on (`spaces = "stay"`).
+    Its,
+    /// The one in front whenever it is shown or brought along (`follow`): `moveToActiveSpace`.
+    Front,
+    /// Every one (`follow`, with a pin or `hide_on_click_away = false` keeping it in sight):
+    /// `canJoinAllSpaces`. **It is with the person on each desktop without taking the keyboard**
+    /// from the application there — bringing a pinned window along by making it key would send
+    /// the next keys typed in that application to the terminal (bateri's own decision; Ghostty
+    /// follows only where it would have hidden).
+    Every,
+}
+
+/// Which desktops the window belongs to, for these settings and pin.
+pub fn desktops(hiding: Hiding) -> Desktops {
+    if !hiding.follow {
+        Desktops::Its
+    } else if hiding.pinned || !hiding.hide_on_click_away {
+        Desktops::Every
+    } else {
+        Desktops::Front
+    }
+}
+
+/// Whether the window comes to the desktop in front, with the keyboard: it belongs to the one in
+/// front ([`Desktops::Front`]) and is on another one — the person went there from it. A window
+/// that belongs to every desktop is already there ([`Desktops::Every`]).
+pub fn follows(hiding: Hiding, desktop: Desktop) -> bool {
+    desktops(hiding) == Desktops::Front && desktop == Desktop::Elsewhere
+}
+
+/// What `lost` does to the window on `desktop`. **The one question both ways the window loses
+/// the focus ask** — the key window changing and the application stopping to be active — so a
+/// desktop change, which brings both, is read the same way by each: the window follows, or (with
+/// `spaces = "stay"`) is hidden or kept as [`hides_on`] says.
+pub fn leaving(lost: Lost, hiding: Hiding, desktop: Desktop) -> Leaving {
+    if follows(hiding, desktop) {
+        Leaving::Follows
+    } else if hides_on(lost, hiding) {
+        Leaving::Hides
+    } else {
+        Leaving::Stays
     }
 }
 
@@ -1196,6 +1269,7 @@ mod tests {
         let on = Hiding {
             hide_on_click_away: true,
             pinned: false,
+            follow: false,
         };
         let key = |to| Lost::Key { to };
         // The table, for a window that hides.
@@ -1221,6 +1295,7 @@ mod tests {
             Hiding {
                 hide_on_click_away: false,
                 pinned: true,
+                ..on
             },
         ] {
             for lost in [
@@ -1232,6 +1307,287 @@ mod tests {
                 assert!(!hides_on(lost, off), "{lost:?} with {off:?}");
             }
         }
+    }
+
+    /// The settings and the pin as a window in sight reads them: `Hiding` for a window that
+    /// hides on a click away (`hide_on_click_away`, not pinned), with the Spaces policy.
+    fn hiding(follow: bool, pinned: bool, hide_on_click_away: bool) -> Hiding {
+        Hiding {
+            hide_on_click_away,
+            pinned,
+            follow,
+        }
+    }
+
+    #[test]
+    fn a_desktop_change_is_followed_in_follow_and_is_what_it_was_in_stay() {
+        use Desktop::{Elsewhere, Here};
+        use KeyTaker::{OtherTerminal, OwnSurface, Unknown};
+        let losses = [
+            Lost::Key { to: OwnSurface },
+            Lost::Key { to: OtherTerminal },
+            Lost::Key { to: Unknown },
+            Lost::Active,
+        ];
+        for lost in losses {
+            // `follow`: the window on another desktop comes, whatever took the focus.
+            assert_eq!(
+                leaving(lost, hiding(true, false, true), Elsewhere),
+                Leaving::Follows,
+                "{lost:?}"
+            );
+            // A window something keeps in sight (a pin, `hide_on_click_away = false`) belongs to
+            // every desktop: it is never brought, so it never takes the keyboard.
+            for (pinned, click_away) in [(true, true), (false, false), (true, false)] {
+                assert_eq!(
+                    leaving(lost, hiding(true, pinned, click_away), Elsewhere),
+                    Leaving::Stays,
+                    "{lost:?}, pinned {pinned}, click away {click_away}"
+                );
+            }
+            // On the desktop it is on, `follow` is no different from `stay`: nothing to follow.
+            for (pinned, click_away) in [(false, true), (true, true), (false, false)] {
+                let hiding = hiding(true, pinned, click_away);
+                let expected = if hides_on(lost, hiding) {
+                    Leaving::Hides
+                } else {
+                    Leaving::Stays
+                };
+                assert_eq!(leaving(lost, hiding, Here), expected, "{lost:?} {hiding:?}");
+            }
+            // `stay`: the desktop is not asked; the answer is `hides_on`'s, as before.
+            for (pinned, click_away) in [(false, true), (true, true), (false, false)] {
+                let hiding = hiding(false, pinned, click_away);
+                let expected = if hides_on(lost, hiding) {
+                    Leaving::Hides
+                } else {
+                    Leaving::Stays
+                };
+                for desktop in [Here, Elsewhere] {
+                    assert_eq!(leaving(lost, hiding, desktop), expected);
+                }
+            }
+        }
+        assert!(follows(hiding(true, false, true), Elsewhere));
+        assert!(!follows(hiding(true, false, true), Here));
+        assert!(!follows(hiding(false, false, true), Elsewhere));
+    }
+
+    /// A window in sight and the person's desktops, to the two ways the application hears of a
+    /// desktop change (the window losing the key, and the system's notification), in the order
+    /// each test gives. Each handler is what the application's own does: it asks the rule, and
+    /// does what the rule says.
+    struct Stage {
+        hiding: Hiding,
+        /// The window is in sight.
+        shown: bool,
+        /// The window is on the desktop in front.
+        here: bool,
+        /// The window has the keyboard.
+        key: bool,
+        /// The application is the active one.
+        active: bool,
+        /// How many times the window was brought along.
+        brought: u32,
+    }
+
+    impl Stage {
+        fn new(hiding: Hiding) -> Self {
+            Stage {
+                hiding,
+                shown: true,
+                here: true,
+                key: true,
+                active: true,
+                brought: 0,
+            }
+        }
+
+        fn desktop(&self) -> Desktop {
+            // A window of every desktop is on the one in front, whichever it is.
+            if self.here || desktops(self.hiding) == Desktops::Every {
+                Desktop::Here
+            } else {
+                Desktop::Elsewhere
+            }
+        }
+
+        /// The person goes to another desktop: the window is not on it and is not key, and the
+        /// application is not the active one (another one is, there).
+        fn the_person_goes_elsewhere(&mut self) {
+            self.here = false;
+            self.key = false;
+            self.active = false;
+        }
+
+        /// The window lost the key (read a turn later, with the window not key):
+        /// `AppDelegate::hotkey_focus_settled`.
+        fn key_resigned(&mut self, lost: Lost) {
+            if !self.shown || self.key {
+                return;
+            }
+            self.act(leaving(lost, self.hiding, self.desktop()));
+        }
+
+        /// The application stopped being active: `AppDelegate::hotkey_active_lost`. It is
+        /// told a turn after the fact: an application that is the active one again by then
+        /// (the window was brought along, which activates it) lost nothing.
+        fn active_lost(&mut self) {
+            if self.shown && !self.active {
+                self.act(leaving(Lost::Active, self.hiding, self.desktop()));
+            }
+        }
+
+        /// The system said the desktop in front changed: `AppDelegate::hotkey_desktop_changed`.
+        fn notified(&mut self) {
+            if self.shown && follows(self.hiding, self.desktop()) {
+                self.act(Leaving::Follows);
+            }
+        }
+
+        fn act(&mut self, leaving: Leaving) {
+            match leaving {
+                Leaving::Hides => self.shown = false,
+                Leaving::Follows => {
+                    self.here = true;
+                    self.key = true;
+                    self.active = true;
+                    self.brought += 1;
+                }
+                Leaving::Stays => {}
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_follows_whichever_comes_first_the_resign_or_the_notification() {
+        // Every pair of what the application can hear, each with the application becoming
+        // inactive too (another application on the new desktop) or not.
+        let sequences: [&[&str]; 6] = [
+            &["resign", "notify"],
+            &["notify", "resign"],
+            &["inactive", "notify"],
+            &["notify", "inactive"],
+            &["resign", "inactive", "notify"],
+            &["notify", "resign", "inactive"],
+        ];
+        for pinned in [false, true] {
+            for sequence in sequences {
+                let mut stage = Stage::new(hiding(true, pinned, true));
+                stage.the_person_goes_elsewhere();
+                for step in sequence {
+                    match *step {
+                        "resign" => stage.key_resigned(Lost::Key {
+                            to: KeyTaker::Unknown,
+                        }),
+                        "inactive" => stage.active_lost(),
+                        _ => stage.notified(),
+                    }
+                }
+                if pinned {
+                    // A pinned window belongs to every desktop: in sight there, never brought,
+                    // and the keyboard stays with the application the person went to.
+                    assert!(
+                        stage.shown && stage.desktop() == Desktop::Here && !stage.key,
+                        "{sequence:?}, pinned: in sight, on the desktop, without the keyboard"
+                    );
+                    assert_eq!(stage.brought, 0, "{sequence:?}");
+                } else {
+                    assert!(
+                        stage.shown && stage.here && stage.key,
+                        "{sequence:?}: in sight, on the desktop, with the keyboard"
+                    );
+                    assert!(stage.brought >= 1, "{sequence:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_kept_in_sight_belongs_to_every_desktop_in_follow_and_to_its_own_in_stay() {
+        assert_eq!(desktops(hiding(true, false, true)), Desktops::Front);
+        assert_eq!(desktops(hiding(true, true, true)), Desktops::Every);
+        assert_eq!(desktops(hiding(true, false, false)), Desktops::Every);
+        for (pinned, click_away) in [(false, true), (true, true), (false, false)] {
+            assert_eq!(desktops(hiding(false, pinned, click_away)), Desktops::Its);
+        }
+    }
+
+    #[test]
+    fn an_application_switch_to_a_window_on_another_desktop_hides_the_window_and_it_stays_hidden() {
+        // Measured on a Mac: activating an application whose window is on another desktop
+        // deactivates this one while the desktop in front is still the old one; the desktop
+        // changes about 300 ms later. The window is where it was at the deactivation, so the
+        // focus leaving hides it, and the notice that follows finds nothing in sight to bring.
+        for pinned_or_kept in [false] {
+            for first in ["resign", "inactive"] {
+                let mut stage = Stage::new(hiding(true, pinned_or_kept, true));
+                // The application is switched, the desktop is not changed yet.
+                stage.key = false;
+                stage.active = false;
+                match first {
+                    "resign" => stage.key_resigned(Lost::Active),
+                    _ => stage.active_lost(),
+                }
+                assert!(
+                    !stage.shown,
+                    "{first}: hidden, as for any other application"
+                );
+                // The desktop changes.
+                stage.here = false;
+                stage.notified();
+                assert!(!stage.shown, "{first}: still hidden after the notice");
+                assert_eq!(stage.brought, 0, "{first}: nothing was brought");
+            }
+        }
+        // A pinned window, or one that is kept for good, is in sight on every desktop and is
+        // not hidden by the switch at all.
+        for (pinned, click_away) in [(true, true), (false, false)] {
+            let mut stage = Stage::new(hiding(true, pinned, click_away));
+            stage.key = false;
+            stage.active = false;
+            stage.active_lost();
+            stage.here = false;
+            stage.notified();
+            assert!(stage.shown && stage.brought == 0);
+        }
+        // `stay` hides it the same, and nothing comes along.
+        let mut stage = Stage::new(hiding(false, false, true));
+        stage.key = false;
+        stage.active = false;
+        stage.active_lost();
+        stage.here = false;
+        stage.notified();
+        assert!(!stage.shown && stage.brought == 0);
+    }
+
+    #[test]
+    fn in_stay_the_application_leaving_hides_in_either_order_and_nothing_comes_along() {
+        for sequence in [["resign", "inactive"], ["inactive", "resign"]] {
+            let mut stage = Stage::new(hiding(false, false, true));
+            stage.the_person_goes_elsewhere();
+            for step in sequence {
+                match step {
+                    "resign" => stage.key_resigned(Lost::Key {
+                        to: KeyTaker::Unknown,
+                    }),
+                    _ => stage.active_lost(),
+                }
+                // The notification between each: `stay` does not read it.
+                stage.notified();
+            }
+            assert!(!stage.shown, "{sequence:?}: hidden, as before");
+            assert_eq!(stage.brought, 0, "{sequence:?}");
+        }
+        // With no other application to become active, the window loses the key and nothing hides
+        // it: it stays on the desktop it was on.
+        let mut stage = Stage::new(hiding(false, false, true));
+        stage.the_person_goes_elsewhere();
+        stage.key_resigned(Lost::Key {
+            to: KeyTaker::Unknown,
+        });
+        stage.notified();
+        assert!(stage.shown && !stage.here && stage.brought == 0);
     }
 
     #[test]
