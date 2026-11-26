@@ -35,7 +35,7 @@ use bt_shell_common::hotkey::{
 use bt_shell_common::keys::us_code_of;
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSEventModifierFlags;
+use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
 };
@@ -270,6 +270,18 @@ impl Drop for Tap {
     }
 }
 
+/// When the event happened, in seconds since boot, as the live trigger's `NSEvent.timestamp`
+/// says it: the event's **own** time, which the system stamps when the key goes down, and not the
+/// time the callback runs (a main thread that was busy would run two taps one after the other and
+/// the count would see them quick). Only an event that cannot be an `NSEvent` has the time of
+/// the call.
+fn event_time(event: &CGEvent) -> f64 {
+    NSEvent::eventWithCGEvent(event).map_or_else(
+        || NSProcessInfo::processInfo().systemUptime(),
+        |event| event.timestamp(),
+    )
+}
+
 /// The listening tap's callback: what the event is to the count. Returns the event as it came
 /// (a listen-only tap's return is ignored). **Nothing here may unwind or take long**: the system
 /// disables a tap that is slow, so the application's own work is told to the main queue.
@@ -291,9 +303,7 @@ unsafe extern "C-unwind" fn tapped(
     } else if let Ok(mut count) = state.count.try_borrow_mut() {
         let hit = if kind == CGEventType::FlagsChanged {
             let flags = NSEventModifierFlags(CGEvent::flags(Some(event_ref)).0 as usize);
-            // The events' own clock: seconds since boot, as the live trigger's `NSEvent.timestamp`.
-            let at = NSProcessInfo::processInfo().systemUptime();
-            count.flags(at, arrange::held_keys(flags))
+            count.flags(event_time(event_ref), arrange::held_keys(flags))
         } else {
             count.interrupt();
             false
@@ -444,6 +454,27 @@ mod tests {
     use objc2_core_graphics::CGEventFlags;
 
     use super::*;
+
+    /// The time of a tapped event is the event's own, and not the time the callback runs (a main
+    /// thread that was busy would run two taps one after the other, and the count would see them
+    /// quick): what the event is stamped with is what the count is given, converted by the system
+    /// to seconds since boot, so twice the stamp is twice the time and a second call says the same.
+    /// Makes an event and posts nothing — **no test builds a tap**.
+    #[test]
+    fn the_time_of_an_event_is_its_own_stamp_in_seconds() {
+        let event = CGEvent::new(None).expect("an event");
+        CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
+        CGEvent::set_timestamp(Some(&event), 1_000_000_000);
+        let first = event_time(&event);
+        assert!(first > 0.0, "a stamp of its own: {first}");
+        assert_eq!(first, event_time(&event), "no clock of the call in it");
+        CGEvent::set_timestamp(Some(&event), 3_000_000_000);
+        let third = event_time(&event);
+        assert!(
+            (third - 3.0 * first).abs() < 1e-6 * third,
+            "{first} {third}"
+        );
+    }
 
     /// The tap's flags are read as the application's own modifier flags (`arrange::held_keys`,
     /// the one reading of them): the bits are the same ones, so a count made of the tap's events is

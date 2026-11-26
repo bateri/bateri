@@ -695,7 +695,7 @@ shortcut = ""
 position = "top"
 # How far in from the edge, in percent of the screen (10 to 100): its height at the top
 # and at the bottom and in the center, its width at the left and at the right. Dragging
-# the opposite edge writes it.
+# an edge of the window writes it and span.
 depth = 50
 # How far along the edge, in percent of the screen (10 to 100): its width at the top,
 # at the bottom and in the center, its height at the left and at the right.
@@ -3301,6 +3301,13 @@ bare letter) is refused with the reason, and macOS refusing the keys is said und
   you unpin it or quit; `hide_on_click_away = false` is the same for good.
 - **The last tab closed** closes the window; the next tap opens a fresh one in your home folder. The window is
   saved with the session and comes back hidden.
+- **From outside bateri.** `bateri hotkey [toggle|show|hide|pin|unpin]` does what the shortcut does (none is
+  `toggle`; `pin` shows the window and keeps it in front until `unpin`), from a terminal of this computer or from no
+  terminal at all, so a launcher or a shortcut of another tool can run it by its full path,
+  `~/.local/share/bateri/shell/bin/bateri hotkey`. Two limits: that folder is not on your `PATH`, and it is not
+  written while `[commands] level` is `"off"`, which refuses the command too. A terminal on a server is refused: the
+  screen is this computer's. `bateri ls` marks the window: `(hotkey)` after its number, and `"hotkey": true` in
+  `--json`, on that window only.
 
 ## Themes
 

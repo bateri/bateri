@@ -18,6 +18,7 @@ You run in a pane of bateri, a terminal app. The `bateri` command opens and arra
 - "tell me when it is done": `bateri wait PANE`.
 - "what does the page say", "click that", "go to that address", for a web page a program shows in a pane: `bateri browser text PANE` (also `snapshot`, which names elements as `[12]`, and `shot`, a picture), `bateri browser click PANE [12]`, `type PANE TEXT --into [12]`, `open PANE URL`, `back`, `reload`, `console` (read only, from its first request on: reload the page to see its log from the start); `clear PANE --cache` empties its cache, `clear PANE --site` its site's data and signs the user out: ask first. `ls` lists the pane's browsers, and `--element ID` picks one of several. A long text or a picture is a file: the command prints where.
 - close, rename, focus, zoom, swap, move, resize, minimize: `bateri close`, `rename`, `focus`, `zoom`, `swap`, `move`, `resize`, `minimize`.
+- "show my hotkey window", "hide it", "keep it up": `bateri hotkey show`, `hide`, `toggle`, `pin`, `unpin`. Only when asked: never on your own.
 
 "Here" and "beside you" mean your own pane. Never pick another pane for them. If your own pane floats, a plain `split` beside it is refused (exit 64): use `--float` or `bateri tab`.
 

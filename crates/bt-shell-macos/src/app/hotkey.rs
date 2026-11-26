@@ -9,6 +9,7 @@
 //! (the panel, the slide, what it gives back) is [`crate::window`]'s.
 
 use bt_core::{HOTKEY_DEFAULT_NAME, HotkeySpaces, HotkeyWindowSettings, SettingsEdit};
+use bt_shell_common::agent::message::HotkeyAction;
 use bt_shell_common::hotkey::{
     self as rules, Candidate, GlobalKeys as _, KeyTaker, Lost, Presence, Step, Verb,
 };
@@ -166,10 +167,21 @@ impl AppDelegate {
 
     /// **The one entrance of the hotkey window**: the shortcut, the double tap, the menu, the
     /// palette and `bateri hotkey` all come here. What happens to the window is
-    /// [`rules::decide`]'s; the step taken is returned.
+    /// [`rules::decide`]'s; the step taken is returned. What could not be done is said on the
+    /// error output: the person who pressed a key has nobody to ask ([`Self::try_toggle_hotkey`]
+    /// is for the one who does, `bateri hotkey`).
     pub(crate) fn toggle_hotkey(&self, verb: Verb) -> Step {
+        self.try_toggle_hotkey(verb).unwrap_or_else(|e| {
+            eprintln!("bateri: could not show the hotkey window: {e}");
+            Step::Nothing
+        })
+    }
+
+    /// [`Self::toggle_hotkey`], with the reason the window could not be shown (no screen, a
+    /// window that could not be built) for a caller that answers someone.
+    pub(crate) fn try_toggle_hotkey(&self, verb: Verb) -> Result<Step, String> {
         if self.is_terminating() {
-            return Step::Nothing;
+            return Ok(Step::Nothing);
         }
         let window = self.hotkey_window();
         let presence = match &window {
@@ -181,17 +193,13 @@ impl AppDelegate {
         };
         let step = rules::decide(verb, presence);
         match (step, window) {
-            (Step::Open, _) => {
-                if let Err(e) = self.open_hotkey_window() {
-                    eprintln!("bateri: could not open the hotkey window: {e}");
-                }
-            }
-            (Step::Show, Some(window)) => self.slide_in_hotkey(&window),
+            (Step::Open, _) => self.open_hotkey_window()?,
+            (Step::Show, Some(window)) => self.slide_in_hotkey(&window)?,
             (Step::Raise, Some(window)) => window.raise_hotkey(),
             (Step::Hide, Some(window)) => self.slide_out_hotkey(&window, true),
             _ => {}
         }
-        step
+        Ok(step)
     }
 
     /// A window that something asks to bring forward — ⌘P and the palette, `bateri focus`,
@@ -205,24 +213,29 @@ impl AppDelegate {
             Presence::Hidden
         };
         match rules::decide(Verb::Show, presence) {
-            Step::Show => self.slide_in_hotkey(window),
+            Step::Show => {
+                if let Err(e) = self.slide_in_hotkey(window) {
+                    eprintln!("bateri: could not show the hotkey window: {e}");
+                }
+            }
             Step::Raise => window.raise_hotkey(),
             _ => {}
         }
     }
 
     /// The window slides in on the screen the settings and the pointer choose.
-    fn slide_in_hotkey(&self, window: &TerminalWindow) {
+    fn slide_in_hotkey(&self, window: &TerminalWindow) -> Result<(), String> {
         let settings = self.settings().hotkey_window;
-        let Some(slide) = self.hotkey_slide(&settings) else {
-            return;
-        };
+        let slide = self
+            .hotkey_slide(&settings)
+            .ok_or_else(|| "there is no screen".to_owned())?;
         window.slide_in(
             &slide,
             settings.spaces == HotkeySpaces::Follow,
             self.hotkey_animates(&settings),
             frontmost_other(self.mtm()),
         );
+        Ok(())
     }
 
     /// The window slides away. `give_back`: the application the person was in comes to the
@@ -483,6 +496,31 @@ impl AppDelegate {
 
     // -----------------------------------------------------------------------------------------
     // The pin and the settings.
+
+    /// `bateri hotkey ACTION`, from a terminal or from none: the window as the action says, through
+    /// the one entrance ([`Self::toggle_hotkey`]). `pin` shows the window too — a pin on a window
+    /// that is not there would be nothing to see — and keeps it until `unpin` or the quit. The
+    /// answer is the window that could not be shown, when it could not: the one who asked is a
+    /// program that would take the window for there.
+    pub(crate) fn hotkey_asked(&self, action: HotkeyAction) -> Result<(), String> {
+        match action {
+            HotkeyAction::Toggle => {
+                self.try_toggle_hotkey(Verb::Toggle)?;
+            }
+            HotkeyAction::Show => {
+                self.try_toggle_hotkey(Verb::Show)?;
+            }
+            HotkeyAction::Hide => {
+                self.try_toggle_hotkey(Verb::Hide)?;
+            }
+            HotkeyAction::Pin => {
+                self.try_toggle_hotkey(Verb::Show)?;
+                self.ivars().hotkey_pinned.set(true);
+            }
+            HotkeyAction::Unpin => self.ivars().hotkey_pinned.set(false),
+        }
+        Ok(())
+    }
 
     /// Window ▸ Pin Hotkey Window: toggled, in memory.
     pub(crate) fn toggle_hotkey_pin(&self) {
@@ -754,10 +792,11 @@ mod tests {
         assert!(hook.contains("self.is_hotkey()") && hook.contains("hotkey_resized("));
     }
 
-    /// **No test, gate, smoke or agent's copy registers a key for the whole system** (Karar 13):
-    /// the real keys are built in one place, after the rule that says who owns them, and the
+    /// **No test, gate, smoke or agent's copy registers a key for the whole system**: the real
+    /// keys are built in one place, after the rule that says who owns them, and the
     /// application's other modules never name them. A source scan: building them would steal the
-    /// keystroke of the Mac the gate runs on.
+    /// keystroke of the Mac the gate runs on, and a copy of the application beside the person's
+    /// would hold the same keys.
     #[test]
     fn the_real_keys_are_built_in_one_place_and_only_by_the_owner() {
         let hotkey = include_str!("hotkey.rs");
@@ -806,6 +845,22 @@ mod tests {
         let app = include_str!("../app.rs");
         assert!(app.contains("self.apply_global_keys(&new);"));
         assert!(app.contains("self.apply_global_keys(&self.settings());"));
+        // A launch that gave the session up takes the lock later, and asks again from there.
+        assert!(
+            body_of(app, "    pub(crate) fn open_given_up_windows(", "    ")
+                .contains("self.apply_global_keys(&self.settings());")
+        );
+    }
+
+    /// A command whose double press is the hotkey window's own is not run by it: the tap that
+    /// shows the window hears the two taps first, and `held_by_hotkey` says the
+    /// menu never gets them.
+    #[test]
+    fn a_double_press_the_hotkey_window_holds_runs_no_command() {
+        let app = include_str!("../app.rs");
+        let body = body_of(app, "    pub(crate) fn double_pressed(", "    ");
+        assert!(body.contains("held_by_hotkey()"));
+        assert!(body.contains("owner_of_twice("));
     }
 
     /// One entrance for every trigger: the menu's item, the shortcut and the command call the
@@ -818,8 +873,25 @@ mod tests {
                 .contains("self.toggle_hotkey(")
         );
         let hotkey = include_str!("hotkey.rs");
-        let toggle = body_of(hotkey, "    pub(crate) fn toggle_hotkey(", "    ");
+        let toggle = body_of(hotkey, "    pub(crate) fn try_toggle_hotkey(", "    ");
         assert!(toggle.contains("rules::decide("));
+        assert!(
+            body_of(hotkey, "    pub(crate) fn toggle_hotkey(", "    ")
+                .contains("self.try_toggle_hotkey(")
+        );
+        // `bateri hotkey` is one more of them, whatever the action: shown, hidden or toggled
+        // by the entrance; pinned or let go in the one place the pin is kept.
+        let asked = body_of(hotkey, "    pub(crate) fn hotkey_asked(", "    ");
+        assert_eq!(asked.matches("self.try_toggle_hotkey(").count(), 4);
+        assert_eq!(asked.matches("hotkey_pinned.set(").count(), 2);
+        assert!(
+            body_of(
+                include_str!("../agent.rs"),
+                "        Answer::Hotkey(action) => {",
+                "        "
+            )
+            .contains("app.hotkey_asked(action)")
+        );
         // The focus leaving asks the rules too, and what took the key is settled a turn later.
         assert!(
             body_of(hotkey, "    fn hotkey_focus_settled(", "    ").contains("rules::hides_on(")

@@ -278,6 +278,18 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         },
         Answer::Notify(text) => notify(app, letter, &server, from.as_deref(), &text),
         Answer::Message(text) => message(app, letter, &server, from.as_deref(), &text),
+        // `bateri hotkey`: a window on the person's screen is shown, hidden or pinned; nothing is
+        // read from a pane, and what was done is the whole answer.
+        Answer::Hotkey(action) => {
+            let reply = match app.hotkey_asked(action) {
+                Ok(()) => Reply::Done,
+                Err(why) => Reply::Failed(Failure::new(
+                    Kind::Failed,
+                    format!("the hotkey window could not be shown: {why}"),
+                )),
+            };
+            letter.answer(reply.encode().into_bytes());
+        }
         Answer::Haptic(name) => play_ready(app, letter, Ready::Haptic, name.as_deref()),
         Answer::Sound(name) => play_ready(app, letter, Ready::Sound, name.as_deref()),
         Answer::Arrange(request) => {
@@ -1446,6 +1458,7 @@ fn windows_of(
         windows.push(Window {
             id: window.number(),
             visible: window.window_visible(),
+            hotkey: window.is_hotkey(),
             groups: groups
                 .groups()
                 .iter()

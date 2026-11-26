@@ -49,7 +49,11 @@ pub struct Screen {
 ///
 /// A pointer on no screen, or none given, is the first screen: the screen the pointer was on may
 /// have been unplugged, and the window must still come ([`crate::restore`] clamps a saved frame
-/// the same way). The edges are half open, so a pointer between two screens is on exactly one.
+/// the same way). A pointer between two screens is on exactly one: the edges are half open, and on
+/// the vertical axis the top edge is the one that belongs to the screen (the pointer's `y` counts
+/// up from the bottom and is a screen's `maxY` on its top row, as `NSMouseInRect` has it); a
+/// pointer on an outer edge that no screen has by that rule (the bottom row) is on the screen
+/// whose closed frame it is in.
 pub fn screen_index(
     screens: &[Screen],
     policy: HotkeyScreen,
@@ -65,12 +69,16 @@ pub fn screen_index(
         return Some(0);
     };
     let within = |frame: &Frame| {
-        x >= frame.x && x < frame.x + frame.width && y >= frame.y && y < frame.y + frame.height
+        x >= frame.x && x < frame.x + frame.width && y > frame.y && y <= frame.y + frame.height
+    };
+    let touching = |frame: &Frame| {
+        x >= frame.x && x <= frame.x + frame.width && y >= frame.y && y <= frame.y + frame.height
     };
     Some(
         screens
             .iter()
             .position(|screen| within(&screen.frame))
+            .or_else(|| screens.iter().position(|screen| touching(&screen.frame)))
             .unwrap_or(0),
     )
 }
@@ -746,6 +754,12 @@ mod tests {
         // The seam is on exactly one screen, and the menu bar is still its screen's.
         assert_eq!(pick(HotkeyScreen::Pointer, Some((1440.0, 100.0))), Some(1));
         assert_eq!(pick(HotkeyScreen::Pointer, Some((1439.9, 899.9))), Some(0));
+        // The top row of a screen reads `maxY` (the pointer's `y` counts up from the bottom), the
+        // bottom row of the one at the edge reads `minY`: both are on their screen.
+        assert_eq!(pick(HotkeyScreen::Pointer, Some((2000.0, 900.0))), Some(1));
+        assert_eq!(pick(HotkeyScreen::Pointer, Some((2000.0, -180.0))), Some(1));
+        assert_eq!(pick(HotkeyScreen::Pointer, Some((300.0, 900.0))), Some(0));
+        assert_eq!(pick(HotkeyScreen::Pointer, Some((3360.0, 300.0))), Some(1));
         // A screen that was unplugged, a pointer nobody knows.
         assert_eq!(pick(HotkeyScreen::Pointer, Some((9000.0, 9000.0))), Some(0));
         assert_eq!(pick(HotkeyScreen::Pointer, None), Some(0));

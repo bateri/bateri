@@ -33,7 +33,7 @@ impl From<Mods> for Modifiers {
     }
 }
 
-/// Function keys F1 to F12 are `U+F704` to `U+F70F` (`NSF1FunctionKey` …).
+/// Function keys F1 to F20 are `U+F704` to `U+F717` (`NSF1FunctionKey` …).
 const FUNCTION_KEY_BASE: u32 = 0xF703;
 
 /// The character a menu item spells a named key as.

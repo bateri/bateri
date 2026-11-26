@@ -5124,6 +5124,9 @@ impl AppDelegate {
             eprintln!("bateri: the saved windows could not be opened");
         }
         self.show_unshown_when_ready();
+        // The session lock was not held when the launch asked who owns the system's key
+        // ([`AppDelegate::apply_global_keys`]); it is now, and the key is this instance's.
+        self.apply_global_keys(&self.settings());
         // It is a launch like the others: what it opened settles, or the next one reads less.
         self.settle_later();
     }
@@ -6311,7 +6314,9 @@ impl AppDelegate {
     /// (`crate::menu::keys::run`). A command shares no key with the menu, so the first in the
     /// menu's order runs, as for a chord two commands share. Nothing runs while a field of
     /// Settings ▸ Keyboard listens — it hears the double press as one to give — and fn never
-    /// does: macOS keeps it.
+    /// does: macOS keeps it. A command whose double press is the Hotkey Window's does not run
+    /// either ([`Resolved::held_by_hotkey`]): the tap that shows the window hears it first, and
+    /// the same two taps would also run the command.
     pub(crate) fn double_pressed(&self, tapped: Tapped) {
         let Tapped::Modifier(modifier) = tapped else {
             return;
@@ -6319,7 +6324,13 @@ impl AppDelegate {
         if crate::settings_window::is_recording(self.mtm()) {
             return;
         }
-        if let Some(command) = self.keys().owner_of_twice(modifier, "") {
+        let keys = self.keys();
+        if let Some(command) = keys.owner_of_twice(modifier, "")
+            && !keys
+                .held_by_hotkey()
+                .iter()
+                .any(|held| held.name == command.name)
+        {
             crate::menu::keys::run(self.mtm(), command.id);
         }
     }

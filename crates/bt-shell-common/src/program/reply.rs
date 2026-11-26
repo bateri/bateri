@@ -159,7 +159,8 @@ mod tests {
             assert!(!body.contains(".local/share"), "a place in the text");
             // Only its description is in every session's context; the body is read when the
             // skill is used, and the files go over the connection, not in the bootstrap's one word.
-            assert!(skill.len() < 12 * 1024, "{} bytes", skill.len());
+            // (13 KiB since `bateri hotkey`: the body had 9 bytes under 12 KiB.)
+            assert!(skill.len() < 13 * 1024, "{} bytes", skill.len());
         }
     }
 

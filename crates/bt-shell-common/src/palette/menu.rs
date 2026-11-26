@@ -638,14 +638,14 @@ pub fn shortcut(key: &str, modifiers: Modifiers) -> Option<String> {
     Some(out)
 }
 
-/// The number of a function key (F1 to F12) a menu key equivalent names: AppKit spells them
-/// U+F704 to U+F70F.
+/// The number of a function key (F1 to F20) a menu key equivalent names: AppKit spells them
+/// U+F704 to U+F717.
 fn function_key(key: &str) -> Option<u32> {
     let mut chars = key.chars();
     let (first, None) = (chars.next()?, chars.next()) else {
         return None;
     };
-    (0xF704..=0xF70F)
+    (0xF704..=0xF717)
         .contains(&u32::from(first))
         .then(|| u32::from(first) - 0xF703)
 }
@@ -1142,6 +1142,12 @@ mod tests {
         assert_eq!(glyphs("\r", with(&['s'])).as_deref(), Some("⇧⌘↩"));
         assert_eq!(glyphs(",", CMD).as_deref(), Some("⌘,"));
         assert_eq!(glyphs("0", CMD).as_deref(), Some("⌘0"));
+        // A function key, F1 to F20 (`[keys]` takes them all), and the one after the last is no key.
+        assert_eq!(glyphs("\u{F704}", CMD).as_deref(), Some("⌘F1"));
+        assert_eq!(glyphs("\u{F70F}", CMD).as_deref(), Some("⌘F12"));
+        assert_eq!(glyphs("\u{F710}", CMD).as_deref(), Some("⌘F13"));
+        assert_eq!(glyphs("\u{F717}", CMD).as_deref(), Some("⌘F20"));
+        assert_eq!(glyphs("\u{F718}", CMD), None);
         // No key: no shortcut, whatever the modifiers; no modifier: not a shortcut either.
         assert_eq!(glyphs("", CMD), None);
         assert_eq!(glyphs("d", Modifiers::default()), None);

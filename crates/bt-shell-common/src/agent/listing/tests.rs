@@ -221,6 +221,7 @@ fn scene() -> Scene {
             Window {
                 id: 1,
                 visible: true,
+                hotkey: false,
                 groups: vec![
                     Group {
                         id: 1,
@@ -236,12 +237,14 @@ fn scene() -> Scene {
             Window {
                 id: 2,
                 visible: false,
+                hotkey: false,
                 groups: Vec::new(),
                 tabs: vec![behind],
             },
             Window {
                 id: 5,
                 visible: true,
+                hotkey: false,
                 groups: Vec::new(),
                 tabs: vec![elsewhere],
             },
@@ -318,6 +321,7 @@ fn a_tab_with_a_label_and_a_title_says_both_and_a_pane_its_id_and_label() {
         windows: Some(vec![Window {
             id: 1,
             visible: true,
+            hotkey: false,
             groups: vec![Group {
                 id: 1,
                 label: "api".to_owned(),
@@ -362,6 +366,7 @@ fn tabs_of_one_group_stand_together_and_a_tab_in_none_stands_alone() {
         windows: Some(vec![Window {
             id: 2,
             visible: true,
+            hotkey: false,
             groups: vec![
                 Group {
                     id: 1,
@@ -525,6 +530,7 @@ fn a_terminal_on_screen_is_in_a_visible_window_in_the_selected_tab_and_not_behin
             windows: Some(vec![Window {
                 id: 1,
                 visible,
+                hotkey: false,
                 groups: Vec::new(),
                 tabs: vec![Tab {
                     selected,
@@ -1072,6 +1078,7 @@ fn the_json_of_a_small_scene_is_this_exactly() {
         windows: Some(vec![Window {
             id: 1,
             visible: true,
+            hotkey: false,
             groups: vec![Group {
                 id: 1,
                 label: "api".to_owned(),
@@ -1110,6 +1117,56 @@ fn the_json_of_a_small_scene_is_this_exactly() {
     );
 }
 
+/// The hotkey window is marked, and only it: the text says `(hotkey)` after its number and the JSON
+/// has a member `"hotkey": true` **after** the ones that were always there, so that every other
+/// window — and a reader that knows the old shape — gets the same bytes it always did.
+#[test]
+fn the_hotkey_window_is_marked_in_the_text_and_the_json_and_no_other_window_is() {
+    let scene = |hotkey: bool| Scene {
+        caller: None,
+        typing: None,
+        windows: Some(vec![Window {
+            id: 2,
+            visible: false,
+            hotkey,
+            groups: Vec::new(),
+            tabs: vec![tab(
+                3,
+                None,
+                None,
+                &pair(Axis::Vertical, 0.5, leaf(1), leaf(2)),
+                &[(1, "p4"), (2, "p5")],
+            )],
+        }]),
+        terminals: Vec::new(),
+    };
+    let marked = scene(true);
+    let plain = scene(false);
+    // The text: after the number, after `(hidden)` when it is also that.
+    assert!(
+        marked
+            .text(NOW)
+            .contains("window id:w2 (hidden) (hotkey)\n"),
+        "{}",
+        marked.text(NOW)
+    );
+    assert!(!plain.text(NOW).contains("hotkey"), "{}", plain.text(NOW));
+    // The JSON: the member is the window's last, and a window that is not it has none; the rest
+    // of the bytes are the same.
+    let (with, without) = (marked.json(), plain.json());
+    assert!(with.contains("],\"hotkey\":true}"), "{with}");
+    assert!(!without.contains("hotkey"), "{without}");
+    assert_eq!(with.replacen(",\"hotkey\":true", "", 1), without);
+    let parsed = Json::parse(&with);
+    let keys = parsed.get("windows").items()[0].keys();
+    assert_eq!(keys, ["id", "visible", "groups", "tabs", "hotkey"]);
+    let parsed = Json::parse(&without);
+    assert_eq!(
+        parsed.get("windows").items()[0].keys(),
+        ["id", "visible", "groups", "tabs"]
+    );
+}
+
 /// A scene of one tab that holds this server's `p4` and, at a level that sees every machine,
 /// the panes of others: an agent's `p9` on `prod`, a terminal nobody numbered there, one with no
 /// name at all.
@@ -1141,6 +1198,7 @@ fn seen_by_screen() -> Scene {
         windows: Some(vec![Window {
             id: 1,
             visible: true,
+            hotkey: false,
             groups: Vec::new(),
             tabs: vec![Tab {
                 selected: true,
@@ -1282,6 +1340,7 @@ fn floated(cards: Vec<Card>) -> Scene {
         windows: Some(vec![Window {
             id: 1,
             visible: true,
+            hotkey: false,
             groups: Vec::new(),
             tabs: vec![Tab {
                 selected: true,

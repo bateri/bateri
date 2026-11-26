@@ -47,7 +47,9 @@ use kablo_bateri::package::Package;
 use kablo_proto::v1::{State, Status};
 
 use super::level::{self, Act, Panes, Verdict, Why};
-use super::message::{Arrange, Failure, Format, Kind, Place, Placed, Relay, Reply, Request};
+use super::message::{
+    Arrange, Failure, Format, HotkeyAction, Kind, Place, Placed, Relay, Reply, Request,
+};
 use super::notes::Note;
 use super::place::Landed;
 use super::view;
@@ -146,6 +148,11 @@ pub enum Answer {
     /// them on its settings ([`crate::config_command`]) and answers what to print and the status.
     /// A server never gets this far: the settings are not its own.
     Config(Vec<String>),
+    /// `hotkey`: show, hide, toggle or pin the hotkey window of the person at this computer. It
+    /// reads and writes no pane, only shows or hides a window on the person's screen, so — like
+    /// `notify`, `haptic` and `sound` — the level has only judged that it is not `off`; a terminal
+    /// of a server never gets this far (the screen is this computer's), as for `config`.
+    Hotkey(HotkeyAction),
     /// `message`: the last thing an agent said. The shell keeps it for the pane the letter came
     /// from, to be shown beside the pane's tab, and answers; it asks nothing and starts nothing,
     /// so the level has only judged that it is not `off`.
@@ -240,6 +247,16 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
         Ok(Request::Message(text)) => Answer::Message(text),
         Ok(Request::Haptic(name)) => Answer::Haptic(name),
         Ok(Request::Sound(name)) => Answer::Sound(name),
+        Ok(Request::Hotkey(action)) if crate::kablo::local::is_account(&server.account) => {
+            Answer::Hotkey(action)
+        }
+        Ok(Request::Hotkey(_)) => Answer::Reply(Reply::Failed(Failure::new(
+            Kind::Refused,
+            format!(
+                "the hotkey window is this computer's: a terminal on {} cannot ask for it",
+                server.host_name().unwrap_or("a server")
+            ),
+        ))),
         Ok(Request::Arrange(arrange)) => Answer::Arrange(arrange),
         // The machine that asks is no other machine: nothing is reached, and the answer is `here`,
         // which needs no level (the command does it itself, as it does what is its own).
@@ -611,6 +628,53 @@ mod tests {
             argv: Vec::new(),
             level: CommandLevel::Own,
         }
+    }
+
+    /// `bateri hotkey` is this computer's, like `config`: a terminal of this computer (and a
+    /// process of no terminal, which the app takes for this computer's) is told to the shell at
+    /// every level but `off`, with the action as it was written, and nobody is asked; a terminal of
+    /// a server is refused whatever its level, and no pane is judged (a pane that does not exist
+    /// has no say in showing a window).
+    #[test]
+    fn hotkey_is_for_the_terminals_of_this_computer_and_no_pane_is_judged() {
+        for level in [CommandLevel::Own, CommandLevel::Screen, CommandLevel::Full] {
+            let here = Server {
+                level,
+                ..this_computer()
+            };
+            for action in HotkeyAction::ALL {
+                let ask = format!("bateri 2\nhotkey\naction {}\n", action.word());
+                for from in [Some("p3"), Some("p99"), None] {
+                    assert_eq!(
+                        serve(&here, from, &ask, &mut Pretend::default()),
+                        Answer::Hotkey(action),
+                        "{level:?} {action:?} {from:?}"
+                    );
+                }
+            }
+            let there = Server { level, ..server() };
+            let Answer::Reply(Reply::Failed(failure)) = serve(
+                &there,
+                Some("p3"),
+                "bateri 2\nhotkey\naction show\n",
+                &mut Pretend::default(),
+            ) else {
+                panic!("{level:?}: a server is not served");
+            };
+            assert_eq!(failure.kind, Kind::Refused);
+            assert!(failure.text.contains("this computer's"), "{}", failure.text);
+            assert!(failure.text.contains("rasp"), "{}", failure.text);
+        }
+        // An action nobody has is the command's usage, from this computer too.
+        let Answer::Reply(Reply::Failed(failure)) = serve(
+            &this_computer(),
+            None,
+            "bateri 2\nhotkey\naction fold\n",
+            &mut Pretend::default(),
+        ) else {
+            panic!("an unknown action is refused");
+        };
+        assert_eq!(failure.kind, Kind::Usage);
     }
 
     /// A machine's questions about its programs go to the shell to be answered on a thread of its
@@ -1405,6 +1469,7 @@ mod tests {
             "bateri 2\nclose\nterminal p7\n".to_owned(),
             "bateri 2\nnotify\ntext hi\n".to_owned(),
             "bateri 2\nmessage\ntext hi\n".to_owned(),
+            "bateri 2\nhotkey\naction toggle\n".to_owned(),
             "not a message".to_owned(),
         ] {
             let Answer::Reply(Reply::Failed(failure)) = serve(&server, Some("p4"), &text, &mut app)

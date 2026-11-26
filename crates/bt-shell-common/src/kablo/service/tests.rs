@@ -6884,11 +6884,19 @@ fn the_time_a_pane_may_take_nothing_is_well_under_the_time_the_relay_waits_for_a
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest.join("../../../kablo/dist"));
     match crate::kablo::install::Bundle::open(&dist) {
-        Ok(bundle) => assert_eq!(
-            bundle.version(),
-            source_version,
-            "the relay the heavy tests run is not the one whose STALL_LIMIT was read"
-        ),
+        // A release of kablo is its source's version. A development release, which `make
+        // kablo-bump` builds at a commit that is not one (`make dist`), is that version, `-dev`
+        // and, after a `+`, the commit it was built at: the one this tree pins.
+        Ok(bundle) => {
+            let version = bundle.version();
+            let development = version
+                .strip_prefix(&format!("{source_version}-dev+"))
+                .is_some_and(|built| !built.is_empty() && rev.starts_with(built));
+            assert!(
+                version == source_version || development,
+                "the relay the heavy tests run ({version}) is not the one whose STALL_LIMIT was read ({source_version} at {rev})"
+            );
+        }
         Err(_) => eprintln!(
             "NOT COMPARED: no kablo release to run ({}); the limit was read from the source of {source_version}",
             dist.display()

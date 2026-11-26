@@ -245,6 +245,10 @@ pub struct Window {
     pub id: u64,
     /// It can be seen: not minimized, not on another space.
     pub visible: bool,
+    /// It is the hotkey window. The text says `(hotkey)` after its number and the JSON gives it
+    /// the member `"hotkey": true`, at the end; **every other window says nothing**, so a reader
+    /// that knows the old shape reads the same bytes.
+    pub hotkey: bool,
     /// The groups of its strip, which [`Tab::group`] names.
     pub groups: Vec<Group>,
     /// In the order of the tab strip.
@@ -758,7 +762,11 @@ impl Scene {
             }
             self.json_tab(out, window, tab);
         }
-        out.push_str("]}");
+        out.push(']');
+        if window.hotkey {
+            out.push_str(",\"hotkey\":true");
+        }
+        out.push('}');
     }
 
     fn json_tab(&self, out: &mut String, window: &Window, tab: &Tab) {
@@ -958,6 +966,9 @@ fn write_window(out: &mut String, window: &Window, notes: &PaneNotes<'_>) {
     let _ = write!(out, "window id:{}", named(IdKind::Window, window.id));
     if !window.visible {
         out.push_str(" (hidden)");
+    }
+    if window.hotkey {
+        out.push_str(" (hotkey)");
     }
     out.push('\n');
     let mut at = 0;

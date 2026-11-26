@@ -2018,8 +2018,8 @@ pub enum SettingsEdit {
     RemoteStats(RemoteStatsMode),
     /// Seconds.
     StatsInterval(u8),
-    /// `[hotkey_window] depth`, in percent of the screen: the drag of the edge opposite the one
-    /// the window comes from ([`HOTKEY_SIZE_RANGE`]).
+    /// `[hotkey_window] depth`, in percent of the screen: a drag of any edge of the window writes
+    /// it, and `span` with it ([`HOTKEY_SIZE_RANGE`]).
     HotkeyDepth(u8),
     /// `[hotkey_window] span`, in percent of the screen ([`HOTKEY_SIZE_RANGE`]).
     HotkeySpan(u8),
@@ -2711,7 +2711,7 @@ shortcut = ""
 position = "top"
 # How far in from the edge, in percent of the screen (10 to 100): its height at the top
 # and at the bottom and in the center, its width at the left and at the right. Dragging
-# the opposite edge writes it.
+# an edge of the window writes it and span.
 depth = 50
 # How far along the edge, in percent of the screen (10 to 100): its width at the top,
 # at the bottom and in the center, its height at the left and at the right.
