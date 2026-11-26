@@ -292,6 +292,7 @@ impl TerminalWindow {
         state.turn.set(turn);
         state.shown.set(true);
         state.handed.set(None);
+        self.settings_level_changed();
         if previous.is_some() {
             state.previous.replace(previous);
         }
@@ -368,6 +369,7 @@ impl TerminalWindow {
         if !state.shown.replace(false) {
             return;
         }
+        self.settings_level_changed();
         let turn = state.turn.get() + 1;
         state.turn.set(turn);
         // The record of where the person was is let go whatever the hide was; the application
@@ -507,6 +509,14 @@ impl TerminalWindow {
         NSApplication::sharedApplication(self.mtm()).activate();
     }
 
+    /// The window came into sight or went out of it: the Settings window's level follows
+    /// ([`AppDelegate::sync_settings_level`]).
+    fn settings_level_changed(&self) {
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.sync_settings_level();
+        }
+    }
+
     /// The window lets go of the application it was to give the front back to (its only tab left
     /// for another window of bateri: the person goes there).
     pub(crate) fn hotkey_forget_previous(&self) {
@@ -525,6 +535,7 @@ impl TerminalWindow {
         state.turn.set(state.turn.get() + 1);
         let was_shown = state.shown.replace(false);
         let previous = state.previous.take();
+        self.settings_level_changed();
         // The pin was this window's: the next one, fresh, is not pinned.
         if let Some(app) = app::delegate(self.mtm()) {
             app.hotkey_window_ended();

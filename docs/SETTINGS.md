@@ -3314,6 +3314,9 @@ change the settings file could not take.
   `hide_on_click_away = false` — is on every desktop instead, and the keyboard stays with the application you go
   to: what you type there does not land in the terminal. The application you were in is forgotten when the window
   comes along (it is on the desktop you left), so the next tap brings nobody forward. With `"stay"` the window stays on its desktop, and goes away when another application comes to the front, as it does anywhere.
+- **Settings over the window.** While the window is in sight, bateri's Settings window stands over it, opened then or
+  before, so the Hotkey Window page changes the window you can see; it is an ordinary window again once the window
+  is gone.
 - **The last tab closed** closes the window; the next tap opens a fresh one in your home folder, not pinned. The
   window is saved with the session and comes back hidden. **Move Tab to New Window** is open for the window's only
   tab, unlike a normal window's: the tab (with what runs in it) goes to a normal window of the size ⌘N gives, and the

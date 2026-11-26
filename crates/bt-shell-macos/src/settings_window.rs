@@ -44,16 +44,16 @@ use objc2::{
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSAppearanceCustomization, NSApplication,
     NSBackingStoreType, NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl,
-    NSControlTextEditingDelegate, NSEventType, NSFont, NSFontAttributeName, NSFontDescriptor,
-    NSImage, NSImageScaling, NSImageSymbolConfiguration, NSImageView, NSLayoutAttribute,
-    NSLayoutConstraint, NSLineBreakMode, NSMenuItem, NSModalResponse, NSModalResponseOK,
-    NSOpenPanel, NSPopUpButton, NSScrollView, NSSearchField, NSSegmentSwitchTracking,
-    NSSegmentedControl, NSSlider, NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper,
-    NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTextFieldDelegate,
-    NSTitlePosition, NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView,
-    NSViewController, NSWindow, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSControlTextEditingDelegate, NSEventType, NSFloatingWindowLevel, NSFont, NSFontAttributeName,
+    NSFontDescriptor, NSImage, NSImageScaling, NSImageSymbolConfiguration, NSImageView,
+    NSLayoutAttribute, NSLayoutConstraint, NSLineBreakMode, NSMenuItem, NSModalResponse,
+    NSModalResponseOK, NSNormalWindowLevel, NSOpenPanel, NSPopUpButton, NSScrollView,
+    NSSearchField, NSSegmentSwitchTracking, NSSegmentedControl, NSSlider, NSSplitViewController,
+    NSSplitViewItem, NSStackView, NSStepper, NSTableColumn, NSTableView, NSTableViewDataSource,
+    NSTableViewDelegate, NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField,
+    NSTextFieldDelegate, NSTitlePosition, NSUserInterfaceItemIdentification,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowDelegate,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSEdgeInsets, NSIndexSet,
@@ -67,6 +67,7 @@ use crate::font_options::FontOption;
 use crate::program::reply;
 use crate::settings::{self, FileState};
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
+use bt_shell_common::hotkey::SettingsLevel;
 use look::Ink;
 use pictures::{Palette, Picture, PictureChoice};
 use switch::ThemeSwitch;
@@ -105,6 +106,17 @@ const WINDOW_SIZE: NSSize = NSSize::new(760.0, 700.0);
 /// The shortest the window can be dragged: the head, a few rows and the
 /// sidebar's button still fit. A design constant.
 const MIN_WINDOW_HEIGHT: f64 = 360.0;
+
+/// The window level of the Settings window for `level`: over the hotkey window's own
+/// (`NSFloatingWindowLevel`, which the panel keeps once it has slid in) by one, or the ordinary
+/// level. One above, not the same: windows of one level stand in the order they were brought
+/// forward, and the panel shown after the Settings window would cover it.
+pub(crate) fn level_of(level: SettingsLevel) -> isize {
+    match level {
+        SettingsLevel::Normal => NSNormalWindowLevel,
+        SettingsLevel::AbovePanel => NSFloatingWindowLevel + 1,
+    }
+}
 /// The sidebar's width: a search field and ten short titles beside their tiles. A design
 /// constant.
 const SIDEBAR_WIDTH: f64 = 212.0;
@@ -2218,6 +2230,20 @@ define_class!(
             AppDelegate::hotkey_quiet_later();
         }
 
+        /// `BATERI_TRACE_SETTINGS=1`: every move and resize of this window, with the stack that
+        /// made it. Nothing in bateri sets this window's frame after it opens, yet a hotkey
+        /// window shown over it was seen to push it below the panel and shrink it: the stack says
+        /// whether that is bateri's or the system's.
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _note: &NSNotification) {
+            self.trace_frame("resized");
+        }
+
+        #[unsafe(method(windowDidMove:))]
+        fn window_did_move(&self, _note: &NSNotification) {
+            self.trace_frame("moved");
+        }
+
         /// A closed window gives the examples' renderer and sessions back; opening it draws them
         /// again from the refresh that reopening makes.
         #[unsafe(method(windowWillClose:))]
@@ -2851,6 +2877,28 @@ impl SettingsWindow {
             .window
             .get()
             .is_some_and(|window| window.isVisible() || window.isMiniaturized())
+    }
+
+    /// The `BATERI_TRACE_SETTINGS` line ([`Self::window_did_resize`]).
+    fn trace_frame(&self, what: &str) {
+        if std::env::var_os("BATERI_TRACE_SETTINGS").is_none() {
+            return;
+        }
+        if let Some(window) = self.ivars().window.get() {
+            eprintln!(
+                "bateri: settings window {what}: {:?}\n{}",
+                window.frame(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+    }
+
+    /// The window's level against the hotkey window: over the panel while it is in sight, an
+    /// ordinary window after ([`bt_shell_common::hotkey::settings_level`]).
+    pub(crate) fn set_level(&self, level: SettingsLevel) {
+        if let Some(window) = self.ivars().window.get() {
+            window.setLevel(level_of(level));
+        }
     }
 
     /// Brings the window to the front (centres it on first open); the category is the last selected.

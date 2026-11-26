@@ -725,6 +725,21 @@ impl AppDelegate {
         self.set_hotkey_pin(false);
     }
 
+    /// The Settings window's level against the hotkey window: over it while a hotkey window is in
+    /// sight, an ordinary window after ([`rules::settings_level`]). Asked when the panel comes or
+    /// goes and when Settings opens, so the window the person changes the hotkey window's
+    /// settings in is never under the window they see the result in.
+    pub(crate) fn sync_settings_level(&self) {
+        let Some(settings) = self.ivars().settings_window.borrow().clone() else {
+            return;
+        };
+        let in_sight = self
+            .windows()
+            .iter()
+            .any(|window| window.is_hotkey() && window.hotkey_shown());
+        settings.set_level(rules::settings_level(in_sight));
+    }
+
     /// Window ▸ Pin Hotkey Window: toggled, in memory.
     pub(crate) fn toggle_hotkey_pin(&self) {
         self.set_hotkey_pin(!self.ivars().hotkey_pinned.get());
@@ -1208,6 +1223,45 @@ mod tests {
         assert!(
             body_of(hotkey, "    pub(crate) fn hotkey_window_ended(", "    ")
                 .contains("self.set_hotkey_pin(false)")
+        );
+    }
+
+    /// The Settings window is over the hotkey window while the panel is in sight and an ordinary
+    /// window after: the level is one above the panel's, the panel's coming and going and the
+    /// window's opening each ask for it. The levels are plain numbers; the calls are scanned (the
+    /// windows are AppKit's).
+    #[test]
+    fn the_settings_window_is_over_the_panel_while_it_is_in_sight() {
+        use objc2_app_kit::{NSFloatingWindowLevel, NSNormalWindowLevel};
+        assert!(
+            crate::settings_window::level_of(bt_shell_common::hotkey::settings_level(true))
+                > NSFloatingWindowLevel
+        );
+        assert_eq!(
+            crate::settings_window::level_of(bt_shell_common::hotkey::settings_level(false)),
+            NSNormalWindowLevel
+        );
+        let on_window = include_str!("../window/hotkey.rs");
+        let on_window = on_window.split("#[cfg(test)]").next().expect("the code");
+        for place in [
+            "        state.shown.set(true);\n        state.handed.set(None);\n        self.settings_level_changed();",
+            "        self.settings_level_changed();\n        let turn = state.turn.get() + 1;",
+            "        let previous = state.previous.take();\n        self.settings_level_changed();",
+        ] {
+            assert!(on_window.contains(place), "{place}");
+        }
+        let app = include_str!("../app.rs");
+        let show = body_of(app, "    fn show_settings_window(", "    ");
+        assert!(
+            show.find("self.sync_settings_level()").expect("synced")
+                < show.find("window.show()").expect("shown"),
+            "the level is set before the window is ordered front"
+        );
+        let code = include_str!("hotkey.rs");
+        let code = code.split("#[cfg(test)]").next().expect("the code");
+        assert!(
+            body_of(code, "    pub(crate) fn sync_settings_level(", "    ")
+                .contains("rules::settings_level(in_sight)")
         );
     }
 

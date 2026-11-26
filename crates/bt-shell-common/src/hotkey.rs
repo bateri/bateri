@@ -378,6 +378,26 @@ pub fn follows(hiding: Hiding, desktop: Desktop) -> bool {
     desktops(hiding) == Desktops::Front && desktop == Desktop::Elsewhere
 }
 
+/// Where bateri's Settings window stands against the hotkey window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsLevel {
+    /// An ordinary window: the hotkey window is out of sight, or there is none.
+    Normal,
+    /// Over the hotkey window, which floats: the person who changes the window's settings sees
+    /// the result at once, with the Settings window beside it and not under it (the panel is
+    /// half the screen). The Settings window floats with it only while the panel is in sight.
+    AbovePanel,
+}
+
+/// The level of the Settings window when a hotkey window is (not) in sight.
+pub fn settings_level(panel_in_sight: bool) -> SettingsLevel {
+    if panel_in_sight {
+        SettingsLevel::AbovePanel
+    } else {
+        SettingsLevel::Normal
+    }
+}
+
 /// What `lost` does to the window on `desktop`. **The one question both ways the window loses
 /// the focus ask** — the key window changing and the application stopping to be active — so a
 /// desktop change, which brings both, is read the same way by each: the window follows, or (with
@@ -1457,6 +1477,12 @@ mod tests {
                 Leaving::Stays => {}
             }
         }
+    }
+
+    #[test]
+    fn the_settings_window_is_over_the_panel_while_the_panel_is_in_sight_and_ordinary_after() {
+        assert_eq!(settings_level(true), SettingsLevel::AbovePanel);
+        assert_eq!(settings_level(false), SettingsLevel::Normal);
     }
 
     #[test]

@@ -7487,6 +7487,8 @@ impl AppDelegate {
             .borrow_mut()
             .get_or_insert_with(|| SettingsWindow::new(self.mtm()))
             .clone();
+        // Its level first: ordered front over a hotkey window in sight, it is over it.
+        self.sync_settings_level();
         // Show first: refreshing skips a hidden window. Both are in the same main
         // queue turn, no frame is drawn in between.
         window.show();
