@@ -231,10 +231,8 @@ objc2-user-notifications = { workspace = true }
 # its string keys, the password's bytes and the port's number.
 objc2-security = { workspace = true }
 # `CFDictionary`, `CFError` and `CFURL` of the browser helper's signature check.
-# `CFMachPort` and `CFRunLoop` are the hotkey window's listening tap (`global_keys`): the port
-# the system makes for it and the run loop source that brings its events to the main thread.
 objc2-core-foundation = { workspace = true, features = [
-    "CFData", "CFNumber", "CFDictionary", "CFError", "CFURL", "CFMachPort", "CFRunLoop",
+    "CFData", "CFNumber", "CFDictionary", "CFError", "CFURL",
 ] }
 # The frames and the messages of the browser helper (`browser_install`, the pane's browsers).
 browser-ipc = { workspace = true, features = ["wgpu"] }
@@ -247,10 +245,12 @@ objc2-web-kit = { workspace = true }
 # header flags, `Cargo.lock` gains this package's edge and nothing moves.
 # A card's shadow is cast in the context's device space (`card::draw_shadow`):
 # `CGContext` and `CGColor`, flags `objc2-app-kit` already turns on in the graph.
-# The hotkey window's double tap is a listen-only event tap (`global_keys`): `CGEvent` makes it and
-# asks for its permission, `CGEventTypes` names its mask and flags. Header flags only.
+# The hotkey window's double tap asks the system how long ago the last key, click or scroll was
+# (`global_keys`, no permission): `CGEventSource` has the question, `CGEventTypes` names the event
+# types and the state. Header flags only.
 objc2-core-graphics = { workspace = true, features = [
-    "CGColor", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage", "CGEvent", "CGEventTypes",
+    "CGColor", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage", "CGEventSource",
+    "CGEventTypes",
 ] }
 # The main queue: `Wake::child_exit` arrives on the reader thread and
 # `terminate:` is the main thread's job. The settings watch
@@ -287,7 +287,7 @@ harness = false
 
 # The hotkey window's panel opened through the shell's own setup and read back: the class, the
 # style, the standing flags and the frames the rules compute. Its own `main`, for the same reason
-# as `embed`'s; no global key and no event tap.
+# as `embed`'s; no global key and no event monitor.
 [[test]]
 name = "hotkey_panel"
 harness = false

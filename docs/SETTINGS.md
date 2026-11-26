@@ -292,9 +292,8 @@ $ bateri config path
   `commands.level` (the reach of the `bateri` command itself),
   `remote.integration` (setting bateri up on a server without asking),
   `agents.claude_skill` (teaching Claude Code the command) and
-  `hotkey_window.shortcut` (a key taken from every application, and a
-  modifier tapped twice asks for a permission). Settings changes
-  them. This is not a lock — a program in a terminal can still edit the file —
+  `hotkey_window.shortcut` (a key taken from every application). Settings
+  changes them. This is not a lock — a program in a terminal can still edit the file —
   only the command leaving them to you.
 - **Only this computer's terminals** use it. In a terminal on a server it says
   the settings are this computer's and exits 77. It needs bateri running, and
@@ -3294,18 +3293,15 @@ change the settings file could not take.
   is not enough, the key would be taken from every application), a function key from `f1` to `f20`, or one modifier
   named alone (`"option"`, the same as `"option+option"`) for tapping it twice. The window's own shortcut is in
   every application, so a `[keys]` line with the same keys is told so in Settings ▸ Keyboard.
-- **A tap of a chord asks for nothing.** The twice-tapped modifier watches the modifier keys, which macOS lets
-  a program do after you allow it in System Settings ▸ Privacy & Security ▸ Input Monitoring. bateri asks once,
-  when you record the double tap in Settings, never at launch; until you allow it the shortcut row says so under its
-  top line, and the **Allow Input Monitoring…** button under that note asks again and opens the pane (the row grows
-  by those two lines while the key waits). Coming back to bateri from there turns the
-  shortcut on. The watch only hears that a modifier changed, and that a key, a click or a scroll came between the
-  two taps (which spoils them: ⌥e is not half of ⌥⌥); it reads no key and changes no event. Another application
+- **Neither kind of shortcut asks for a permission.** A chord is the system's own key. A modifier tapped twice is
+  heard from the modifier changes the system tells every application; nothing is asked for, in System Settings or
+  anywhere, and it works in bateri's own windows and in every other application alike. The watch hears that a
+  modifier changed, and asks the system how long ago the last key, click or scroll was: one that came after the first
+  tap spoils the count (⌥e is not half of ⌥⌥). It reads no key's meaning and changes no event. Another application
   that holds the same keys can keep them: bateri tells you when macOS refuses them, not when another application
   is first.
 - **`bateri config` does not write `shortcut`** (`set` and `reset` end with status 77, `get` and `list` read it).
-  A program should not take a key from every application, and a modifier tapped twice asks for a permission:
-  that is the person's to set, in Settings.
+  A program should not take a key from every application: that is the person's to set, in Settings.
 - **Hiding.** The window goes away when you click another application or another bateri window, unless a sheet, the
   palette, Settings or a menu of bateri's own took the focus. Window ▸ Pin Hotkey Window keeps it in front until
   you unpin it, the window closes or you quit; `hide_on_click_away = false` is the same for good.

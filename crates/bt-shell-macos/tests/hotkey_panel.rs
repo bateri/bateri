@@ -5,7 +5,7 @@
 //! the screen's edge, and that is out of sight, and says so, once it is hidden.
 //!
 //! Its own `main` (`harness = false`): AppKit wants the main thread. Without a window server
-//! session (an ssh login) it says so and passes. **No global key is registered and no event tap
+//! session (an ssh login) it says so and passes. **No global key is registered and no event monitor
 //! is made** (the window has none of its own): the check only opens a panel for the moment it
 //! takes.
 

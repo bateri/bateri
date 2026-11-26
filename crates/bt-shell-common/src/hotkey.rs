@@ -15,10 +15,11 @@
 //! assumes there is only one.
 //!
 //! **The global key is behind a seam** ([`GlobalKeys`]): the real one is Carbon's
-//! `RegisterEventHotKey` and a listen-only event tap (`bt-shell-macos`), and no test, gate, smoke
-//! or agent try registers either — a real registration steals the keystroke from the Mac that
-//! runs the gate and a tap raises a permission question. A test's is [`fake::Keys`]. Only an
-//! instance that [`owns_global_keys`] builds the real one.
+//! `RegisterEventHotKey` and, for a modifier tapped twice, the system's event monitors
+//! (`bt-shell-macos`); **neither asks the person for a permission**. No test, gate, smoke or
+//! agent try registers either — a real registration steals the keystroke from the Mac that runs
+//! the gate. A test's is [`fake::Keys`]. Only an instance that [`owns_global_keys`] builds the
+//! real one.
 
 use bt_core::{Chord, Modifier, Settings, Shortcut};
 
@@ -524,7 +525,8 @@ pub fn can_merge(windows: &[Candidate]) -> bool {
 pub enum Binding {
     /// A chord that works in every application (`RegisterEventHotKey`): asks for no permission.
     Chord(Chord),
-    /// One modifier tapped twice (a listen-only event tap): asks for Input Monitoring.
+    /// One modifier tapped twice (the system's event monitors, [`DoubleTap`]): asks for no
+    /// permission.
     Twice(Modifier),
 }
 
@@ -552,16 +554,6 @@ pub enum Refusal {
     /// holding the same keys is **not** told by this: the system accepts a key that another one
     /// also holds, and says nothing.
     Refused(i32),
-    /// A double tap is listened to through the event tap, and the permission it needs is not
-    /// given ([`Access::NotGranted`]), or the tap could not be made.
-    NoListening,
-}
-
-/// The state of the permission a double tap needs (Input Monitoring).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Access {
-    Granted,
-    NotGranted,
 }
 
 /// The seam in front of the system's global keys: the one place that registers a key for every
@@ -570,14 +562,6 @@ pub trait GlobalKeys {
     /// Holds `binding` in place of whatever was held before; `None` lets go of it. Said again
     /// with the same binding it is held once.
     fn bind(&mut self, binding: Option<Binding>) -> Result<(), Refusal>;
-
-    /// Whether the permission a double tap needs is given. Asks the system and does **not** ask
-    /// the person: a launch that asked would put a question on every run of every build.
-    fn listen_access(&self) -> Access;
-
-    /// Asks the person for the permission (once; the system remembers the answer). Only the
-    /// Settings page calls it, when a double tap is recorded or the button is pressed.
-    fn ask_listen_access(&mut self);
 }
 
 /// What an instance of the application is, to the rule that says whether it holds the key.
@@ -659,22 +643,6 @@ impl Registration {
         }
     }
 
-    /// Asks again for what was asked and not held because the permission to hear a double tap
-    /// was not there: the person has allowed it since (the Settings button, or coming back from
-    /// System Settings). Nothing else is asked twice, so a key another application holds is not
-    /// asked for again until the settings change.
-    pub fn retry(&mut self, keys: &mut dyn GlobalKeys, settings: &Settings, instance: &Instance) {
-        if self.waits_for_access() && keys.listen_access() == Access::Granted {
-            self.attempted = None;
-            self.sync(keys, settings, instance);
-        }
-    }
-
-    /// Whether the key asked for is not held for want of the permission to hear a double tap.
-    pub fn waits_for_access(&self) -> bool {
-        self.problem == Some(Refusal::NoListening)
-    }
-
     /// A field of Settings starts (`true`) or stops listening for a shortcut. While it listens
     /// the system holds **nothing** (a chord's registration and a double tap's tap are let go),
     /// so the key the window has now is heard by the field like any other, and pressing it does
@@ -741,15 +709,11 @@ pub fn refusal_text(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
         Refusal::Refused(status) => format!(
             "The system did not give `{key}` (status {status}); another application may hold it."
         ),
-        Refusal::NoListening => format!(
-            "`{key}` needs Input Monitoring to hear a double tap: allow bateri in System Settings."
-        ),
     }
 }
 
 /// [`refusal_text`] as the Settings row says it, to a person: the key in its glyphs (⌥ ⌥, not
-/// `option+option`), no code quotes. **A refusal that waits for the permission does not name it**:
-/// the button under the note does (Allow Input Monitoring…), and the page says it once.
+/// `option+option`), no code quotes.
 pub fn refusal_words(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
     let named = shortcut.map(|shortcut| {
         crate::shortcuts::glyphs(&shortcut).unwrap_or_else(|| shortcut.to_string())
@@ -758,10 +722,6 @@ pub fn refusal_words(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
         Refusal::Refused(status) => format!(
             "The system did not give {} (status {status}); another application may hold it.",
             named.as_deref().unwrap_or("the shortcut")
-        ),
-        Refusal::NoListening => format!(
-            "{} is not heard yet. A double tap in other applications needs your permission.",
-            named.as_deref().unwrap_or("The shortcut")
         ),
     }
 }
@@ -775,12 +735,48 @@ pub fn refusal_note(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The double tap: the count a listen-only tap feeds.
+// The double tap: the count the system's event monitors feed.
 
-/// The count of the one modifier the hotkey window waits for, fed by the system's listening tap
+/// Whether a key, a click or a scroll **came after the press that began a count**, which spoils
+/// the count (⌥e is not half of ⌥⌥): the press went down `since_press_ms` ago and the last such
+/// input was `since_input_ms` ago, both as of the same moment, so the input is the later one when
+/// it is the nearer. An input at the very moment of the press is the press's own company, not
+/// something that came after it.
+///
+/// This is how a double tap is heard **without a permission**: the modifier changes come from
+/// the system's event monitors, which an application with no permission still gets for a
+/// modifier, but not the keys, clicks or scrolls that would spoil the count. Those the system
+/// tells on request, as the time since the last of them
+/// (`CGEventSourceSecondsSinceLastEventType`), and this is the question put to that answer.
+pub fn spoils_count(since_press_ms: u64, since_input_ms: u64) -> bool {
+    since_input_ms < since_press_ms
+}
+
+/// How long before an event the last key, click or scroll was, when the system was asked
+/// `lag` seconds **after** the event (a main thread that was busy delivers it late):
+/// `since_input_now` is the system's answer. An input that came after the event is none that
+/// came before it, so the answer is as old as can be.
+pub fn input_age_at_event(since_input_now: f64, lag: f64) -> f64 {
+    let age = since_input_now - lag.max(0.0);
+    if age < 0.0 { f64::INFINITY } else { age }
+}
+
+/// Seconds as whole milliseconds, never below nothing and never past what a `u64` holds.
+fn millis(seconds: f64) -> u64 {
+    if seconds.is_nan() || seconds <= 0.0 {
+        0
+    } else if seconds * 1000.0 >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        (seconds * 1000.0).round() as u64
+    }
+}
+
+/// The count of the one modifier the hotkey window waits for, fed by the system's event monitors
 /// ([`crate::shortcuts::Taps`] is the one machine behind every double press: the live trigger
 /// and the recorder use it too, so the three cannot disagree on what a double press is). The
-/// tap's thresholds are the application's (`arrange::taps()`): none is written here.
+/// thresholds are the application's (`arrange::taps()`): none is written here. What spoils a
+/// count is asked of the system at each modifier change ([`spoils_count`]).
 #[derive(Clone, Debug)]
 pub struct DoubleTap {
     wanted: Modifier,
@@ -793,18 +789,27 @@ impl DoubleTap {
         Self { wanted, taps }
     }
 
-    /// The modifiers held after a change, at `at` (seconds): whether this change was the second
-    /// quick tap of the one modifier waited for. Another modifier's double tap, fn's, and a first
-    /// tap are not.
-    pub fn flags(&mut self, at: f64, held: crate::shortcuts::Held) -> bool {
+    /// The modifiers held after a change, at `at` (seconds, the event's own time): whether this
+    /// change was the second quick tap of the one modifier waited for. Another modifier's double
+    /// tap, fn's, and a first tap are not. `input_age` is how long before `at` the last key,
+    /// click or scroll was, in seconds ([`input_age_at_event`]): one that came after the press
+    /// that began the count spoils it first, as if it had been told when it happened.
+    pub fn flags(&mut self, at: f64, held: crate::shortcuts::Held, input_age: f64) -> bool {
         use crate::shortcuts::{Step, Tapped};
+        if self
+            .taps
+            .began()
+            .is_some_and(|began| spoils_count(millis(at - began), millis(input_age)))
+        {
+            self.taps.interrupt();
+        }
         matches!(
             self.taps.flags(at, held),
             Step::Twice(Tapped::Modifier(modifier)) if modifier == self.wanted
         )
     }
 
-    /// A key, a click or a scroll: whatever was being counted is lost.
+    /// A key, a click or a scroll told as it happened: whatever was being counted is lost.
     pub fn interrupt(&mut self) {
         self.taps.interrupt();
     }
@@ -862,10 +867,10 @@ pub fn named_key_code(key: bt_core::NamedKey) -> Option<u16> {
 /// holds nothing.
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake {
-    use super::{Access, Binding, GlobalKeys, Refusal};
+    use super::{Binding, GlobalKeys, Refusal};
 
     /// A [`GlobalKeys`] that registers nothing anywhere.
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub struct Keys {
         /// What it holds now.
         pub held: Option<Binding>,
@@ -873,33 +878,11 @@ pub mod fake {
         pub calls: Vec<Option<Binding>>,
         /// What the next [`GlobalKeys::bind`] answers (kept until changed).
         pub refuse: Option<Refusal>,
-        /// What the permission is.
-        pub access: Access,
-        /// How many times the person was asked.
-        pub asked: usize,
-    }
-
-    impl Default for Keys {
-        fn default() -> Self {
-            Self {
-                held: None,
-                calls: Vec::new(),
-                refuse: None,
-                access: Access::Granted,
-                asked: 0,
-            }
-        }
     }
 
     impl GlobalKeys for Keys {
         fn bind(&mut self, binding: Option<Binding>) -> Result<(), Refusal> {
             self.calls.push(binding);
-            // A double tap is heard by a listening tap, which the system builds only for an
-            // application that was allowed.
-            if matches!(binding, Some(Binding::Twice(_))) && self.access == Access::NotGranted {
-                self.held = None;
-                return Err(Refusal::NoListening);
-            }
             if let Some(refusal) = self.refuse
                 && binding.is_some()
             {
@@ -908,14 +891,6 @@ pub mod fake {
             }
             self.held = binding;
             Ok(())
-        }
-
-        fn listen_access(&self) -> Access {
-            self.access
-        }
-
-        fn ask_listen_access(&mut self) {
-            self.asked += 1;
         }
     }
 }
@@ -1830,37 +1805,30 @@ mod tests {
         assert_eq!(registration.problem(), None);
     }
 
-    /// A key the system could not be given (no permission to hear a double tap) and then taken
-    /// away while the field listens is not told after: the refusal goes with the key.
+    /// A key the system could not be given and then taken away while the field listens is not
+    /// told after: the refusal goes with the key.
     #[test]
     fn a_refusal_does_not_outlive_the_key_that_was_taken_away_while_the_field_listened() {
-        let twice = settings_with("option");
-        let mut keys = fake::Keys {
-            access: Access::NotGranted,
-            ..fake::Keys::default()
-        };
-        let mut registration = Registration::new();
-        registration.sync(&mut keys, &twice, &owner());
-        assert_eq!(registration.problem(), Some(Refusal::NoListening));
-        assert!(registration.waits_for_access());
-        registration.set_quiet(&mut keys, &twice, &owner(), true);
-        assert_eq!(
-            registration.problem(),
-            Some(Refusal::NoListening),
-            "kept while it listens"
-        );
-        // Remove while it listens: the settings ask for nothing when it stops.
-        registration.sync(&mut keys, &Settings::default(), &owner());
-        registration.set_quiet(&mut keys, &Settings::default(), &owner(), false);
-        assert_eq!(registration.problem(), None);
-        assert!(!registration.waits_for_access());
-        assert!(registration.notices(None).is_empty());
-        // A key that is refused when the field stops is told then.
+        let chord = settings_with("cmd+f1");
         let mut refusing = fake::Keys {
             refuse: Some(Refusal::Refused(-9878)),
             ..fake::Keys::default()
         };
-        let chord = settings_with("cmd+f1");
+        let mut registration = Registration::new();
+        registration.sync(&mut refusing, &chord, &owner());
+        assert_eq!(registration.problem(), Some(Refusal::Refused(-9878)));
+        registration.set_quiet(&mut refusing, &chord, &owner(), true);
+        assert_eq!(
+            registration.problem(),
+            Some(Refusal::Refused(-9878)),
+            "kept while it listens"
+        );
+        // Remove while it listens: the settings ask for nothing when it stops.
+        registration.sync(&mut refusing, &Settings::default(), &owner());
+        registration.set_quiet(&mut refusing, &Settings::default(), &owner(), false);
+        assert_eq!(registration.problem(), None);
+        assert!(registration.notices(None).is_empty());
+        // A key that is refused when the field stops is told then.
         let mut registration = Registration::new();
         registration.set_quiet(&mut refusing, &chord, &owner(), true);
         registration.set_quiet(&mut refusing, &chord, &owner(), false);
@@ -1872,10 +1840,7 @@ mod tests {
     #[test]
     fn a_double_tap_comes_down_with_the_field_and_with_remove() {
         let twice = settings_with("option");
-        let mut keys = fake::Keys {
-            access: Access::Granted,
-            ..fake::Keys::default()
-        };
+        let mut keys = fake::Keys::default();
         let mut registration = Registration::new();
         registration.sync(&mut keys, &twice, &owner());
         assert_eq!(registration.held(), Some(Binding::Twice(Modifier::Option)));
@@ -1924,25 +1889,22 @@ mod tests {
         }
     }
 
-    /// The Settings row says a refusal to a person: the key in its glyphs and no code quotes,
-    /// and the permission is named by the button, not by the sentence.
+    /// The Settings row says a refusal to a person: the key in its glyphs and no code quotes.
     #[test]
-    fn the_row_says_a_refusal_in_glyphs_and_names_the_permission_not() {
+    fn the_row_says_a_refusal_in_glyphs() {
         let twice = Shortcut::Twice(Modifier::Option);
-        let waiting = refusal_words(Refusal::NoListening, Some(twice));
-        assert!(waiting.starts_with("\u{2325} \u{2325} "), "{waiting}");
         let refused = refusal_words(Refusal::Refused(-9878), Some(twice));
+        assert!(
+            refused.starts_with("The system did not give \u{2325} \u{2325} "),
+            "{refused}"
+        );
         assert!(refused.contains("(status -9878)"), "{refused}");
-        for text in [&waiting, &refused] {
-            assert!(!text.contains('`'), "{text}");
-            assert!(!text.contains("option"), "{text}");
-        }
-        assert!(!waiting.contains("Input Monitoring"), "{waiting}");
+        assert!(!refused.contains('`'), "{refused}");
+        assert!(!refused.contains("option"), "{refused}");
         // The file's own language is as it was: the key as the file writes it, in code quotes.
-        let file = refusal_note(Refusal::NoListening, Some(twice));
+        let file = refusal_note(Refusal::Refused(-9878), Some(twice));
         assert!(file.contains("`option+option`"), "{file}");
-        // No key to name: the sentence says "The shortcut".
-        assert!(refusal_words(Refusal::NoListening, None).starts_with("The shortcut is not heard"));
+        // No key to name: the sentence says "the shortcut".
         assert!(refusal_words(Refusal::Refused(1), None).contains("give the shortcut ("));
     }
 
@@ -1994,7 +1956,7 @@ mod tests {
         settings_with("option")
     }
 
-    /// A double tap is asked of a listening tap and a chord of the key registration: the setting
+    /// A double tap is asked of the event monitors and a chord of the key registration: the setting
     /// decides which, and a change from one to the other lets the old one go first.
     #[test]
     fn a_single_modifier_asks_for_the_tap_and_a_chord_does_not() {
@@ -2012,42 +1974,7 @@ mod tests {
         assert_eq!(keys.held, None);
     }
 
-    /// Without the permission the tap is not built, and what was asked waits for it: told as a
-    /// refusal that Settings answers with its button, and asked again (once) when it is given.
-    #[test]
-    fn a_double_tap_waits_for_the_permission_and_is_held_when_it_is_given() {
-        let settings = twice_settings();
-        let mut keys = fake::Keys {
-            access: Access::NotGranted,
-            ..fake::Keys::default()
-        };
-        let mut registration = Registration::new();
-        registration.sync(&mut keys, &settings, &owner());
-        assert_eq!(registration.problem(), Some(Refusal::NoListening));
-        assert!(registration.waits_for_access());
-        assert_eq!(registration.held(), None);
-        // Still not given: asking again changes nothing and calls nothing.
-        registration.retry(&mut keys, &settings, &owner());
-        assert_eq!(keys.calls.len(), 1);
-        // Given: held.
-        keys.access = Access::Granted;
-        registration.retry(&mut keys, &settings, &owner());
-        assert_eq!(registration.held(), Some(Binding::Twice(Modifier::Option)));
-        assert_eq!(registration.problem(), None);
-        assert!(!registration.waits_for_access());
-        // A refusal that is not the permission's is not asked again by a retry.
-        let mut refused = fake::Keys {
-            refuse: Some(Refusal::Refused(-9878)),
-            ..fake::Keys::default()
-        };
-        let mut registration = Registration::new();
-        registration.sync(&mut refused, &settings_with("cmd+f1"), &owner());
-        registration.retry(&mut refused, &settings_with("cmd+f1"), &owner());
-        assert_eq!(refused.calls.len(), 1);
-    }
-
-    /// The count answers the second quick tap of the modifier waited for, and of no other; a key,
-    /// a click or a scroll spoils it.
+    /// The count answers the second quick tap of the modifier waited for, and of no other.
     #[test]
     fn the_count_answers_the_second_tap_of_its_own_modifier_only() {
         use crate::shortcuts::{Held, Taps};
@@ -2057,9 +1984,10 @@ mod tests {
         };
         let none = Held::default();
         let count = |wanted| DoubleTap::new(wanted, Taps::new(0.3, 0.5));
+        // No key, click or scroll ever: as old as can be.
         let tap = |count: &mut DoubleTap, key, at: f64| {
-            let first = count.flags(at, key);
-            first | count.flags(at + 0.1, none)
+            let first = count.flags(at, key, f64::INFINITY);
+            first | count.flags(at + 0.1, none, f64::INFINITY)
         };
         // Option twice, quickly: the second release is the hit.
         let mut option = count(Modifier::Option);
@@ -2072,7 +2000,7 @@ mod tests {
         let mut late = count(Modifier::Option);
         assert!(!tap(&mut late, held(Modifier::Option), 1.0));
         assert!(!tap(&mut late, held(Modifier::Option), 3.0));
-        // A key between the taps spoils the count (⌥e is not half of ⌥⌥).
+        // A key told as it happens spoils the count (⌥e is not half of ⌥⌥).
         let mut keyed = count(Modifier::Option);
         assert!(!tap(&mut keyed, held(Modifier::Option), 1.0));
         keyed.interrupt();
@@ -2087,6 +2015,83 @@ mod tests {
         assert!(!tap(&mut function, fn_held, 1.3));
     }
 
+    /// What the system tells of the keys, clicks and scrolls is its answer to "how long ago was
+    /// the last one": a count is spoiled when one came after the press that began it, wherever it
+    /// came — between the taps or during the second.
+    #[test]
+    fn a_key_a_click_or_a_scroll_after_the_first_press_spoils_the_count() {
+        use crate::shortcuts::{Held, Taps};
+        let option = Held {
+            mods: Mods::NONE.with(Modifier::Option),
+            function: false,
+        };
+        let none = Held::default();
+        // The events of a double tap at 1.00-1.08 and 1.25-1.33, with `input` (a time, or none) as
+        // the last key, click or scroll the system knew of at each: told as the age it had then.
+        let run = |input: Option<f64>, at_each: &[(f64, bool)]| {
+            let mut count = DoubleTap::new(Modifier::Option, Taps::new(0.3, 0.5));
+            let mut hit = false;
+            for &(at, down) in at_each {
+                let age = match input {
+                    Some(time) if time <= at => at - time,
+                    _ => f64::INFINITY,
+                };
+                hit |= count.flags(at, if down { option } else { none }, age);
+            }
+            hit
+        };
+        let clean = [(1.00, true), (1.08, false), (1.25, true), (1.33, false)];
+        assert!(run(None, &clean));
+        // An input before the first press is not one that came after it (it may be by a
+        // millisecond), nor one after the whole double tap.
+        assert!(run(Some(0.999), &clean));
+        assert!(run(Some(0.50), &clean));
+        assert!(run(Some(1.34), &clean), "after the second release");
+        // Between the press and its release (⌥ held, a key typed: ⌥e), between the taps, during
+        // the second tap: the count is spoiled whichever of them is the last the system knows.
+        for time in [1.04, 1.15, 1.30] {
+            assert!(!run(Some(time), &clean), "{time}");
+        }
+        // The input at the moment of the press is the press's own company.
+        assert!(run(Some(1.00), &clean));
+        // A count that began after the input is a count of its own: typing, then ⌥⌥ at once.
+        let after = [(2.00, true), (2.08, false), (2.25, true), (2.33, false)];
+        assert!(run(Some(1.50), &after));
+        // The key between two double taps spoils the first one and not the next: the second
+        // tap of the first pair is already a first tap of the next count.
+        let two = [(1.00, true), (1.08, false), (1.25, true), (1.33, false)];
+        assert!(!run(Some(1.20), &two));
+    }
+
+    /// The rule on its own: the input is the later one when it is the nearer.
+    #[test]
+    fn an_input_nearer_than_the_press_is_the_later_one() {
+        assert!(spoils_count(300, 200));
+        assert!(spoils_count(300, 0));
+        assert!(!spoils_count(300, 300), "the very moment of the press");
+        assert!(!spoils_count(300, 301));
+        assert!(!spoils_count(300, u64::MAX), "no input ever");
+        assert!(!spoils_count(0, 0));
+    }
+
+    /// The system is asked a moment after the event: what came in that moment is no input before
+    /// the event, and what came before is as old as it was then.
+    #[test]
+    fn the_age_of_an_input_is_told_as_of_the_event() {
+        assert_eq!(input_age_at_event(0.50, 0.0), 0.50);
+        assert!((input_age_at_event(0.50, 0.125) - 0.375).abs() < 1e-9);
+        // The last input came after the event (age less than the lag): none before it.
+        assert!(input_age_at_event(0.05, 0.10).is_infinite());
+        // A negative lag (a clock that went back a hair) is none.
+        assert_eq!(input_age_at_event(0.50, -0.01), 0.50);
+        assert_eq!(millis(0.0), 0);
+        assert_eq!(millis(-1.0), 0);
+        assert_eq!(millis(f64::NAN), 0);
+        assert_eq!(millis(0.0004), 0);
+        assert_eq!(millis(0.0016), 2);
+        assert_eq!(millis(f64::INFINITY), u64::MAX);
+    }
+
     #[test]
     fn the_stand_in_keys_register_nothing_and_remember_what_they_were_asked() {
         let mut keys = fake::Keys::default();
@@ -2099,8 +2104,5 @@ mod tests {
         assert_eq!(keys.held, None);
         assert_eq!(keys.bind(None), Ok(()));
         assert_eq!(keys.calls, [Some(binding), Some(binding), None]);
-        assert_eq!(keys.listen_access(), Access::Granted);
-        keys.ask_listen_access();
-        assert_eq!(keys.asked, 1);
     }
 }

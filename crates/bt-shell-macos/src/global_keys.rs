@@ -3,17 +3,19 @@
 //! - **A chord** is Carbon's `RegisterEventHotKey`. It asks for **no permission** (the event is
 //!   the system's own, delivered to the application that registered it), and it takes the key away
 //!   from every other application while it is held.
-//! - **One modifier tapped twice** is a **listen-only** event tap (`CGEventTapCreate` with
-//!   `kCGEventTapOptionListenOnly`), which the system builds only for an application that was
-//!   allowed to listen (Input Monitoring). It sees the modifier changes and the presses that spoil
-//!   a count — a key, a click, a scroll — and passes them to the count the whole application
-//!   uses ([`bt_shell_common::hotkey::DoubleTap`] over `arrange::taps()`), with the thresholds
-//!   of the live trigger and of Settings' recorder. It changes no event and reads no key's
-//!   meaning. The permission is **asked about** here ([`CGPreflightListenEventAccess`], which asks
-//!   no one) and **asked for** only when `AppDelegate::allow_listening` says: the Settings page,
-//!   when a double tap is recorded or its button pressed — a launch that asked would put a
-//!   question on every run of every build. The system disables a tap that is slow or that the
-//!   person's input suspended; it is enabled again at once.
+//! - **One modifier tapped twice** is heard by the system's **event monitors**, and asks for **no
+//!   permission** (measured on macOS 26.4, by a process with no Input Monitoring and no
+//!   Accessibility): a global monitor (`addGlobalMonitorForEventsMatchingMask:`, the other
+//!   applications') and a local one (bateri's own windows') both get the modifier changes, and
+//!   feed the count the whole application uses ([`bt_shell_common::hotkey::DoubleTap`] over
+//!   `arrange::taps()`), with the thresholds of the live trigger and of Settings' recorder. A
+//!   global monitor never hears an event bateri itself is sent, so the two never count one press
+//!   twice (and a press told twice would change nothing: the count compares the modifiers held).
+//!   What spoils a count — a key, a click, a scroll — a monitor does **not** hear without the
+//!   permission, so the system is **asked** at each modifier change how long ago the last of them
+//!   was (`CGEventSourceSecondsSinceLastEventType`, which needs no permission either) and the
+//!   count takes it from there ([`bt_shell_common::hotkey::spoils_count`]). No key's meaning is
+//!   read, no event changed.
 //!
 //! This takes keys from the person's Mac, which is why a test, the gate, the smoke and the
 //! agent's copy never build it ([`bt_shell_common::hotkey::owns_global_keys`], and
@@ -24,25 +26,24 @@
 //! on the US layout when that layout has no such character (a Cyrillic or Arabic one); a named
 //! key has its code in [`bt_shell_common::hotkey::named_key_code`].
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
+use block2::RcBlock;
 use bt_core::Key;
 use bt_shell_common::hotkey::{
-    Access, Binding, DoubleTap, GlobalKeys, Refusal, carbon_modifiers, named_key_code,
+    Binding, DoubleTap, GlobalKeys, Refusal, carbon_modifiers, input_age_at_event, named_key_code,
 };
 use bt_shell_common::keys::us_code_of;
+use bt_shell_common::shortcuts::Held;
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSEvent, NSEventModifierFlags};
-use objc2_core_foundation::{
-    CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
-};
-use objc2_core_graphics::{
-    CGEvent, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy,
-    CGEventType, CGPreflightListenEventAccess, CGRequestListenEventAccess,
-};
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{NSEvent, NSEventMask};
+use objc2_core_graphics::{CGEventSource, CGEventSourceStateID, CGEventType};
 use objc2_foundation::NSProcessInfo;
 
 use crate::{app, arrange};
@@ -191,134 +192,115 @@ fn code_of(key: Key) -> Option<u16> {
     }
 }
 
-/// What the tap's callback keeps: the count, and the port to enable again when the system
-/// disables it. Boxed, so its address (the callback's `user_info`) holds still.
-struct TapState {
-    count: RefCell<DoubleTap>,
-    /// The tap's port, set once it exists (the callback runs only after).
-    port: Cell<*const CFMachPort>,
-}
+/// What spoils a count of modifier taps: a key, a click, a scroll. A monitor does not hear them
+/// without the permission; the system tells how long ago the last was.
+const SPOILERS: [CGEventType; 5] = [
+    CGEventType::KeyDown,
+    CGEventType::LeftMouseDown,
+    CGEventType::RightMouseDown,
+    CGEventType::OtherMouseDown,
+    CGEventType::ScrollWheel,
+];
 
-/// The listening tap while it is held: its port, the source that brings its events to the main
-/// run loop, and the state its callback reads.
-struct Tap {
-    port: CFRetained<CFMachPort>,
-    source: CFRetained<CFRunLoopSource>,
-    // Kept for the callback's pointer: dropped after the port is invalidated.
-    _state: Box<TapState>,
-}
-
-impl Tap {
-    /// The events the tap hears: the modifiers' changes, and what spoils a count of them (a key,
-    /// a click, a scroll).
-    fn mask() -> u64 {
-        [
-            CGEventType::FlagsChanged,
-            CGEventType::KeyDown,
-            CGEventType::LeftMouseDown,
-            CGEventType::RightMouseDown,
-            CGEventType::OtherMouseDown,
-            CGEventType::ScrollWheel,
-        ]
+/// How long ago the last key, click or scroll was, in seconds, as the system tells it (any
+/// application's: the combined session's). Needs no permission.
+fn last_input_age() -> f64 {
+    SPOILERS
         .into_iter()
-        .fold(0, |mask, kind| mask | (1u64 << kind.0))
-    }
-
-    /// Builds the tap for `count` and starts it, or `None` when the system will not (the
-    /// permission is not there).
-    fn start(count: DoubleTap) -> Option<Tap> {
-        let state = Box::new(TapState {
-            count: RefCell::new(count),
-            port: Cell::new(std::ptr::null()),
-        });
-        let user = std::ptr::from_ref::<TapState>(&state)
-            .cast_mut()
-            .cast::<c_void>();
-        // SAFETY: the callback is `tapped` below, which implements the callback's contract; `user`
-        // is the state's address, which lives until the tap is stopped (`Drop`: the port is
-        // invalidated before the state goes).
-        let port = unsafe {
-            CGEvent::tap_create(
-                CGEventTapLocation::SessionEventTap,
-                CGEventTapPlacement::HeadInsertEventTap,
-                CGEventTapOptions::ListenOnly,
-                Self::mask(),
-                Some(tapped),
-                user,
+        .map(|kind| {
+            CGEventSource::seconds_since_last_event_type(
+                CGEventSourceStateID::CombinedSessionState,
+                kind,
             )
-        }?;
-        state.port.set(CFRetained::as_ptr(&port).as_ptr());
-        let source = CFMachPort::new_run_loop_source(None, Some(&port), 0)?;
-        // The main thread's loop: the callback runs where the application's windows are.
-        CFRunLoop::main()?.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
-        CGEvent::tap_enable(&port, true);
-        Some(Tap {
-            port,
-            source,
-            _state: state,
         })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// What a modifier change is to the count: whether it was the second quick tap. `at` is the
+/// event's own time, in seconds since boot, as the live trigger's `NSEvent.timestamp` says it
+/// (and not the time this runs: a main thread that was busy would run two taps one after the
+/// other and the count would see them quick), `now` the time the system was asked, and
+/// `since_input` its answer ([`last_input_age`]). Told twice, a change is no second tap: the count
+/// compares the modifiers held. A count that is being changed already (never, on one thread) says
+/// no.
+fn counted(count: &RefCell<DoubleTap>, at: f64, now: f64, since_input: f64, held: Held) -> bool {
+    count
+        .try_borrow_mut()
+        .is_ok_and(|mut count| count.flags(at, held, input_age_at_event(since_input, now - at)))
+}
+
+/// A modifier change heard by a monitor: told to the count, and the main queue is told when it
+/// was the double tap (the application's own work does not run inside an event's delivery).
+fn heard(count: &RefCell<DoubleTap>, event: &NSEvent) {
+    let at = event.timestamp();
+    let now = NSProcessInfo::processInfo().systemUptime();
+    let held = crate::arrange::held_keys(event.modifierFlags());
+    if counted(count, at, now, last_input_age(), held) {
+        DispatchQueue::main().exec_async(|| {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = app::delegate(mtm) {
+                app.hotkey_pressed();
+            }
+        });
     }
 }
 
-impl Drop for Tap {
-    fn drop(&mut self) {
-        CGEvent::tap_enable(&self.port, false);
-        if let Some(main) = CFRunLoop::main() {
-            main.remove_source(Some(&self.source), unsafe { kCFRunLoopCommonModes });
-        }
-        self.port.invalidate();
-    }
+/// The monitors while a double tap is held: the other applications' and bateri's own. Both are
+/// removed when this goes.
+struct Monitors {
+    global: Option<Retained<AnyObject>>,
+    local: Option<Retained<AnyObject>>,
 }
 
-/// When the event happened, in seconds since boot, as the live trigger's `NSEvent.timestamp`
-/// says it: the event's **own** time, which the system stamps when the key goes down, and not the
-/// time the callback runs (a main thread that was busy would run two taps one after the other and
-/// the count would see them quick). Only an event that cannot be an `NSEvent` has the time of
-/// the call.
-fn event_time(event: &CGEvent) -> f64 {
-    NSEvent::eventWithCGEvent(event).map_or_else(
-        || NSProcessInfo::processInfo().systemUptime(),
-        |event| event.timestamp(),
-    )
-}
-
-/// The listening tap's callback: what the event is to the count. Returns the event as it came
-/// (a listen-only tap's return is ignored). **Nothing here may unwind or take long**: the system
-/// disables a tap that is slow, so the application's own work is told to the main queue.
-unsafe extern "C-unwind" fn tapped(
-    _proxy: CGEventTapProxy,
-    kind: CGEventType,
-    event: NonNull<CGEvent>,
-    user: *mut c_void,
-) -> *mut CGEvent {
-    // SAFETY: `user` is the `TapState` this tap was made with (`Tap::start`), alive while the
-    // tap is; the event is valid for the call.
-    let (state, event_ref) = unsafe { (&*user.cast::<TapState>(), event.as_ref()) };
-    if kind == CGEventType::TapDisabledByTimeout || kind == CGEventType::TapDisabledByUserInput {
-        // The system switched it off: switched on again.
-        // SAFETY: the port is set before the first event and lives with the tap.
-        if let Some(port) = unsafe { state.port.get().as_ref() } {
-            CGEvent::tap_enable(port, true);
-        }
-    } else if let Ok(mut count) = state.count.try_borrow_mut() {
-        let hit = if kind == CGEventType::FlagsChanged {
-            let flags = NSEventModifierFlags(CGEvent::flags(Some(event_ref)).0 as usize);
-            count.flags(event_time(event_ref), arrange::held_keys(flags))
-        } else {
-            count.interrupt();
-            false
+impl Monitors {
+    /// Starts the monitors of `count`. No permission is asked for: a monitor of modifier changes
+    /// is given to any application.
+    fn start(count: DoubleTap) -> Monitors {
+        let count = Rc::new(RefCell::new(count));
+        let others = {
+            let count = Rc::clone(&count);
+            RcBlock::new(move |event: NonNull<NSEvent>| {
+                // SAFETY: AppKit gives the monitor a valid event.
+                heard(&count, unsafe { event.as_ref() });
+            })
         };
-        if hit {
-            DispatchQueue::main().exec_async(|| {
-                // audit: a block running on the main queue is on the main thread by definition.
-                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                if let Some(app) = app::delegate(mtm) {
-                    app.hotkey_pressed();
-                }
-            });
+        let own = {
+            let count = Rc::clone(&count);
+            RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+                // SAFETY: AppKit gives the monitor a valid event.
+                heard(&count, unsafe { event.as_ref() });
+                // The event goes on as it came: this only listens.
+                event.as_ptr()
+            })
+        };
+        // SAFETY: the local block returns the valid event it was given.
+        let (global, local) = unsafe {
+            (
+                NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+                    NSEventMask::FlagsChanged,
+                    &others,
+                ),
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                    NSEventMask::FlagsChanged,
+                    &own,
+                ),
+            )
+        };
+        Monitors { global, local }
+    }
+}
+
+impl Drop for Monitors {
+    fn drop(&mut self) {
+        for monitor in [self.global.take(), self.local.take()]
+            .into_iter()
+            .flatten()
+        {
+            // SAFETY: the object is the monitor an `add…Monitor…` call returned, removed once.
+            unsafe { NSEvent::removeMonitor(&monitor) };
         }
     }
-    event.as_ptr()
 }
 
 /// The system's hold on the key, one at a time. The handler is installed with the first chord and
@@ -326,7 +308,7 @@ unsafe extern "C-unwind" fn tapped(
 pub(crate) struct SystemKeys {
     handler: Ref,
     hot_key: Ref,
-    tap: Option<Tap>,
+    monitors: Option<Monitors>,
 }
 
 impl SystemKeys {
@@ -334,7 +316,7 @@ impl SystemKeys {
         Self {
             handler: std::ptr::null_mut(),
             hot_key: std::ptr::null_mut(),
-            tap: None,
+            monitors: None,
         }
     }
 
@@ -380,21 +362,16 @@ impl SystemKeys {
 impl GlobalKeys for SystemKeys {
     fn bind(&mut self, binding: Option<Binding>) -> Result<(), Refusal> {
         self.release();
-        // What was held is let go before the new one is held: the tap with the chord.
-        self.tap = None;
+        // What was held is let go before the new one is held: the monitors with the chord.
+        self.monitors = None;
         let Some(binding) = binding else {
             return Ok(());
         };
         let chord = match binding {
             Binding::Chord(chord) => chord,
             Binding::Twice(modifier) => {
-                // Without the permission the system would ask the person to give it: only the
-                // Settings page may cause that, so nothing is built until it is there.
-                if self.listen_access() != Access::Granted {
-                    return Err(Refusal::NoListening);
-                }
                 let count = DoubleTap::new(modifier, arrange::taps());
-                self.tap = Some(Tap::start(count).ok_or(Refusal::NoListening)?);
+                self.monitors = Some(Monitors::start(count));
                 return Ok(());
             }
         };
@@ -422,26 +399,12 @@ impl GlobalKeys for SystemKeys {
             Err(Refusal::Refused(status))
         }
     }
-
-    fn listen_access(&self) -> Access {
-        // Asks the system, not the person.
-        if CGPreflightListenEventAccess() {
-            Access::Granted
-        } else {
-            Access::NotGranted
-        }
-    }
-
-    fn ask_listen_access(&mut self) {
-        // The system's own question, once: it remembers the answer.
-        CGRequestListenEventAccess();
-    }
 }
 
 impl Drop for SystemKeys {
     fn drop(&mut self) {
         self.release();
-        self.tap = None;
+        self.monitors = None;
         if !self.handler.is_null() {
             // SAFETY: the reference came from `InstallEventHandler` and is removed once.
             unsafe { RemoveEventHandler(self.handler) };
@@ -451,75 +414,137 @@ impl Drop for SystemKeys {
 
 #[cfg(test)]
 mod tests {
-    use objc2_core_graphics::CGEventFlags;
+    use bt_core::{Modifier, Mods};
+    use bt_shell_common::shortcuts::Held;
+    use objc2_app_kit::NSEventModifierFlags;
 
     use super::*;
 
-    /// The time of a tapped event is the event's own, and not the time the callback runs (a main
-    /// thread that was busy would run two taps one after the other, and the count would see them
-    /// quick): what the event is stamped with is what the count is given, converted by the system
-    /// to seconds since boot, so twice the stamp is twice the time and a second call says the same.
-    /// Makes an event and posts nothing — **no test builds a tap**.
-    #[test]
-    fn the_time_of_an_event_is_its_own_stamp_in_seconds() {
-        let event = CGEvent::new(None).expect("an event");
-        CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
-        CGEvent::set_timestamp(Some(&event), 1_000_000_000);
-        let first = event_time(&event);
-        assert!(first > 0.0, "a stamp of its own: {first}");
-        assert_eq!(first, event_time(&event), "no clock of the call in it");
-        CGEvent::set_timestamp(Some(&event), 3_000_000_000);
-        let third = event_time(&event);
-        assert!(
-            (third - 3.0 * first).abs() < 1e-6 * third,
-            "{first} {third}"
-        );
+    /// The count a monitor feeds, with the application's own thresholds.
+    fn count() -> RefCell<DoubleTap> {
+        RefCell::new(DoubleTap::new(Modifier::Option, arrange::taps()))
     }
 
-    /// The tap's flags are read as the application's own modifier flags (`arrange::held_keys`,
-    /// the one reading of them): the bits are the same ones, so a count made of the tap's events is
-    /// the count the live trigger makes. Constants only — **no test builds a tap**.
+    fn option() -> Held {
+        arrange::held_keys(NSEventModifierFlags::Option)
+    }
+
+    /// What a double tap of ⌥ is to the monitors: every change is told as the system tells it
+    /// (`at` the event's time, asked at `now = at`), and `since_input` is how long ago the last
+    /// key, click or scroll was at each. The hits.
+    fn tapped(count: &RefCell<DoubleTap>, events: &[(f64, bool, f64)]) -> usize {
+        events
+            .iter()
+            .filter(|&&(at, down, since_input)| {
+                let held = if down { option() } else { Held::default() };
+                counted(count, at, at, since_input, held)
+            })
+            .count()
+    }
+
+    /// A double tap of ⌥ with nothing typed or clicked is one hit; ⌥e ⌥e is none; ⌥ held with a
+    /// key typed in the middle (or a click, or a scroll — the system answers for all of them
+    /// alike) is none. The thresholds are the application's: the second tap comes within the
+    /// double-click interval of the first.
     #[test]
-    fn the_tap_flags_are_the_applications_modifier_flags() {
-        for (cg, ns) in [
-            (CGEventFlags::MaskShift, NSEventModifierFlags::Shift),
-            (CGEventFlags::MaskControl, NSEventModifierFlags::Control),
-            (CGEventFlags::MaskAlternate, NSEventModifierFlags::Option),
-            (CGEventFlags::MaskCommand, NSEventModifierFlags::Command),
-            (
-                CGEventFlags::MaskSecondaryFn,
-                NSEventModifierFlags::Function,
-            ),
-        ] {
-            assert_eq!(cg.0, ns.0 as u64, "{cg:?}");
-        }
-        // Caps lock is no modifier of a shortcut: ⌥ with it on is ⌥ alone.
-        let flags = NSEventModifierFlags(
-            (CGEventFlags::MaskAlternate | CGEventFlags::MaskAlphaShift).0 as usize,
-        );
-        let held = arrange::held_keys(flags);
+    fn a_double_tap_is_a_hit_and_a_key_between_is_none() {
+        let never = f64::INFINITY;
+        let clean = [
+            (1.00, true, never),
+            (1.07, false, never),
+            (1.20, true, never),
+            (1.27, false, never),
+        ];
+        assert_eq!(tapped(&count(), &clean), 1);
+        // ⌥F18 ⌥F18, the measured case: a key 70 ms before each release.
+        let typed = [
+            (1.00, true, never),
+            (1.07, false, 0.07 - 0.0),
+            (1.20, true, never),
+            (1.27, false, 0.07),
+        ];
+        assert_eq!(tapped(&count(), &typed), 0);
+        // A click, or a scroll, while the second ⌥ is held.
+        let clicked = [
+            (1.00, true, never),
+            (1.07, false, never),
+            (1.20, true, never),
+            (1.27, false, 0.04),
+        ];
+        assert_eq!(tapped(&count(), &clicked), 0);
+        // Typing before the first ⌥ is not between the taps.
+        let before = [
+            (1.00, true, 0.30),
+            (1.07, false, 0.37),
+            (1.20, true, 0.50),
+            (1.27, false, 0.57),
+        ];
+        assert_eq!(tapped(&count(), &before), 1);
+    }
+
+    /// A change told twice — the global monitor and the local one, were both to hear it — is one
+    /// change: the count compares the modifiers held, and counts the second tap once.
+    #[test]
+    fn a_change_told_by_both_monitors_counts_once() {
+        let never = f64::INFINITY;
+        let count = count();
+        let told_twice = [
+            (1.00, true, never),
+            (1.00, true, never),
+            (1.07, false, never),
+            (1.07, false, never),
+            (1.20, true, never),
+            (1.20, true, never),
+            (1.27, false, never),
+            (1.27, false, never),
+        ];
+        assert_eq!(tapped(&count, &told_twice), 1);
+    }
+
+    /// The system is asked a moment after the event, and the count is told as of the event: an
+    /// input that came in that moment is no input before the event.
+    #[test]
+    fn the_age_of_the_last_input_is_told_as_of_the_event() {
+        let count = count();
+        // Taps at 1.00-1.07 and 1.20-1.27; the monitors ran 0.2 s late each time, and a key was
+        // typed at 1.30 (after the double tap, before the system was asked).
+        let hit = |at: f64, down: bool| {
+            let held = if down { option() } else { Held::default() };
+            let now = at + 0.2;
+            counted(&count, at, now, now - 1.30, held)
+        };
+        assert!(!hit(1.00, true));
+        assert!(!hit(1.07, false));
+        assert!(!hit(1.20, true));
+        assert!(hit(1.27, false), "a key after the event does not spoil it");
+    }
+
+    /// The system's answer for the keys, clicks and scrolls needs no permission to read: the
+    /// five kinds are the ones a count is spoiled by, and the answer is a time (never negative).
+    #[test]
+    fn the_system_tells_how_long_ago_the_last_input_was() {
         assert_eq!(
-            held.mods,
-            bt_core::Mods::NONE.with(bt_core::Modifier::Option)
+            SPOILERS,
+            [
+                CGEventType::KeyDown,
+                CGEventType::LeftMouseDown,
+                CGEventType::RightMouseDown,
+                CGEventType::OtherMouseDown,
+                CGEventType::ScrollWheel,
+            ]
         );
-        assert!(!held.function);
+        assert!(last_input_age() >= 0.0);
     }
 
-    /// The tap hears the modifiers and what spoils their count, and nothing else: no key's
-    /// meaning is asked of an event.
+    /// The modifier changes a monitor hears are read as the application's own modifier flags
+    /// (`arrange::held_keys`, the one reading of them): a count made of the monitors' events is
+    /// the count the live trigger makes. Caps lock is no modifier of a shortcut: ⌥ with it on is
+    /// ⌥ alone.
     #[test]
-    fn the_tap_hears_the_modifiers_and_what_spoils_their_count() {
-        let mask = Tap::mask();
-        for kind in [
-            CGEventType::FlagsChanged,
-            CGEventType::KeyDown,
-            CGEventType::LeftMouseDown,
-            CGEventType::RightMouseDown,
-            CGEventType::OtherMouseDown,
-            CGEventType::ScrollWheel,
-        ] {
-            assert_ne!(mask & (1u64 << kind.0), 0, "{kind:?}");
-        }
-        assert_eq!(mask.count_ones(), 6);
+    fn the_monitors_flags_are_the_applications_modifier_flags() {
+        let held =
+            arrange::held_keys(NSEventModifierFlags::Option | NSEventModifierFlags::CapsLock);
+        assert_eq!(held.mods, Mods::NONE.with(Modifier::Option));
+        assert!(!held.function);
     }
 }

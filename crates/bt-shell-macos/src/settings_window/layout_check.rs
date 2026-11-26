@@ -27,9 +27,7 @@ use objc2_foundation::{
 };
 
 use super::pictures::Palette;
-use super::{
-    Category, Key, ROW_PAD_X, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen,
-};
+use super::{Category, Key, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
 use crate::settings::{self, FileState};
 
 /// How far two frames may run into each other before it is an overlap: the hairline rounding of
@@ -1173,13 +1171,12 @@ impl SettingsWindow {
     }
 
     /// The Hotkey Window page's shortcut row in the states a person finds it in: with no
-    /// shortcut, with a chord, with a double tap and with a double tap that waits for the
-    /// permission. **The right of the row is the same in each** — the field and Remove at the same
-    /// place (in the row) and the same size, neither squeezed by what the row says beside them —
-    /// and the row grows only while the key waits, by the note and the button under its top line,
-    /// which are read whole (a label that is given less width than its text takes is cut). With
-    /// `shots`, the page and the window are written as `hotkey-window-{state}.png` for the three
-    /// states a person is shown.
+    /// shortcut, with a chord and with a double tap. **The right of the row is the same in each**
+    /// — the field and Remove at the same place (in the row) and the same size, neither squeezed
+    /// by what the row says beside them, whatever the description's lines do to the row — and the
+    /// description is read whole (a label that is given less width than its text takes is cut),
+    /// and says nothing of a permission: a double tap asks for none. With `shots`, the page and
+    /// the window are written as `hotkey-window-{state}.png`.
     fn hotkey_problems(
         &self,
         themes: &ThemeLists<'_>,
@@ -1206,29 +1203,15 @@ impl SettingsWindow {
         };
         let twice = Shortcut::Twice(Modifier::Option);
         let chord = Shortcut::parse_global("option+shift+h").ok();
-        // (name, whether a picture is written, shortcut, waiting for the permission)
-        let states = [
-            ("none", true, None, false),
-            ("chord", true, chord, false),
-            ("twice", false, Some(twice), false),
-            ("twice-waiting", true, Some(twice), true),
-        ];
+        // (name, shortcut)
+        let states = [("none", None), ("chord", chord), ("twice", Some(twice))];
         // The field's and Remove's frames in the row, as the first state has them.
         let mut first: Option<[NSRect; 2]> = None;
-        let mut heights = Vec::new();
-        for (name, pictured, shortcut, waiting) in states {
+        for (name, shortcut) in states {
             let mut settings = Settings::default();
             settings.hotkey_window.shortcut = shortcut;
             self.refresh(&settings, resolved, &FileState::Missing, &[], themes);
-            let words = waiting.then(|| {
-                bt_shell_common::hotkey::refusal_words(
-                    bt_shell_common::hotkey::Refusal::NoListening,
-                    shortcut,
-                )
-            });
-            controls
-                .hotkey_shortcut
-                .show(&settings, true, words.as_deref(), false);
+            controls.hotkey_shortcut.show(&settings, true, false);
             sidebar.selectRowIndexes_byExtendingSelection(
                 &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::HotkeyWindow)),
                 false,
@@ -1239,7 +1222,7 @@ impl SettingsWindow {
                 continue;
             };
             content.layoutSubtreeIfNeeded();
-            let (field, remove, allow, note) = controls.hotkey_shortcut.parts();
+            let (field, remove) = controls.hotkey_shortcut.parts();
             // In the pages' document (flipped: y grows downwards), and from the row's top left.
             let at = in_document(&row.view, &document);
             let in_page = |view: &NSView| in_document(view, &document);
@@ -1298,84 +1281,33 @@ impl SettingsWindow {
                     say(format!("{what} runs into the row's text"));
                 }
             }
-            // The text beside the name and the warning are read whole: given the width their
-            // text takes (a label given less is cut), and the height.
-            for (what, label) in [("the description", &*row.note), ("the warning", note)] {
-                if label.isHidden() {
-                    continue;
-                }
-                let (frame, text) = (in_page(label), label.intrinsicContentSize());
-                if frame.size.width + SLACK < text.width || frame.size.height + SLACK < text.height
-                {
-                    say(format!(
-                        "{what} is {:.1} × {:.1} for text that takes {:.1} × {:.1}: cut",
-                        frame.size.width, frame.size.height, text.width, text.height
-                    ));
-                }
-            }
-            // What the key waits for is under the top line, as wide as the row, and only then.
-            let under = in_page(&controls.hotkey_shortcut.under());
-            if waiting {
-                let said = words.as_deref().unwrap_or_default();
-                if note.isHidden() || allow.isHidden() {
-                    say("the note and the button are not shown".to_owned());
-                }
-                if said.contains('`') || !said.starts_with("\u{2325} \u{2325} ") {
-                    say(format!("the warning is not in glyphs: {said:?}"));
-                }
-                if !contains(at, in_page(note)) || !contains(at, in_page(allow)) {
-                    say("the note or the button leaves the row".to_owned());
-                }
-                if top(in_page(allow)) < bottom(in_page(note)) - SLACK {
-                    say("the button is not under the note".to_owned());
-                }
-                let line = bottom(in_page(field)).max(bottom(in_page(remove)));
-                if top(in_page(note)) < line - SLACK {
-                    say("the note is not under the row's top line".to_owned());
-                }
-                if (under.size.width - (at.size.width - 2.0 * ROW_PAD_X)).abs() > SLACK {
-                    say(format!(
-                        "the part under the top line is {:.1} wide in a row {:.1} wide",
-                        under.size.width, at.size.width
-                    ));
-                }
-            } else if under.size.height > SLACK || !note.isHidden() || !allow.isHidden() {
+            // The text beside the name is read whole: given the width its text takes (a label
+            // given less is cut), and the height.
+            let (frame, text) = (in_page(&row.note), row.note.intrinsicContentSize());
+            if frame.size.width + SLACK < text.width || frame.size.height + SLACK < text.height {
                 say(format!(
-                    "the row has {:.1} under its top line with no key waiting",
-                    under.size.height
+                    "the description is {:.1} × {:.1} for text that takes {:.1} × {:.1}: cut",
+                    frame.size.width, frame.size.height, text.width, text.height
                 ));
             }
-            // The row says Input Monitoring once — in the button, while it is there — and holds no
-            // code quote.
-            let shown = |label: String, hidden: bool| if hidden { String::new() } else { label };
-            let said = format!(
-                "{} {} {}",
-                row.note.stringValue(),
-                shown(note.stringValue().to_string(), note.isHidden()),
-                shown(allow.title().to_string(), allow.isHidden())
-            );
-            if said.matches("Input Monitoring").count() != usize::from(waiting) {
-                say(format!("Input Monitoring is said wrongly: {said:?}"));
+            // A double tap asks for no permission, and nothing in the row says it does; the row
+            // holds no code quote either.
+            let said = row.note.stringValue().to_string();
+            for word in ["Input Monitoring", "permission", "Allow"] {
+                if said.contains(word) {
+                    say(format!("the row speaks of a permission ({word}): {said:?}"));
+                }
             }
             if said.contains('`') {
                 say(format!("a code quote is in the row's text: {said:?}"));
             }
-            heights.push((name, at.size.height));
-            if let (Some(dir), true) = (shots, pictured) {
+            if let Some(dir) = shots {
                 picture(&document, &dir.join(format!("hotkey-window-{name}.png")));
                 picture(
                     &content,
                     &dir.join(format!("hotkey-window-{name}-window.png")),
                 );
             }
-        }
-        // The row grows while the key waits and in no other state of the same shortcut.
-        if let [.., (_, plain), (_, waiting)] = heights[..]
-            && waiting <= plain + SLACK
-        {
-            problems.push(format!(
-                "Hotkey Window: the row is {waiting:.1} high while the key waits and {plain:.1} when it does not: it did not grow"
-            ));
         }
         // Back to what the other checks expect: the page as the file's defaults draw it.
         self.refresh(

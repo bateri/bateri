@@ -1318,8 +1318,6 @@ define_class!(
         #[unsafe(method(applicationDidBecomeActive:))]
         fn did_become_active(&self, _notification: &NSNotification) {
             crate::agent::seen();
-            // Coming back from System Settings, where the double tap may have been allowed.
-            self.hotkey_access_may_have_changed();
             // A field of Settings that was listening when bateri went behind listens again.
             Self::hotkey_quiet_later();
         }

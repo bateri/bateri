@@ -1,12 +1,12 @@
 //! The Hotkey Window page's shortcut row in each state a person finds it in — no shortcut, a
-//! chord, a double tap, a double tap that waits for the permission — laid out and measured
-//! (`bt_shell_macos::hotkey_row_problems`): the field and Remove are the same size at the same
-//! place in every state, the warning is read whole and the row grows only while the key waits.
+//! chord, a double tap — laid out and measured (`bt_shell_macos::hotkey_row_problems`): the field
+//! and Remove are the same size at the same place in every state, the description is read whole
+//! and says nothing of a permission (a double tap asks for none).
 //! (`tests/settings_window.rs` runs the same measurement among the page checks.)
 //!
 //! With `--ignored` the page and the window are also drawn off the screen, as bitmaps and with no
-//! window driven, into `target/shots/` as `hotkey-window-{none,chord,twice-waiting}.png` (the
-//! page) and `hotkey-window-{…}-window.png` (the window), for a person to look at:
+//! window driven, into `target/shots/` as `hotkey-window-{none,chord,twice}.png` (the page) and
+//! `hotkey-window-{…}-window.png` (the window), for a person to look at:
 //! `cargo test -p bt-shell-macos --test hotkey_row -- --ignored`. A test with its own `main`
 //! (`harness = false`) has no `#[ignore]`: the argument is read here.
 //!

@@ -91,6 +91,9 @@ pub struct Taps {
     down: Option<(Tapped, f64)>,
     /// The tap that was made and when it was let go.
     once: Option<(Tapped, f64)>,
+    /// When the press that began the count in progress went down: the first tap's. A second tap
+    /// that pairs with it does not move it; whatever ends the count takes it away.
+    began: Option<f64>,
 }
 
 impl Taps {
@@ -103,7 +106,14 @@ impl Taps {
             held: Held::default(),
             down: None,
             once: None,
+            began: None,
         }
+    }
+
+    /// When the press that began the count in progress went down (seconds, as `flags` was told),
+    /// if a count is in progress: a key held down, or a first tap waiting for its pair.
+    pub fn began(&self) -> Option<f64> {
+        self.began
     }
 
     /// The modifiers held after a change, at the time `at` (seconds).
@@ -124,6 +134,11 @@ impl Taps {
                     {
                         self.once = None;
                     }
+                    // A press that pairs with a tap waiting is the count's second: it began
+                    // with the first.
+                    if self.once.is_none() {
+                        self.began = Some(at);
+                    }
                 }
                 _ => self.interrupt(),
             }
@@ -131,14 +146,19 @@ impl Taps {
         }
         let Some((key, pressed)) = self.down.take() else {
             self.once = None;
+            self.began = None;
             return Step::Nothing;
         };
         if at - pressed >= self.tap {
             self.once = None;
+            self.began = None;
             return Step::Nothing;
         }
         match self.once.take() {
-            Some(_) => Step::Twice(key),
+            Some(_) => {
+                self.began = None;
+                Step::Twice(key)
+            }
             None => {
                 self.once = Some((key, at));
                 Step::Once(key)
@@ -150,6 +170,7 @@ impl Taps {
     pub fn interrupt(&mut self) {
         self.down = None;
         self.once = None;
+        self.began = None;
     }
 
     /// The key whose second tap is awaited at `at` (seconds): one tap was made and the gap has
@@ -442,5 +463,40 @@ mod tests {
         taps.flags(6.0, SHIFT);
         taps.interrupt();
         assert_eq!(taps.flags(6.1, NONE), Step::Nothing);
+    }
+
+    /// The count remembers when its first press went down (a modifier's key listening to the
+    /// system asks whether something spoiled it since), keeps it through the second tap, and
+    /// drops it whenever the count ends.
+    #[test]
+    fn the_count_remembers_when_its_first_press_went_down() {
+        let mut taps = counting();
+        assert_eq!(taps.began(), None);
+        taps.flags(1.00, SHIFT);
+        assert_eq!(taps.began(), Some(1.00));
+        // Its release: the first tap waits for its pair, and began with the first press.
+        taps.flags(1.08, NONE);
+        assert_eq!(taps.began(), Some(1.00));
+        // The second press pairs with it and does not move it.
+        taps.flags(1.25, SHIFT);
+        assert_eq!(taps.began(), Some(1.00));
+        // The double press ends the count.
+        assert_eq!(taps.flags(1.33, NONE), Step::Twice(shift()));
+        assert_eq!(taps.began(), None);
+        // A second press after the gap is a count of its own.
+        taps.flags(2.00, SHIFT);
+        taps.flags(2.08, NONE);
+        taps.flags(3.00, SHIFT);
+        assert_eq!(taps.began(), Some(3.00), "the first tap's wait ran out");
+        // A press held too long, a pair of keys and an interruption end it.
+        taps.flags(3.50, NONE);
+        assert_eq!(taps.began(), None);
+        taps.flags(4.00, SHIFT);
+        taps.flags(4.05, both(Modifier::Shift, Modifier::Option));
+        assert_eq!(taps.began(), None);
+        taps.flags(5.00, NONE);
+        taps.flags(6.00, OPTION);
+        taps.interrupt();
+        assert_eq!(taps.began(), None);
     }
 }

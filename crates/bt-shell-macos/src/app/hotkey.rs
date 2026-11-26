@@ -11,7 +11,7 @@
 use bt_core::{HOTKEY_DEFAULT_NAME, HotkeySpaces, HotkeyWindowSettings, SettingsEdit};
 use bt_shell_common::agent::message::HotkeyAction;
 use bt_shell_common::hotkey::{
-    self as rules, Candidate, GlobalKeys as _, KeyTaker, Leaving, Lost, Presence, Step, Verb,
+    self as rules, Candidate, KeyTaker, Leaving, Lost, Presence, Step, Verb,
 };
 use dispatch2::DispatchQueue;
 use objc2_app_kit::{NSScreen, NSWorkspaceActiveSpaceDidChangeNotification};
@@ -21,10 +21,6 @@ use crate::window::{frame_of, frontmost_other, rect_of};
 
 /// The bundle the agent tries bateri with: it never holds the system's key.
 const AGENT_CHECK_BUNDLE: &str = "dev.bateri.agent-check";
-
-/// System Settings ▸ Privacy & Security ▸ Input Monitoring: where a double tap is allowed.
-const INPUT_MONITORING_PANE: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
 
 thread_local! {
     /// The object the system tells that the desktop in front changed: made when the first window
@@ -454,59 +450,6 @@ impl AppDelegate {
         self.post_notices(Source::Hotkey, told);
         // The page that shows why a key is not held shows it now.
         self.refresh_settings_window();
-    }
-
-    /// The person wants the double tap heard: asks the system for the permission (the system asks
-    /// the person, once), asks for the key again, and — when the button sent this and the
-    /// permission is still not there — opens the System Settings pane that gives it. **Only the
-    /// Settings page calls this** (a double tap just recorded, or its button): a launch that asked
-    /// would put a question on every run of every build ([`Self::hotkey_access_may_have_changed`]
-    /// only asks the system whether it was given).
-    pub(crate) fn allow_listening(&self, open_pane: bool) {
-        if !self.retry_global_keys(true) {
-            return;
-        }
-        if open_pane {
-            crate::hyperlink::open_url(INPUT_MONITORING_PANE);
-        }
-    }
-
-    /// Whether the key asked for waits for the permission to hear a double tap (the Settings
-    /// row shows its button then).
-    pub(crate) fn hotkey_waits_for_access(&self) -> bool {
-        self.ivars().hotkey_registration.borrow().waits_for_access()
-    }
-
-    /// bateri came to the front: the person may have given the permission a double tap waits for
-    /// in System Settings. Asks the system whether it was, and the key again if so; asks no one.
-    pub(crate) fn hotkey_access_may_have_changed(&self) {
-        if self.ivars().hotkey_registration.borrow().waits_for_access() {
-            self.retry_global_keys(false);
-        }
-    }
-
-    /// Asks for the key again where a double tap waits for the permission (`ask`: the person
-    /// is asked for it first); tells the settings what came of it. Whether it still waits.
-    fn retry_global_keys(&self, ask: bool) -> bool {
-        let instance = self.hotkey_instance();
-        if !rules::owns_global_keys(&instance) {
-            return false;
-        }
-        let settings = self.settings().clone();
-        let (waiting, told) = self.with_system_keys(|keys| {
-            if ask {
-                keys.ask_listen_access();
-            }
-            let mut registration = self.ivars().hotkey_registration.borrow_mut();
-            registration.retry(keys, &settings, &instance);
-            (
-                registration.waits_for_access(),
-                registration.notices(settings.hotkey_window.shortcut),
-            )
-        });
-        self.post_notices(Source::Hotkey, told);
-        self.refresh_settings_window();
-        waiting
     }
 
     /// The person dragged an edge of the hotkey window and let go: the size it has now is a share
@@ -966,32 +909,47 @@ mod tests {
         assert!(hotkey.matches("self.candidates()").count() >= 4);
     }
 
-    /// **No test, gate, smoke or agent's copy builds a tap, and nothing asks the person for the
-    /// permission but the Settings page.** A source scan (the real tap needs the person's
-    /// permission and a window server): the one `tap_create` is behind the question whether the
-    /// permission is there, the question to the person is in one place that only Settings
-    /// calls, and the thresholds of the count are the application's (`arrange::taps()`), not
-    /// numbers of this file's.
+    /// **A double tap asks the person for no permission, and no test, gate, smoke or agent's copy
+    /// listens to the keyboard.** A source scan (the monitors are the system's and the real
+    /// ones are built only for the owner): the double tap is heard by the system's event monitors,
+    /// a global one and a local one, over one count; what spoils the count is asked of the system
+    /// (`CGEventSourceSecondsSinceLastEventType`, which needs no permission); the thresholds of
+    /// the count are the application's (`arrange::taps()`), not numbers of this file's; and
+    /// nothing in the application builds an event tap, asks for Input Monitoring or sends the
+    /// person to its pane.
     #[test]
-    fn the_tap_is_built_with_the_permission_and_the_person_is_asked_only_from_settings() {
+    fn a_double_tap_is_heard_by_event_monitors_and_asks_for_nothing() {
         let keys = include_str!("../global_keys.rs");
         let code = keys.split("#[cfg(test)]").next().expect("the code");
-        assert_eq!(code.matches("CGEvent::tap_create(").count(), 1);
-        assert_eq!(code.matches("CGRequestListenEventAccess()").count(), 1);
-        let bind = body_of(code, "    fn bind(", "    ");
-        let asked = bind
-            .find("self.listen_access() != Access::Granted")
-            .expect("the permission is looked at");
-        let built = bind.find("Tap::start(").expect("the tap is built here");
-        assert!(asked < built, "the permission before the tap");
-        assert!(code.contains("CGEventTapOptions::ListenOnly"));
+        assert_eq!(
+            code.matches("addGlobalMonitorForEventsMatchingMask_handler(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            code.matches("addLocalMonitorForEventsMatchingMask_handler(")
+                .count(),
+            1
+        );
+        assert_eq!(code.matches("NSEventMask::FlagsChanged").count(), 2);
+        // One count behind both: a change told by the two is the same change.
+        assert!(code.contains("let count = Rc::new(RefCell::new(count));"));
+        assert_eq!(code.matches("Rc::clone(&count)").count(), 2);
+        // What spoils the count is asked of the system, at each change, and the count decides.
+        assert!(code.contains("CGEventSource::seconds_since_last_event_type("));
+        assert!(code.contains("CGEventSourceStateID::CombinedSessionState"));
+        assert!(code.contains("input_age_at_event("));
+        let heard = body_of(code, "fn heard(", "");
+        assert!(heard.contains("last_input_age()"));
+        assert!(heard.contains("event.timestamp()"), "the event's own time");
         assert!(code.contains("arrange::taps()"));
         assert!(
             !code.contains("Taps::new("),
             "the thresholds are `arrange::taps()`'s"
         );
-        // Nobody else names the system's calls.
+        // Neither a tap nor a request for a permission is anywhere in the application.
         for (name, other) in [
+            ("global_keys.rs", code),
             ("app.rs", include_str!("../app.rs")),
             ("window.rs", include_str!("../window.rs")),
             ("lib.rs", include_str!("../lib.rs")),
@@ -1000,44 +958,19 @@ mod tests {
             ("hotkey.rs", include_str!("hotkey.rs")),
         ] {
             let other = other.split("#[cfg(test)]").next().expect("the code");
-            assert!(
-                !other.contains("tap_create(") && !other.contains("CGRequestListenEventAccess"),
-                "{name}"
-            );
+            for word in [
+                "tap_create(",
+                "CGEventTap",
+                "CGRequestListenEventAccess",
+                "CGPreflightListenEventAccess",
+                "Privacy_ListenEvent",
+                "allow_listening",
+                "hotkey_access_may_have_changed",
+                "hotkey_waits_for_access",
+            ] {
+                assert!(!other.contains(word), "{name}: {word}");
+            }
         }
-        // The person is asked from `allow_listening` only, and only Settings calls it.
-        let code_here = include_str!("hotkey.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the code");
-        assert_eq!(code_here.matches("retry_global_keys(true)").count(), 1);
-        assert_eq!(code_here.matches("retry_global_keys(false)").count(), 1);
-        assert!(
-            body_of(code_here, "    pub(crate) fn allow_listening(", "    ")
-                .contains("retry_global_keys(true)")
-        );
-        assert!(
-            body_of(
-                code_here,
-                "    pub(crate) fn hotkey_access_may_have_changed(",
-                "    "
-            )
-            .contains("retry_global_keys(false)")
-        );
-        for (name, other) in [
-            ("app.rs", include_str!("../app.rs")),
-            ("window.rs", include_str!("../window.rs")),
-            ("menu.rs", include_str!("../menu.rs")),
-            ("lib.rs", include_str!("../lib.rs")),
-        ] {
-            let other = other.split("#[cfg(test)]").next().expect("the code");
-            assert!(!other.contains("allow_listening("), "{name}");
-        }
-        let page = include_str!("../settings_window/hotkey.rs");
-        assert!(page.contains("delegate.allow_listening(false)"));
-        assert!(include_str!("../settings_window.rs").contains("delegate.allow_listening(true)"));
-        // Coming back to the front only asks the system whether it was given.
-        assert!(include_str!("../app.rs").contains("self.hotkey_access_may_have_changed();"));
     }
 
     /// The size the person dragged to is written as `depth` and `span` and **nothing else**: the
@@ -1127,7 +1060,6 @@ mod tests {
         // Both ways in ask who owns the keys before they reach the place that builds them.
         for caller in [
             "    pub(crate) fn apply_global_keys(",
-            "    fn retry_global_keys(",
             "    pub(crate) fn sync_hotkey_quiet(",
         ] {
             let body = body_of(code, caller, "    ");
@@ -1138,7 +1070,7 @@ mod tests {
                 "{caller}: asked who owns them before building them"
             );
         }
-        assert_eq!(code.matches("self.with_system_keys(").count(), 3);
+        assert_eq!(code.matches("self.with_system_keys(").count(), 2);
         // The instance is read from the lock, the bundle, the timed run and the agent's copy.
         let instance = body_of(code, "    fn hotkey_instance(", "    ");
         for fact in [
