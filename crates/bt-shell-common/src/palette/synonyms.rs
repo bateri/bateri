@@ -26,6 +26,11 @@ const WORDS: &[(&str, &str)] = &[
     ("renameGroup", "title name label folder"),
     ("detachTab", "window pop out detach"),
     ("mergeWindows", "combine join gather"),
+    (
+        "showHotkeyWindow",
+        "quake dropdown drop-down visor guake slide terminal toggle",
+    ),
+    ("pinHotkeyWindow", "keep stay float sticky unpin"),
     ("showTabList", "list overview all switch"),
     ("goToTab", "switch jump recent previous window"),
     ("goToFolder", "directory cd path open project change"),

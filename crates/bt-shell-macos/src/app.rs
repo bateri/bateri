@@ -71,6 +71,7 @@ use crate::watch::{Notify, Watch};
 use crate::window::{self, CloseScope, Placement, Seat, TerminalWindow};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
+mod hotkey;
 mod web_links;
 use crate::{child, focus, jobs, retired_holders, settings};
 use bt_shell_common::child::PaneRuns;
@@ -1120,6 +1121,10 @@ pub(crate) struct Ivars {
     /// The launch before this one read the session and never settled
     /// ([`restore::AttemptMode::Safe`]): what went through a parser then is not read again.
     safe_restore: Cell<bool>,
+    /// Window ▸ Pin Hotkey Window: the hotkey window stays where the focus leaves it. In memory
+    /// only, gone with the application (a pin is a state of now, `[hotkey_window]
+    /// hide_on_click_away = false` is the lasting choice).
+    hotkey_pinned: Cell<bool>,
     /// This launch is the arrival of an update from the bateri before kablo: its update's
     /// holder was waiting ([`retired_holders::update_waiting`]). The ledger of that bateri does
     /// not say it left to be updated, and this is what does.
@@ -1307,6 +1312,13 @@ define_class!(
             crate::agent::seen();
         }
 
+        /// Another application came to the front: the hotkey window, in sight and not pinned,
+        /// goes ([`AppDelegate::hotkey_active_lost`]).
+        #[unsafe(method(applicationDidResignActive:))]
+        fn did_resign_active(&self, _notification: &NSNotification) {
+            self.hotkey_active_lost();
+        }
+
         /// The Dock icon was clicked. **If there is no window at all** a new
         /// window opens and AppKit's default is skipped; if there is a window
         /// (even minimized) the default stays — AppKit restores the minimized
@@ -1320,7 +1332,10 @@ define_class!(
             // also counts a non-terminal window like the About panel and an open
             // panel would block the new window (found in code review); the list already
             // covers the minimized ones.
-            let default = !self.ivars().windows.borrow().is_empty();
+            //
+            // **A hotkey window, hidden or not, is no window to come back to**: with only it the
+            // click opens a normal window ([`bt_shell_common::hotkey::needs_normal_window`]).
+            let default = !self.needs_normal_window();
             if !default {
                 self.open_window_or_report(None, Opening::Window);
             }
@@ -1743,8 +1758,12 @@ define_class!(
                 // the copy that carries a second key for it is hidden always and would run it.
                 crate::menu::shows_end_programs(self.settings().keep_running)
             } else if item.action() == Some(sel!(mergeWindows:)) {
-                // Merging needs a second window to take tabs from.
-                self.windows().len() > 1
+                // Merging needs a second normal window to take tabs from.
+                self.can_merge_windows()
+            } else if item.action() == Some(sel!(pinHotkeyWindow:)) {
+                // Window ▸ Pin Hotkey Window: checked while pinned, and checked and grey while
+                // `hide_on_click_away = false` has already said the same for good.
+                self.validate_pin_item(item)
             } else if item.action() == Some(sel!(undoMove:)) {
                 // Edit ▸ Undo Move: or Undo of a browser that has the keyboard, which is the
                 // content's (the item is its Undo and the engine's to run).
@@ -1860,6 +1879,20 @@ define_class!(
         #[unsafe(method(mergeWindows:))]
         fn merge_windows(&self, _sender: Option<&AnyObject>) {
             self.merge_all_windows();
+        }
+
+        /// Window ▸ Show Hotkey Window: the same entry the shortcut and `bateri hotkey show` go
+        /// through ([`AppDelegate::toggle_hotkey`]); in sight and key already, nothing.
+        #[unsafe(method(showHotkeyWindow:))]
+        fn show_hotkey_window_action(&self, _sender: Option<&AnyObject>) {
+            self.toggle_hotkey(bt_shell_common::hotkey::Verb::Show);
+        }
+
+        /// Window ▸ Pin Hotkey Window: the hotkey window stays in sight when the focus leaves it,
+        /// or goes again ([`AppDelegate::toggle_hotkey_pin`]).
+        #[unsafe(method(pinHotkeyWindow:))]
+        fn pin_hotkey_window(&self, _sender: Option<&AnyObject>) {
+            self.toggle_hotkey_pin();
         }
 
         /// Shell ▸ New Local Tab (⌥⌘T): **always** a local tab, even from a
@@ -2865,6 +2898,7 @@ impl AppDelegate {
             gave_up: Cell::new(false),
             attempt_dir: RefCell::new(None),
             safe_restore: Cell::new(false),
+            hotkey_pinned: Cell::new(false),
             old_update,
             layout_writer: Cell::new(false),
             layout_save_pending: Cell::new(false),
@@ -3547,7 +3581,7 @@ impl AppDelegate {
     ) -> Result<Retained<TerminalWindow>, String> {
         // Inheritance comes from the active window's selected tab's **focused pane**.
         let source = from.map(|from| from.selected_tab().focused_pane());
-        self.open_window_as(from, source.as_deref(), opening, None, true)
+        self.open_window_as(from, source.as_deref(), opening, None, true, None)
     }
 
     /// [`Self::open_window`] for a window a program on a server asked for (`bateri window`): its
@@ -3568,6 +3602,7 @@ impl AppDelegate {
             Opening::Window,
             Some((start, pane)),
             keys,
+            None,
         )
     }
 
@@ -3580,6 +3615,7 @@ impl AppDelegate {
         opening: Opening,
         born: Option<(&Start, u64)>,
         keys: bool,
+        hotkey: Option<(&str, NSRect)>,
     ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
         let id = self.next_id();
@@ -3588,7 +3624,8 @@ impl AppDelegate {
             Some((start, pane)) => self.pane_launch_as(tab, source, opening, Some(start), pane),
             None => self.pane_launch(tab, source, opening, None),
         };
-        let window = TerminalWindow::new(mtm, id, tab, launch).map_err(|e| e.to_string())?;
+        let window = TerminalWindow::new(mtm, id, tab, launch, hotkey.map(|(name, _)| name))
+            .map_err(|e| e.to_string())?;
         // The side column is as wide as the one the window opens from: a width the user chose
         // is the user's, not one window's accident.
         if let Some(from) = from {
@@ -3604,14 +3641,18 @@ impl AppDelegate {
         // already has it from its birth settings, the same slot.
         let edge = self.settings().content_edge;
         window.set_content_edge(edge);
-        if keys {
+        if let Some((_, frame)) = hotkey {
+            // At its final size and out of sight: the shells see that size first, and the
+            // caller slides it in ([`AppDelegate::open_hotkey_window`]).
+            window.place_hidden(frame);
+        } else if keys {
             window.show_after(from);
         } else {
             window.show_apart(from);
         }
         // Timed run: the smoke gate must not depend on which app is in front
         // (`TerminalWindow::float_for_timed_run`).
-        if self.ivars().run.is_some() {
+        if self.ivars().run.is_some() && hotkey.is_none() {
             window.float_for_timed_run();
         }
         if let Err(e) = window.start(mtm) {
@@ -3677,7 +3718,12 @@ impl AppDelegate {
     /// says so: a move a program on a server asked for does not take the keyboard to the window
     /// ([`bt_shell_common::agent::arrange`]).
     pub(crate) fn make_move_raising(&self, wanted: Move, raise: bool) -> bool {
-        match moves::plan(&self.world(), wanted, self) {
+        let mut world = self.world();
+        if matches!(wanted, Move::MergeAllWindows { .. }) {
+            // The hotkey window is the person's to call, not a window of the work: its tabs stay.
+            world.retain(|window| !self.window(window.id).is_some_and(|w| w.is_hotkey()));
+        }
+        match moves::plan(&world, wanted, self) {
             Ok(mut plan) => {
                 if !raise {
                     plan.after
@@ -3965,6 +4011,19 @@ impl AppDelegate {
         })
     }
 
+    /// [`Self::window_at`] for a carried pane or tab that **lands**: a hotkey window is no place
+    /// to drop one (it is out of sight half the time, and what went there would be where nobody
+    /// looks), unless it is the window the carry started in — inside it everything works as in
+    /// any window.
+    pub(crate) fn drop_window_at(
+        &self,
+        screen: NSPoint,
+        from: u64,
+    ) -> Option<Retained<TerminalWindow>> {
+        self.window_at(screen)
+            .filter(|window| !window.is_hotkey() || window.id() == from)
+    }
+
     /// **The applier: a window around a tab** ([`moves::Step::OpenWindow`]):
     /// window `id` around `moved`, a tab that has left `from` — the size and
     /// place `from` has (or, with `at`, its title row under that screen
@@ -4028,7 +4087,7 @@ impl AppDelegate {
         let window = TerminalWindow::with_tab(
             self.mtm(),
             id,
-            None,
+            (None, None),
             from.run(),
             moved,
             Some(frame),
@@ -4350,10 +4409,15 @@ impl AppDelegate {
     /// ends with it ([`Move::MergeAllWindows`]). Nothing moves if any of the
     /// windows holds a question of its own (a beep).
     pub(crate) fn merge_all_windows(&self) {
-        let Some(into) = self.key_window().or_else(|| {
-            self.front_terminal_window()
-                .and_then(|window| self.window_owning(&window))
-        }) else {
+        // The target is a normal window: the hotkey window is neither merged into nor from.
+        let Some(into) = self
+            .key_window()
+            .filter(|window| !window.is_hotkey())
+            .or_else(|| {
+                self.front_terminal_window()
+                    .and_then(|window| self.window_owning(&window))
+            })
+        else {
             return;
         };
         self.make_move(Move::MergeAllWindows { into: into.id() });
@@ -4630,7 +4694,7 @@ impl AppDelegate {
                 self.front_terminal_window()
                     .and_then(|window| self.window_owning(&window))
             })
-            .or_else(|| self.windows().into_iter().next())
+            .or_else(|| self.pane_window())
             .or_else(|| self.open_window(None, Opening::Window).ok());
         let frame = into.as_ref().map_or(
             Frame {
@@ -4755,6 +4819,11 @@ impl AppDelegate {
             && let Some(saved) = self.take_saved(lock)
             && self.restore_saved(&saved)
         {
+            // A session of only the hotkey window (out of sight) shows nothing: a normal window
+            // opens beside it, as the Dock's click would ([`AppDelegate::needs_normal_window`]).
+            if self.needs_normal_window() {
+                return self.open_window(None, Opening::Window).map(drop);
+            }
             return Ok(());
         }
         self.open_window(None, Opening::Window).map(drop)
@@ -4916,23 +4985,38 @@ impl AppDelegate {
                     .map(|_| ()),
                 None => {
                     let id = self.next_id();
-                    TerminalWindow::restore(mtm, id, window.id, tab_id, &tab, launches, |this| {
-                        // `open_window`'s order: notice, list, chrome, then shown.
-                        this.set_notice(&self.ivars().notices.borrow().subtitle());
-                        self.ivars().windows.borrow_mut().push(this.clone());
-                        this.set_theme(theme);
-                        this.set_content_edge(edge);
-                        if let Some(side) = window.side_width {
-                            this.set_side_width(side);
-                        }
-                        if window.column_hidden {
-                            this.set_column_hidden(true);
-                        }
-                        if window.activity {
-                            this.set_activity(true);
-                        }
-                        this.show_at(frame);
-                    })
+                    let hotkey = window.hotkey.as_deref();
+                    TerminalWindow::restore(
+                        mtm,
+                        id,
+                        (window.id, hotkey),
+                        tab_id,
+                        &tab,
+                        launches,
+                        |this| {
+                            // `open_window`'s order: notice, list, chrome, then shown.
+                            this.set_notice(&self.ivars().notices.borrow().subtitle());
+                            self.ivars().windows.borrow_mut().push(this.clone());
+                            this.set_theme(theme);
+                            this.set_content_edge(edge);
+                            if let Some(side) = window.side_width {
+                                this.set_side_width(side);
+                            }
+                            if window.column_hidden {
+                                this.set_column_hidden(true);
+                            }
+                            if window.activity {
+                                this.set_activity(true);
+                            }
+                            if hotkey.is_some() {
+                                // The hotkey window comes back out of sight, at the size it will
+                                // slide in at (its frame is the settings', not the saved one).
+                                this.place_hidden(self.hotkey_frame_now().unwrap_or(frame));
+                            } else {
+                                this.show_at(frame);
+                            }
+                        },
+                    )
                     .map(|this| built = Some(this))
                 }
             };
@@ -5078,6 +5162,9 @@ impl AppDelegate {
         numbers.iter().find_map(|number| {
             windows
                 .iter()
+                // The hotkey window is never "the front window": a session must not come back
+                // with it in front, and what means the window the person works in is a normal one.
+                .filter(|window| !window.is_hotkey())
                 .find(|window| window.ns_window().windowNumber() == number.integerValue())
                 .map(|window| window.ns_window().retain())
         })
@@ -5097,7 +5184,10 @@ impl AppDelegate {
             .keyWindow()
             .into_iter()
             .chain(app.mainWindow())
-            .find(|window| self.window_owning(window).is_some())
+            .find(|window| {
+                self.window_owning(window)
+                    .is_some_and(|owner| !owner.is_hotkey())
+            })
             .or_else(|| self.front_terminal_window());
         let mut windows = Vec::new();
         let mut histories = Vec::new();
@@ -5139,7 +5229,7 @@ impl AppDelegate {
                 },
                 tabs,
                 selected: selected_index,
-                key: key.as_deref().is_some_and(|key| window.owns(key)),
+                key: !window.is_hotkey() && key.as_deref().is_some_and(|key| window.owns(key)),
                 // A column at the default is written as none: the layout then stays in the
                 // version before widths.
                 side_width: Some(window.side_width()).filter(|&side| side != tabs::SIDE_WIDTH),
@@ -5147,8 +5237,7 @@ impl AppDelegate {
                 activity: window.activity(),
                 groups,
                 id: Some(window.number()),
-                // The hotkey window is written by Phase 2 (`TerminalWindow::hotkey`).
-                hotkey: None,
+                hotkey: window.hotkey_name().map(str::to_owned),
             });
         }
         (Saved { windows }, histories)
@@ -5163,8 +5252,7 @@ impl AppDelegate {
     /// The first window's selected tab's focused pane — the launch's only
     /// pane in a timed run, before the smoke run's second tab.
     fn first_pane(&self) -> Option<Retained<TerminalPane>> {
-        self.windows()
-            .first()
+        self.first_normal_window()
             .map(|window| window.selected_tab().focused_pane())
     }
 
@@ -5259,7 +5347,7 @@ impl AppDelegate {
         if self.ivars().measured_asked.replace(true) {
             return;
         }
-        let window = self.windows().first().cloned();
+        let window = self.first_normal_window();
         let opened = window.is_some_and(|window| {
             let background = window.selected_tab().focused_pane();
             self.new_tab_in(window.id());
@@ -6964,8 +7052,14 @@ impl AppDelegate {
         crate::menu::set_end_programs_visible(self.mtm(), new.keep_running);
         // The shortcuts the file gives the commands: the menu's keys and everything that names
         // one. Before the slot is written, from `new`, as the arms above.
-        if changes.keys {
+        // The hotkey window's shortcut is taken in the same resolution: the Keyboard page's
+        // verdict and `problems()` read it.
+        if changes.keys || changes.hotkey {
             self.apply_keys(&new);
+        }
+        // Where and how big the hotkey window is: in sight, it takes its new place at once.
+        if changes.hotkey {
+            self.hotkey_settings_changed(&new);
         }
         // What the vibrations and the sounds may do: what a closed switch no longer lets play
         // ends here, not at the next ask.

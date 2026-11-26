@@ -1004,7 +1004,7 @@ impl Session {
     /// waited on opened it, or it is another window's) with regions drawn in that tab. Over no
     /// window of ours nothing is painted.
     fn read(&mut self, app: &AppDelegate, screen: NSPoint) {
-        self.read_in(app, screen, app.window_at(screen));
+        self.read_in(app, screen, app.drop_window_at(screen, self.window));
     }
 
     /// [`Self::read`] with the window under the pointer already found.
@@ -1175,7 +1175,7 @@ impl Session {
         let card = carry.card.take();
         // The window under the pointer, where in it, and what letting go there means.
         let here = at.and_then(|at| {
-            let target = app.window_at(at)?;
+            let target = app.drop_window_at(at, self.window)?;
             let point = target.ns_window().convertPointFromScreen(at);
             let lands = lands_at(target.bar().pane_target(point), self.tab);
             Some((target, point, lands))

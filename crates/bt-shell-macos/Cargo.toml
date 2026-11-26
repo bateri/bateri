@@ -281,6 +281,13 @@ harness = false
 name = "pencere"
 harness = false
 
+# The hotkey window's panel opened through the shell's own setup and read back: the class, the
+# style, the standing flags and the frames the rules compute. Its own `main`, for the same reason
+# as `embed`'s; no global key and no event tap.
+[[test]]
+name = "hotkey_panel"
+harness = false
+
 # What AppKit's quit does to the windows still open: it closes them after
 # `applicationWillTerminate:`, and a window's `windowWillClose:` must tell that
 # close from the user's. A child process quits (`terminate:` ends the process);

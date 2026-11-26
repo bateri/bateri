@@ -374,7 +374,14 @@ pub(crate) fn title_double_click(action: Option<&str>, legacy_minimize: bool) ->
 /// the bar's empty part, on a pane header's blank in the band, on the divider between two such
 /// headers and on the cards' top margin do is the same thing. The caller has decided that the
 /// press is the window's.
+///
+/// **The hotkey window is not taken** ([`crate::window::is_hotkey_panel`]): its place is its
+/// screen edge's, and a double click's zoom or minimize is not its to do. The one place, where
+/// `movable = NO` would also take away Move & Resize (`rules/sekmeler.md`).
 pub(crate) fn move_window(window: &NSWindow, event: &NSEvent) {
+    if crate::window::is_hotkey_panel(window) {
+        return;
+    }
     if event.clickCount() < 2 {
         window.performWindowDragWithEvent(event);
         return;
@@ -6327,6 +6334,8 @@ impl TabBar {
         }
         window
             .standardWindowButton(NSWindowButton::ZoomButton)
+            // Hidden lights leave the row: the hotkey window's strip starts at the edge.
+            .filter(|zoom| !zoom.isHidden())
             .map_or(LIGHTS_GAP, |zoom| {
                 let in_window = zoom.convertRect_toView(zoom.bounds(), None);
                 let here = self.convertRect_fromView(in_window, None);

@@ -148,7 +148,7 @@ impl AppDelegate {
     fn aim(&self, tab: u64, screen: NSPoint) -> Option<Aim> {
         let from = self.window_holding(tab)?;
         let carried = self.tab(tab)?;
-        let window = self.window_at(screen)?;
+        let window = self.drop_window_at(screen, from.id())?;
         let point = window.ns_window().convertPointFromScreen(screen);
         if window.bar().holds(point) {
             return None;

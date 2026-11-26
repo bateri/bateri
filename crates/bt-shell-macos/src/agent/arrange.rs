@@ -1012,10 +1012,13 @@ fn reach(target: &Target, go: Go) -> Done {
                 let pane = target.pane.clone().unwrap_or_else(|| tab.focused_pane());
                 window.bring_to_front(&tab, &pane);
             } else {
-                window.ns_window().makeKeyAndOrderFront(None);
+                window.order_front(true);
             }
         }
-        Go::Order => window.ns_window().orderFront(None),
+        // Ordered in front without the keyboard is for a window that came by someone's asking
+        // (`bateri window`); the hotkey window comes the person's way, not by an agent's order.
+        Go::Order if window.is_hotkey() => {}
+        Go::Order => window.order_front(false),
         Go::Within | Go::Refused => {}
     }
     Ok(())

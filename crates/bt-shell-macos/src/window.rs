@@ -143,6 +143,12 @@ use crate::tab_bar::{Capsule, Heading, Label, RowClaim, SwitchRow, Switcher, Tab
 use crate::tabs::{self, Card, Column, Finish, Tabs};
 use crate::undo::{Record, Scene, Shape};
 
+mod hotkey;
+pub(crate) use hotkey::{
+    frame_of, frontmost_other, is_panel as is_hotkey_panel,
+    panel_problems as hotkey_panel_problems, rect_of,
+};
+
 /// Whether the theme's background is dark — the window chrome's appearance
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
 ///
@@ -715,6 +721,8 @@ pub(crate) struct WindowIvars {
     /// sheet is open" gate ([`TerminalWindow::asking`]). The completion block
     /// empties it on every answer.
     alert: RefCell<Option<Retained<NSAlert>>>,
+    /// The hotkey window's own state; `None` for a normal window ([`hotkey`]).
+    hotkey: Option<hotkey::State>,
 }
 
 define_class!(
@@ -745,13 +753,22 @@ define_class!(
             self.layout_changed();
         }
 
+        // Zoom has no meaning for a window that is a share of its screen: the hotkey window
+        // never zooms (its button is grey too).
+        #[unsafe(method(windowShouldZoom:toFrame:))]
+        fn window_should_zoom(&self, _sender: &NSWindow, _frame: NSRect) -> bool {
+            !self.is_hotkey()
+        }
+
         // `[appearance] resize_in_steps`: an edge the user drags moves a
         // whole cell at a time. Only the user's drag (`inLiveResize`): a frame
         // set by macOS — tiling, Fill, zoom, a restored layout — is taken as
         // given, or a tiled window would leave a gap beside its neighbour.
         #[unsafe(method(windowWillResize:toSize:))]
         fn window_will_resize(&self, sender: &NSWindow, size: NSSize) -> NSSize {
+            // The hotkey window's size is a share of its screen, not cells.
             let stepping = sender.inLiveResize()
+                && !self.is_hotkey()
                 && app::delegate(self.mtm()).is_some_and(|app| app.settings().resize_in_steps);
             if !stepping {
                 return size;
@@ -863,6 +880,10 @@ define_class!(
             self.close_overview();
             // A press on a pane's header that had not become a carry goes with them.
             if let Some(app) = app::delegate(self.mtm()) {
+                // The hotkey window's own question: does losing the keyboard take it away?
+                if self.hotkey_shown() {
+                    app.hotkey_key_resigned(self);
+                }
                 app.key_window_resigned();
                 // Nor does the pointer's header hear that the application went behind.
                 app.settle_heads_later();
@@ -956,6 +977,7 @@ define_class!(
             // ⌘Q under `"quit"` handed the panes over and the terminals go on, and a
             // quit that ends them has said so already.
             let terminating = app::delegate(self.mtm()).is_some_and(|app| app.is_terminating());
+            self.hotkey_closing(terminating);
             if !terminating {
                 for pane in self.panes() {
                     pane.end_kept_terminal();
@@ -2302,10 +2324,19 @@ impl TerminalWindow {
         id: u64,
         tab: u64,
         launch: embed::Config,
+        hotkey: Option<&str>,
     ) -> Result<Retained<Self>, GpuError> {
         let run = launch.run;
         let pane = embed::open(mtm, initial_rect(), launch)?;
-        Ok(Self::with_pane(mtm, id, tab, run, &pane, (None, None)))
+        Ok(Self::with_pane(
+            mtm,
+            id,
+            tab,
+            run,
+            &pane,
+            (None, None),
+            hotkey,
+        ))
     }
 
     /// The window around a new tab `tab` and its first pane —
@@ -2319,9 +2350,18 @@ impl TerminalWindow {
         run: Option<Run>,
         pane: &TerminalPane,
         (window_number, tab_number): (Option<u64>, Option<u64>),
+        hotkey: Option<&str>,
     ) -> Retained<Self> {
         let tab = TerminalTab::new(mtm, tab, id, pane, tab_number);
-        let this = Self::with_tab(mtm, id, window_number, run, tab, None, tabs::SIDE_WIDTH);
+        let this = Self::with_tab(
+            mtm,
+            id,
+            (window_number, hotkey),
+            run,
+            tab,
+            None,
+            tabs::SIDE_WIDTH,
+        );
         // The content's size changes independently of the window too (the
         // title row); so the geometry comes from the view's own notification,
         // its observer the pane (`TerminalPane::observe_frame`). The
@@ -2342,7 +2382,7 @@ impl TerminalWindow {
     pub(crate) fn with_tab(
         mtm: MainThreadMarker,
         id: u64,
-        number: Option<u64>,
+        (number, hotkey): (Option<u64>, Option<&str>),
         run: Option<Run>,
         tab: Retained<TerminalTab>,
         frame: Option<NSRect>,
@@ -2351,25 +2391,11 @@ impl TerminalWindow {
         let rect = initial_rect();
         tab.moved_to(id);
         let pane = tab.focused_pane();
-        // The content reaches under the title row: the tab bar is drawn in it.
-        let style = NSWindowStyleMask::Titled
-            | NSWindowStyleMask::Closable
-            | NSWindowStyleMask::Miniaturizable
-            | NSWindowStyleMask::Resizable
-            | NSWindowStyleMask::FullSizeContentView;
-        // SAFETY: with defer=false the window is created immediately. The
-        // constructor is unsafe because of `releasedWhenClosed`: without a
-        // window controller AppKit releases the window on close and the
-        // Retained in `WindowIvars.window` would dangle; we turn it off right below.
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                rect,
-                style,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
+        // The one setup of the window and of the hotkey window's panel ([`hotkey::make_window`]);
+        // the plain window's constructor is unsafe because of `releasedWhenClosed`: without a
+        // window controller AppKit releases the window on close and the Retained in
+        // `WindowIvars.window` would dangle; we turn it off right below.
+        let window = hotkey::make_window(mtm, rect, hotkey.is_some());
         // SAFETY: only changes the ownership semantics; we are the Retained's owner.
         unsafe { window.setReleasedWhenClosed(false) };
         // Session restore is bateri's own file: were AppKit to
@@ -2437,6 +2463,7 @@ impl TerminalWindow {
             notice: RefCell::new(String::new()),
             chrome: Cell::new(None),
             alert: RefCell::new(None),
+            hotkey: hotkey.map(hotkey::State::new),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -2464,7 +2491,7 @@ impl TerminalWindow {
     pub(crate) fn restore(
         mtm: MainThreadMarker,
         id: u64,
-        number: Option<u64>,
+        (number, hotkey): (Option<u64>, Option<&str>),
         tab: u64,
         saved: &SavedTab,
         launches: Vec<embed::Config>,
@@ -2476,7 +2503,7 @@ impl TerminalWindow {
         let (first, extra) = panes
             .split_first()
             .ok_or_else(|| "a saved tab without panes".to_owned())?;
-        let this = Self::with_pane(mtm, id, tab, run, first, (number, saved.id));
+        let this = Self::with_pane(mtm, id, tab, run, first, (number, saved.id), hotkey);
         let tab = this.selected_tab();
         tab.set_name(saved.name.clone());
         tab.adopt(layers, extra);
@@ -2577,7 +2604,7 @@ impl TerminalWindow {
     /// Makes the window key and brings it to the front — the restored key
     /// window.
     pub(crate) fn select(&self) {
-        self.ivars().window.makeKeyAndOrderFront(None);
+        self.order_front(true);
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -4424,7 +4451,7 @@ impl TerminalWindow {
             window.deminiaturize(None);
         }
         let selected = self.select_tab(tab.id());
-        window.makeKeyAndOrderFront(None);
+        self.order_front(true);
         if selected {
             tab.focus_pane(pane);
         }
@@ -4747,7 +4774,8 @@ impl TerminalWindow {
     /// ask; a restored or macOS-placed frame is left as it was.
     pub(crate) fn fit_to_cells(&self) {
         let on = app::delegate(self.mtm()).is_some_and(|app| app.settings().resize_in_steps);
-        if !on {
+        // The hotkey window's frame is the screen's share, not a number of cells.
+        if !on || self.is_hotkey() {
             return;
         }
         let window = &self.ivars().window;
@@ -5128,7 +5156,7 @@ impl TerminalWindow {
         if window.isMiniaturized() {
             window.deminiaturize(None);
         }
-        window.makeKeyAndOrderFront(None);
+        self.order_front(true);
         NSApplication::sharedApplication(self.mtm()).activate();
     }
 

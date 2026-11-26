@@ -385,6 +385,10 @@ pub const COMMANDS: &[Command] = &[
     ),
     command("move_tab_to_new_window", "detachTab", &[]),
     command("merge_all_windows", "mergeWindows", &[]),
+    // The hotkey window's two menu commands: no key by default (its own shortcut is global and
+    // lives in `[hotkey_window] shortcut`, which Settings records).
+    command("show_hotkey_window", "showHotkeyWindow", &[]),
+    command("pin_hotkey_window", "pinHotkeyWindow", &[]),
     command("bring_all_to_front", "arrangeInFront", &[]),
 ];
 
@@ -678,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_seven_new() {
+    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_nine_new() {
         let none: Vec<&str> = COMMANDS
             .iter()
             .filter(|command| command.defaults.is_empty())
@@ -687,9 +691,12 @@ mod tests {
         // The twenty-eight items of the menu that have no key today, and the seven that
         // join the menu: Command History…, Themes… and Open Themes Folder (which the theme
         // list builds every time it opens), Open All in New Tab, Go to Waiting Tab, New
-        // Floating Pane (Float Pane has ⌥⌘↩) and Remove bateri from Host.
-        assert_eq!(none.len(), 28 + 7, "{none:?}");
+        // Floating Pane (Float Pane has ⌥⌘↩) and Remove bateri from Host; and the hotkey window's
+        // two, Show and Pin.
+        assert_eq!(none.len(), 28 + 7 + 2, "{none:?}");
         for new in [
+            "show_hotkey_window",
+            "pin_hotkey_window",
             "command_history",
             "themes",
             "open_themes_folder",

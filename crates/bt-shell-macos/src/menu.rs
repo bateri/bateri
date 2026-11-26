@@ -788,6 +788,11 @@ pub(crate) fn install(
             item(mtm, "Move Tab to New Window", sel!(detachTab:)),
             item(mtm, "Merge All Windows", sel!(mergeWindows:)),
             NSMenuItem::separatorItem(mtm),
+            // The hotkey window (`[hotkey_window]`): shown from here as from its shortcut, and
+            // kept in sight when the focus leaves it (a state of now, checked while it holds).
+            item(mtm, "Show Hotkey Window", sel!(showHotkeyWindow:)),
+            item(mtm, "Pin Hotkey Window", sel!(pinHotkeyWindow:)),
+            NSMenuItem::separatorItem(mtm),
             item(mtm, "Bring All to Front", sel!(arrangeInFront:)),
         ],
     );
