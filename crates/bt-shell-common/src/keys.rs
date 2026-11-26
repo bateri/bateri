@@ -544,6 +544,12 @@ fn keypad(code: u16) -> Option<Keypad> {
 
 /// The key a physical key is in the standard PC layout — the protocol's "base layout key" — for
 /// the keys of characters (macOS's `kVK_ANSI_*` codes are the US layout's).
+/// The key code of the key that types `c` on the US layout: the answer for a character no other
+/// layout the person has types ([`us_layout`] read the other way).
+pub fn us_code_of(c: char) -> Option<u16> {
+    (0..128).find(|&code| us_layout(code) == Some(c))
+}
+
 fn us_layout(code: u16) -> Option<char> {
     Some(match code {
         0 => 'a',

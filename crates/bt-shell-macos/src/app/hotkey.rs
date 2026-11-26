@@ -8,12 +8,15 @@
 //! settings and AppKit, hands them to those rules, and does what they say. The window's own part
 //! (the panel, the slide, what it gives back) is [`crate::window`]'s.
 
-use bt_core::{HOTKEY_DEFAULT_NAME, HotkeySpaces, HotkeyWindowSettings};
+use bt_core::{HOTKEY_DEFAULT_NAME, HotkeySpaces, HotkeyWindowSettings, SettingsEdit};
 use bt_shell_common::hotkey::{self as rules, Candidate, KeyTaker, Lost, Presence, Step, Verb};
 use objc2_app_kit::NSScreen;
 
 use super::*;
 use crate::window::{frame_of, frontmost_other, rect_of};
+
+/// The bundle the agent tries bateri with: it never holds the system's key.
+const AGENT_CHECK_BUNDLE: &str = "dev.bateri.agent-check";
 
 impl AppDelegate {
     // -----------------------------------------------------------------------------------------
@@ -253,6 +256,89 @@ impl AppDelegate {
     }
 
     // -----------------------------------------------------------------------------------------
+    // The system's key.
+
+    /// What this instance is, to the rule that says whether it holds the key
+    /// ([`rules::owns_global_keys`]). Asked **after** the session lock is taken
+    /// (`restore_or_open_windows`).
+    fn hotkey_instance(&self) -> rules::Instance {
+        let bundle = NSBundle::mainBundle()
+            .bundleIdentifier()
+            .map(|id| id.to_string());
+        rules::Instance {
+            holds_session_lock: self.ivars().restore_lock.borrow().is_some(),
+            bundled: bundle.is_some(),
+            timed_run: self.ivars().run.is_some(),
+            agent_check: bundle.as_deref() == Some(AGENT_CHECK_BUNDLE),
+        }
+    }
+
+    /// Brings the system's hold on the key to what `settings` ask: at launch and when
+    /// `[hotkey_window]` changes (`new`, the slot not written yet). **The one place the real
+    /// keys are built**, and only for an instance that owns them: nothing else ever registers a
+    /// key for the whole system. What could not be held is told with the settings' diagnostics.
+    pub(crate) fn apply_global_keys(&self, settings: &Settings) {
+        let instance = self.hotkey_instance();
+        if !rules::owns_global_keys(&instance) {
+            return;
+        }
+        let told = {
+            let mut keys = self.ivars().global_keys.borrow_mut();
+            let keys = keys.get_or_insert_with(crate::global_keys::CarbonKeys::new);
+            let mut registration = self.ivars().hotkey_registration.borrow_mut();
+            registration.sync(keys, settings, &instance);
+            registration.notices(settings.hotkey_window.shortcut)
+        };
+        self.post_notices(Source::Hotkey, told);
+        // The page that shows why a key is not held shows it now.
+        self.refresh_settings_window();
+    }
+
+    /// The person dragged an edge of the hotkey window and let go: the size it has now is a share
+    /// of the screen it is on, and **that** is what is written — `depth` and `span`, nothing else
+    /// (the size has one owner, the settings file; kept in memory it would jump back at the next
+    /// read). The window then goes to the frame the settings make of the shares, so the edge that
+    /// holds it to its place did not move away.
+    pub(crate) fn hotkey_resized(&self, window: &TerminalWindow) {
+        if !window.hotkey_shown() {
+            return;
+        }
+        let settings = self.settings().hotkey_window;
+        let frame = window.frame_now();
+        let screens = self.hotkey_screens();
+        let on = window.screen_now().map(|screen| frame_of(screen.frame()));
+        if let Some(screen) = on.and_then(|on| screens.iter().find(|screen| screen.frame == on)) {
+            let (depth, span) = rules::shares(screen.visible, settings.position, frame);
+            if (depth, span) != (settings.depth, settings.span) {
+                let edits = [
+                    SettingsEdit::HotkeyDepth(depth),
+                    SettingsEdit::HotkeySpan(span),
+                ];
+                // A file that cannot be written leaves the shares as they were: the window
+                // goes back to them below.
+                let _ = self.save_edits(&edits);
+            }
+        }
+        let now = self.settings().clone();
+        self.hotkey_settings_changed(&now);
+    }
+
+    /// Why the system does not hold the key the settings ask for, if it does not (the Settings
+    /// row says it).
+    pub(crate) fn hotkey_problem(&self) -> Option<rules::Refusal> {
+        self.ivars().hotkey_registration.borrow().problem()
+    }
+
+    /// The system's key was pressed. Silent while a field of Settings listens for a shortcut: the
+    /// key is the person's to give, not one to run.
+    pub(crate) fn hotkey_pressed(&self) {
+        if crate::settings_window::is_recording(self.mtm()) {
+            return;
+        }
+        self.toggle_hotkey(Verb::Toggle);
+    }
+
+    // -----------------------------------------------------------------------------------------
     // The focus leaving.
 
     /// Whether the focus leaving hides the window now ([`rules::Hiding`]).
@@ -461,6 +547,114 @@ mod tests {
             assert_eq!(hotkey.matches(call).count(), 1, "{call}");
         }
         assert!(hotkey.matches("self.candidates()").count() >= 4);
+    }
+
+    /// The size the person dragged to is written as `depth` and `span` and **nothing else**: the
+    /// shares of a frame are read back from the file as the frame they came from, the shortcut and
+    /// the other keys stay, and so does the person's comment. The write goes through the one
+    /// place that writes settings (`save_edits`).
+    #[test]
+    fn a_dragged_size_writes_depth_and_span_and_nothing_else() {
+        use bt_core::{HotkeyPosition, Settings, SettingsEdit};
+        use bt_shell_common::hotkey as rules;
+        use bt_shell_common::restore::Frame;
+
+        let visible = Frame {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 875.0,
+        };
+        let text = "# my notes\n[terminal]\nscrollback = 1234\n\n[hotkey_window]\n\
+                    shortcut = \"option+space\"\nposition = \"left\"\n";
+        let before = Settings::parse_keeping(text, &Settings::default())
+            .expect("it parses")
+            .settings;
+        for position in HotkeyPosition::NAMES.iter().map(|&(_, position)| position) {
+            let dragged = rules::shown_frame(visible, position, 35, 80);
+            let (depth, span) = rules::shares(visible, position, dragged);
+            assert_eq!((depth, span), (35, 80), "{position:?}");
+            let written = [
+                SettingsEdit::HotkeyDepth(depth),
+                SettingsEdit::HotkeySpan(span),
+            ]
+            .iter()
+            .try_fold(text.to_owned(), |text, edit| {
+                Settings::with_edit(&text, edit)
+            })
+            .expect("it writes");
+            let after = Settings::parse_keeping(&written, &Settings::default())
+                .expect("it parses")
+                .settings;
+            assert_eq!(after.hotkey_window.depth, 35);
+            assert_eq!(after.hotkey_window.span, 80);
+            // Everything the drag did not name stays: the shortcut, the position, the others.
+            let mut same = after.clone();
+            same.hotkey_window = before.hotkey_window;
+            assert_eq!(same, before, "{written}");
+            assert!(written.contains("# my notes") && written.contains("scrollback = 1234"));
+        }
+        // And the code that writes it names those two edits only, after the rule that reads the
+        // frame as shares.
+        let code = include_str!("hotkey.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the code");
+        let drag = body_of(code, "    pub(crate) fn hotkey_resized(", "    ");
+        assert!(drag.contains("rules::shares("));
+        assert_eq!(drag.matches("SettingsEdit::").count(), 2);
+        assert!(
+            drag.contains("SettingsEdit::HotkeyDepth(")
+                && drag.contains("SettingsEdit::HotkeySpan(")
+        );
+        // The edge's end is told by the window's own delegate, for the hotkey window only.
+        let window = include_str!("../window.rs");
+        let hook = body_of(window, "        fn window_did_end_live_resize(", "        ");
+        assert!(hook.contains("self.is_hotkey()") && hook.contains("hotkey_resized("));
+    }
+
+    /// **No test, gate, smoke or agent's copy registers a key for the whole system** (Karar 13):
+    /// the real keys are built in one place, after the rule that says who owns them, and the
+    /// application's other modules never name them. A source scan: building them would steal the
+    /// keystroke of the Mac the gate runs on.
+    #[test]
+    fn the_real_keys_are_built_in_one_place_and_only_by_the_owner() {
+        let hotkey = include_str!("hotkey.rs");
+        let code = hotkey.split("#[cfg(test)]").next().expect("the code");
+        let building = "CarbonKeys::new";
+        assert_eq!(code.matches(building).count(), 1);
+        for (name, other) in [
+            ("app.rs", include_str!("../app.rs")),
+            ("window.rs", include_str!("../window.rs")),
+            ("lib.rs", include_str!("../lib.rs")),
+            ("menu.rs", include_str!("../menu.rs")),
+            ("settings_window.rs", include_str!("../settings_window.rs")),
+        ] {
+            assert!(!other.contains(building), "{name}");
+        }
+        let apply = body_of(code, "    pub(crate) fn apply_global_keys(", "    ");
+        let owner = apply.find("rules::owns_global_keys(").expect("the rule");
+        let built = apply.find(building).expect("the building");
+        assert!(owner < built, "asked who owns them before building them");
+        // The instance is read from the lock, the bundle, the timed run and the agent's copy.
+        let instance = body_of(code, "    fn hotkey_instance(", "    ");
+        for fact in [
+            "restore_lock",
+            "bundleIdentifier",
+            "self.ivars().run",
+            "AGENT_CHECK_BUNDLE",
+        ] {
+            assert!(instance.contains(fact), "{fact}");
+        }
+        // And the key press is silent while a field listens for a shortcut.
+        assert!(
+            body_of(code, "    pub(crate) fn hotkey_pressed(", "    ")
+                .contains("settings_window::is_recording(")
+        );
+        // The settings' change asks for the keys again, from the file that was read.
+        let app = include_str!("../app.rs");
+        assert!(app.contains("self.apply_global_keys(&new);"));
+        assert!(app.contains("self.apply_global_keys(&self.settings());"));
     }
 
     /// One entrance for every trigger: the menu's item, the shortcut and the command call the

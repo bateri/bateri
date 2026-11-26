@@ -440,6 +440,138 @@ pub fn binding_for(settings: &Settings, instance: &Instance) -> Option<Binding> 
         .flatten()
 }
 
+// ---------------------------------------------------------------------------------------------
+// The registration: what is held, and what is told when it could not be.
+
+/// The system's hold on the hotkey window's key, kept in step with the settings. It remembers
+/// what it last **asked** for (so the same binding is not asked twice, whatever the answer was),
+/// what the system holds, and why it did not when it did not.
+#[derive(Debug, Default)]
+pub struct Registration {
+    attempted: Option<Binding>,
+    held: Option<Binding>,
+    problem: Option<Refusal>,
+}
+
+impl Registration {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Brings what the system holds to what `settings` ask of this `instance`: the old binding
+    /// is let go and the new one held, in that order, and only when the binding changed. An
+    /// instance that does not [`owns_global_keys`] asks for nothing, so a timed run, the agent's
+    /// copy and a second instance of the bundle never touch the system's keys.
+    pub fn sync(&mut self, keys: &mut dyn GlobalKeys, settings: &Settings, instance: &Instance) {
+        let wanted = binding_for(settings, instance);
+        if wanted == self.attempted {
+            return;
+        }
+        self.attempted = wanted;
+        match keys.bind(wanted) {
+            Ok(()) => {
+                self.held = wanted;
+                self.problem = None;
+            }
+            Err(refusal) => {
+                self.held = None;
+                self.problem = Some(refusal);
+            }
+        }
+    }
+
+    /// What the system holds now.
+    pub fn held(&self) -> Option<Binding> {
+        self.held
+    }
+
+    /// Why the key asked for is not held, if it is not.
+    pub fn problem(&self) -> Option<Refusal> {
+        self.problem
+    }
+
+    /// The line the settings' diagnostics carry about it (empty when all is well).
+    pub fn notices(&self, shortcut: Option<Shortcut>) -> Vec<String> {
+        self.problem
+            .map(|refusal| vec![refusal_note(refusal, shortcut)])
+            .unwrap_or_default()
+    }
+}
+
+/// What to tell the person about a key the system did not hold, as the Settings row says it. A
+/// registration that succeeds says nothing about whether another application also wants the key:
+/// only a refusal is told.
+pub fn refusal_text(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
+    let key = shortcut.map_or_else(
+        || "The shortcut".to_owned(),
+        |shortcut| shortcut.to_string(),
+    );
+    match refusal {
+        Refusal::Refused(status) => format!(
+            "The system did not give `{key}` (status {status}); another application may hold it."
+        ),
+        Refusal::NoListening => format!(
+            "`{key}` needs Input Monitoring to hear a double tap: allow bateri in System Settings."
+        ),
+    }
+}
+
+/// [`refusal_text`] as a line of the settings' diagnostics, which name the key they are about.
+pub fn refusal_note(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
+    format!(
+        "hotkey_window.shortcut: {}",
+        refusal_text(refusal, shortcut)
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// What the system's registration is told.
+
+/// Carbon's modifier mask of `mods` (`cmdKey`, `shiftKey`, `optionKey`, `controlKey`).
+pub fn carbon_modifiers(mods: bt_core::Mods) -> u32 {
+    let mut mask = 0;
+    if mods.cmd {
+        mask |= 0x0100;
+    }
+    if mods.shift {
+        mask |= 0x0200;
+    }
+    if mods.option {
+        mask |= 0x0800;
+    }
+    if mods.ctrl {
+        mask |= 0x1000;
+    }
+    mask
+}
+
+/// The virtual key code of a named key. **Function keys are not in a row:** F13–F20 are
+/// 105, 107, 113, 106, 64, 79, 80, 90 (F1–F12 follow the keyboard's own scatter), so the table is
+/// the answer and no arithmetic is.
+pub fn named_key_code(key: bt_core::NamedKey) -> Option<u16> {
+    use bt_core::NamedKey;
+    const FUNCTION: [u16; 20] = [
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90,
+    ];
+    Some(match key {
+        NamedKey::Left => 123,
+        NamedKey::Right => 124,
+        NamedKey::Down => 125,
+        NamedKey::Up => 126,
+        NamedKey::Tab => 48,
+        NamedKey::Return => 36,
+        NamedKey::Space => 49,
+        NamedKey::Escape => 53,
+        NamedKey::Backspace => 51,
+        NamedKey::Delete => 117,
+        NamedKey::Home => 115,
+        NamedKey::End => 119,
+        NamedKey::PageUp => 116,
+        NamedKey::PageDown => 121,
+        NamedKey::F(number) => *FUNCTION.get(usize::from(number.checked_sub(1)?))?,
+    })
+}
+
 /// The stand-in for the system's keys that tests use: it keeps what it was asked to hold and
 /// holds nothing.
 #[cfg(any(test, feature = "test-support"))]
@@ -916,6 +1048,114 @@ mod tests {
             binding_for(&settings, &owner),
             Some(Binding::Twice(Modifier::Cmd))
         );
+    }
+
+    fn settings_with(shortcut: &str) -> Settings {
+        let mut settings = Settings::default();
+        settings.hotkey_window.shortcut =
+            Some(Shortcut::parse_global(shortcut).expect("a shortcut"));
+        settings
+    }
+
+    fn owner() -> Instance {
+        Instance {
+            holds_session_lock: true,
+            bundled: true,
+            ..Instance::default()
+        }
+    }
+
+    /// The registration follows the settings: a changed shortcut lets the old one go and holds
+    /// the new one (one call each, in that order), a shortcut that did not change is not asked
+    /// again, and an emptied one lets go.
+    #[test]
+    fn the_registration_follows_the_settings_and_asks_once_for_each_binding() {
+        let (first, second) = (settings_with("cmd+f1"), settings_with("option+f2"));
+        let mut keys = fake::Keys::default();
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &first, &owner());
+        registration.sync(&mut keys, &first, &owner());
+        assert_eq!(keys.calls.len(), 1, "the same binding is held once");
+        assert_eq!(registration.held(), binding_of(&first));
+        registration.sync(&mut keys, &second, &owner());
+        assert_eq!(keys.calls, [binding_of(&first), binding_of(&second)]);
+        assert_eq!(keys.held, binding_of(&second));
+        registration.sync(&mut keys, &Settings::default(), &owner());
+        assert_eq!(keys.calls.last(), Some(&None));
+        assert_eq!(registration.held(), None);
+        assert_eq!(registration.problem(), None);
+    }
+
+    /// An instance that is not the owner never touches the system's keys: not a timed run, nor the
+    /// agent's copy, nor one without the session lock (whatever the settings say).
+    #[test]
+    fn an_instance_that_does_not_own_the_keys_registers_nothing_at_all() {
+        let settings = settings_with("cmd+f1");
+        for not in [
+            Instance::default(),
+            Instance {
+                timed_run: true,
+                ..owner()
+            },
+            Instance {
+                agent_check: true,
+                ..owner()
+            },
+            Instance {
+                holds_session_lock: false,
+                ..owner()
+            },
+        ] {
+            let mut keys = fake::Keys::default();
+            let mut registration = Registration::new();
+            registration.sync(&mut keys, &settings, &not);
+            assert!(keys.calls.is_empty(), "{not:?}");
+            assert_eq!(registration.held(), None);
+        }
+    }
+
+    /// A refusal is told, with the key and the system's number, and goes when a later binding is
+    /// held.
+    #[test]
+    fn a_key_the_system_refused_is_told_and_forgotten_when_another_is_held() {
+        let (first, second) = (settings_with("cmd+f1"), settings_with("cmd+f2"));
+        let mut keys = fake::Keys {
+            refuse: Some(Refusal::Refused(-9878)),
+            ..fake::Keys::default()
+        };
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &first, &owner());
+        assert_eq!(registration.problem(), Some(Refusal::Refused(-9878)));
+        assert_eq!(registration.held(), None);
+        let told = registration.notices(first.hotkey_window.shortcut);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].contains("-9878") && told[0].contains("hotkey_window.shortcut"));
+        keys.refuse = None;
+        registration.sync(&mut keys, &second, &owner());
+        assert_eq!(registration.problem(), None);
+        assert!(
+            registration
+                .notices(second.hotkey_window.shortcut)
+                .is_empty()
+        );
+    }
+
+    /// The codes Carbon is given: the function keys are not in a row, and the modifiers are the
+    /// system's own mask.
+    #[test]
+    fn carbon_is_given_the_codes_of_the_keyboard() {
+        assert_eq!(named_key_code(NamedKey::F(1)), Some(122));
+        assert_eq!(named_key_code(NamedKey::F(13)), Some(105));
+        assert_eq!(named_key_code(NamedKey::F(17)), Some(64));
+        assert_eq!(named_key_code(NamedKey::F(20)), Some(90));
+        assert_eq!(named_key_code(NamedKey::F(0)), None);
+        assert_eq!(named_key_code(NamedKey::F(21)), None);
+        assert_eq!(named_key_code(NamedKey::Space), Some(49));
+        let mods = Mods::NONE.with(Modifier::Cmd).with(Modifier::Option);
+        assert_eq!(carbon_modifiers(mods), 0x0100 | 0x0800);
+        assert_eq!(carbon_modifiers(Mods::NONE), 0);
+        assert_eq!(crate::keys::us_code_of('a'), Some(0));
+        assert_eq!(crate::keys::us_code_of(';'), Some(41));
     }
 
     #[test]

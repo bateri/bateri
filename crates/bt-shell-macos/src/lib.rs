@@ -59,6 +59,7 @@ mod dev_fault;
 pub mod embed;
 pub mod feel;
 mod footer;
+mod global_keys;
 mod hold_service;
 mod hyperlink;
 mod inspector;

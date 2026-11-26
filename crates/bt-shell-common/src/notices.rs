@@ -28,6 +28,9 @@ pub enum Source {
     /// The opened font: the requested family was not found or is not monospaced. Its source is
     /// the atlas, not a file; it is rewritten after every build of the atlas.
     Font,
+    /// The hotkey window's key: the system did not give it, or a double tap has no permission to
+    /// be heard. Its source is the registration, not a file; it is rewritten at each change.
+    Hotkey,
 }
 
 /// The messages of the font slot.

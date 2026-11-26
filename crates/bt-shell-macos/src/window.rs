@@ -753,6 +753,17 @@ define_class!(
             self.layout_changed();
         }
 
+        // The hotkey window's size is the settings': an edge the user dragged is written as a
+        // share of the screen when the drag ends, and the window goes to the frame it makes.
+        #[unsafe(method(windowDidEndLiveResize:))]
+        fn window_did_end_live_resize(&self, _n: &NSNotification) {
+            if self.is_hotkey()
+                && let Some(app) = app::delegate(self.mtm())
+            {
+                app.hotkey_resized(self);
+            }
+        }
+
         // Zoom has no meaning for a window that is a share of its screen: the hotkey window
         // never zooms (its button is grey too).
         #[unsafe(method(windowShouldZoom:toFrame:))]

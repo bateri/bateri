@@ -28,11 +28,11 @@ use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, CommandLevel,
     ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase,
-    IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MinimizedPanes,
-    Osc52, ReduceMotion, RemoteIntegration, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX,
-    STATS_INTERVAL_RANGE, SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, SplitStyle, TabDetails, TabPosition, TabRunning, Theme,
-    UnfocusedCaret,
+    HOTKEY_SIZE_RANGE, HotkeyPosition, HotkeyScreen, HotkeySpaces, IconColors, KeepRunning,
+    Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MinimizedPanes, Osc52, ReduceMotion,
+    RemoteIntegration, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
+    SYSTEM_THEME, ScrollBounce, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
+    SplitStyle, TabDetails, TabPosition, TabRunning, Theme, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::{Retained, Weak};
@@ -75,6 +75,7 @@ use theme_gallery::ThemeGallery;
 mod agent_sample;
 mod apps;
 mod font_options;
+mod hotkey;
 mod keyboard;
 mod layout_check;
 mod look;
@@ -185,13 +186,14 @@ enum Category {
     Feedback,
     Shell,
     Keyboard,
+    HotkeyWindow,
     Servers,
     Agents,
     Apps,
 }
 
 impl Category {
-    const ALL: [Category; 12] = [
+    const ALL: [Category; 13] = [
         Category::General,
         Category::Appearance,
         Category::Font,
@@ -201,6 +203,7 @@ impl Category {
         Category::Feedback,
         Category::Shell,
         Category::Keyboard,
+        Category::HotkeyWindow,
         Category::Servers,
         Category::Agents,
         Category::Apps,
@@ -229,6 +232,7 @@ impl Category {
             Category::Feedback => "Sound & Haptics",
             Category::Shell => "Shell",
             Category::Keyboard => "Keyboard",
+            Category::HotkeyWindow => "Hotkey Window",
             Category::Servers => "Servers",
             Category::Agents => "Agents",
             Category::Apps => "Apps",
@@ -247,6 +251,7 @@ impl Category {
             Category::Feedback => "speaker.wave.2",
             Category::Shell => "terminal",
             Category::Keyboard => "keyboard",
+            Category::HotkeyWindow => "rectangle.topthird.inset.filled",
             Category::Servers => "network",
             Category::Agents => "sparkles",
             Category::Apps => "square.grid.2x2",
@@ -315,11 +320,19 @@ enum Key {
     FeedbackApps,
     OpenWith,
     OpenLinksWith,
+    HotkeyShortcut,
+    HotkeyPosition,
+    HotkeyScreen,
+    HotkeySpaces,
+    HotkeyDepth,
+    HotkeySpan,
+    HotkeyHideOnClickAway,
+    HotkeyAnimate,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 58] = [
+    const ALL: [Key; 66] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -378,6 +391,14 @@ impl Key {
         Key::FeedbackApps,
         Key::OpenWith,
         Key::OpenLinksWith,
+        Key::HotkeyShortcut,
+        Key::HotkeyPosition,
+        Key::HotkeyScreen,
+        Key::HotkeySpaces,
+        Key::HotkeyDepth,
+        Key::HotkeySpan,
+        Key::HotkeyHideOnClickAway,
+        Key::HotkeyAnimate,
     ];
 
     fn tag(self) -> NSInteger {
@@ -451,6 +472,14 @@ impl Key {
             Key::FeedbackApps => "feedback.apps",
             Key::OpenWith => "apps.open_with",
             Key::OpenLinksWith => "apps.open_links_with",
+            Key::HotkeyShortcut => "hotkey_window.shortcut",
+            Key::HotkeyPosition => "hotkey_window.position",
+            Key::HotkeyScreen => "hotkey_window.screen",
+            Key::HotkeySpaces => "hotkey_window.spaces",
+            Key::HotkeyDepth => "hotkey_window.depth",
+            Key::HotkeySpan => "hotkey_window.span",
+            Key::HotkeyHideOnClickAway => "hotkey_window.hide_on_click_away",
+            Key::HotkeyAnimate => "hotkey_window.animate",
         }
     }
 }
@@ -784,6 +813,45 @@ impl Choice for TabRunning {
     }
 }
 
+impl Choice for HotkeyPosition {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            HotkeyPosition::Top => "Top",
+            HotkeyPosition::Bottom => "Bottom",
+            HotkeyPosition::Left => "Left",
+            HotkeyPosition::Right => "Right",
+            HotkeyPosition::Center => "Center",
+        }
+    }
+}
+
+impl Choice for HotkeyScreen {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            HotkeyScreen::Pointer => "Where the pointer is",
+            HotkeyScreen::Primary => "The main screen",
+        }
+    }
+}
+
+impl Choice for HotkeySpaces {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            HotkeySpaces::Follow => "Follow me",
+            HotkeySpaces::Stay => "Stay where it opened",
+        }
+    }
+}
+
 impl Choice for ContentEdge {
     fn names() -> &'static [(&'static str, Self)] {
         Self::NAMES
@@ -977,6 +1045,31 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
             RemoteStatsMode::Off => None,
         },
         Key::StatsInterval => Some("Pauses in hidden tabs and while idle."),
+        Key::HotkeyShortcut => Some(match settings.hotkey_window.shortcut {
+            None => "None: the window opens from the Window menu, the palette or `bateri hotkey`.",
+            Some(bt_core::Shortcut::Twice(_)) => {
+                "Tap it twice, in any application. Needs Input Monitoring."
+            }
+            Some(_) => "Works in every application; press it again to hide the window.",
+        }),
+        Key::HotkeyPosition => Some(match settings.hotkey_window.position {
+            HotkeyPosition::Center => "In the middle of the screen; it slides in from the top.",
+            _ => "The edge it slides in from. Drag its inner edge to change Depth and Span.",
+        }),
+        Key::HotkeyDepth => Some("How far it reaches in from the edge, of the screen."),
+        Key::HotkeySpan => Some("How much of the edge it covers."),
+        Key::HotkeyScreen => Some(match settings.hotkey_window.screen {
+            HotkeyScreen::Pointer => "It opens on the screen the pointer is on.",
+            HotkeyScreen::Primary => "It always opens on the screen with the menu bar.",
+        }),
+        Key::HotkeySpaces => Some(match settings.hotkey_window.spaces {
+            HotkeySpaces::Follow => "It comes to the Space you are in.",
+            HotkeySpaces::Stay => "It stays in the Space it was opened in.",
+        }),
+        Key::HotkeyHideOnClickAway => {
+            Some("Hides when another window or application takes the keyboard.")
+        }
+        Key::HotkeyAnimate => Some("Slides from the edge; off, it appears and goes at once."),
         Key::OpenWith => Some(open_with_description(&settings.apps_open_with)),
         // What a click does depends on what is on this computer: the row says it itself.
         Key::OpenLinksWith => None,
@@ -1237,6 +1330,9 @@ fn choice_labels(key: Key) -> Vec<&'static str> {
         Key::ConfirmClose => choice_titles::<ConfirmClose>(),
         Key::RestoreWindows => choice_titles::<RestoreWindows>(),
         Key::KeepRunning => choice_titles::<KeepRunning>(),
+        Key::HotkeyPosition => choice_titles::<HotkeyPosition>(),
+        Key::HotkeyScreen => choice_titles::<HotkeyScreen>(),
+        Key::HotkeySpaces => choice_titles::<HotkeySpaces>(),
         Key::Scrollbar => choice_titles::<Scrollbar>(),
         Key::ContentEdge => choice_titles::<ContentEdge>(),
         Key::SplitStyle => choice_titles::<SplitStyle>(),
@@ -1346,6 +1442,15 @@ fn parse_interval(text: &str) -> Option<u8> {
         .parse::<u8>()
         .ok()
         .filter(|seconds| STATS_INTERVAL_RANGE.contains(seconds))
+}
+
+/// The `depth` and `span` the field accepts: a whole number of percent inside
+/// [`HOTKEY_SIZE_RANGE`] — the parser's own rule.
+fn parse_percent(text: &str) -> Option<u8> {
+    text.trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| HOTKEY_SIZE_RANGE.contains(percent))
 }
 
 /// The decimal the field accepts: finite and inside the range.
@@ -1847,6 +1952,14 @@ struct Controls {
     dim_splits: Retained<ThemeSwitch>,
     focus_frame: Retained<ThemeSwitch>,
     resize_in_steps: Retained<ThemeSwitch>,
+    hotkey_shortcut: hotkey::ShortcutRow,
+    hotkey_position: Retained<NSPopUpButton>,
+    hotkey_screen: Retained<NSPopUpButton>,
+    hotkey_spaces: Retained<NSPopUpButton>,
+    hotkey_depth: Number,
+    hotkey_span: Number,
+    hotkey_hide: Retained<ThemeSwitch>,
+    hotkey_animate: Retained<ThemeSwitch>,
     /// The pages' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
@@ -2368,6 +2481,8 @@ define_class!(
                 Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
                 Some(Key::FocusFrame) => Some(SettingsEdit::FocusFrame(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
+                Some(Key::HotkeyHideOnClickAway) => Some(SettingsEdit::HotkeyHideOnClickAway(on)),
+                Some(Key::HotkeyAnimate) => Some(SettingsEdit::HotkeyAnimate(on)),
                 Some(Key::TabIcons) => Some(SettingsEdit::TabIcons(on)),
                 Some(Key::FontSmoothing) => Some(SettingsEdit::FontSmoothing(on)),
                 _ => None,
@@ -2460,6 +2575,14 @@ define_class!(
                     &controls.stats_interval,
                     parse_interval(&text).map(f64::from),
                 ),
+                Some(Key::HotkeyDepth) => (
+                    &controls.hotkey_depth,
+                    parse_percent(&text).map(f64::from),
+                ),
+                Some(Key::HotkeySpan) => (
+                    &controls.hotkey_span,
+                    parse_percent(&text).map(f64::from),
+                ),
                 _ => return,
             };
             // Passing through an unchanged field does not write: the rounded
@@ -2474,6 +2597,9 @@ define_class!(
                 Some(Key::LetterSpacing) => Some(SettingsEdit::LetterSpacing(value)),
                 // `parse_interval` accepted it: a whole number inside the range.
                 Some(Key::StatsInterval) => Some(SettingsEdit::StatsInterval(value as u8)),
+                // `parse_percent` accepted it: a whole number inside the range.
+                Some(Key::HotkeyDepth) => Some(SettingsEdit::HotkeyDepth(value as u8)),
+                Some(Key::HotkeySpan) => Some(SettingsEdit::HotkeySpan(value as u8)),
                 _ => None,
             });
             match edit {
@@ -2562,6 +2688,8 @@ define_class!(
                 Some(Key::LetterSpacing) => Some(SettingsEdit::LetterSpacing(value)),
                 // The stepper's bounds are the accepted range and its step is 1.
                 Some(Key::StatsInterval) => Some(SettingsEdit::StatsInterval(value.round() as u8)),
+                Some(Key::HotkeyDepth) => Some(SettingsEdit::HotkeyDepth(value.round() as u8)),
+                Some(Key::HotkeySpan) => Some(SettingsEdit::HotkeySpan(value.round() as u8)),
                 _ => None,
             };
             self.save(edit);
@@ -2893,6 +3021,22 @@ impl SettingsWindow {
         set_switch(&c.dim_splits, settings.dim_unfocused_splits);
         set_switch(&c.focus_frame, settings.focus_frame);
         set_switch(&c.resize_in_steps, settings.resize_in_steps);
+        let hotkey = &settings.hotkey_window;
+        select_choice(&c.hotkey_position, hotkey.position);
+        select_choice(&c.hotkey_screen, hotkey.screen);
+        select_choice(&c.hotkey_spaces, hotkey.spaces);
+        set_number(
+            &c.hotkey_depth,
+            f64::from(hotkey.depth),
+            &hotkey.depth.to_string(),
+        );
+        set_number(
+            &c.hotkey_span,
+            f64::from(hotkey.span),
+            &hotkey.span.to_string(),
+        );
+        set_switch(&c.hotkey_hide, hotkey.hide_on_click_away);
+        set_switch(&c.hotkey_animate, hotkey.animate);
         let files = &settings.remote_files;
         c.download_dir
             .path
@@ -2909,6 +3053,7 @@ impl SettingsWindow {
         self.ivars().folders.replace(files.download_dir.clone());
 
         let status = status(state, write);
+        c.hotkey_shortcut.show(settings, !status.locked);
         // The Agents page's line on where the reply shows follows Tab Details and the tabs'
         // position; its button is a way to the page they are on, so the lock leaves it alone.
         if let Some(line) = &c.agent_where {
@@ -2939,7 +3084,25 @@ impl SettingsWindow {
             let unlisted = (key == Key::OpenWith)
                 .then(|| open_with_warning(&self.ivars().open_withs.borrow()))
                 .flatten();
-            let diagnostic = diagnostic.or(unlisted.as_deref());
+            // The shortcut row says why a key was refused (the one just recorded, or the one the
+            // system would not give), which a diagnostic of the file's own takes the place of.
+            let hotkey_note = (key == Key::HotkeyShortcut)
+                .then(|| {
+                    c.hotkey_shortcut.refused().or_else(|| {
+                        app::delegate(self.mtm())
+                            .and_then(|app| app.hotkey_problem())
+                            .map(|refusal| {
+                                bt_shell_common::hotkey::refusal_text(
+                                    refusal,
+                                    settings.hotkey_window.shortcut,
+                                )
+                            })
+                    })
+                })
+                .flatten();
+            let diagnostic = diagnostic
+                .or(unlisted.as_deref())
+                .or(hotkey_note.as_deref());
             // The Links row says what the next click does, from what is on this computer: not
             // a function of the settings alone.
             let links_note = (key == Key::OpenLinksWith).then(|| {
@@ -3340,6 +3503,9 @@ impl SettingsWindow {
             Key::ConfirmClose => choice_at(index).map(SettingsEdit::ConfirmClose),
             Key::RestoreWindows => choice_at(index).map(SettingsEdit::RestoreWindows),
             Key::KeepRunning => choice_at(index).map(SettingsEdit::KeepRunning),
+            Key::HotkeyPosition => choice_at(index).map(SettingsEdit::HotkeyPosition),
+            Key::HotkeyScreen => choice_at(index).map(SettingsEdit::HotkeyScreen),
+            Key::HotkeySpaces => choice_at(index).map(SettingsEdit::HotkeySpaces),
             Key::Scrollbar => choice_at(index).map(SettingsEdit::Scrollbar),
             Key::ContentEdge => choice_at(index).map(SettingsEdit::ContentEdge),
             Key::SplitStyle => choice_at(index).map(SettingsEdit::SplitStyle),
@@ -4214,6 +4380,26 @@ impl SettingsWindow {
         let tab_details = self.segmented::<TabDetails>(Key::TabDetails);
         let minimized_panes = self.segmented::<MinimizedPanes>(Key::MinimizedPanes);
         let resize_in_steps = self.switch(Key::ResizeInSteps);
+        let hotkey_shortcut = hotkey::ShortcutRow::new(self.mtm());
+        let hotkey_position = self.popup::<HotkeyPosition>(Key::HotkeyPosition);
+        let hotkey_screen = self.popup::<HotkeyScreen>(Key::HotkeyScreen);
+        let hotkey_spaces = self.popup::<HotkeySpaces>(Key::HotkeySpaces);
+        let hotkey_depth = self.number(
+            Key::HotkeyDepth,
+            f64::from(*HOTKEY_SIZE_RANGE.start()),
+            f64::from(*HOTKEY_SIZE_RANGE.end()),
+            5.0,
+            NUMBER_WIDTH,
+        );
+        let hotkey_span = self.number(
+            Key::HotkeySpan,
+            f64::from(*HOTKEY_SIZE_RANGE.start()),
+            f64::from(*HOTKEY_SIZE_RANGE.end()),
+            5.0,
+            NUMBER_WIDTH,
+        );
+        let hotkey_hide = self.switch(Key::HotkeyHideOnClickAway);
+        let hotkey_animate = self.switch(Key::HotkeyAnimate);
         let tab_icons = self.switch(Key::TabIcons);
         let font_smoothing = self.switch(Key::FontSmoothing);
         let tab_icon_colors = self.segmented::<IconColors>(Key::TabIconColors);
@@ -4320,6 +4506,14 @@ impl SettingsWindow {
             dim_splits,
             focus_frame,
             resize_in_steps,
+            hotkey_shortcut,
+            hotkey_position,
+            hotkey_screen,
+            hotkey_spaces,
+            hotkey_depth,
+            hotkey_span,
+            hotkey_hide,
+            hotkey_animate,
             rows: Vec::new(),
             groups: Vec::new(),
         };
@@ -4850,6 +5044,18 @@ impl Controls {
             Key::DimSplits => Parts::of(&self.dim_splits),
             Key::FocusFrame => Parts::of(&self.focus_frame),
             Key::ResizeInSteps => Parts::of(&self.resize_in_steps),
+            Key::HotkeyShortcut => Parts {
+                view: self.hotkey_shortcut.view(),
+                controls: Vec::new(),
+                dim: Vec::new(),
+            },
+            Key::HotkeyPosition => Parts::of(&self.hotkey_position),
+            Key::HotkeyScreen => Parts::of(&self.hotkey_screen),
+            Key::HotkeySpaces => Parts::of(&self.hotkey_spaces),
+            Key::HotkeyDepth => number(&self.hotkey_depth),
+            Key::HotkeySpan => number(&self.hotkey_span),
+            Key::HotkeyHideOnClickAway => Parts::of(&self.hotkey_hide),
+            Key::HotkeyAnimate => Parts::of(&self.hotkey_animate),
         }
     }
 }
@@ -5450,7 +5656,7 @@ enum SideItem {
 
 impl SideItem {
     /// The sidebar's rows, top to bottom: the pages in order, a gap before Servers.
-    const ALL: [SideItem; 13] = [
+    const ALL: [SideItem; 14] = [
         SideItem::Page(Category::General),
         SideItem::Page(Category::Appearance),
         SideItem::Page(Category::Font),
@@ -5460,6 +5666,7 @@ impl SideItem {
         SideItem::Page(Category::Feedback),
         SideItem::Page(Category::Shell),
         SideItem::Page(Category::Keyboard),
+        SideItem::Page(Category::HotkeyWindow),
         SideItem::Gap,
         SideItem::Page(Category::Servers),
         SideItem::Page(Category::Agents),
@@ -5864,7 +6071,9 @@ mod tests {
                     [apps]\nopen_with = []\nopen_links_with = []\n\
                     [remote]\n\
                     download_dir = []\ndownload_conflict = []\ndownload_notify = []\n\
-                    stats = []\nstats_interval = []\nintegration = []\n";
+                    stats = []\nstats_interval = []\nintegration = []\n\
+                    [hotkey_window]\nshortcut = []\nposition = []\nscreen = []\nspaces = []\n\
+                    depth = []\nspan = []\nhide_on_click_away = []\nanimate = []\n";
         let parsed = Settings::parse_keeping(text, &Settings::default()).expect("it parses");
         let seen = status(&FileState::Usable(parsed.diagnostics), &[]);
         assert_eq!(seen.banner, Banner::default(), "no unmatched diagnostic");
@@ -5930,6 +6139,14 @@ mod tests {
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
                 Key::FocusFrame => SettingsEdit::FocusFrame(true),
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),
+                Key::HotkeyShortcut => SettingsEdit::HotkeyShortcut(None),
+                Key::HotkeyPosition => SettingsEdit::HotkeyPosition(HotkeyPosition::Left),
+                Key::HotkeyScreen => SettingsEdit::HotkeyScreen(HotkeyScreen::Primary),
+                Key::HotkeySpaces => SettingsEdit::HotkeySpaces(HotkeySpaces::Stay),
+                Key::HotkeyDepth => SettingsEdit::HotkeyDepth(60),
+                Key::HotkeySpan => SettingsEdit::HotkeySpan(80),
+                Key::HotkeyHideOnClickAway => SettingsEdit::HotkeyHideOnClickAway(false),
+                Key::HotkeyAnimate => SettingsEdit::HotkeyAnimate(false),
                 Key::SplitStyle => SettingsEdit::SplitStyle(SplitStyle::Lines),
                 Key::TabDetails => SettingsEdit::TabDetails(TabDetails::Always),
                 Key::MinimizedPanes => SettingsEdit::MinimizedPanes(MinimizedPanes::TopRight),
@@ -6712,11 +6929,13 @@ mod tests {
                 .into_iter()
                 .filter(|k| pages::unit(*k).is_some())
                 .count(),
-            5
+            7
         );
+        assert_eq!(pages::unit(Key::HotkeyDepth), Some("%"));
+        assert_eq!(pages::unit(Key::HotkeySpan), Some("%"));
     }
 
-    /// The sidebar lists the ten pages in their order with a gap before Servers, and every
+    /// The sidebar lists the pages in their order with a gap before Servers, and every
     /// page that has rows has a stack of its own.
     #[test]
     fn the_sidebar_lists_every_page_with_a_gap_before_servers() {
@@ -6758,7 +6977,8 @@ mod tests {
                 None,
                 Some(8),
                 Some(9),
-                Some(10)
+                Some(10),
+                Some(11)
             ]
         );
     }

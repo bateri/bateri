@@ -176,6 +176,26 @@ const SHELL: &[Group] = &[
     group(Some("bateri command"), &[row(Key::CommandLevel)]),
 ];
 
+/// The Hotkey Window page: the key, the window's place and size, and what it does when it loses
+/// the keyboard.
+const HOTKEY: &[Group] = &[
+    group(None, &[row(Key::HotkeyShortcut)]),
+    group(
+        Some("Window"),
+        &[
+            row(Key::HotkeyPosition),
+            row(Key::HotkeyDepth),
+            row(Key::HotkeySpan),
+            row(Key::HotkeyScreen),
+            row(Key::HotkeySpaces),
+        ],
+    ),
+    group(
+        Some("Behavior"),
+        &[row(Key::HotkeyHideOnClickAway), row(Key::HotkeyAnimate)],
+    ),
+];
+
 const SERVERS: &[Group] = &[
     group(
         Some("Over ssh"),
@@ -253,6 +273,7 @@ pub(super) fn groups(category: Category) -> &'static [Group] {
         Category::Feedback => FEEDBACK,
         Category::Shell => SHELL,
         Category::Keyboard => &[],
+        Category::HotkeyWindow => HOTKEY,
         Category::Servers => SERVERS,
         Category::Agents => AGENTS,
         Category::Apps => APPS,
@@ -312,6 +333,14 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::RemoteIntegration => "Set up shell integration on servers",
         Key::RemoteStats => "Server load",
         Key::StatsInterval => "Sample every",
+        Key::HotkeyShortcut => "Shortcut",
+        Key::HotkeyPosition => "Position",
+        Key::HotkeyDepth => "Depth",
+        Key::HotkeySpan => "Span",
+        Key::HotkeyScreen => "Screen",
+        Key::HotkeySpaces => "Spaces",
+        Key::HotkeyHideOnClickAway => "Hide when I click away",
+        Key::HotkeyAnimate => "Slide in and out",
         Key::DownloadDir => "Folder",
         Key::DownloadConflict => "If the name exists",
         Key::DownloadNotify => "Notify when done",
@@ -376,6 +405,7 @@ pub(super) fn unit(key: Key) -> Option<&'static str> {
         Key::Size => Some("pt"),
         Key::LineHeight | Key::LetterSpacing => Some("\u{d7}"),
         Key::StatsInterval => Some("seconds"),
+        Key::HotkeyDepth | Key::HotkeySpan => Some("%"),
         _ => None,
     }
 }

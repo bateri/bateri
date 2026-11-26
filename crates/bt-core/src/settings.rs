@@ -2023,6 +2023,20 @@ pub enum SettingsEdit {
     HotkeyDepth(u8),
     /// `[hotkey_window] span`, in percent of the screen ([`HOTKEY_SIZE_RANGE`]).
     HotkeySpan(u8),
+    /// `[hotkey_window] shortcut`: `None` writes `""` (no shortcut). The Settings page writes it
+    /// by recording a key (`bateri config` refuses the path: a key for every application is
+    /// the person's to give).
+    HotkeyShortcut(Option<Shortcut>),
+    /// `[hotkey_window] position`.
+    HotkeyPosition(HotkeyPosition),
+    /// `[hotkey_window] screen`.
+    HotkeyScreen(HotkeyScreen),
+    /// `[hotkey_window] spaces`.
+    HotkeySpaces(HotkeySpaces),
+    /// `[hotkey_window] hide_on_click_away`.
+    HotkeyHideOnClickAway(bool),
+    /// `[hotkey_window] animate`.
+    HotkeyAnimate(bool),
     /// One feature choice of `family` (`ss01 = true` under `[font.features."Family"]`):
     /// `Some` writes the line, `None` removes it (the font's own default again). The family
     /// is found ignoring case and written as given when its table is new. Everything else in
@@ -2162,6 +2176,16 @@ impl SettingsEdit {
             Self::StatsInterval(_) => ("remote", "stats_interval", "remote.stats_interval"),
             Self::HotkeyDepth(_) => ("hotkey_window", "depth", "hotkey_window.depth"),
             Self::HotkeySpan(_) => ("hotkey_window", "span", "hotkey_window.span"),
+            Self::HotkeyShortcut(_) => ("hotkey_window", "shortcut", "hotkey_window.shortcut"),
+            Self::HotkeyPosition(_) => ("hotkey_window", "position", "hotkey_window.position"),
+            Self::HotkeyScreen(_) => ("hotkey_window", "screen", "hotkey_window.screen"),
+            Self::HotkeySpaces(_) => ("hotkey_window", "spaces", "hotkey_window.spaces"),
+            Self::HotkeyHideOnClickAway(_) => (
+                "hotkey_window",
+                "hide_on_click_away",
+                "hotkey_window.hide_on_click_away",
+            ),
+            Self::HotkeyAnimate(_) => ("hotkey_window", "animate", "hotkey_window.animate"),
             // The key is the command's name, which a constant cannot hold: the writers
             // ([`keys::with_shortcut`], [`keys::without_shortcuts`]) take it from the variant.
             Self::Shortcut { .. } | Self::DefaultShortcuts { .. } => ("keys", "", "keys"),
@@ -2211,6 +2235,14 @@ impl SettingsEdit {
             Self::RemoteStats(mode) => mode.name().into(),
             Self::StatsInterval(seconds) => i64::from(*seconds).into(),
             Self::HotkeyDepth(percent) | Self::HotkeySpan(percent) => i64::from(*percent).into(),
+            // The text the file reads back ([`Shortcut::parse_global`]); none is `""`.
+            Self::HotkeyShortcut(shortcut) => shortcut
+                .map(|shortcut| shortcut.to_string())
+                .unwrap_or_default()
+                .into(),
+            Self::HotkeyPosition(position) => position.name().into(),
+            Self::HotkeyScreen(screen) => screen.name().into(),
+            Self::HotkeySpaces(spaces) => spaces.name().into(),
             // The line's value; a removal writes none and never asks.
             Self::Shortcut { shortcuts, .. } => keys::value_of(shortcuts.as_deref()),
             Self::DefaultShortcuts { .. } => String::new().into(),
@@ -2231,6 +2263,8 @@ impl SettingsEdit {
             | Self::FeedbackApps(on)
             | Self::DimUnfocusedSplits(on)
             | Self::FocusFrame(on)
+            | Self::HotkeyHideOnClickAway(on)
+            | Self::HotkeyAnimate(on)
             | Self::ResizeInSteps(on)
             | Self::FontSmoothing(on)
             | Self::TabIcons(on) => (*on).into(),
@@ -9549,6 +9583,14 @@ cursor = \"spring\"
             SettingsEdit::StatsInterval(seconds) => settings.remote_stats.interval = seconds,
             SettingsEdit::HotkeyDepth(percent) => settings.hotkey_window.depth = percent,
             SettingsEdit::HotkeySpan(percent) => settings.hotkey_window.span = percent,
+            SettingsEdit::HotkeyShortcut(shortcut) => settings.hotkey_window.shortcut = shortcut,
+            SettingsEdit::HotkeyPosition(position) => settings.hotkey_window.position = position,
+            SettingsEdit::HotkeyScreen(screen) => settings.hotkey_window.screen = screen,
+            SettingsEdit::HotkeySpaces(spaces) => settings.hotkey_window.spaces = spaces,
+            SettingsEdit::HotkeyHideOnClickAway(on) => {
+                settings.hotkey_window.hide_on_click_away = on;
+            }
+            SettingsEdit::HotkeyAnimate(on) => settings.hotkey_window.animate = on,
             SettingsEdit::Shortcut { name, shortcuts } => {
                 settings.keys.retain(|entry| entry.name != name);
                 if let Some(shortcuts) = shortcuts {

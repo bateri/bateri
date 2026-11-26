@@ -1125,6 +1125,11 @@ pub(crate) struct Ivars {
     /// only, gone with the application (a pin is a state of now, `[hotkey_window]
     /// hide_on_click_away = false` is the lasting choice).
     hotkey_pinned: Cell<bool>,
+    /// The system's hold on the hotkey window's key: built **only** by an instance that owns the
+    /// keys ([`AppDelegate::apply_global_keys`]), never in a timed run, a test or the agent's copy.
+    global_keys: RefCell<Option<crate::global_keys::CarbonKeys>>,
+    /// What the system holds of it, and why it does not when it does not.
+    hotkey_registration: RefCell<bt_shell_common::hotkey::Registration>,
     /// This launch is the arrival of an update from the bateri before kablo: its update's
     /// holder was waiting ([`retired_holders::update_waiting`]). The ledger of that bateri does
     /// not say it left to be updated, and this is what does.
@@ -1250,6 +1255,9 @@ define_class!(
                 eprintln!("bateri: {e}");
                 std::process::exit(1);
             }
+            // The system's key for the hotkey window: after the session lock is taken, which says
+            // whether this is the instance that holds it ([`AppDelegate::apply_global_keys`]).
+            self.apply_global_keys(&self.settings());
             // The launch settles a moment after its windows are built
             // ([`AppDelegate::settled`]).
             self.settle_later();
@@ -2899,6 +2907,8 @@ impl AppDelegate {
             attempt_dir: RefCell::new(None),
             safe_restore: Cell::new(false),
             hotkey_pinned: Cell::new(false),
+            global_keys: RefCell::new(None),
+            hotkey_registration: RefCell::new(bt_shell_common::hotkey::Registration::new()),
             old_update,
             layout_writer: Cell::new(false),
             layout_save_pending: Cell::new(false),
@@ -7060,6 +7070,7 @@ impl AppDelegate {
         // Where and how big the hotkey window is: in sight, it takes its new place at once.
         if changes.hotkey {
             self.hotkey_settings_changed(&new);
+            self.apply_global_keys(&new);
         }
         // What the vibrations and the sounds may do: what a closed switch no longer lets play
         // ends here, not at the next ask.

@@ -3274,8 +3274,12 @@ it in front.
 | `left`, `right` | width | height |
 | `center` | height | width |
 
-The sizes are shares of the screen's usable area, the menu bar and the Dock left out. Drag the edge opposite the one
-it comes from (all four edges of a `center` window) and the new share is written to the file.
+The sizes are shares of the screen's usable area, the menu bar and the Dock left out. Drag an edge of the window and
+let go: the new shares are written to the file and the window settles back against the edge it comes from.
+
+Settings ▸ Hotkey Window has a row for each key. Its shortcut row listens when you click it: press the keys (or tap a
+modifier twice), esc leaves it and ⌫ takes the shortcut away; a key that would be taken from every application (a
+bare letter) is refused with the reason, and macOS refusing the keys is said under the row.
 
 - **The shortcut** is a chord with `ctrl`, `option` or `cmd` and a key (`option+space`, `shift+cmd+k`; `shift` alone
   is not enough, the key would be taken from every application), a function key from `f1` to `f20`, or one modifier

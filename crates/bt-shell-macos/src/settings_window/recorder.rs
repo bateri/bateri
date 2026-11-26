@@ -70,7 +70,12 @@ pub(super) struct RecorderIvars {
     taps: RefCell<Taps>,
     listening: Cell<bool>,
     label: Retained<NSTextField>,
-    prompt: String,
+    /// What the field says while it is not listening: its row's name for "nothing", or the
+    /// shortcut it holds ([`ShortcutRecorder::set_prompt`]).
+    prompt: RefCell<String>,
+    /// Whether a click or the keyboard may reach the field: the lock of the settings file takes
+    /// it ([`ShortcutRecorder::set_enabled`]).
+    enabled: Cell<bool>,
     news: RefCell<Option<News>>,
 }
 
@@ -88,7 +93,7 @@ define_class!(
     impl ShortcutRecorder {
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
-            true
+            self.ivars().enabled.get()
         }
 
         #[unsafe(method(becomeFirstResponder))]
@@ -135,6 +140,9 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, _event: &NSEvent) {
+            if !self.ivars().enabled.get() {
+                return;
+            }
             self.ivars().taps.borrow_mut().interrupt();
             if let Some(window) = self.window() {
                 window.makeFirstResponder(Some(self));
@@ -185,7 +193,8 @@ impl ShortcutRecorder {
             taps: RefCell::new(arrange::taps()),
             listening: Cell::new(false),
             label: label.clone(),
-            prompt: prompt.to_owned(),
+            prompt: RefCell::new(prompt.to_owned()),
+            enabled: Cell::new(true),
             news: RefCell::new(Some(Rc::new(news))),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
@@ -209,6 +218,29 @@ impl ShortcutRecorder {
             constraint.setActive(true);
         }
         this
+    }
+
+    /// What the field says while it is not listening.
+    pub(super) fn set_prompt(&self, prompt: &str) {
+        if *self.ivars().prompt.borrow() != prompt {
+            self.ivars().prompt.replace(prompt.to_owned());
+            self.show();
+        }
+    }
+
+    /// Lets the field take clicks and the keyboard, or not (the settings file is locked). A field
+    /// that is listening when it is turned off gives the keyboard up.
+    pub(super) fn set_enabled(&self, enabled: bool) {
+        if self.ivars().enabled.replace(enabled) == enabled {
+            return;
+        }
+        if !enabled
+            && self.ivars().listening.get()
+            && let Some(window) = self.window()
+        {
+            window.makeFirstResponder(None);
+        }
+        self.show();
     }
 
     /// Takes the keyboard.
@@ -266,7 +298,7 @@ impl ShortcutRecorder {
             .borrow()
             .waiting(NSProcessInfo::processInfo().systemUptime());
         let (text, quiet) = if !iv.listening.get() {
-            (iv.prompt.clone(), true)
+            (iv.prompt.borrow().clone(), true)
         } else if let Some(tapped) = waiting {
             (format!("{} once more…", tapped.glyph()), false)
         } else if held.is_empty() {
@@ -278,7 +310,9 @@ impl ShortcutRecorder {
             )
         };
         iv.label.setStringValue(&NSString::from_str(&text));
-        let color = if quiet {
+        let color = if !iv.enabled.get() {
+            look::faded(Ink::Dim, 0.55)
+        } else if quiet {
             look::ink(Ink::Dim)
         } else {
             look::ink(Ink::Text)
