@@ -634,9 +634,11 @@ impl Registration {
     }
 }
 
-/// What to tell the person about a key the system did not hold, as the Settings row says it. A
-/// registration that succeeds says nothing about whether another application also wants the key:
-/// only a refusal is told.
+/// What to tell the person about a key the system did not hold, **in the file's language**: the key
+/// as the file writes it, between code quotes, as a line of the settings' diagnostics
+/// ([`refusal_note`]) and the notices say it. The Settings row says it to a person
+/// ([`refusal_words`]). A registration that succeeds says nothing about whether another
+/// application also wants the key: only a refusal is told.
 pub fn refusal_text(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
     let key = shortcut.map_or_else(
         || "The shortcut".to_owned(),
@@ -648,6 +650,25 @@ pub fn refusal_text(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
         ),
         Refusal::NoListening => format!(
             "`{key}` needs Input Monitoring to hear a double tap: allow bateri in System Settings."
+        ),
+    }
+}
+
+/// [`refusal_text`] as the Settings row says it, to a person: the key in its glyphs (⌥ ⌥, not
+/// `option+option`), no code quotes. **A refusal that waits for the permission does not name it**:
+/// the button under the note does (Allow Input Monitoring…), and the page says it once.
+pub fn refusal_words(refusal: Refusal, shortcut: Option<Shortcut>) -> String {
+    let named = shortcut.map(|shortcut| {
+        crate::shortcuts::glyphs(&shortcut).unwrap_or_else(|| shortcut.to_string())
+    });
+    match refusal {
+        Refusal::Refused(status) => format!(
+            "The system did not give {} (status {status}); another application may hold it.",
+            named.as_deref().unwrap_or("the shortcut")
+        ),
+        Refusal::NoListening => format!(
+            "{} is not heard yet. A double tap in other applications needs your permission.",
+            named.as_deref().unwrap_or("The shortcut")
         ),
     }
 }
@@ -1519,6 +1540,28 @@ mod tests {
             assert!(keys.calls.is_empty(), "{not:?}");
             assert_eq!(registration.held(), None);
         }
+    }
+
+    /// The Settings row says a refusal to a person: the key in its glyphs and no code quotes,
+    /// and the permission is named by the button, not by the sentence.
+    #[test]
+    fn the_row_says_a_refusal_in_glyphs_and_names_the_permission_not() {
+        let twice = Shortcut::Twice(Modifier::Option);
+        let waiting = refusal_words(Refusal::NoListening, Some(twice));
+        assert!(waiting.starts_with("\u{2325} \u{2325} "), "{waiting}");
+        let refused = refusal_words(Refusal::Refused(-9878), Some(twice));
+        assert!(refused.contains("(status -9878)"), "{refused}");
+        for text in [&waiting, &refused] {
+            assert!(!text.contains('`'), "{text}");
+            assert!(!text.contains("option"), "{text}");
+        }
+        assert!(!waiting.contains("Input Monitoring"), "{waiting}");
+        // The file's own language is as it was: the key as the file writes it, in code quotes.
+        let file = refusal_note(Refusal::NoListening, Some(twice));
+        assert!(file.contains("`option+option`"), "{file}");
+        // No key to name: the sentence says "The shortcut".
+        assert!(refusal_words(Refusal::NoListening, None).starts_with("The shortcut is not heard"));
+        assert!(refusal_words(Refusal::Refused(1), None).contains("give the shortcut ("));
     }
 
     /// A refusal is told, with the key and the system's number, and goes when a later binding is

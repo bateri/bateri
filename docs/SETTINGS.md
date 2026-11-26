@@ -3283,7 +3283,8 @@ opens.
 
 Settings ▸ Hotkey Window has a row for each key. Its **Show from any app** row listens when you click it: press the
 keys (or tap a modifier twice), esc leaves it and ⌫ takes the shortcut away; the **Remove** button beside it does the
-same, also while it listens, and is dimmed while there is no shortcut. While a field of Settings listens for a
+same, also while it listens, and is dimmed while there is no shortcut; the field and Remove stand in the same place
+whatever the row says. While a field of Settings listens for a
 shortcut (this row, or one of Settings ▸ Keyboard's) the shortcut is not held, so pressing the old one there records
 it and does not show the window. A key that would be taken from every
 application (a bare letter) is refused with the reason, macOS refusing the keys is said under the row, and so is a
@@ -3295,8 +3296,9 @@ change the settings file could not take.
   every application, so a `[keys]` line with the same keys is told so in Settings ▸ Keyboard.
 - **A tap of a chord asks for nothing.** The twice-tapped modifier watches the modifier keys, which macOS lets
   a program do after you allow it in System Settings ▸ Privacy & Security ▸ Input Monitoring. bateri asks once,
-  when you record the double tap in Settings, never at launch; until you allow it the shortcut row says so, and its
-  **Allow Input Monitoring…** button asks again and opens the pane. Coming back to bateri from there turns the
+  when you record the double tap in Settings, never at launch; until you allow it the shortcut row says so under its
+  top line, and the **Allow Input Monitoring…** button under that note asks again and opens the pane (the row grows
+  by those two lines while the key waits). Coming back to bateri from there turns the
   shortcut on. The watch only hears that a modifier changed, and that a key, a click or a scroll came between the
   two taps (which spoils them: ⌥e is not half of ⌥⌥); it reads no key and changes no event. Another application
   that holds the same keys can keep them: bateri tells you when macOS refuses them, not when another application

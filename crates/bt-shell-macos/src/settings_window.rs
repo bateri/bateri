@@ -142,6 +142,9 @@ const ROW_GAP: f64 = 14.0;
 /// The room between a row's picture (the Agents page's tile) and its name.
 const LEAD_GAP: f64 = 10.0;
 const ROW_MIN_HEIGHT: f64 = 40.0;
+/// Where a row's control stands from the row's top when the row has a part under its top line
+/// (the control is not centred against a text that changes): its middle on the name's line.
+const TOP_LINE_CONTROL_TOP: f64 = 6.0;
 /// The Agents page's example stands this much further from the sentence over it than a row puts
 /// a part under its text: as far as it stands from the line under it.
 const SAMPLE_ABOVE: f64 = 14.0;
@@ -1047,10 +1050,10 @@ fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<
         },
         Key::StatsInterval => Some("Pauses in hidden tabs and while idle."),
         Key::HotkeyShortcut => Some(match settings.hotkey_window.shortcut {
-            None => "None: the window opens from the Window menu, the palette or `bateri hotkey`.",
-            Some(bt_core::Shortcut::Twice(_)) => {
-                "Tap it twice, in any application. Needs Input Monitoring."
+            None => {
+                "None: the window opens from the Window menu, the palette or the bateri hotkey command."
             }
+            Some(bt_core::Shortcut::Twice(_)) => "Tap it twice, in any application.",
             Some(_) => "Works in every application; press it again to hide the window.",
         }),
         Key::HotkeyPosition => Some(match settings.hotkey_window.position {
@@ -3086,7 +3089,16 @@ impl SettingsWindow {
         self.ivars().folders.replace(files.download_dir.clone());
 
         let status = status(state, write);
-        let waiting = app::delegate(self.mtm()).is_some_and(|app| app.hotkey_waits_for_access());
+        // The key the system waits for the permission to hear: said in the row's lower part, with
+        // the button that asks for it (not in the note beside the name).
+        let waiting = app::delegate(self.mtm())
+            .is_some_and(|app| app.hotkey_waits_for_access())
+            .then(|| {
+                bt_shell_common::hotkey::refusal_words(
+                    bt_shell_common::hotkey::Refusal::NoListening,
+                    settings.hotkey_window.shortcut,
+                )
+            });
         // A line of the file that holds a shortcut nobody can read says so in its row, and the
         // row can still take it away.
         let unreadable = status
@@ -3094,7 +3106,7 @@ impl SettingsWindow {
             .iter()
             .any(|(row_key, _)| *row_key == Key::HotkeyShortcut);
         c.hotkey_shortcut
-            .show(settings, !status.locked, waiting, unreadable);
+            .show(settings, !status.locked, waiting.as_deref(), unreadable);
         // The Agents page's line on where the reply shows follows Tab Details and the tabs'
         // position; its button is a way to the page they are on, so the lock leaves it alone.
         if let Some(line) = &c.agent_where {
@@ -3132,8 +3144,10 @@ impl SettingsWindow {
                     c.hotkey_shortcut.refused().or_else(|| {
                         app::delegate(self.mtm())
                             .and_then(|app| app.hotkey_problem())
+                            // The permission a double tap waits for is said under the row.
+                            .filter(|_| waiting.is_none())
                             .map(|refusal| {
-                                bt_shell_common::hotkey::refusal_text(
+                                bt_shell_common::hotkey::refusal_words(
                                     refusal,
                                     settings.hotkey_window.shortcut,
                                 )
@@ -4636,6 +4650,7 @@ impl SettingsWindow {
                                     view: shelf,
                                     controls: Vec::new(),
                                     dim: Vec::new(),
+                                    under: None,
                                 },
                                 true,
                                 None,
@@ -4657,6 +4672,7 @@ impl SettingsWindow {
                                     view: Retained::into_super(Retained::into_super(open.clone())),
                                     controls: Vec::new(),
                                     dim: Vec::new(),
+                                    under: None,
                                 },
                                 false,
                                 None,
@@ -4943,6 +4959,10 @@ struct Parts {
     controls: Vec<Retained<NSControl>>,
     /// The labels beside the controls (a unit, a slider's reading) that dim with the row.
     dim: Vec<Retained<NSTextField>>,
+    /// What the row says under its top line (the name and the control), as wide as the row: a
+    /// note and the button that answers it (the Keyboard page's pending key). The row grows by
+    /// what is in it and by nothing while it holds nothing: the view takes no room then.
+    under: Option<Retained<NSView>>,
 }
 
 impl Parts {
@@ -4959,6 +4979,7 @@ impl Parts {
             view,
             controls: vec![control.retain()],
             dim: Vec::new(),
+            under: None,
         }
     }
 }
@@ -4987,6 +5008,7 @@ impl Controls {
                     number.stepper.as_super().retain(),
                 ],
                 dim: unit.into_iter().collect(),
+                under: None,
             }
         };
         let slide = |slide: &Slide| {
@@ -4998,6 +5020,7 @@ impl Controls {
                 view: hstack(mtm, &[&slide.slider, &slide.value], 10.0),
                 controls: vec![slide.slider.as_super().retain()],
                 dim: vec![slide.value.clone()],
+                under: None,
             }
         };
         let folder = |folder: &Folder, show: Option<&NSButton>| {
@@ -5009,6 +5032,7 @@ impl Controls {
                 view: hstack(mtm, &views, 8.0),
                 controls: vec![folder.change.as_super().retain()],
                 dim: Vec::new(),
+                under: None,
             }
         };
         match key {
@@ -5037,6 +5061,7 @@ impl Controls {
                         Retained::into_super(self.theme.clone()),
                     ],
                     dim: Vec::new(),
+                    under: None,
                 }
             }
             Key::LightTheme => Parts::of(&self.light_theme),
@@ -5048,6 +5073,7 @@ impl Controls {
                 view: self.font_options.view(),
                 controls: Vec::new(),
                 dim: Vec::new(),
+                under: None,
             },
             Key::Size => number(&self.size),
             Key::LineHeight => number(&self.line_height),
@@ -5097,6 +5123,7 @@ impl Controls {
                 view: self.hotkey_shortcut.view(),
                 controls: Vec::new(),
                 dim: Vec::new(),
+                under: Some(self.hotkey_shortcut.under()),
             },
             Key::HotkeyPosition => Parts::of(&self.hotkey_position),
             Key::HotkeyScreen => Parts::of(&self.hotkey_screen),
@@ -5203,7 +5230,9 @@ fn group_view(
 }
 
 /// A row of a group's box: the name on the left with its description under it, the control on
-/// the right (or, for `below`, under the text and as wide as the row), a hairline above it.
+/// the right (or, for `below`, under the text and as wide as the row), a hairline above it. A row
+/// with a part `under` its top line (the name and the control) has that line in a view of its own,
+/// pinned to the row's top, and the part below it as wide as the row.
 fn build_row(
     mtm: MainThreadMarker,
     key: Option<Key>,
@@ -5248,9 +5277,19 @@ fn build_row(
     };
     // The rule between two rows, in the theme's separator: a pane's split line.
     let separator = surface(mtm, Ink::Line);
+    // The top line: the row itself, unless there is a part under it.
+    let line: Retained<NSView> = if parts.under.is_some() {
+        NSView::new(mtm)
+    } else {
+        view.clone()
+    };
     add_pinned(&view, &separator);
-    add_pinned(&view, &text);
-    add_pinned(&view, &parts.view);
+    if let Some(under) = &parts.under {
+        add_pinned(&view, &line);
+        add_pinned(&view, under);
+    }
+    add_pinned(&line, &text);
+    add_pinned(&line, &parts.view);
     let min_height = view
         .heightAnchor()
         .constraintGreaterThanOrEqualToConstant(ROW_MIN_HEIGHT);
@@ -5267,22 +5306,22 @@ fn build_row(
             .constraintEqualToAnchor(&view.topAnchor()),
         separator.heightAnchor().constraintEqualToConstant(1.0),
         text.leadingAnchor()
-            .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_PAD_X),
+            .constraintEqualToAnchor_constant(&line.leadingAnchor(), ROW_PAD_X),
         text.topAnchor()
-            .constraintGreaterThanOrEqualToAnchor_constant(&view.topAnchor(), ROW_PAD_Y),
+            .constraintGreaterThanOrEqualToAnchor_constant(&line.topAnchor(), ROW_PAD_Y),
     ];
     if below {
         constraints.extend([
             text.trailingAnchor()
-                .constraintLessThanOrEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
+                .constraintLessThanOrEqualToAnchor_constant(&line.trailingAnchor(), -ROW_PAD_X),
             parts
                 .view
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_PAD_X),
+                .constraintEqualToAnchor_constant(&line.leadingAnchor(), ROW_PAD_X),
             parts
                 .view
                 .trailingAnchor()
-                .constraintLessThanOrEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
+                .constraintLessThanOrEqualToAnchor_constant(&line.trailingAnchor(), -ROW_PAD_X),
             parts.view.topAnchor().constraintEqualToAnchor_constant(
                 &text.bottomAnchor(),
                 if label.is_empty() { 4.0 } else { 10.0 },
@@ -5290,32 +5329,69 @@ fn build_row(
             parts
                 .view
                 .bottomAnchor()
-                .constraintEqualToAnchor_constant(&view.bottomAnchor(), -ROW_PAD_Y),
+                .constraintEqualToAnchor_constant(&line.bottomAnchor(), -ROW_PAD_Y),
         ]);
     } else {
         constraints.extend([
             text.bottomAnchor()
-                .constraintLessThanOrEqualToAnchor_constant(&view.bottomAnchor(), -ROW_PAD_Y),
-            text.centerYAnchor()
-                .constraintEqualToAnchor(&view.centerYAnchor()),
+                .constraintLessThanOrEqualToAnchor_constant(&line.bottomAnchor(), -ROW_PAD_Y),
             parts
                 .view
                 .trailingAnchor()
-                .constraintEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
-            parts
-                .view
-                .centerYAnchor()
-                .constraintEqualToAnchor(&view.centerYAnchor()),
-            parts
-                .view
-                .topAnchor()
-                .constraintGreaterThanOrEqualToAnchor_constant(&view.topAnchor(), 6.0),
+                .constraintEqualToAnchor_constant(&line.trailingAnchor(), -ROW_PAD_X),
             parts
                 .view
                 .bottomAnchor()
-                .constraintLessThanOrEqualToAnchor_constant(&view.bottomAnchor(), -6.0),
+                .constraintLessThanOrEqualToAnchor_constant(&line.bottomAnchor(), -6.0),
             text.trailingAnchor()
                 .constraintLessThanOrEqualToAnchor_constant(&parts.view.leadingAnchor(), -ROW_GAP),
+        ]);
+        if parts.under.is_some() {
+            // The top line stands from the row's top, the text and the control each at a fixed
+            // place: the control does not move up and down with the lines of the description
+            // (the field a person is recording into stays where they look).
+            constraints.extend([
+                text.topAnchor()
+                    .constraintEqualToAnchor_constant(&line.topAnchor(), ROW_PAD_Y),
+                parts
+                    .view
+                    .topAnchor()
+                    .constraintEqualToAnchor_constant(&line.topAnchor(), TOP_LINE_CONTROL_TOP),
+            ]);
+        } else {
+            constraints.extend([
+                text.centerYAnchor()
+                    .constraintEqualToAnchor(&line.centerYAnchor()),
+                parts
+                    .view
+                    .centerYAnchor()
+                    .constraintEqualToAnchor(&line.centerYAnchor()),
+                parts
+                    .view
+                    .topAnchor()
+                    .constraintGreaterThanOrEqualToAnchor_constant(&line.topAnchor(), 6.0),
+            ]);
+        }
+    }
+    if let Some(under) = &parts.under {
+        constraints.extend([
+            line.topAnchor().constraintEqualToAnchor(&view.topAnchor()),
+            line.leadingAnchor()
+                .constraintEqualToAnchor(&view.leadingAnchor()),
+            line.trailingAnchor()
+                .constraintEqualToAnchor(&view.trailingAnchor()),
+            under
+                .topAnchor()
+                .constraintEqualToAnchor(&line.bottomAnchor()),
+            under
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&view.leadingAnchor(), ROW_PAD_X),
+            under
+                .trailingAnchor()
+                .constraintEqualToAnchor_constant(&view.trailingAnchor(), -ROW_PAD_X),
+            under
+                .bottomAnchor()
+                .constraintEqualToAnchor(&view.bottomAnchor()),
         ]);
     }
     activate(&constraints);

@@ -300,6 +300,14 @@ harness = false
 name = "terminate"
 harness = false
 
+# The Hotkey Window page's shortcut row in each state a person finds it in, measured (the field and
+# Remove are the same size at the same place in every one); with `-- --ignored`, the page is also
+# drawn off the screen into `target/shots/` for a person to look at. Its own `main`, for the same
+# reason as `embed`'s.
+[[test]]
+name = "hotkey_row"
+harness = false
+
 # Every page of the settings window laid out and measured: rows inside their group's box and
 # one under another, text beside its control. Its own `main`, for the same reason as `embed`'s;
 # with `BT_SETTINGS_SHOTS=<dir>` it also writes each page there as a PNG.

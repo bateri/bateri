@@ -14,7 +14,7 @@ use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 
-use bt_core::{CursorBlink, Settings, TabDetails, TabPosition, Theme};
+use bt_core::{CursorBlink, Modifier, Settings, Shortcut, TabDetails, TabPosition, Theme};
 use bt_gpu::ScrollbarMode;
 use objc2::{AllocAnyThread, ClassType, DefinedClass, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
@@ -27,7 +27,9 @@ use objc2_foundation::{
 };
 
 use super::pictures::Palette;
-use super::{Category, Key, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen};
+use super::{
+    Category, Key, ROW_PAD_X, Resolved, SettingsWindow, SideItem, ThemeLists, pages, specimen,
+};
 use crate::settings::{self, FileState};
 
 /// How far two frames may run into each other before it is an overlap: the hairline rounding of
@@ -290,6 +292,7 @@ impl SettingsWindow {
         self.blink_problems(&themes, resolved, shots, &mut problems);
         self.drag_problems(shots, &mut problems);
         self.agents_problems(&themes, resolved, shots, &mut problems);
+        self.hotkey_problems(&themes, resolved, shots, &mut problems);
         self.apps_problems(&themes, resolved, &dark, shots, &mut problems);
         if let Some(dir) = shots {
             // The Keyboard page is a list of its own, not a grid: its picture only.
@@ -1136,6 +1139,252 @@ impl SettingsWindow {
         self.show_specimen();
         self.cancel_blink();
         specimens.stop_blink();
+    }
+
+    /// [`Self::hotkey_problems`] on its own, for `tests/hotkey_row.rs`: the window is shown off
+    /// the screen's edge as the application shows it, and refreshed with the defaults first.
+    pub(crate) fn hotkey_row_problems(&self, shots: Option<&Path>) -> Vec<String> {
+        let Some(window) = self.ivars().window.get() else {
+            return vec!["the window was not built".to_owned()];
+        };
+        window.setFrameTopLeftPoint(NSPoint::new(-4000.0, -4000.0));
+        window.orderFront(None);
+        let settings = Settings::default();
+        let embedded = Theme::embedded_groups();
+        let (light, _) = settings::load_theme(None, &settings.light_theme).or_embedded(false);
+        let (dark, _) = settings::load_theme(None, &settings.dark_theme).or_embedded(true);
+        let themes = ThemeLists {
+            embedded: &embedded,
+            user: &[],
+            user_themes: &[],
+            on_screen: &light,
+            light: &light,
+            dark: &dark,
+            dark_appearance: false,
+        };
+        let resolved = Resolved {
+            reduce: false,
+            scrollbar: ScrollbarMode::Auto,
+        };
+        self.refresh(&settings, resolved, &FileState::Missing, &[], &themes);
+        let mut problems = Vec::new();
+        self.hotkey_problems(&themes, resolved, shots, &mut problems);
+        problems
+    }
+
+    /// The Hotkey Window page's shortcut row in the states a person finds it in: with no
+    /// shortcut, with a chord, with a double tap and with a double tap that waits for the
+    /// permission. **The right of the row is the same in each** — the field and Remove at the same
+    /// place (in the row) and the same size, neither squeezed by what the row says beside them —
+    /// and the row grows only while the key waits, by the note and the button under its top line,
+    /// which are read whole (a label that is given less width than its text takes is cut). With
+    /// `shots`, the page and the window are written as `hotkey-window-{state}.png` for the three
+    /// states a person is shown.
+    fn hotkey_problems(
+        &self,
+        themes: &ThemeLists<'_>,
+        resolved: Resolved,
+        shots: Option<&Path>,
+        problems: &mut Vec<String>,
+    ) {
+        let ivars = self.ivars();
+        let (Some(window), Some(sidebar), Some(controls), Some(scroll)) = (
+            ivars.window.get(),
+            ivars.sidebar.get(),
+            ivars.controls.get(),
+            ivars.pane_scroll.get(),
+        ) else {
+            return;
+        };
+        let Some(row) = controls
+            .rows
+            .iter()
+            .find(|row| row.key == Some(Key::HotkeyShortcut))
+        else {
+            problems.push("Hotkey Window: the page has no shortcut row".to_owned());
+            return;
+        };
+        let twice = Shortcut::Twice(Modifier::Option);
+        let chord = Shortcut::parse_global("option+shift+h").ok();
+        // (name, whether a picture is written, shortcut, waiting for the permission)
+        let states = [
+            ("none", true, None, false),
+            ("chord", true, chord, false),
+            ("twice", false, Some(twice), false),
+            ("twice-waiting", true, Some(twice), true),
+        ];
+        // The field's and Remove's frames in the row, as the first state has them.
+        let mut first: Option<[NSRect; 2]> = None;
+        let mut heights = Vec::new();
+        for (name, pictured, shortcut, waiting) in states {
+            let mut settings = Settings::default();
+            settings.hotkey_window.shortcut = shortcut;
+            self.refresh(&settings, resolved, &FileState::Missing, &[], themes);
+            let words = waiting.then(|| {
+                bt_shell_common::hotkey::refusal_words(
+                    bt_shell_common::hotkey::Refusal::NoListening,
+                    shortcut,
+                )
+            });
+            controls
+                .hotkey_shortcut
+                .show(&settings, true, words.as_deref(), false);
+            sidebar.selectRowIndexes_byExtendingSelection(
+                &NSIndexSet::indexSetWithIndex(SideItem::row_of(Category::HotkeyWindow)),
+                false,
+            );
+            window.layoutIfNeeded();
+            let (Some(content), Some(document)) = (window.contentView(), scroll.documentView())
+            else {
+                continue;
+            };
+            content.layoutSubtreeIfNeeded();
+            let (field, remove, allow, note) = controls.hotkey_shortcut.parts();
+            // In the pages' document (flipped: y grows downwards), and from the row's top left.
+            let at = in_document(&row.view, &document);
+            let in_page = |view: &NSView| in_document(view, &document);
+            let in_row = |view: &NSView| {
+                let frame = in_page(view);
+                NSRect::new(
+                    NSPoint::new(frame.origin.x - at.origin.x, frame.origin.y - at.origin.y),
+                    frame.size,
+                )
+            };
+            let (field_at, remove_at) = (in_row(field), in_row(remove));
+            let mut say = |what: String| problems.push(format!("Hotkey Window ({name}): {what}"));
+            // The right of the row: the same in every state.
+            match &first {
+                None => first = Some([field_at, remove_at]),
+                Some([field_was, remove_was]) => {
+                    for (what, was, now) in [
+                        ("the field", field_was, &field_at),
+                        ("Remove", remove_was, &remove_at),
+                    ] {
+                        if (was.origin.x - now.origin.x).abs() > SLACK
+                            || (was.origin.y - now.origin.y).abs() > SLACK
+                            || (was.size.width - now.size.width).abs() > SLACK
+                            || (was.size.height - now.size.height).abs() > SLACK
+                        {
+                            say(format!(
+                                "{what} is {:.1} × {:.1} at ({:.1}, {:.1}) in the row here and {:.1} × {:.1} at ({:.1}, {:.1}) with no shortcut",
+                                now.size.width,
+                                now.size.height,
+                                now.origin.x,
+                                now.origin.y,
+                                was.size.width,
+                                was.size.height,
+                                was.origin.x,
+                                was.origin.y
+                            ));
+                        }
+                    }
+                }
+            }
+            if remove_at.size.width < 56.0 {
+                say(format!(
+                    "Remove is {:.1} wide: squeezed",
+                    remove_at.size.width
+                ));
+            }
+            if overlap(field_at, remove_at) {
+                say("the field runs into Remove".to_owned());
+            }
+            for (what, part) in [("the field", field), ("Remove", remove)] {
+                let frame = in_page(part);
+                if !contains(at, frame) {
+                    say(format!("{what} leaves the row"));
+                }
+                if overlap(frame, in_page(&row.label)) || overlap(frame, in_page(&row.note)) {
+                    say(format!("{what} runs into the row's text"));
+                }
+            }
+            // The text beside the name and the warning are read whole: given the width their
+            // text takes (a label given less is cut), and the height.
+            for (what, label) in [("the description", &*row.note), ("the warning", note)] {
+                if label.isHidden() {
+                    continue;
+                }
+                let (frame, text) = (in_page(label), label.intrinsicContentSize());
+                if frame.size.width + SLACK < text.width || frame.size.height + SLACK < text.height
+                {
+                    say(format!(
+                        "{what} is {:.1} × {:.1} for text that takes {:.1} × {:.1}: cut",
+                        frame.size.width, frame.size.height, text.width, text.height
+                    ));
+                }
+            }
+            // What the key waits for is under the top line, as wide as the row, and only then.
+            let under = in_page(&controls.hotkey_shortcut.under());
+            if waiting {
+                let said = words.as_deref().unwrap_or_default();
+                if note.isHidden() || allow.isHidden() {
+                    say("the note and the button are not shown".to_owned());
+                }
+                if said.contains('`') || !said.starts_with("\u{2325} \u{2325} ") {
+                    say(format!("the warning is not in glyphs: {said:?}"));
+                }
+                if !contains(at, in_page(note)) || !contains(at, in_page(allow)) {
+                    say("the note or the button leaves the row".to_owned());
+                }
+                if top(in_page(allow)) < bottom(in_page(note)) - SLACK {
+                    say("the button is not under the note".to_owned());
+                }
+                let line = bottom(in_page(field)).max(bottom(in_page(remove)));
+                if top(in_page(note)) < line - SLACK {
+                    say("the note is not under the row's top line".to_owned());
+                }
+                if (under.size.width - (at.size.width - 2.0 * ROW_PAD_X)).abs() > SLACK {
+                    say(format!(
+                        "the part under the top line is {:.1} wide in a row {:.1} wide",
+                        under.size.width, at.size.width
+                    ));
+                }
+            } else if under.size.height > SLACK || !note.isHidden() || !allow.isHidden() {
+                say(format!(
+                    "the row has {:.1} under its top line with no key waiting",
+                    under.size.height
+                ));
+            }
+            // The row says Input Monitoring once — in the button, while it is there — and holds no
+            // code quote.
+            let shown = |label: String, hidden: bool| if hidden { String::new() } else { label };
+            let said = format!(
+                "{} {} {}",
+                row.note.stringValue(),
+                shown(note.stringValue().to_string(), note.isHidden()),
+                shown(allow.title().to_string(), allow.isHidden())
+            );
+            if said.matches("Input Monitoring").count() != usize::from(waiting) {
+                say(format!("Input Monitoring is said wrongly: {said:?}"));
+            }
+            if said.contains('`') {
+                say(format!("a code quote is in the row's text: {said:?}"));
+            }
+            heights.push((name, at.size.height));
+            if let (Some(dir), true) = (shots, pictured) {
+                picture(&document, &dir.join(format!("hotkey-window-{name}.png")));
+                picture(
+                    &content,
+                    &dir.join(format!("hotkey-window-{name}-window.png")),
+                );
+            }
+        }
+        // The row grows while the key waits and in no other state of the same shortcut.
+        if let [.., (_, plain), (_, waiting)] = heights[..]
+            && waiting <= plain + SLACK
+        {
+            problems.push(format!(
+                "Hotkey Window: the row is {waiting:.1} high while the key waits and {plain:.1} when it does not: it did not grow"
+            ));
+        }
+        // Back to what the other checks expect: the page as the file's defaults draw it.
+        self.refresh(
+            &Settings::default(),
+            resolved,
+            &FileState::Missing,
+            &[],
+            themes,
+        );
     }
 
     /// The Agents page keeps still when its switch turns — the explanation and the example stand

@@ -15,6 +15,12 @@
 //! shortcut and nothing else. **Remove** takes it away by the same path as ⌫ — also while the
 //! field listens, and for a double tap too, whose tap comes down with the key — and is dimmed,
 //! never hidden, while there is none. A write that did not happen is said in the row.
+//!
+//! **The right of the row is the same in every state**: the field and Remove, each of a width
+//! that is its own and is not given up to anything beside them. What a key waits for (the
+//! permission a double tap needs) is said **under** the row's top line, as the Keyboard page says
+//! a pending key: a note as wide as the row and the button that answers it on a line of its own.
+//! The row grows by that and only while the key waits.
 
 use std::cell::{Cell, RefCell};
 
@@ -23,9 +29,16 @@ use bt_shell_common::shortcuts::{Tapped, glyphs};
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSButton, NSView};
+use objc2_app_kit::{
+    NSApplication, NSButton, NSFont, NSLayoutAttribute, NSLayoutConstraintOrientation,
+    NSLayoutPriorityRequired, NSStackView, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
+};
+use objc2_foundation::{NSEdgeInsets, NSString, ns_string};
+
+use super::look::{self, Ink};
 
 use super::recorder::{Recorded, ShortcutRecorder};
+use super::{ROW_PAD_Y, ROW_WIDTH};
 use crate::app;
 
 /// What the field says while it holds no shortcut.
@@ -98,13 +111,21 @@ pub(super) fn prompt(shortcut: Option<Shortcut>) -> String {
         .unwrap_or_else(|| NONE.to_owned())
 }
 
-/// The shortcut's row: the field, the Remove button (always there, dimmed while there is no
-/// shortcut), the button that sends the person to the permission a double tap needs (seen only
-/// while the key waits for it), and what the field was told to say.
+/// The least width of Remove: the title's own is what it takes, this is the floor under a title
+/// that is short.
+const REMOVE_MIN_WIDTH: f64 = 64.0;
+
+/// The shortcut's row: on the right the field and the Remove button (always there, dimmed while
+/// there is no shortcut), and under the row's top line what the key waits for — a note and the
+/// button that sends the person to the permission a double tap needs — while it waits.
 pub(super) struct ShortcutRow {
     recorder: Retained<ShortcutRecorder>,
     remove: Retained<NSButton>,
     allow: Retained<NSButton>,
+    /// What the key waits for, in the warning's colour.
+    note: Retained<NSTextField>,
+    /// The note and the button, as wide as the row; takes no room while the key waits for nothing.
+    under: Retained<NSStackView>,
     view: Retained<NSView>,
 }
 
@@ -124,14 +145,47 @@ impl ShortcutRow {
                 work(mtm, heard);
             });
         });
+        // Remove is as wide as its title asks, whatever the row has beside it: a button that the
+        // row's text may squeeze draws a sliver.
+        let width = remove.fittingSize().width.ceil().max(REMOVE_MIN_WIDTH);
+        remove
+            .widthAnchor()
+            .constraintEqualToConstant(width)
+            .setActive(true);
+        remove.setContentCompressionResistancePriority_forOrientation(
+            NSLayoutPriorityRequired,
+            NSLayoutConstraintOrientation::Horizontal,
+        );
+        remove.setContentHuggingPriority_forOrientation(
+            NSLayoutPriorityRequired,
+            NSLayoutConstraintOrientation::Horizontal,
+        );
+        let view = super::hstack(mtm, &[&recorder, &remove], 8.0);
+        // The Keyboard page's pending key: a note, then the button, one under the other.
+        let note = super::wrapping_text_label(ns_string!(""), mtm);
+        note.setFont(Some(&NSFont::systemFontOfSize(
+            NSFont::smallSystemFontSize(),
+        )));
+        note.setPreferredMaxLayoutWidth(ROW_WIDTH);
+        let under = super::stack(
+            mtm,
+            &[&note, &allow],
+            NSUserInterfaceLayoutOrientation::Vertical,
+            6.0,
+            NSLayoutAttribute::Leading,
+        );
+        note.setHidden(true);
         allow.setHidden(true);
-        let view = super::hstack(mtm, &[&recorder, &remove, &allow], 8.0);
-        Self {
+        let row = Self {
             recorder,
             remove,
             allow,
+            note,
+            under,
             view,
-        }
+        };
+        row.leave_room(false);
+        row
     }
 
     /// The field and its button, to put in the row.
@@ -139,11 +193,39 @@ impl ShortcutRow {
         self.view.clone()
     }
 
+    /// What the row says under its top line, to put in the row.
+    pub(super) fn under(&self) -> Retained<NSView> {
+        Retained::into_super(self.under.clone())
+    }
+
+    /// The field, Remove, the permission's button and the note, to measure.
+    pub(super) fn parts(&self) -> (&NSView, &NSButton, &NSButton, &NSTextField) {
+        (&self.recorder, &self.remove, &self.allow, &self.note)
+    }
+
+    /// The part under the top line: the room under the button while there is something in it,
+    /// none while there is not.
+    fn leave_room(&self, waiting: bool) {
+        self.under.setEdgeInsets(NSEdgeInsets {
+            top: 0.0,
+            left: 0.0,
+            bottom: if waiting { ROW_PAD_Y } else { 0.0 },
+            right: 0.0,
+        });
+    }
+
     /// Says what the file holds, and whether the field may be used (the file is not locked);
-    /// `waiting` is the key waiting for the permission to hear a double tap, which the button
-    /// answers; `unreadable` is a line of the file that holds a shortcut that cannot be read
+    /// `waiting` is what the key waits for the permission to hear a double tap with — the note
+    /// the row says under its top line — and the button that answers it is there while it is
+    /// `Some`; `unreadable` is a line of the file that holds a shortcut that cannot be read
     /// (Remove takes that away too).
-    pub(super) fn show(&self, settings: &Settings, enabled: bool, waiting: bool, unreadable: bool) {
+    pub(super) fn show(
+        &self,
+        settings: &Settings,
+        enabled: bool,
+        waiting: Option<&str>,
+        unreadable: bool,
+    ) {
         self.recorder
             .set_prompt(&prompt(settings.hotkey_window.shortcut));
         self.recorder.set_enabled(enabled);
@@ -153,9 +235,15 @@ impl ShortcutRow {
         let removable = enabled && (settings.hotkey_window.shortcut.is_some() || unreadable);
         self.remove.setEnabled(removable);
         super::ink_button(&self.remove, removable);
-        self.allow.setHidden(!waiting);
+        if let Some(words) = waiting {
+            self.note.setStringValue(&NSString::from_str(words));
+            self.note.setTextColor(Some(&look::ink(Ink::Warning)));
+        }
+        self.note.setHidden(waiting.is_none());
+        self.allow.setHidden(waiting.is_none());
         self.allow.setEnabled(enabled);
         super::ink_button(&self.allow, enabled);
+        self.leave_room(waiting.is_some());
     }
 
     /// The note of the last key refused, if the field is still waiting for another, or of the
@@ -310,13 +398,23 @@ mod tests {
 
     /// The row's wiring, as a source scan (the page needs a window server): Remove goes through
     /// the same `work` as ⌫, and a failed write is kept and not dropped; the button is dimmed
-    /// and never hidden; the order is the field, Remove, the permission's button.
+    /// and never hidden; the right of the row is the field and Remove, each of a width of its own,
+    /// and the permission's button is not in it but under the row's top line.
     #[test]
     fn remove_is_the_same_path_as_delete_and_the_row_keeps_it_in_its_place() {
         let code = include_str!("hotkey.rs");
         let code = &code[..code.find("#[cfg(test)]").expect("the tests")];
         assert!(code.contains("work(mtm, Recorded::Delete)"));
-        assert!(code.contains("super::hstack(mtm, &[&recorder, &remove, &allow], 8.0)"));
+        assert!(code.contains("super::hstack(mtm, &[&recorder, &remove], 8.0)"));
+        assert!(
+            code.contains(".constraintEqualToConstant(width)")
+                && code.contains("NSLayoutPriorityRequired"),
+            "Remove is not squeezed"
+        );
+        assert!(
+            code.contains("&[&note, &allow]"),
+            "the permission's button is under the note, out of the right group"
+        );
         assert!(
             !code.contains("remove.setHidden"),
             "Remove is dimmed, never hidden"

@@ -146,6 +146,15 @@ pub fn settings_layout_problems(
     settings_window::SettingsWindow::new(mtm).layout_problems(shots)
 }
 
+/// The Hotkey Window page's shortcut row in the states a person finds it in (no shortcut, a chord,
+/// a double tap, a double tap that waits for its permission), laid out and measured; with `shots`,
+/// the page and the window of three of them are written there as PNGs. Only for
+/// `tests/hotkey_row.rs`.
+#[doc(hidden)]
+pub fn hotkey_row_problems(mtm: MainThreadMarker, shots: Option<&std::path::Path>) -> Vec<String> {
+    settings_window::SettingsWindow::new(mtm).hotkey_row_problems(shots)
+}
+
 /// Opens the hotkey window's panel through the shell's own setup and lists what is wrong with it
 /// (class, style, standing flags, the frames the rules compute, hiding). Only for
 /// `tests/hotkey_panel.rs`.
