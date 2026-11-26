@@ -13,6 +13,7 @@ use bt_shell_common::agent::message::HotkeyAction;
 use bt_shell_common::hotkey::{
     self as rules, Candidate, GlobalKeys as _, KeyTaker, Lost, Presence, Step, Verb,
 };
+use dispatch2::DispatchQueue;
 use objc2_app_kit::NSScreen;
 
 use super::*;
@@ -122,6 +123,17 @@ impl AppDelegate {
         let screens = self.hotkey_screens();
         let pointer = NSEvent::mouseLocation();
         let index = rules::screen_index(&screens, settings.screen, Some((pointer.x, pointer.y)))?;
+        self.hotkey_slide_on(&screens, index, settings)
+    }
+
+    /// The slide on the screen `index` of `screens`: the frame the shares make of its usable
+    /// area, and whether the way in is clear ([`rules::slide_among`]).
+    fn hotkey_slide_on(
+        &self,
+        screens: &[rules::Screen],
+        index: usize,
+        settings: &HotkeyWindowSettings,
+    ) -> Option<rules::Slide> {
         let screen = screens.get(index)?;
         let shown = rules::shown_frame(
             screen.visible,
@@ -129,7 +141,23 @@ impl AppDelegate {
             settings.depth,
             settings.span,
         );
-        Some(rules::slide(screen, shown, settings.position))
+        rules::slide_among(screens, index, shown, settings.position)
+    }
+
+    /// The slide of a window that is in sight **on the screen it is on** (the pointer and the
+    /// primary screen choose where a window comes, [`Self::hotkey_slide`], and nothing else): a
+    /// setting that changed, or an edge that was let go, lays it out again where it is.
+    fn hotkey_slide_here(
+        &self,
+        window: &TerminalWindow,
+        settings: &HotkeyWindowSettings,
+    ) -> Option<rules::Slide> {
+        let screens = self.hotkey_screens();
+        match rules::screen_of(&screens, window.frame_now()) {
+            Some(on) => self.hotkey_slide_on(&screens, on, settings),
+            // On no screen (it was unplugged): it comes back where a window comes.
+            None => self.hotkey_slide(settings),
+        }
     }
 
     /// The frame the hotkey window has when it is shown, for a window that is placed out of sight
@@ -145,15 +173,9 @@ impl AppDelegate {
     fn hotkey_slide_away(&self, window: &TerminalWindow) -> Option<rules::Slide> {
         let screens = self.hotkey_screens();
         let frame = window.frame_now();
-        let on = window.screen_now().map(|screen| frame_of(screen.frame()));
-        let screen = on
-            .and_then(|on| screens.iter().find(|screen| screen.frame == on))
-            .or_else(|| screens.first())?;
-        Some(rules::slide(
-            screen,
-            frame,
-            self.settings().hotkey_window.position,
-        ))
+        let on =
+            rules::screen_of(&screens, frame).or_else(|| (!screens.is_empty()).then_some(0))?;
+        rules::slide_among(&screens, on, frame, self.settings().hotkey_window.position)
     }
 
     /// Whether a slide happens: not with `animate = false`, nor under Reduce Motion
@@ -195,8 +217,10 @@ impl AppDelegate {
         match (step, window) {
             (Step::Open, _) => self.open_hotkey_window()?,
             (Step::Show, Some(window)) => self.slide_in_hotkey(&window)?,
-            (Step::Raise, Some(window)) => window.raise_hotkey(),
-            (Step::Hide, Some(window)) => self.slide_out_hotkey(&window, true),
+            // In sight with no keyboard (a pin, with the person in another application): the
+            // window comes to the person, who is where they are now.
+            (Step::Raise, Some(window)) => window.raise_hotkey(frontmost_other(self.mtm())),
+            (Step::Hide, Some(window)) => self.hide_hotkey(&window, rules::HideCause::Asked),
             _ => {}
         }
         Ok(step)
@@ -218,7 +242,7 @@ impl AppDelegate {
                     eprintln!("bateri: could not show the hotkey window: {e}");
                 }
             }
-            Step::Raise => window.raise_hotkey(),
+            Step::Raise => window.raise_hotkey(frontmost_other(self.mtm())),
             _ => {}
         }
     }
@@ -238,8 +262,16 @@ impl AppDelegate {
         Ok(())
     }
 
+    /// The window goes away for `cause`: the application the person was in comes to the front
+    /// only as [`rules::restores_previous`] says (they asked, and the window had the keyboard);
+    /// every other hide lets the record go and brings nobody. **The one place that decides.**
+    fn hide_hotkey(&self, window: &TerminalWindow, cause: rules::HideCause) {
+        let give_back = rules::restores_previous(cause, window.is_key_window());
+        self.slide_out_hotkey(window, give_back);
+    }
+
     /// The window slides away. `give_back`: the application the person was in comes to the
-    /// front (the tap and the command); without it the focus went elsewhere by itself.
+    /// front ([`Self::hide_hotkey`] decides); without it nobody is brought forward.
     fn slide_out_hotkey(&self, window: &TerminalWindow, give_back: bool) {
         let settings = self.settings().hotkey_window;
         let Some(slide) = self.hotkey_slide_away(window) else {
@@ -386,8 +418,7 @@ impl AppDelegate {
         let settings = self.settings().hotkey_window;
         let frame = window.frame_now();
         let screens = self.hotkey_screens();
-        let on = window.screen_now().map(|screen| frame_of(screen.frame()));
-        if let Some(screen) = on.and_then(|on| screens.iter().find(|screen| screen.frame == on)) {
+        if let Some(screen) = rules::screen_of(&screens, frame).and_then(|on| screens.get(on)) {
             let (depth, span) = rules::shares(screen.visible, settings.position, frame);
             if (depth, span) != (settings.depth, settings.span) {
                 let edits = [
@@ -401,6 +432,50 @@ impl AppDelegate {
         }
         let now = self.settings().clone();
         self.hotkey_settings_changed(&now);
+    }
+
+    /// What the system holds follows whether a field of Settings listens for a shortcut: while it
+    /// does, **nothing is held** (the registration of a chord, the tap of a double tap), so the
+    /// field hears the key the window has like any other and it does not show or hide the window
+    /// ([`Registration::set_quiet`]). It is asked again when the field starts or stops listening,
+    /// the Settings window gains or loses the keyboard or closes, and bateri comes forward or
+    /// goes behind — a field that is listening in a window that is not key is not heard from.
+    pub(crate) fn sync_hotkey_quiet(&self) {
+        let instance = self.hotkey_instance();
+        if !rules::owns_global_keys(&instance) {
+            return;
+        }
+        let quiet = crate::settings_window::is_recording(self.mtm());
+        let settings = self.settings().clone();
+        let (resumed, told) = self.with_system_keys(|keys| {
+            let mut registration = self.ivars().hotkey_registration.borrow_mut();
+            let resumed = registration.set_quiet(keys, &settings, &instance, quiet);
+            (
+                resumed,
+                registration.notices(settings.hotkey_window.shortcut),
+            )
+        });
+        // The key is held again here, a turn after the settings were written: what the system
+        // said about it (another application's key, the permission a double tap waits for) is
+        // told now, and the page shows it, as when the settings change. Only then: the calls
+        // that find nothing changed (every activation of bateri, every key change of a window)
+        // tell and redraw nothing.
+        if resumed {
+            self.post_notices(Source::Hotkey, told);
+            self.refresh_settings_window();
+        }
+    }
+
+    /// [`Self::sync_hotkey_quiet`], a turn later: the news of a first responder or a key window
+    /// comes while it is still changing, and who has the keyboard is settled only after.
+    pub(crate) fn hotkey_quiet_later() {
+        DispatchQueue::main().exec_async(|| {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.sync_hotkey_quiet();
+            }
+        });
     }
 
     /// Why the system does not hold the key the settings ask for, if it does not (the Settings
@@ -462,7 +537,7 @@ impl AppDelegate {
             Lost::Key { to: taker }
         };
         if rules::hides_on(lost, self.hotkey_hiding()) {
-            self.slide_out_hotkey(&window, false);
+            self.hide_hotkey(&window, rules::HideCause::FocusLeft);
         }
     }
 
@@ -489,7 +564,7 @@ impl AppDelegate {
         }
         for window in self.windows() {
             if window.hotkey_shown() {
-                self.slide_out_hotkey(&window, false);
+                self.hide_hotkey(&window, rules::HideCause::FocusLeft);
             }
         }
     }
@@ -552,7 +627,8 @@ impl AppDelegate {
             return;
         };
         let settings = new.hotkey_window;
-        if let Some(slide) = self.hotkey_slide(&settings) {
+        // On its own screen: the pointer is wherever the person was when they changed a setting.
+        if let Some(slide) = self.hotkey_slide_here(&window, &settings) {
             window.replace(&slide, settings.spaces == HotkeySpaces::Follow);
         }
     }
@@ -816,6 +892,7 @@ mod tests {
         for caller in [
             "    pub(crate) fn apply_global_keys(",
             "    fn retry_global_keys(",
+            "    pub(crate) fn sync_hotkey_quiet(",
         ] {
             let body = body_of(code, caller, "    ");
             let owner = body.find("rules::owns_global_keys(").expect("the rule");
@@ -825,7 +902,7 @@ mod tests {
                 "{caller}: asked who owns them before building them"
             );
         }
-        assert_eq!(code.matches("self.with_system_keys(").count(), 2);
+        assert_eq!(code.matches("self.with_system_keys(").count(), 3);
         // The instance is read from the lock, the bundle, the timed run and the agent's copy.
         let instance = body_of(code, "    fn hotkey_instance(", "    ");
         for fact in [
@@ -850,6 +927,104 @@ mod tests {
             body_of(app, "    pub(crate) fn open_given_up_windows(", "    ")
                 .contains("self.apply_global_keys(&self.settings());")
         );
+    }
+
+    /// The system's key is let go while a field of Settings listens, and asked for again when it
+    /// stops, the Settings window loses the keyboard or closes, or bateri goes behind: each of
+    /// those is a place that asks. A source scan (the real keys are never built by a test).
+    #[test]
+    fn the_system_key_follows_the_field_that_listens_from_each_place_that_changes_it() {
+        let code = include_str!("hotkey.rs");
+        let code = code.split("#[cfg(test)]").next().expect("the code");
+        let quiet = body_of(code, "    pub(crate) fn sync_hotkey_quiet(", "    ");
+        assert!(quiet.contains("settings_window::is_recording("));
+        assert!(quiet.contains(".set_quiet("));
+        // The recorder says it when it starts and stops, the window when it has the keyboard or
+        // not or goes, the application when it comes forward or goes behind.
+        let recorder = include_str!("../settings_window/recorder.rs");
+        assert_eq!(
+            recorder
+                .matches("AppDelegate::hotkey_quiet_later()")
+                .count(),
+            2
+        );
+        let window = include_str!("../settings_window.rs");
+        assert_eq!(
+            window.matches("AppDelegate::hotkey_quiet_later()").count(),
+            3
+        );
+        let app = include_str!("../app.rs");
+        assert_eq!(app.matches("Self::hotkey_quiet_later()").count(), 2);
+        // A key pressed while a field listens is the field's, in any case.
+        assert!(
+            body_of(code, "    pub(crate) fn hotkey_pressed(", "    ")
+                .contains("settings_window::is_recording(")
+        );
+    }
+
+    /// A hide has one cause, and one place decides whether the application before comes back:
+    /// every hide goes through `hide_hotkey` and the rule; a window that is raised takes the
+    /// application in front as the one to come back to.
+    #[test]
+    fn a_hide_asks_the_rule_whether_the_application_before_comes_back() {
+        let code = include_str!("hotkey.rs");
+        let code = code.split("#[cfg(test)]").next().expect("the code");
+        assert!(body_of(code, "    fn hide_hotkey(", "    ").contains("rules::restores_previous("));
+        // `slide_out_hotkey` is called with the rule's answer, and with nothing else.
+        assert_eq!(code.matches("self.slide_out_hotkey(").count(), 1);
+        for place in [
+            "    pub(crate) fn try_toggle_hotkey(",
+            "    fn hotkey_focus_settled(",
+            "    pub(crate) fn hotkey_active_lost(",
+        ] {
+            assert!(
+                body_of(code, place, "    ").contains("self.hide_hotkey("),
+                "{place}"
+            );
+        }
+        // The window's own ends ask it too: the close, and the wait that keeps another window of
+        // bateri from coming forward while the application before is being given the front.
+        let window = include_str!("../window/hotkey.rs");
+        let window = window.split("#[cfg(test)]").next().expect("the code");
+        assert!(
+            body_of(window, "    pub(crate) fn hotkey_closing(", "    ")
+                .contains("restores_previous(HideCause::Closed")
+        );
+        let ended = body_of(window, "    fn slid_out(", "    ");
+        assert!(ended.contains("another_window_would_come_forward()"));
+        assert!(ended.contains("HANDOVER_WAIT"));
+        assert!(code.contains("HideCause::Asked"));
+        assert_eq!(code.matches("HideCause::FocusLeft").count(), 2);
+        assert_eq!(
+            code.matches("raise_hotkey(frontmost_other(self.mtm()))")
+                .count(),
+            2
+        );
+    }
+
+    /// A window that is in sight is laid out again on its own screen: a setting that changed, an
+    /// edge that was dragged and the way out all ask for the window's screen, and only the way
+    /// in asks the pointer.
+    #[test]
+    fn a_window_in_sight_is_laid_out_on_its_own_screen_and_only_the_way_in_asks_the_pointer() {
+        let code = include_str!("hotkey.rs");
+        let code = code.split("#[cfg(test)]").next().expect("the code");
+        assert!(
+            body_of(code, "    pub(crate) fn hotkey_settings_changed(", "    ")
+                .contains("self.hotkey_slide_here(")
+        );
+        for place in [
+            "    fn hotkey_slide_away(",
+            "    pub(crate) fn hotkey_resized(",
+        ] {
+            assert!(
+                body_of(code, place, "    ").contains("rules::screen_of("),
+                "{place}"
+            );
+        }
+        // The pointer is read in one place.
+        assert_eq!(code.matches("NSEvent::mouseLocation()").count(), 1);
+        assert!(body_of(code, "    fn hotkey_slide(", "    ").contains("NSEvent::mouseLocation()"));
     }
 
     /// A command whose double press is the hotkey window's own is not run by it: the tap that

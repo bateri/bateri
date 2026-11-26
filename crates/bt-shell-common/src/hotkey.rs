@@ -151,6 +151,10 @@ pub fn shares(visible: Frame, position: HotkeyPosition, frame: Frame) -> (u8, u8
 pub struct Slide {
     pub away: Frame,
     pub shown: Frame,
+    /// The window does not travel: where it would come from touches another screen (a screen
+    /// above, or beside, the one it is on), and a window sliding in over that one would be seen
+    /// there. It stays at `shown` and fades in and out in the same time ([`slide_among`]).
+    pub fade: bool,
 }
 
 /// The slide of a window that is `shown` on `screen`: it comes from just beyond the screen's own
@@ -165,7 +169,50 @@ pub fn slide(screen: &Screen, shown: Frame, position: HotkeyPosition) -> Slide {
         HotkeyPosition::Left => away.x = whole.x - shown.width,
         HotkeyPosition::Right => away.x = whole.x + whole.width,
     }
-    Slide { away, shown }
+    Slide {
+        away,
+        shown,
+        fade: false,
+    }
+}
+
+/// [`slide`] on the screen `on` of `screens`, which also knows whether the way in is clear: when
+/// the place the window comes from overlaps another screen it fades where it is instead of
+/// travelling (as iTerm2 does). `None` for a screen that is not there.
+pub fn slide_among(
+    screens: &[Screen],
+    on: usize,
+    shown: Frame,
+    position: HotkeyPosition,
+) -> Option<Slide> {
+    let mut moving = slide(screens.get(on)?, shown, position);
+    moving.fade = screens
+        .iter()
+        .enumerate()
+        .any(|(at, other)| at != on && overlap_area(&other.frame, &moving.away) > 0.0);
+    Some(moving)
+}
+
+/// The area two frames have in common (none when they only touch).
+fn overlap_area(a: &Frame, b: &Frame) -> f64 {
+    let width = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let height = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    width.max(0.0) * height.max(0.0)
+}
+
+/// The screen a window is on: the one its frame overlaps the most (the first when two are
+/// equal), `None` when it overlaps none. **A window that is shown stays on its own screen**: the
+/// pointer and the primary screen choose where it comes ([`screen_index`]), not where it is
+/// laid out again (a setting that changed, an edge that was dragged) or taken away from.
+pub fn screen_of(screens: &[Screen], frame: Frame) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (at, screen) in screens.iter().enumerate() {
+        let area = overlap_area(&screen.frame, &frame);
+        if area > 0.0 && best.is_none_or(|(_, most)| area > most) {
+            best = Some((at, area));
+        }
+    }
+    best.map(|(at, _)| at)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -270,6 +317,29 @@ pub fn hides_on(lost: Lost, hiding: Hiding) -> bool {
         Lost::Active => true,
         Lost::Key { to } => to == KeyTaker::OtherTerminal,
     }
+}
+
+/// What took the window away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HideCause {
+    /// The person asked: the shortcut, or `bateri hotkey` with `toggle` or `hide`.
+    Asked,
+    /// The window ended: its last tab went. The person was typing in it, so they go back to
+    /// where they were.
+    Closed,
+    /// The focus left it: a click on something else, another application coming forward.
+    FocusLeft,
+}
+
+/// Whether the application the person was in comes back to the front as the window goes. Only
+/// when the person asked **and the window had the keyboard**: that is the person coming back
+/// from where they were typing. A window that did not have it (a pin, with the person in
+/// another application), and every hide the focus caused, bring nobody forward: the person is
+/// already where they went, and the record of where they were is let go either way. Decided by
+/// the cause and not by whether bateri is the active application: the keyboard leaving a window
+/// and the application stopping to be active come in turns of the run loop of their own.
+pub fn restores_previous(cause: HideCause, had_key: bool) -> bool {
+    matches!(cause, HideCause::Asked | HideCause::Closed) && had_key
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -459,6 +529,9 @@ pub struct Registration {
     attempted: Option<Binding>,
     held: Option<Binding>,
     problem: Option<Refusal>,
+    /// A field of Settings is listening for a shortcut: the system holds nothing, so the field
+    /// hears the keys that were the window's too ([`Registration::set_quiet`]).
+    quiet: bool,
 }
 
 impl Registration {
@@ -471,6 +544,11 @@ impl Registration {
     /// instance that does not [`owns_global_keys`] asks for nothing, so a timed run, the agent's
     /// copy and a second instance of the bundle never touch the system's keys.
     pub fn sync(&mut self, keys: &mut dyn GlobalKeys, settings: &Settings, instance: &Instance) {
+        // While the field listens nothing is held, whatever the settings say: they are asked
+        // again when it stops.
+        if self.quiet {
+            return;
+        }
         let wanted = binding_for(settings, instance);
         if wanted == self.attempted {
             return;
@@ -502,6 +580,40 @@ impl Registration {
     /// Whether the key asked for is not held for want of the permission to hear a double tap.
     pub fn waits_for_access(&self) -> bool {
         self.problem == Some(Refusal::NoListening)
+    }
+
+    /// A field of Settings starts (`true`) or stops listening for a shortcut. While it listens
+    /// the system holds **nothing** (a chord's registration and a double tap's tap are let go),
+    /// so the key the window has now is heard by the field like any other, and pressing it does
+    /// not show or hide the window. When it stops, what the settings ask is held again. Why a
+    /// key was not held stays as it was, so the page does not change under the field.
+    ///
+    /// `true` when the field has just stopped listening and what the settings ask was held
+    /// again: what the system said about it is news to tell, which no other call is.
+    pub fn set_quiet(
+        &mut self,
+        keys: &mut dyn GlobalKeys,
+        settings: &Settings,
+        instance: &Instance,
+        quiet: bool,
+    ) -> bool {
+        if self.quiet == quiet {
+            return false;
+        }
+        self.quiet = quiet;
+        if quiet {
+            if self.held.take().is_some() {
+                // Letting go cannot be refused.
+                let _ = keys.bind(None);
+            }
+        } else {
+            // Asked again from nothing: a refusal from before is not kept for a key that is no
+            // longer asked for (it was taken away while the field listened).
+            self.attempted = None;
+            self.problem = None;
+            self.sync(keys, settings, instance);
+        }
+        !quiet
     }
 
     /// What the system holds now.
@@ -921,6 +1033,119 @@ mod tests {
         assert_eq!(SLIDE_MILLIS, 240);
     }
 
+    /// A window whose way in is clear slides; one whose way in is another screen fades where it is.
+    #[test]
+    fn a_window_fades_where_the_place_it_comes_from_is_another_screen() {
+        let screens = two_screens();
+        let shown = |screen: &Screen, position| shown_frame(screen.visible, position, 40, 80);
+        let among = |on: usize, position| {
+            slide_among(&screens, on, shown(&screens[on], position), position).expect("a screen")
+        };
+        // Nothing above the first screen: the top is clear, and so is the left. Its right edge is
+        // the second screen's, which a window from the right would be seen on.
+        assert!(!among(0, HotkeyPosition::Top).fade);
+        assert!(!among(0, HotkeyPosition::Center).fade);
+        assert!(!among(0, HotkeyPosition::Left).fade);
+        assert!(among(0, HotkeyPosition::Right).fade);
+        // The second screen has the first beside it on its left, and nothing at the others.
+        assert!(among(1, HotkeyPosition::Left).fade);
+        assert!(!among(1, HotkeyPosition::Right).fade);
+        assert!(!among(1, HotkeyPosition::Top).fade);
+        // The faded window does not travel, and has the frame of the slide all the same.
+        let right = among(0, HotkeyPosition::Right);
+        assert_eq!(right.shown, shown(&screens[0], HotkeyPosition::Right));
+        // One screen: nothing to be seen on.
+        for position in POSITIONS {
+            let alone = slide_among(&screens[..1], 0, shown(&screens[0], position), position);
+            assert_eq!(alone.map(|slide| slide.fade), Some(false), "{position:?}");
+        }
+        // A screen above: the top fades; a screen only beside the corner (touching, no overlap
+        // of the window's own width) does not.
+        let above = [
+            screens[0],
+            Screen {
+                frame: frame(0.0, 900.0, 1440.0, 900.0),
+                visible: frame(0.0, 900.0, 1440.0, 875.0),
+            },
+        ];
+        let top = slide_among(
+            &above,
+            0,
+            shown(&above[0], HotkeyPosition::Top),
+            HotkeyPosition::Top,
+        );
+        assert_eq!(top.map(|slide| slide.fade), Some(true));
+        let bottom = slide_among(
+            &above,
+            0,
+            shown(&above[0], HotkeyPosition::Bottom),
+            HotkeyPosition::Bottom,
+        );
+        assert_eq!(bottom.map(|slide| slide.fade), Some(false));
+        // No such screen.
+        assert!(
+            slide_among(
+                &screens,
+                5,
+                shown(&screens[0], HotkeyPosition::Top),
+                HotkeyPosition::Top
+            )
+            .is_none()
+        );
+    }
+
+    /// A window that is in sight stays on the screen it is on: the one its frame overlaps the
+    /// most, whatever the pointer or the primary screen say.
+    #[test]
+    fn a_window_in_sight_is_on_the_screen_it_overlaps_the_most() {
+        let screens = two_screens();
+        // Wholly on the second, partly across the seam on either side, off every screen.
+        assert_eq!(
+            screen_of(&screens, frame(1500.0, 0.0, 800.0, 400.0)),
+            Some(1)
+        );
+        assert_eq!(
+            screen_of(&screens, frame(1000.0, 100.0, 600.0, 300.0)),
+            Some(0)
+        );
+        assert_eq!(
+            screen_of(&screens, frame(1200.0, 100.0, 600.0, 300.0)),
+            Some(1)
+        );
+        assert_eq!(
+            screen_of(&screens, frame(5000.0, 5000.0, 100.0, 100.0)),
+            None
+        );
+        // Only touching the edge of a screen is not on it.
+        assert_eq!(screen_of(&screens, frame(-100.0, 0.0, 100.0, 100.0)), None);
+        // Equal: the first.
+        assert_eq!(
+            screen_of(&screens, frame(1340.0, 100.0, 200.0, 100.0)),
+            Some(0)
+        );
+        assert_eq!(screen_of(&[], frame(0.0, 0.0, 10.0, 10.0)), None);
+    }
+
+    /// The application the person was in comes back only when they asked for the window to go
+    /// and the window had the keyboard; every other way out lets the record go and brings nobody.
+    #[test]
+    fn the_application_before_comes_back_only_to_a_person_who_asked_from_the_window() {
+        for (cause, had_key, back) in [
+            (HideCause::Asked, true, true),
+            (HideCause::Asked, false, false),
+            (HideCause::Closed, true, true),
+            (HideCause::Closed, false, false),
+            (HideCause::FocusLeft, true, false),
+            (HideCause::FocusLeft, false, false),
+        ] {
+            assert_eq!(
+                restores_previous(cause, had_key),
+                back,
+                "{cause:?} {had_key}"
+            );
+        }
+    }
+
     #[test]
     fn a_tap_shows_what_is_away_and_hides_what_is_in_front_and_brings_what_is_not() {
         use Presence::{Absent, Hidden, Shown};
@@ -1156,6 +1381,116 @@ mod tests {
         assert_eq!(keys.calls.last(), Some(&None));
         assert_eq!(registration.held(), None);
         assert_eq!(registration.problem(), None);
+    }
+
+    /// While a field of Settings listens the system holds nothing (the chord's registration, the
+    /// double tap's tap), the key the window has is the field's to hear, and what the settings
+    /// ask is held again when it stops — the shortcut that was recorded, if one was.
+    #[test]
+    fn nothing_is_held_while_a_field_listens_and_the_settings_are_held_again_after() {
+        let (old, new) = (settings_with("option+shift+h"), settings_with("cmd+f1"));
+        let mut keys = fake::Keys::default();
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &old, &owner());
+        assert_eq!(keys.held, binding_of(&old));
+        // The field starts listening: the key is let go, and said so once.
+        assert!(!registration.set_quiet(&mut keys, &old, &owner(), true));
+        assert_eq!(keys.held, None);
+        assert_eq!(registration.held(), None);
+        assert_eq!(keys.calls, [binding_of(&old), None]);
+        assert!(!registration.set_quiet(&mut keys, &old, &owner(), true));
+        assert_eq!(keys.calls.len(), 2, "said once");
+        // Nothing is held for a change of the settings made while it listens (the key that was
+        // just recorded is written before the field is let go) ...
+        registration.sync(&mut keys, &new, &owner());
+        assert_eq!(keys.calls.len(), 2);
+        assert_eq!(keys.held, None);
+        // ... and it is held when the field stops: the key of the file as it is then.
+        assert!(
+            registration.set_quiet(&mut keys, &new, &owner(), false),
+            "it left quiet: what was held is news"
+        );
+        assert!(
+            !registration.set_quiet(&mut keys, &new, &owner(), false),
+            "and asked again it is not"
+        );
+        assert_eq!(keys.held, binding_of(&new));
+        assert_eq!(registration.held(), binding_of(&new));
+        assert_eq!(keys.calls, [binding_of(&old), None, binding_of(&new)]);
+        // Listening and stopping with nothing held asks the system for nothing it did not have:
+        // the shortcut was taken away (Remove, or ⌫).
+        registration.set_quiet(&mut keys, &new, &owner(), true);
+        registration.sync(&mut keys, &Settings::default(), &owner());
+        registration.set_quiet(&mut keys, &Settings::default(), &owner(), false);
+        assert_eq!(keys.held, None);
+        assert_eq!(registration.held(), None);
+        assert_eq!(registration.problem(), None);
+    }
+
+    /// A key the system could not be given (no permission to hear a double tap) and then taken
+    /// away while the field listens is not told after: the refusal goes with the key.
+    #[test]
+    fn a_refusal_does_not_outlive_the_key_that_was_taken_away_while_the_field_listened() {
+        let twice = settings_with("option");
+        let mut keys = fake::Keys {
+            access: Access::NotGranted,
+            ..fake::Keys::default()
+        };
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &twice, &owner());
+        assert_eq!(registration.problem(), Some(Refusal::NoListening));
+        assert!(registration.waits_for_access());
+        registration.set_quiet(&mut keys, &twice, &owner(), true);
+        assert_eq!(
+            registration.problem(),
+            Some(Refusal::NoListening),
+            "kept while it listens"
+        );
+        // Remove while it listens: the settings ask for nothing when it stops.
+        registration.sync(&mut keys, &Settings::default(), &owner());
+        registration.set_quiet(&mut keys, &Settings::default(), &owner(), false);
+        assert_eq!(registration.problem(), None);
+        assert!(!registration.waits_for_access());
+        assert!(registration.notices(None).is_empty());
+        // A key that is refused when the field stops is told then.
+        let mut refusing = fake::Keys {
+            refuse: Some(Refusal::Refused(-9878)),
+            ..fake::Keys::default()
+        };
+        let chord = settings_with("cmd+f1");
+        let mut registration = Registration::new();
+        registration.set_quiet(&mut refusing, &chord, &owner(), true);
+        registration.set_quiet(&mut refusing, &chord, &owner(), false);
+        assert_eq!(registration.problem(), Some(Refusal::Refused(-9878)));
+    }
+
+    /// A double tap goes the same way: its tap is let go while the field listens, and it is built
+    /// again after; taken away while the field listens, it is not built again.
+    #[test]
+    fn a_double_tap_comes_down_with_the_field_and_with_remove() {
+        let twice = settings_with("option");
+        let mut keys = fake::Keys {
+            access: Access::Granted,
+            ..fake::Keys::default()
+        };
+        let mut registration = Registration::new();
+        registration.sync(&mut keys, &twice, &owner());
+        assert_eq!(registration.held(), Some(Binding::Twice(Modifier::Option)));
+        registration.set_quiet(&mut keys, &twice, &owner(), true);
+        assert_eq!(keys.held, None, "the tap is down while the field listens");
+        registration.set_quiet(&mut keys, &twice, &owner(), false);
+        assert_eq!(keys.held, Some(Binding::Twice(Modifier::Option)));
+        // Remove, with the field not listening: the settings lose the shortcut and the tap goes.
+        registration.sync(&mut keys, &Settings::default(), &owner());
+        assert_eq!(keys.held, None);
+        assert_eq!(registration.held(), None);
+        // Remove, with the field listening: the tap is already down and stays down.
+        registration.sync(&mut keys, &twice, &owner());
+        registration.set_quiet(&mut keys, &twice, &owner(), true);
+        registration.sync(&mut keys, &Settings::default(), &owner());
+        registration.set_quiet(&mut keys, &Settings::default(), &owner(), false);
+        assert_eq!(keys.held, None);
+        assert_eq!(registration.held(), None);
     }
 
     /// An instance that is not the owner never touches the system's keys: not a timed run, nor the

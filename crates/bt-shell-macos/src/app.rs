@@ -1320,6 +1320,8 @@ define_class!(
             crate::agent::seen();
             // Coming back from System Settings, where the double tap may have been allowed.
             self.hotkey_access_may_have_changed();
+            // A field of Settings that was listening when bateri went behind listens again.
+            Self::hotkey_quiet_later();
         }
 
         /// Another application came to the front: the hotkey window, in sight and not pinned,
@@ -1327,6 +1329,8 @@ define_class!(
         #[unsafe(method(applicationDidResignActive:))]
         fn did_resign_active(&self, _notification: &NSNotification) {
             self.hotkey_active_lost();
+            // Nobody listens in a bateri that is behind: its key is the system's again.
+            Self::hotkey_quiet_later();
         }
 
         /// The Dock icon was clicked. **If there is no window at all** a new

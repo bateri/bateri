@@ -35,6 +35,7 @@ use objc2_foundation::{
 };
 
 use super::look::{self, Ink};
+use crate::app::AppDelegate;
 use crate::arrange;
 
 /// What the field heard.
@@ -101,6 +102,8 @@ define_class!(
             self.ivars().listening.set(true);
             self.ivars().taps.replace(arrange::taps());
             self.show();
+            // The system's key for the hotkey window is let go while the field listens.
+            AppDelegate::hotkey_quiet_later();
             true
         }
 
@@ -110,6 +113,7 @@ define_class!(
                 self.ivars().held.set(Mods::default());
                 self.show();
                 self.tell(Recorded::Lost);
+                AppDelegate::hotkey_quiet_later();
             }
             true
         }

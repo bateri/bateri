@@ -452,6 +452,39 @@ mod tests {
         assert!(commented.contains("# depth = 50"), "{commented}");
     }
 
+    /// What the Settings row records it takes away with the same edit: the line that has a
+    /// shortcut is written `""`, and read back it is none. The file of the first try had
+    /// `option+shift+h` and the row could not take it away.
+    #[test]
+    fn a_recorded_shortcut_is_taken_away_by_the_edit_that_wrote_it() {
+        let text = "# mine\n[hotkey_window]\nshortcut = \"option+shift+h\"\ndepth = 40\n";
+        let (read, diagnostics) = read_text(text);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(read.shortcut.is_some());
+        let removed = Settings::with_edit(text, &SettingsEdit::HotkeyShortcut(None)).unwrap();
+        assert_eq!(
+            removed,
+            "# mine\n[hotkey_window]\nshortcut = \"\"\ndepth = 40\n"
+        );
+        let (read, diagnostics) = read_text(&removed);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(read.shortcut, None);
+        // And written again, and taken away again.
+        let again =
+            Settings::with_edit(&removed, &SettingsEdit::HotkeyShortcut(read.shortcut)).unwrap();
+        assert_eq!(again, removed);
+    }
+
+    /// Taking a shortcut away from a file that has none still writes a line: the Settings row
+    /// therefore writes the removal only when it changes something (a different shortcut, or a
+    /// line nobody can read), and ⌫ with nothing set leaves the file alone.
+    #[test]
+    fn taking_away_a_shortcut_that_is_not_there_would_still_add_a_line() {
+        let written = Settings::with_edit("", &SettingsEdit::HotkeyShortcut(None)).unwrap();
+        assert!(written.contains("[hotkey_window]"), "{written:?}");
+        assert!(written.contains("shortcut = \"\""), "{written:?}");
+    }
+
     #[test]
     fn a_change_of_the_section_is_a_change_of_its_own() {
         let before = Settings::default();

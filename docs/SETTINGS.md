@@ -710,7 +710,7 @@ spaces = "follow"
 # Pin Hotkey Window keeps it until bateri quits.
 hide_on_click_away = true
 # true | false. Slide in and out; off, it appears and goes away at once. Reduce motion
-# turns it off too.
+# turns it off too. Where the way in is another screen, it fades in place instead.
 animate = true
 
 [keys]
@@ -3252,8 +3252,10 @@ Dock's icon while it is the only window opens a normal one.
 
 It has **no shortcut until you record one**: Settings ▸ Hotkey Window takes the keys you press. Until then Window ▸
 Show Hotkey Window, the command palette and `bateri hotkey` open it. A tap of the shortcut shows the window when
-it is away and hides it when it is in front; with the window shown but another bateri window in front, it brings
-it in front.
+it is away and hides it when it has the keyboard; with the window shown but not in front of you (another bateri
+window in front, or a pinned window while you are in another application), it brings it in front, and the application
+you were in then is the one the next tap goes back to. A window that goes away because you clicked elsewhere, or
+because `bateri hotkey hide` was run while it did not have the keyboard, brings no application forward.
 
 | key | type | default | meaning |
 |---|---|---|---|
@@ -3264,7 +3266,7 @@ it in front.
 | `screen` | `"pointer"` \| `"primary"` | `"pointer"` | the screen it opens on: the one the pointer is on, or the one with the menu bar |
 | `spaces` | `"follow"` \| `"stay"` | `"follow"` | `"follow"` opens it in the Space in front, `"stay"` in the one it was opened in |
 | `hide_on_click_away` | `true` \| `false` | `true` | hide it when the focus leaves it for another window or another application |
-| `animate` | `true` \| `false` | `true` | slide in and out; Reduce motion turns the slide off too |
+| `animate` | `true` \| `false` | `true` | slide in and out; Reduce motion turns the slide off too; where the way in is another screen the window fades in place instead |
 
 `depth` and `span` count from the edge the window comes from, so the same two numbers read the same on every edge:
 
@@ -3275,11 +3277,17 @@ it in front.
 | `center` | height | width |
 
 The sizes are shares of the screen's usable area, the menu bar and the Dock left out. Drag an edge of the window and
-let go: the new shares are written to the file and the window settles back against the edge it comes from.
+let go: the new shares are written to the file and the window settles back against the edge it comes from. A window
+that is in sight stays on its own screen when a setting changes or an edge is dragged: `screen` chooses only where it
+opens.
 
-Settings ▸ Hotkey Window has a row for each key. Its shortcut row listens when you click it: press the keys (or tap a
-modifier twice), esc leaves it and ⌫ takes the shortcut away; a key that would be taken from every application (a
-bare letter) is refused with the reason, and macOS refusing the keys is said under the row.
+Settings ▸ Hotkey Window has a row for each key. Its **Show from any app** row listens when you click it: press the
+keys (or tap a modifier twice), esc leaves it and ⌫ takes the shortcut away; the **Remove** button beside it does the
+same, also while it listens, and is dimmed while there is no shortcut. While a field of Settings listens for a
+shortcut (this row, or one of Settings ▸ Keyboard's) the shortcut is not held, so pressing the old one there records
+it and does not show the window. A key that would be taken from every
+application (a bare letter) is refused with the reason, macOS refusing the keys is said under the row, and so is a
+change the settings file could not take.
 
 - **The shortcut** is a chord with `ctrl`, `option` or `cmd` and a key (`option+space`, `shift+cmd+k`; `shift` alone
   is not enough, the key would be taken from every application), a function key from `f1` to `f20`, or one modifier

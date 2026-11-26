@@ -61,7 +61,7 @@ use objc2_foundation::{
     NSObjectProtocol, NSPoint, NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
 };
 
-use crate::app;
+use crate::app::{self, AppDelegate};
 use crate::child;
 use crate::font_options::FontOption;
 use crate::program::reply;
@@ -88,8 +88,9 @@ mod switch;
 mod tabs_specimen;
 mod theme_gallery;
 
-/// Whether the keyboard is in a field of Settings ▸ Keyboard that listens for a shortcut: then
-/// a modifier pressed twice is a shortcut to give, not one to run.
+/// Whether the keyboard is in a field of Settings that listens for a shortcut (a command's, on
+/// the Keyboard page, or the hotkey window's): then a modifier pressed twice is a shortcut to
+/// give, not one to run, and the system's key for the hotkey window is let go.
 pub(crate) fn is_recording(mtm: MainThreadMarker) -> bool {
     recorder::is_listening(mtm)
 }
@@ -2201,10 +2202,26 @@ define_class!(
     }
 
     unsafe impl NSWindowDelegate for SettingsWindow {
+        /// The field that listens is heard from while this window has the keyboard: the system's
+        /// key for the hotkey window is let go then, and held again when it does not
+        /// ([`AppDelegate::sync_hotkey_quiet`]).
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _note: &NSNotification) {
+            AppDelegate::hotkey_quiet_later();
+        }
+
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _note: &NSNotification) {
+            AppDelegate::hotkey_quiet_later();
+        }
+
         /// A closed window gives the examples' renderer and sessions back; opening it draws them
         /// again from the refresh that reopening makes.
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _note: &NSNotification) {
+            // A field that was listening goes with the window: the system's key comes back.
+            AppDelegate::hotkey_quiet_later();
+            hotkey::forget_unsaved();
             self.cancel_blink();
             if let Some(specimens) = self.ivars().specimens.get() {
                 specimens.release();
@@ -2724,6 +2741,13 @@ define_class!(
             self.choose_folder_for(key);
         }
 
+        /// The shortcut row's Remove: takes the shortcut away as ⌫ does, also while the field
+        /// listens.
+        #[unsafe(method(removeShortcut:))]
+        fn remove_shortcut(&self, _sender: Option<&AnyObject>) {
+            hotkey::remove();
+        }
+
         /// The shortcut row's Allow Input Monitoring…: asks for the permission a double tap needs
         /// and, if it is still not given, opens the System Settings pane that gives it.
         #[unsafe(method(allowListening:))]
@@ -3063,7 +3087,14 @@ impl SettingsWindow {
 
         let status = status(state, write);
         let waiting = app::delegate(self.mtm()).is_some_and(|app| app.hotkey_waits_for_access());
-        c.hotkey_shortcut.show(settings, !status.locked, waiting);
+        // A line of the file that holds a shortcut nobody can read says so in its row, and the
+        // row can still take it away.
+        let unreadable = status
+            .rows
+            .iter()
+            .any(|(row_key, _)| *row_key == Key::HotkeyShortcut);
+        c.hotkey_shortcut
+            .show(settings, !status.locked, waiting, unreadable);
         // The Agents page's line on where the reply shows follows Tab Details and the tabs'
         // position; its button is a way to the page they are on, so the lock leaves it alone.
         if let Some(line) = &c.agent_where {
@@ -4392,6 +4423,7 @@ impl SettingsWindow {
         let resize_in_steps = self.switch(Key::ResizeInSteps);
         let hotkey_shortcut = hotkey::ShortcutRow::new(
             self.mtm(),
+            self.button("Remove", Some(Key::HotkeyShortcut), sel!(removeShortcut:)),
             self.button(
                 "Allow Input Monitoring\u{2026}",
                 Some(Key::HotkeyShortcut),

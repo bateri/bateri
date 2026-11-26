@@ -333,7 +333,7 @@ pub(super) fn label(key: Key) -> &'static str {
         Key::RemoteIntegration => "Set up shell integration on servers",
         Key::RemoteStats => "Server load",
         Key::StatsInterval => "Sample every",
-        Key::HotkeyShortcut => "Shortcut",
+        Key::HotkeyShortcut => "Show from any app",
         Key::HotkeyPosition => "Position",
         Key::HotkeyDepth => "Depth",
         Key::HotkeySpan => "Span",

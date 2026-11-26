@@ -2726,7 +2726,7 @@ spaces = "follow"
 # Pin Hotkey Window keeps it until bateri quits.
 hide_on_click_away = true
 # true | false. Slide in and out; off, it appears and goes away at once. Reduce motion
-# turns it off too.
+# turns it off too. Where the way in is another screen, it fades in place instead.
 animate = true
 
 [keys]

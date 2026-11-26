@@ -12,9 +12,11 @@
 //! event it came from, so the page works on it a turn later ([`DispatchQueue`]).
 //!
 //! What was recorded is written alone (`SettingsEdit::HotkeyShortcut`): the page writes the
-//! shortcut and nothing else.
+//! shortcut and nothing else. **Remove** takes it away by the same path as ⌫ — also while the
+//! field listens, and for a double tap too, whose tap comes down with the key — and is dimmed,
+//! never hidden, while there is none. A write that did not happen is said in the row.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use bt_core::{Modifier, Settings, SettingsEdit, Shortcut};
 use bt_shell_common::shortcuts::{Tapped, glyphs};
@@ -33,6 +35,12 @@ thread_local! {
     /// Why the last key pressed was refused, until the next thing the field hears (the page is
     /// on the main thread only).
     static REFUSED: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Why the last shortcut could not be written (the file is locked, unreadable or not ours to
+    /// write): said in the row until the person does something else ([`unsaved_after`]).
+    static UNSAVED: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The file holds a shortcut line nobody can read (the last `show` said so): Remove takes it
+    /// away although the settings read none.
+    static UNREADABLE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// What the page does with what the field heard.
@@ -66,6 +74,23 @@ fn twice(modifier: Modifier) -> Answer {
     Answer::Write(Some(Shortcut::Twice(modifier)))
 }
 
+/// The note of a write that did not happen, after the field heard `heard` and (when it wrote)
+/// `saved`: the reason of a write that failed, none after one that went through, and none when
+/// the person has done something new (a key, esc, ⌫, a double tap). Only the keyboard leaving the
+/// field keeps it: that is what the failed write itself does, one turn later.
+pub(super) fn unsaved_after(
+    before: Option<String>,
+    heard: Recorded,
+    saved: Option<Result<(), String>>,
+) -> Option<String> {
+    match (heard, saved) {
+        (_, Some(Err(why))) => Some(why),
+        (_, Some(Ok(()))) => None,
+        (Recorded::Lost, None) => before,
+        (_, None) => None,
+    }
+}
+
 /// What the field says for `shortcut`: its glyphs, or that there is none.
 pub(super) fn prompt(shortcut: Option<Shortcut>) -> String {
     shortcut
@@ -73,17 +98,24 @@ pub(super) fn prompt(shortcut: Option<Shortcut>) -> String {
         .unwrap_or_else(|| NONE.to_owned())
 }
 
-/// The shortcut's row: the field, the button that sends the person to the permission a double tap
-/// needs (seen only while the key waits for it), and what the field was told to say.
+/// The shortcut's row: the field, the Remove button (always there, dimmed while there is no
+/// shortcut), the button that sends the person to the permission a double tap needs (seen only
+/// while the key waits for it), and what the field was told to say.
 pub(super) struct ShortcutRow {
     recorder: Retained<ShortcutRecorder>,
+    remove: Retained<NSButton>,
     allow: Retained<NSButton>,
     view: Retained<NSView>,
 }
 
 impl ShortcutRow {
-    /// `allow` is the window's button for the permission (it holds the action).
-    pub(super) fn new(mtm: MainThreadMarker, allow: Retained<NSButton>) -> Self {
+    /// `remove` and `allow` are the window's buttons (they hold the actions): Remove, and the
+    /// permission's.
+    pub(super) fn new(
+        mtm: MainThreadMarker,
+        remove: Retained<NSButton>,
+        allow: Retained<NSButton>,
+    ) -> Self {
         let recorder = ShortcutRecorder::new(mtm, NONE, |heard| {
             // Told inside the event that made it: the work is done a turn later.
             DispatchQueue::main().exec_async(move || {
@@ -93,9 +125,10 @@ impl ShortcutRow {
             });
         });
         allow.setHidden(true);
-        let view = super::hstack(mtm, &[&recorder, &allow], 8.0);
+        let view = super::hstack(mtm, &[&recorder, &remove, &allow], 8.0);
         Self {
             recorder,
+            remove,
             allow,
             view,
         }
@@ -108,20 +141,40 @@ impl ShortcutRow {
 
     /// Says what the file holds, and whether the field may be used (the file is not locked);
     /// `waiting` is the key waiting for the permission to hear a double tap, which the button
-    /// answers.
-    pub(super) fn show(&self, settings: &Settings, enabled: bool, waiting: bool) {
+    /// answers; `unreadable` is a line of the file that holds a shortcut that cannot be read
+    /// (Remove takes that away too).
+    pub(super) fn show(&self, settings: &Settings, enabled: bool, waiting: bool, unreadable: bool) {
         self.recorder
             .set_prompt(&prompt(settings.hotkey_window.shortcut));
         self.recorder.set_enabled(enabled);
+        // There is something to take away only while there is a shortcut; the button stays where
+        // it is and says so by its colour.
+        UNREADABLE.set(unreadable);
+        let removable = enabled && (settings.hotkey_window.shortcut.is_some() || unreadable);
+        self.remove.setEnabled(removable);
+        super::ink_button(&self.remove, removable);
         self.allow.setHidden(!waiting);
         self.allow.setEnabled(enabled);
         super::ink_button(&self.allow, enabled);
     }
 
-    /// The note of the last key refused, if the field is still waiting for another.
+    /// The note of the last key refused, if the field is still waiting for another, or of the
+    /// write that did not happen.
     pub(super) fn refused(&self) -> Option<String> {
-        REFUSED.with_borrow(Clone::clone)
+        REFUSED
+            .with_borrow(Clone::clone)
+            .or_else(|| UNSAVED.with_borrow(Clone::clone))
     }
+}
+
+/// Remove: takes the shortcut away as ⌫ does, whether or not the field is listening. A turn
+/// later, like what the field tells: the page rebuilds the row the button sits in.
+pub(super) fn remove() {
+    DispatchQueue::main().exec_async(|| {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        work(mtm, Recorded::Delete);
+    });
 }
 
 /// Does what [`answer`] says to what the field heard.
@@ -129,6 +182,8 @@ fn work(mtm: MainThreadMarker, heard: Recorded) {
     let Some(delegate) = app::delegate(mtm) else {
         return;
     };
+    // What was written, when something was: its error is the row's note.
+    let mut saved = None;
     match answer(heard) {
         Answer::Refuse(note) => {
             REFUSED.set(Some(note));
@@ -140,10 +195,12 @@ fn work(mtm: MainThreadMarker, heard: Recorded) {
         Answer::Write(shortcut) => {
             REFUSED.set(None);
             stop_listening(mtm);
-            if delegate.file_settings().hotkey_window.shortcut != shortcut {
-                delegate
-                    .save_edits(&[SettingsEdit::HotkeyShortcut(shortcut)])
-                    .ok();
+            // Written when it changes the file: a different shortcut, or one taken away from a
+            // line the file's reading could not make a shortcut of (it reads as none and is still
+            // there to go). ⌫ with nothing set writes nothing: no section is added to the file.
+            let unreadable = shortcut.is_none() && UNREADABLE.get();
+            if unreadable || delegate.file_settings().hotkey_window.shortcut != shortcut {
+                saved = Some(delegate.save_edits(&[SettingsEdit::HotkeyShortcut(shortcut)]));
             }
             // A double tap is heard by a listening tap, which needs the person's permission: asked
             // here, where the person just chose it, and nowhere at launch.
@@ -152,12 +209,22 @@ fn work(mtm: MainThreadMarker, heard: Recorded) {
             }
         }
     }
+    UNSAVED.with_borrow_mut(|note| *note = unsaved_after(note.take(), heard, saved));
     delegate.refresh_settings_window();
 }
 
-/// The keyboard goes back to the window: the field stops listening.
+/// The window forgets the note of a write that did not happen: it was closed.
+pub(super) fn forget_unsaved() {
+    UNSAVED.set(None);
+}
+
+/// The keyboard goes back to the window: the field stops listening. A field that is not
+/// listening has nothing to let go of — and a click on another field must not lose the keyboard
+/// the field it went to has just taken.
 fn stop_listening(mtm: MainThreadMarker) {
-    if let Some(window) = NSApplication::sharedApplication(mtm).keyWindow() {
+    if super::recorder::is_listening(mtm)
+        && let Some(window) = NSApplication::sharedApplication(mtm).keyWindow()
+    {
         window.makeFirstResponder(None);
     }
 }
@@ -218,6 +285,69 @@ mod tests {
         assert_eq!(answer(Recorded::Delete), Answer::Write(None));
         assert_eq!(answer(Recorded::Escape), Answer::Leave);
         assert_eq!(answer(Recorded::Lost), Answer::Leave);
+    }
+
+    /// A write that did not happen is said in the row until the person does something else; the
+    /// keyboard leaving the field (what the write itself does a turn later) keeps the note.
+    #[test]
+    fn a_write_that_failed_is_said_until_the_person_does_something_else() {
+        let why =
+            || Some("settings.toml could not be written; the setting was not saved".to_owned());
+        let failed = unsaved_after(None, Recorded::Delete, Some(Err(why().unwrap())));
+        assert_eq!(failed, why());
+        // The field letting go of the keyboard changes nothing about it.
+        assert_eq!(unsaved_after(failed.clone(), Recorded::Lost, None), failed);
+        // A write that goes through, or any key, or esc, takes it away.
+        assert_eq!(
+            unsaved_after(failed.clone(), Recorded::Delete, Some(Ok(()))),
+            None
+        );
+        assert_eq!(unsaved_after(failed.clone(), Recorded::Escape, None), None);
+        assert_eq!(unsaved_after(failed.clone(), Recorded::Delete, None), None);
+        // And there is nothing to say where nothing failed.
+        assert_eq!(unsaved_after(None, Recorded::Lost, None), None);
+    }
+
+    /// The row's wiring, as a source scan (the page needs a window server): Remove goes through
+    /// the same `work` as ⌫, and a failed write is kept and not dropped; the button is dimmed
+    /// and never hidden; the order is the field, Remove, the permission's button.
+    #[test]
+    fn remove_is_the_same_path_as_delete_and_the_row_keeps_it_in_its_place() {
+        let code = include_str!("hotkey.rs");
+        let code = &code[..code.find("#[cfg(test)]").expect("the tests")];
+        assert!(code.contains("work(mtm, Recorded::Delete)"));
+        assert!(code.contains("super::hstack(mtm, &[&recorder, &remove, &allow], 8.0)"));
+        assert!(
+            !code.contains("remove.setHidden"),
+            "Remove is dimmed, never hidden"
+        );
+        assert!(code.contains("self.remove.setEnabled(removable)"));
+        assert!(
+            code.contains("|| unreadable"),
+            "a line nobody can read can be removed"
+        );
+        assert!(
+            code.contains("let unreadable = shortcut.is_none() && UNREADABLE.get();")
+                && !code.contains("shortcut.is_none() || delegate"),
+            "⌫ with nothing set writes nothing"
+        );
+        assert!(code.contains("if super::recorder::is_listening(mtm)"));
+        assert!(
+            code.contains("settings.hotkey_window.shortcut.is_some()"),
+            "dim while there is no shortcut"
+        );
+        // The write's answer is read: nothing swallows it.
+        let work = &code[code.find("fn work(").expect("work")..];
+        let work = &work[..work.find("\n}\n").expect("its end")];
+        assert!(work.contains("saved = Some(delegate.save_edits("));
+        assert!(
+            !work.contains(".ok()"),
+            "a failed write is said, not dropped"
+        );
+        // The window's button reaches it.
+        let window = include_str!("../settings_window.rs");
+        assert!(window.contains("sel!(removeShortcut:)"));
+        assert!(window.contains("hotkey::remove()"));
     }
 
     /// The field shows the shortcut the file holds, or that it holds none.

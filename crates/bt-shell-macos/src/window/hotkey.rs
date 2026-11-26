@@ -24,7 +24,10 @@
 //! window ask (`tab_bar::move_window`); `movable = NO` is not used, because it would also take
 //! away Move & Resize (`rules/sekmeler.md`).
 
-use bt_shell_common::hotkey::{SLIDE_MILLIS, Slide};
+use std::time::Instant;
+
+use bt_shell_common::hotkey::{HideCause, SLIDE_MILLIS, Slide, restores_previous};
+use dispatch2::DispatchTime;
 use objc2::runtime::Bool;
 use objc2::{ClassType, sel};
 use objc2_app_kit::{
@@ -67,7 +70,18 @@ pub(super) struct State {
     turn: Cell<u64>,
     /// The application the person was in before the window came, to give the front back to.
     previous: RefCell<Option<Retained<NSRunningApplication>>>,
+    /// When the window began to hand the front to that application, until it is out of sight:
+    /// the window is ordered out only once bateri has stopped being the active application
+    /// ([`HANDOVER_WAIT`]).
+    handed: Cell<Option<Instant>>,
 }
+
+/// How long ordering the window out waits for the application it gave the front to to have it.
+/// On macOS 26 that application is in front a few turns of the run loop after it was asked, and
+/// a window ordered out while bateri is still the active one brings another window of bateri in
+/// front of it for a moment (iTerm2's note: it waits for the application to stop being active, and
+/// goes on after 0.3 s whatever happened).
+const HANDOVER_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl State {
     pub(super) fn new(name: &str) -> Self {
@@ -76,6 +90,7 @@ impl State {
             shown: Cell::new(false),
             turn: Cell::new(0),
             previous: RefCell::new(None),
+            handed: Cell::new(None),
         }
     }
 }
@@ -237,11 +252,6 @@ impl TerminalWindow {
         frame_of(self.ivars().window.frame())
     }
 
-    /// The screen the window is on, if any.
-    pub(crate) fn screen_now(&self) -> Option<Retained<NSScreen>> {
-        self.ivars().window.screen()
-    }
-
     /// A hotkey window that is born or comes back hidden: placed at `frame` (its shells see their
     /// final size first) and left out of sight, its panes told so.
     pub(crate) fn place_hidden(&self, frame: NSRect) {
@@ -269,17 +279,26 @@ impl TerminalWindow {
         let turn = state.turn.get() + 1;
         state.turn.set(turn);
         state.shown.set(true);
+        state.handed.set(None);
         if previous.is_some() {
             state.previous.replace(previous);
         }
         let window = self.ivars().window.clone();
         window.setCollectionBehavior(behavior(follow));
         let (away, shown) = (rect_of(slide.away), rect_of(slide.shown));
-        if animate {
+        let fades = animate && slide.fade;
+        if fades {
+            // It comes where it stays, out of sight only because it is clear.
+            window.setLevel(NSFloatingWindowLevel);
+            window.setAlphaValue(0.0);
+            window.setFrame_display(shown, false);
+        } else if animate {
             window.setLevel(sliding_level());
+            self.visible_at_once();
             window.setFrame_display(away, false);
         } else {
             window.setLevel(NSFloatingWindowLevel);
+            self.visible_at_once();
             window.setFrame_display(shown, false);
         }
         // Key first, then bateri is activated: only this window comes to the front of the
@@ -294,9 +313,26 @@ impl TerminalWindow {
         let this = self.retain();
         card::animate(
             SLIDE_MILLIS as f64 / 1000.0,
-            move || moving.animator().setFrame_display(shown, true),
+            move || {
+                if fades {
+                    moving.animator().setAlphaValue(1.0);
+                } else {
+                    moving.animator().setFrame_display(shown, true);
+                }
+            },
             move || this.slid_in(turn),
         );
+    }
+
+    /// The window is opaque now, whatever fade was under way: a fade out that is cut short by a
+    /// slide in would otherwise go on to its end (alpha 0) over the window that came back. Set
+    /// through a group of no duration, which replaces an animation in flight.
+    fn visible_at_once(&self) {
+        let window = self.ivars().window.clone();
+        if window.alphaValue() >= 1.0 {
+            return;
+        }
+        card::animate(0.0, move || window.animator().setAlphaValue(1.0), || {});
     }
 
     /// The end of a slide in: floats from here on, unless another slide began meanwhile.
@@ -306,6 +342,7 @@ impl TerminalWindow {
         };
         if state.turn.get() == turn && state.shown.get() {
             self.ivars().window.setLevel(NSFloatingWindowLevel);
+            self.ivars().window.setAlphaValue(1.0);
         }
     }
 
@@ -321,26 +358,56 @@ impl TerminalWindow {
         }
         let turn = state.turn.get() + 1;
         state.turn.set(turn);
+        // The record of where the person was is let go whatever the hide was; the application
+        // comes forward only when `give_back` ([`bt_shell_common::hotkey::restores_previous`]).
         let previous = state.previous.take().filter(|_| give_back);
         let window = self.ivars().window.clone();
         let away = rect_of(slide.away);
+        // Handed at once, not at the slide's end: the keyboard is the application's while the
+        // window leaves, and before it is ordered out.
+        if let Some(previous) = previous {
+            state.handed.set(Some(Instant::now()));
+            previous.activateWithOptions(NSApplicationActivationOptions::empty());
+        }
         if animate {
-            window.setLevel(sliding_level());
+            let fades = slide.fade;
+            if !fades {
+                window.setLevel(sliding_level());
+            }
             let moving = window.clone();
             let this = self.retain();
             card::animate(
                 SLIDE_MILLIS as f64 / 1000.0,
-                move || moving.animator().setFrame_display(away, true),
+                move || {
+                    if fades {
+                        moving.animator().setAlphaValue(0.0);
+                    } else {
+                        moving.animator().setFrame_display(away, true);
+                    }
+                },
                 move || this.slid_out(turn),
             );
         } else {
             self.slid_out(turn);
         }
-        // Handed at once, not at the slide's end: the keyboard is the application's while the
-        // window leaves.
-        if let Some(previous) = previous {
-            previous.activateWithOptions(NSApplicationActivationOptions::empty());
-        }
+    }
+
+    /// Whether ordering this window out would bring another window of bateri forward: one that
+    /// can be seen, is not minimized or transparent, and can take the keyboard
+    /// (iTerm2's `hasPromotableBackgroundWindow`). With none the window goes at once.
+    fn another_window_would_come_forward(&self) -> bool {
+        let this = &self.ivars().window;
+        NSApplication::sharedApplication(self.mtm())
+            .windows()
+            .iter()
+            .any(|other| {
+                !std::ptr::eq(&*other, &**this)
+                    && other.isVisible()
+                    && !other.isMiniaturized()
+                    && other.alphaValue() > 0.0
+                    && other.canBecomeKeyWindow()
+                    && other.isOnActiveSpace()
+            })
     }
 
     /// The end of a slide out: out of sight, unless another slide began meanwhile.
@@ -348,11 +415,37 @@ impl TerminalWindow {
         let Some(state) = self.ivars().hotkey.as_ref() else {
             return;
         };
-        if state.turn.get() == turn && !state.shown.get() {
-            let window = &self.ivars().window;
-            window.orderOut(None);
-            window.setLevel(NSFloatingWindowLevel);
+        if state.turn.get() != turn || state.shown.get() {
+            return;
         }
+        // Another application was given the front: ordering this window out while bateri is the
+        // active application would bring another window of bateri in front of it for a moment.
+        // The wait ends when bateri is no longer active, or after [`HANDOVER_WAIT`].
+        if let Some(since) = state.handed.get()
+            && since.elapsed() < HANDOVER_WAIT
+            && NSApplication::sharedApplication(self.mtm()).isActive()
+            && self.another_window_would_come_forward()
+            && let Ok(when) = DispatchTime::try_from(std::time::Duration::from_millis(30))
+        {
+            let id = self.id();
+            let waiting = DispatchQueue::main().after(when, move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
+                    window.slid_out(turn);
+                }
+            });
+            // A wait that could not be set goes on to take the window out of sight.
+            if waiting.is_ok() {
+                return;
+            }
+        }
+        state.handed.set(None);
+        let window = &self.ivars().window;
+        window.orderOut(None);
+        window.setLevel(NSFloatingWindowLevel);
+        // The next slide in begins from a window that can be seen.
+        window.setAlphaValue(1.0);
     }
 
     /// Brings the window in front, with the keyboard if `keys`. **A hotkey window comes the way
@@ -381,7 +474,15 @@ impl TerminalWindow {
 
     /// The window is in sight with no keyboard (a pin that something else took the focus from):
     /// in front and key, without a slide.
-    pub(crate) fn raise_hotkey(&self) {
+    ///
+    /// `previous` is the application the person is in now (`None` when it is bateri itself): the
+    /// one the window gives the front back to when it is taken away from here, in place of the
+    /// one from when it first came. The person is back from there, not from where they were an
+    /// hour ago.
+    pub(crate) fn raise_hotkey(&self, previous: Option<Retained<NSRunningApplication>>) {
+        if let Some(state) = self.ivars().hotkey.as_ref() {
+            state.previous.replace(previous);
+        }
         let window = &self.ivars().window;
         window.makeKeyAndOrderFront(None);
         NSApplication::sharedApplication(self.mtm()).activate();
@@ -399,7 +500,8 @@ impl TerminalWindow {
         let previous = state.previous.take();
         // Only the window the person was typing in gives the front back: a pinned one that
         // something else has the keyboard from ends without taking it from there.
-        let in_front = was_shown && self.ivars().window.isKeyWindow();
+        let in_front =
+            was_shown && restores_previous(HideCause::Closed, self.ivars().window.isKeyWindow());
         if let (true, false, Some(previous)) = (in_front, quitting, previous) {
             previous.activateWithOptions(NSApplicationActivationOptions::empty());
         }
