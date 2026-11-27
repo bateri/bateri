@@ -82,6 +82,46 @@ impl UiRect {
     }
 }
 
+/// The corners of a clip: the box that is cut (the padding box of the element that clips) and the
+/// radius of each of its four corners, pixels: top-left, top-right, bottom-right, bottom-left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiRound {
+    pub rect: UiRect,
+    pub radii: [f32; 4],
+}
+
+/// What is drawn through: a rectangle and, where a box with round corners clips, the shape of its
+/// corners too. Nothing is drawn outside the rectangle, nor outside the corners.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiClip {
+    pub rect: UiRect,
+    pub round: Option<UiRound>,
+}
+
+impl UiClip {
+    /// A rectangle's clip: square.
+    pub const fn new(rect: UiRect) -> Self {
+        Self { rect, round: None }
+    }
+
+    /// The box and radii the shader reads: all zero where the clip is square.
+    const fn rounding(self) -> ([f32; 4], [f32; 4]) {
+        match self.round {
+            Some(round) => (
+                [round.rect.x, round.rect.y, round.rect.w, round.rect.h],
+                round.radii,
+            ),
+            None => ([0.0; 4], [0.0; 4]),
+        }
+    }
+}
+
+impl From<UiRect> for UiClip {
+    fn from(rect: UiRect) -> Self {
+        Self::new(rect)
+    }
+}
+
 /// A colour for the draw list: a theme colour (already linear) with `alpha`.
 pub fn tint(color: LinearRgba, alpha: f32) -> [f32; 4] {
     let [r, g, b, _] = color.to_array();
@@ -92,7 +132,7 @@ pub fn tint(color: LinearRgba, alpha: f32) -> [f32; 4] {
 /// below; a box with only a rectangle draws nothing (transparent, no border,
 /// no shadow).
 ///
-/// `#[repr(C)]`, ten `[f32; 4]`, stride 160, no padding.
+/// `#[repr(C)]`, twelve `[f32; 4]`, stride 192, no padding.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiQuad {
@@ -110,9 +150,15 @@ pub struct UiQuad {
     gradient_end: [f32; 4],
     /// The way it runs, a unit vector (x, y; y down), and whether there is one (`z` 1).
     gradient: [f32; 4],
+    /// The box whose round corners also cut what is drawn (x, y, width, height), and the radii of
+    /// those corners: all zero where the clip is square.
+    clip_round: [f32; 4],
+    clip_radii: [f32; 4],
 }
 
-const _: () = assert!(size_of::<UiQuad>() == 160);
+const _: () = assert!(size_of::<UiQuad>() == 192);
+const _: () = assert!(std::mem::offset_of!(UiQuad, clip_round) == 160);
+const _: () = assert!(std::mem::offset_of!(UiQuad, clip_radii) == 176);
 const _: () = assert!(std::mem::offset_of!(UiQuad, gradient_start) == 112);
 const _: () = assert!(std::mem::offset_of!(UiQuad, gradient_end) == 128);
 const _: () = assert!(std::mem::offset_of!(UiQuad, gradient) == 144);
@@ -124,7 +170,7 @@ const _: () = assert!(std::mem::offset_of!(UiQuad, clip) == 80);
 const _: () = assert!(std::mem::offset_of!(UiQuad, params) == 96);
 
 // SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields
-// (the `size_of`/`offset_of` asserts above: 160, no gaps).
+// (the `size_of`/`offset_of` asserts above: 192, no gaps).
 unsafe impl GpuBytes for UiQuad {}
 
 impl UiQuad {
@@ -141,6 +187,8 @@ impl UiQuad {
             gradient_start: [0.0; 4],
             gradient_end: [0.0; 4],
             gradient: [0.0; 4],
+            clip_round: [0.0; 4],
+            clip_radii: [0.0; 4],
         }
     }
 
@@ -204,14 +252,22 @@ impl UiQuad {
         self.clip = clip.corners();
         self
     }
+
+    /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners.
+    #[must_use]
+    pub const fn clipped(mut self, clip: UiClip) -> Self {
+        self.clip = clip.rect.corners();
+        (self.clip_round, self.clip_radii) = clip.rounding();
+        self
+    }
 }
 
 /// One glyph of proportional text: `ui.wgsl`'s `GlyphIn` and its Rust twin.
 /// Made by [`Renderer::ui_text`], never by hand — its source rectangle is a
 /// place in the text atlas.
 ///
-/// `#[repr(C)]`: three `[f32; 4]` and a `[f32; 2]` with its explicit pad,
-/// stride 64.
+/// `#[repr(C)]`: three `[f32; 4]`, a `[f32; 2]` with its explicit pad and two `[f32; 4]`,
+/// stride 96.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiGlyph {
@@ -222,15 +278,21 @@ pub struct UiGlyph {
     /// The bitmap's top-left corner in the atlas.
     src: [f32; 2],
     pad: [f32; 2],
+    /// The box whose round corners also cut (x, y, width, height), and their radii: all zero where
+    /// the clip is square.
+    clip_round: [f32; 4],
+    clip_radii: [f32; 4],
 }
 
-const _: () = assert!(size_of::<UiGlyph>() == 64);
+const _: () = assert!(size_of::<UiGlyph>() == 96);
+const _: () = assert!(std::mem::offset_of!(UiGlyph, clip_round) == 64);
+const _: () = assert!(std::mem::offset_of!(UiGlyph, clip_radii) == 80);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, color) == 16);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, clip) == 32);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, src) == 48);
 
-// SAFETY: `repr(C)`, `f32` fields only; the trailing `pad` is explicit, size
-// 64 is asserted.
+// SAFETY: `repr(C)`, `f32` fields only; the `pad` is explicit, size
+// 96 is asserted.
 unsafe impl GpuBytes for UiGlyph {}
 
 /// The pixels of an image a page draws, as its decoder made them: what [`Renderer::ui_image`]
@@ -250,7 +312,7 @@ pub struct UiBitmap<'a> {
 /// An image: `ui.wgsl`'s `ImageIn` and its Rust twin. A textured rectangle, with the corners and
 /// the clip a [`UiQuad`] has, drawn by [`Renderer::ui_image`].
 ///
-/// `#[repr(C)]`, six `[f32; 4]`, stride 96, no padding.
+/// `#[repr(C)]`, eight `[f32; 4]`, stride 128, no padding.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiImage {
@@ -263,9 +325,15 @@ pub struct UiImage {
     /// Opacity, tinted (`1.0` or `0.0`), the turn (radians clockwise about the rectangle's middle),
     /// then one unused.
     params: [f32; 4],
+    /// The box whose round corners also cut (x, y, width, height), and their radii: all zero where
+    /// the clip is square.
+    clip_round: [f32; 4],
+    clip_radii: [f32; 4],
 }
 
-const _: () = assert!(size_of::<UiImage>() == 96);
+const _: () = assert!(size_of::<UiImage>() == 128);
+const _: () = assert!(std::mem::offset_of!(UiImage, clip_round) == 96);
+const _: () = assert!(std::mem::offset_of!(UiImage, clip_radii) == 112);
 const _: () = assert!(std::mem::offset_of!(UiImage, uv) == 16);
 const _: () = assert!(std::mem::offset_of!(UiImage, tint) == 32);
 const _: () = assert!(std::mem::offset_of!(UiImage, radii) == 48);
@@ -273,7 +341,7 @@ const _: () = assert!(std::mem::offset_of!(UiImage, clip) == 64);
 const _: () = assert!(std::mem::offset_of!(UiImage, params) == 80);
 
 // SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields (the asserts above:
-// 96, no gaps).
+// 128, no gaps).
 unsafe impl GpuBytes for UiImage {}
 
 impl UiImage {
@@ -286,6 +354,8 @@ impl UiImage {
             radii: [0.0; 4],
             clip: UiRect::UNBOUNDED.corners(),
             params: [1.0, 0.0, 0.0, 0.0],
+            clip_round: [0.0; 4],
+            clip_radii: [0.0; 4],
         }
     }
 
@@ -332,6 +402,14 @@ impl UiImage {
     #[must_use]
     pub const fn clip(mut self, clip: UiRect) -> Self {
         self.clip = clip.corners();
+        self
+    }
+
+    /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners.
+    #[must_use]
+    pub const fn clipped(mut self, clip: UiClip) -> Self {
+        self.clip = clip.rect.corners();
+        (self.clip_round, self.clip_radii) = clip.rounding();
         self
     }
 }
@@ -437,7 +515,7 @@ const _: () = assert!(size_of::<UiImmediates>() as u32 <= super::IMMEDIATE_BUDGE
 // SAFETY: `repr(C)`, two `f32`s, size 8 asserted.
 unsafe impl GpuBytes for UiImmediates {}
 
-const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 10] = [
+const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 12] = [
     attribute(0, 0),
     attribute(16, 1),
     attribute(32, 2),
@@ -448,25 +526,31 @@ const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 10] = [
     attribute(112, 7),
     attribute(128, 8),
     attribute(144, 9),
+    attribute(160, 10),
+    attribute(176, 11),
 ];
 
-/// The image's six attributes, one `vec4` each, at the offsets of `UiImage`'s fields.
-const IMAGE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
+/// The image's eight attributes, one `vec4` each, at the offsets of `UiImage`'s fields.
+const IMAGE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
     attribute(0, 0),
     attribute(16, 1),
     attribute(32, 2),
     attribute(48, 3),
     attribute(64, 4),
     attribute(80, 5),
+    attribute(96, 6),
+    attribute(112, 7),
 ];
 
-/// The glyph's four attributes: rect@0, colour@16, clip@32, src@48 (read as a
-/// `vec4`: the explicit pad is its tail).
-const GLYPH_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+/// The glyph's six attributes: rect@0, colour@16, clip@32, src@48 (read as a `vec4`: the explicit
+/// pad is its tail), the clip's round box@64 and radii@80.
+const GLYPH_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
     attribute(0, 0),
     attribute(16, 1),
     attribute(32, 2),
     attribute(48, 3),
+    attribute(64, 4),
+    attribute(80, 5),
 ];
 
 const fn attribute(offset: u64, location: u32) -> wgpu::VertexAttribute {
@@ -782,6 +866,19 @@ impl Renderer {
         color: [f32; 4],
         clip: UiRect,
     ) -> f32 {
+        self.ui_text_clipped(list, line, at, color, UiClip::new(clip))
+    }
+
+    /// [`Renderer::ui_text`] cut by a clip that may have round corners.
+    pub fn ui_text_clipped(
+        &self,
+        list: &mut UiList,
+        line: &ShapedText,
+        at: [f32; 2],
+        color: [f32; 4],
+        clip: UiClip,
+    ) -> f32 {
+        let (clip_round, clip_radii) = clip.rounding();
         let mut ui = self.ui.borrow_mut();
         let Some(text) = ui.text.as_mut() else {
             return 0.0;
@@ -802,9 +899,11 @@ impl Renderer {
                     f32::from(entry.height),
                 ],
                 color,
-                clip: clip.corners(),
+                clip: clip.rect.corners(),
                 src: [f32::from(entry.x), f32::from(entry.y)],
                 pad: [0.0; 2],
+                clip_round,
+                clip_radii,
             }));
         }
         self.write_text(&mut ui);

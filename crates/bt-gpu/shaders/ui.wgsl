@@ -31,13 +31,16 @@ var<immediate> imm: Immediates;
 // Boxes
 // ---------------------------------------------------------------------------
 //
-// Rust twin: `UiQuad`, #[repr(C)], ten `[f32; 4]`, stride 160:
+// Rust twin: `UiQuad`, #[repr(C)], twelve `[f32; 4]`, stride 192:
 //   rect@0            x, y, width, height of the box
 //   fill@16           the background; straight alpha
 //   border_color@32   the border; straight alpha
 //   shadow_color@48   the shadow; straight alpha, alpha 0 = none
 //   radii@64          top-left, top-right, bottom-right, bottom-left
 //   clip@80           x0, y0, x1, y1: nothing is drawn outside
+//   clip_round@160    x, y, width, height of the box whose rounded corners also cut
+//   clip_radii@176    its corners' radii (top-left, top-right, bottom-right, bottom-left);
+//                     all zero = square: the clip is the rectangle alone
 //   params@96         border width, shadow blur, shadow dx, shadow dy
 //   gradient_start@112 where a fill from one colour to another starts; straight alpha
 //   gradient_end@128  and where it ends
@@ -63,6 +66,8 @@ struct QuadIn {
     @location(7) gradient_start: vec4<f32>,
     @location(8) gradient_end: vec4<f32>,
     @location(9) gradient: vec4<f32>,
+    @location(10) clip_round: vec4<f32>,
+    @location(11) clip_radii: vec4<f32>,
 }
 
 struct QuadOut {
@@ -78,6 +83,8 @@ struct QuadOut {
     @location(7) @interpolate(flat) gradient_start: vec4<f32>,
     @location(8) @interpolate(flat) gradient_end: vec4<f32>,
     @location(9) @interpolate(flat) gradient: vec4<f32>,
+    @location(10) @interpolate(flat) clip_round: vec4<f32>,
+    @location(11) @interpolate(flat) clip_radii: vec4<f32>,
 }
 
 @vertex
@@ -112,6 +119,8 @@ fn ui_quad_vertex(@builtin(vertex_index) vid: u32, it: QuadIn) -> QuadOut {
     o.gradient_start = it.gradient_start;
     o.gradient_end = it.gradient_end;
     o.gradient = it.gradient;
+    o.clip_round = it.clip_round;
+    o.clip_radii = it.clip_radii;
     return o;
 }
 
@@ -146,10 +155,27 @@ fn corner_radius(p: vec2<f32>, radii: vec4<f32>) -> f32 {
     );
 }
 
+// How much of the pixel at `p` a clip with round corners lets be drawn: 1 inside the corners, 0 outside
+// them, the edge soft as a box's is. A clip whose radii are all zero lets all of it be drawn: the
+// rectangle (tested apart, in `clip`) is its whole.
+fn clip_cover(p: vec2<f32>, round: vec4<f32>, radii: vec4<f32>) -> f32 {
+    if radii.x <= 0.0 && radii.y <= 0.0 && radii.z <= 0.0 && radii.w <= 0.0 {
+        return 1.0;
+    }
+    let half_size = round.zw * 0.5;
+    let rel = p - (round.xy + half_size);
+    let d = rounded_box_sdf(rel, half_size, corner_radius(rel, radii));
+    return 1.0 - smoothstep(-0.5, 0.5, d);
+}
+
 @fragment
 fn ui_quad_fragment(in: QuadOut) -> @location(0) vec4<f32> {
     let p = in.position.xy;
     if p.x < in.clip.x || p.y < in.clip.y || p.x > in.clip.z || p.y > in.clip.w {
+        discard;
+    }
+    let cover = clip_cover(p, in.clip_round, in.clip_radii);
+    if cover <= 0.0 {
         discard;
     }
     let half_size = in.rect.zw * 0.5;
@@ -194,26 +220,31 @@ fn ui_quad_fragment(in: QuadOut) -> @location(0) vec4<f32> {
         a = a + shadow_a * (1.0 - a);
     }
 
-    // Back to straight alpha for the pipeline's `SrcAlpha` blend.
-    return vec4<f32>(rgb / max(a, 0.00001), a);
+    // Back to straight alpha for the pipeline's `SrcAlpha` blend; what the clip's corners cut is
+    // less of all of it, the shadow's too.
+    return vec4<f32>(rgb / max(a, 0.00001), a * cover);
 }
 
 // ---------------------------------------------------------------------------
 // Glyphs
 // ---------------------------------------------------------------------------
 //
-// Rust twin: `UiGlyph`, #[repr(C)], three `[f32; 4]` and a `[f32; 2]` with its
-// explicit pad, stride 64:
+// Rust twin: `UiGlyph`, #[repr(C)], three `[f32; 4]`, a `[f32; 2]` with its
+// explicit pad and two `[f32; 4]`, stride 96:
 //   rect@0   x, y, width, height of the quad on the surface (whole pixels)
 //   color@16 linear straight RGBA of the text
 //   clip@32  x0, y0, x1, y1
 //   src@48   the bitmap's top-left corner in the atlas, texels
+//   clip_round@64, clip_radii@80   as a box's: the box whose rounded corners also cut,
+//            and the radii of its corners (all zero = none)
 
 struct GlyphIn {
     @location(0) rect: vec4<f32>,
     @location(1) color: vec4<f32>,
     @location(2) clip: vec4<f32>,
     @location(3) src: vec4<f32>,
+    @location(4) clip_round: vec4<f32>,
+    @location(5) clip_radii: vec4<f32>,
 }
 
 struct GlyphOut {
@@ -221,6 +252,8 @@ struct GlyphOut {
     @location(0) texel: vec2<f32>,
     @location(1) @interpolate(flat) color: vec4<f32>,
     @location(2) @interpolate(flat) clip: vec4<f32>,
+    @location(3) @interpolate(flat) clip_round: vec4<f32>,
+    @location(4) @interpolate(flat) clip_radii: vec4<f32>,
 }
 
 @vertex
@@ -234,6 +267,8 @@ fn ui_glyph_vertex(@builtin(vertex_index) vid: u32, it: GlyphIn) -> GlyphOut {
     o.texel = it.src.xy + corner * it.rect.zw;
     o.color = it.color;
     o.clip = it.clip;
+    o.clip_round = it.clip_round;
+    o.clip_radii = it.clip_radii;
     return o;
 }
 
@@ -244,14 +279,15 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
         discard;
     }
     let coverage = textureLoad(atlas, vec2<i32>(floor(in.texel)), 0).r;
-    return vec4<f32>(in.color.rgb, in.color.a * coverage);
+    let cover = clip_cover(p, in.clip_round, in.clip_radii);
+    return vec4<f32>(in.color.rgb, in.color.a * coverage * cover);
 }
 
 // ---------------------------------------------------------------------------
 // Images
 // ---------------------------------------------------------------------------
 //
-// Rust twin: `UiImage`, #[repr(C)], six `[f32; 4]`, stride 96:
+// Rust twin: `UiImage`, #[repr(C)], eight `[f32; 4]`, stride 128:
 //   rect@0   x, y, width, height of the rectangle the image is drawn in
 //   uv@16    u0, v0, u1, v1: the part of the texture the rectangle shows,
 //            shares of it (rows run top down, like the window's)
@@ -259,6 +295,8 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
 //   radii@48 top-left, top-right, bottom-right, bottom-left
 //   clip@64  x0, y0, x1, y1
 //   params@80 opacity, tinted (0 or 1), turn, unused
+//   clip_round@96, clip_radii@112   as a box's: the box whose rounded corners also cut,
+//            and the radii of its corners (all zero = none)
 //            the turn: radians clockwise about the middle of the rectangle (0 for an image that
 //            does not spin); the clip stays where it is
 //
@@ -290,6 +328,8 @@ struct ImageIn {
     @location(3) radii: vec4<f32>,
     @location(4) clip: vec4<f32>,
     @location(5) params: vec4<f32>,
+    @location(6) clip_round: vec4<f32>,
+    @location(7) clip_radii: vec4<f32>,
 }
 
 struct ImageOut {
@@ -300,6 +340,8 @@ struct ImageOut {
     @location(3) @interpolate(flat) radii: vec4<f32>,
     @location(4) @interpolate(flat) clip: vec4<f32>,
     @location(5) @interpolate(flat) params: vec4<f32>,
+    @location(6) @interpolate(flat) clip_round: vec4<f32>,
+    @location(7) @interpolate(flat) clip_radii: vec4<f32>,
 }
 
 @group(0) @binding(0) var picture: texture_2d<f32>;
@@ -326,6 +368,8 @@ fn ui_image_vertex(@builtin(vertex_index) vid: u32, it: ImageIn) -> ImageOut {
     o.radii = it.radii;
     o.clip = it.clip;
     o.params = it.params;
+    o.clip_round = it.clip_round;
+    o.clip_radii = it.clip_radii;
     return o;
 }
 
@@ -388,7 +432,7 @@ fn ui_image_fragment(in: ImageOut) -> @location(0) vec4<f32> {
     let texel = textureSampleLevel(picture, picture_sampler, at, lod);
 
     var rgb = in.tint.rgb;
-    var alpha = texel.a * in.params.x * inside;
+    var alpha = texel.a * in.params.x * inside * clip_cover(p, in.clip_round, in.clip_radii);
     if in.params.y > 0.5 {
         alpha = alpha * in.tint.a;
     } else {

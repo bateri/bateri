@@ -11,7 +11,7 @@ use bt_atlas::{Family, TextStyle};
 use bt_core::LinearRgba;
 
 use super::tests::{BACKGROUND, MIDTONE, WHITE, pixel_at, renderer};
-use super::ui::{UiBitmap, UiImage, UiList, UiQuad, UiRect, tint};
+use super::ui::{UiBitmap, UiClip, UiImage, UiList, UiQuad, UiRect, UiRound, tint};
 use crate::Renderer;
 
 const EDGE: usize = 64;
@@ -235,6 +235,72 @@ fn a_clip_stops_the_box_at_its_edge() {
     assert!(near(at(&pixels, 31, 30), (0x1a, 0x1c, 0x21), 1));
 }
 
+/// A clip that is the rectangle (8, 8, 32, 32) with its four corners rounded by 12.
+fn round_clip() -> UiClip {
+    let rect = UiRect::new(8.0, 8.0, 32.0, 32.0);
+    UiClip {
+        rect,
+        round: Some(UiRound {
+            rect,
+            radii: [12.0; 4],
+        }),
+    }
+}
+
+#[test]
+fn a_clip_with_round_corners_cuts_a_box_at_the_corners_and_leaves_the_rest() {
+    let clear = (0x1a, 0x1c, 0x21);
+    // A box that covers the whole sheet, so that what shows of it is the clip's shape.
+    let draw = |clip: UiClip| {
+        let mut list = UiList::new();
+        list.quad(
+            UiQuad::new(UiRect::new(0.0, 0.0, 64.0, 64.0))
+                .fill(tint(WHITE, 1.0))
+                .clipped(clip),
+        );
+        paint(MIDTONE, &list)
+    };
+    let pixels = draw(round_clip());
+    for corner in [(8, 8), (39, 8), (8, 39), (39, 39)] {
+        let seen = at(&pixels, corner.0, corner.1);
+        assert!(
+            near(seen, clear, 1),
+            "the corner {corner:?} is cut: {seen:?}"
+        );
+    }
+    // The middle of every side and the centre are in the shape, and nothing is past the rectangle.
+    for inside in [(8, 24), (39, 24), (24, 8), (24, 39), (24, 24)] {
+        assert_eq!(
+            at(&pixels, inside.0, inside.1),
+            (255, 255, 255),
+            "{inside:?}"
+        );
+    }
+    assert!(near(at(&pixels, 7, 24), clear, 1));
+    assert!(near(at(&pixels, 40, 24), clear, 1));
+    // The edge of the curve is soft: a pixel on it is neither the box nor what is behind it.
+    let edge = at(&pixels, 11, 11);
+    assert!(!near(edge, clear, 8) && edge != (255, 255, 255), "{edge:?}");
+    // The same rectangle with no corners is only the rectangle: the corner pixel is the box's.
+    let square = draw(UiClip::new(UiRect::new(8.0, 8.0, 32.0, 32.0)));
+    assert_eq!(at(&square, 8, 8), (255, 255, 255));
+}
+
+#[test]
+fn a_clip_with_round_corners_leaves_the_corners_of_a_box_inside_it_as_they_are() {
+    // A box with a radius of its own, inside the clip's shape: nothing is cut that the clip does not.
+    let mut list = UiList::new();
+    list.quad(
+        UiQuad::new(UiRect::new(16.0, 16.0, 16.0, 16.0))
+            .fill(tint(WHITE, 1.0))
+            .radius(4.0)
+            .clipped(round_clip()),
+    );
+    let pixels = paint(MIDTONE, &list);
+    assert_eq!(at(&pixels, 24, 24), (255, 255, 255));
+    assert_eq!(at(&pixels, 17, 24), (255, 255, 255));
+}
+
 #[test]
 fn later_items_cover_earlier_ones() {
     let red = LinearRgba::from_srgb(0xc8, 0x40, 0x40);
@@ -431,6 +497,38 @@ fn text_is_clipped() {
     let pixels = r.render_ui_offscreen(SHEET as u32, BACKGROUND, &list);
     let (_, _, right, _) = ink_box(&pixels, (0, 0, 0), (0, 0, SHEET, SHEET)).expect("some ink");
     assert!(right < 40, "nothing past the clip: {right}");
+}
+
+#[test]
+fn text_is_cut_by_the_round_corners_of_its_clip() {
+    if !proportional() {
+        return;
+    }
+    let r = renderer();
+    let font = r
+        .ui_font(&style(Family::System, 32.0, 400))
+        .expect("the system face opens");
+    let line = r.ui_shape(font, "HHHHHH").expect("shapes");
+    let whole = UiRect::new(0.0, 0.0, SHEET as f32, SHEET as f32);
+    let ink = |clip: UiClip| {
+        let mut list = UiList::new();
+        r.ui_text_clipped(&mut list, &line, [4.0, 4.0], tint(WHITE, 1.0), clip);
+        let pixels = r.render_ui_offscreen(SHEET as u32, BACKGROUND, &list);
+        ink_box(&pixels, (0, 0, 0), (0, 0, 16, 16))
+    };
+    assert!(
+        ink(UiClip::new(whole)).is_some(),
+        "the first letter reaches the corner"
+    );
+    // A circle in the sheet leaves its corners out: the first letter's top left is one of them.
+    let round = UiClip {
+        rect: whole,
+        round: Some(UiRound {
+            rect: whole,
+            radii: [64.0; 4],
+        }),
+    };
+    assert_eq!(ink(round), None);
 }
 
 #[test]
@@ -732,6 +830,32 @@ fn an_image_has_the_corners_clip_and_opacity_of_a_box() {
         near(at(&pixels, 24, 24), expected, 2),
         "{:?}",
         at(&pixels, 24, 24)
+    );
+}
+
+#[test]
+fn an_image_is_cut_by_the_round_corners_of_its_clip() {
+    let r = renderer();
+    let white = bitmap(6, 1, &[opaque((255, 255, 255))]);
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &white,
+        UiImage::new(UiRect::new(0.0, 0.0, 64.0, 64.0)).clipped(round_clip()),
+    ));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert!(
+        near(at(&pixels, 8, 8), GROUND, 1),
+        "{:?}",
+        at(&pixels, 8, 8)
+    );
+    assert!(near(at(&pixels, 39, 39), GROUND, 1));
+    assert_eq!(at(&pixels, 24, 8), (255, 255, 255));
+    assert_eq!(at(&pixels, 24, 24), (255, 255, 255));
+    assert!(
+        near(at(&pixels, 7, 24), GROUND, 1),
+        "nothing past the rectangle"
     );
 }
 
