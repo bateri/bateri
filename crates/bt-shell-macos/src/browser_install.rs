@@ -404,9 +404,6 @@ pub(crate) fn manager() -> Option<Arc<Manager>> {
                 ),
                 profiles: root.join("profiles"),
                 run: root.join("run"),
-                // A copy run where it is is a development copy: its cookies are not worth the
-                // keychain's question on every build.
-                mock_keychain: fixed.is_some() || local,
                 linger: helper::LINGER,
                 start_timeout: helper::START_TIMEOUT,
                 trust: if fixed.is_some() || local {

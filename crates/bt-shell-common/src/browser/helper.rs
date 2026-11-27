@@ -100,8 +100,6 @@ pub struct Config {
     pub profiles: PathBuf,
     /// A folder the socket is made in (`0700`).
     pub run: PathBuf,
-    /// Cookie encryption off the user's keychain: tests and development copies.
-    pub mock_keychain: bool,
     pub linger: Duration,
     pub start_timeout: Duration,
     pub trust: Trust,
@@ -412,11 +410,10 @@ impl Manager {
         let proxy = Proxy::bind_with(self.routes.clone(), syncs.clone())?;
         let launch = Launch::prepare(&self.config.run)?;
         let receiver = Receiver::register(launch.mach_name())?;
-        let args = launch.args(
-            &self.config.profiles,
-            &proxy.url(),
-            self.config.mock_keychain,
-        );
+        // The engine never uses the person's keychain. An engine that predates that reads
+        // this argument to keep off it; the argument goes when the ipc rev moves to a
+        // browser commit whose `args` always says it.
+        let args = launch.args(&self.config.profiles, &proxy.url(), true);
         let mut process = self.spawn.spawn(&executable, &args)?;
         let connection = match launch.accept(process.id(), self.config.start_timeout) {
             Ok(connection) => connection,

@@ -886,7 +886,7 @@ install: kablo-rev bundle
 # The browser element's engine is a release, which a copy with no team signature does
 # not trust: `make dev BROWSER_APP=<the helper's app>` makes the copy run that app where it is
 # (`BateriBrowserApp` in its `Info.plist`, read only by a copy that names a profile), with no
-# signature check and no keychain; without it the copy has no engine.
+# signature check; without it the copy has no engine.
 # To try the download the person is offered (the note on the first link, Settings ▸ Apps ▸ Links),
 # `make dev BROWSER_RELEASES=<folder>` makes the copy download its engine from a local release
 # (`BateriBrowserReleases` in its `Info.plist`, read only by a copy that names a profile) with the

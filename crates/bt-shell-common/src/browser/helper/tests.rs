@@ -219,7 +219,6 @@ pub(crate) fn world(
         source: Source::Installed(layout),
         profiles: root.join("profiles"),
         run: root.join("run"),
-        mock_keychain: true,
         linger,
         start_timeout: Duration::from_secs(5),
         trust: Arc::new(|_| Ok(())),
@@ -326,6 +325,8 @@ fn the_helper_is_started_the_way_the_contract_says() {
     let _browser = w.manager.open(&key(None), SIZE, 1.0, sink).unwrap();
     let args = w.args.recv_timeout(WAIT).unwrap();
     let names: Vec<&str> = args.iter().filter_map(|a| a.split('=').next()).collect();
+    // `--mock-keychain` is always there: it keeps an engine that predates "no keychain" off the
+    // person's keychain.
     assert_eq!(
         names,
         [
@@ -1126,7 +1127,6 @@ mod depot {
                 source: Source::Fixed(app.to_owned()),
                 profiles: root.join("profiles"),
                 run: root.join("run"),
-                mock_keychain: true,
                 linger: Duration::from_millis(300),
                 start_timeout: Duration::from_secs(30),
                 trust: Arc::new(|_| Ok(())),

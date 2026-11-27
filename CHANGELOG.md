@@ -21,6 +21,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **The browser no longer asks for your keychain password.** macOS could ask to let bateri Browser use “Chromium Safe Storage”; the browser engine no longer uses the keychain. Sites you were signed in to on this Mac ask you to sign in once more.
 - **Full screen uses the whole top row.** The sidebar button no longer leaves room for the hidden traffic lights, and when the menu bar slides down the window slides down with it instead of being covered.
 - **`bateri split` no longer leaves an empty shell behind.** When a program finished right away, as `ls` does, an empty shell took its pane. Now the pane closes with the program. Add `--keep-open` to keep its output on screen.
 
