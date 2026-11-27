@@ -6341,29 +6341,29 @@ impl TabBar {
         self.draw_card();
     }
 
-    /// Whether the window's traffic lights stand in its title row: a window that hides them (the
-    /// hotkey window) gives their room to the bar, the strip's start ([`Self::leading`]) and the
-    /// side column's sidebar button (`tabs::Head::start`) alike. Full screen keeps them: the
-    /// column's head does not move as the window enters or leaves it.
+    /// Whether the window's traffic lights stand in its title row. A window that hides them (the
+    /// hotkey window) and a window in full screen (the lights live in the menu bar's window
+    /// there, shown only while the pointer is at the screen's top) give their room to the bar:
+    /// the strip's start ([`Self::leading`]) and the side column's sidebar button
+    /// (`tabs::Head::start`) alike. The window lays the bar out again as it enters and leaves
+    /// full screen.
     pub(super) fn lights_in_row(&self) -> bool {
-        self.window()
-            .and_then(|window| window.standardWindowButton(NSWindowButton::ZoomButton))
-            .is_none_or(|zoom| !zoom.isHidden())
+        self.window().is_none_or(|window| {
+            !window.styleMask().contains(NSWindowStyleMask::FullScreen)
+                && window
+                    .standardWindowButton(NSWindowButton::ZoomButton)
+                    .is_none_or(|zoom| !zoom.isHidden())
+        })
     }
 
-    /// Where the strip may start: past the zoom button, or at the gap alone
-    /// in full screen, where the lights live in another window.
+    /// Where the strip may start: past the zoom button, or at the gap alone where the lights are
+    /// not in the row ([`Self::lights_in_row`]).
     fn leading(&self) -> f64 {
-        let Some(window) = self.window() else {
-            return LIGHTS_GAP;
-        };
-        if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
+        if !self.lights_in_row() {
             return LIGHTS_GAP;
         }
-        window
-            .standardWindowButton(NSWindowButton::ZoomButton)
-            // Hidden lights leave the row: the hotkey window's strip starts at the edge.
-            .filter(|zoom| !zoom.isHidden())
+        self.window()
+            .and_then(|window| window.standardWindowButton(NSWindowButton::ZoomButton))
             .map_or(LIGHTS_GAP, |zoom| {
                 let in_window = zoom.convertRect_toView(zoom.bounds(), None);
                 let here = self.convertRect_fromView(in_window, None);

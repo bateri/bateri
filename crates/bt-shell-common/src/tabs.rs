@@ -5283,6 +5283,20 @@ mod tests {
         // The name stays centred on the window, with the room the button gave back.
         assert_eq!(row.title.x + row.title.width / 2.0, 500.0);
         assert!(row.title.width > Head::row(1000.0, 40.0, 20.5, true).title.width);
+        // Full screen: no lights and a square corner. The button keeps EDGE from the screen's
+        // left edge, as New Tab does from the right one, in the column's head and the title row.
+        assert_eq!(Head::start(false, 0.0), EDGE);
+        let full = Head::row(2560.0, 40.0, 0.0, false);
+        let new_tab = full.new_tab.expect("the title row has New Tab");
+        assert_eq!(full.sidebar.x, EDGE);
+        assert_eq!(full.sidebar.x, 2560.0 - new_tab.x - BUTTON);
+        let column = Side {
+            lights: false,
+            corner: 0.0,
+            ..side(600.0, 3)
+        }
+        .layout();
+        assert_eq!(column.sidebar.x, EDGE);
     }
 
     #[test]
