@@ -3634,11 +3634,12 @@ const ROWS_PAGE: &str = r#"return {
     end,
 }"#;
 
-/// A field of `rows` rows is as tall as that many lines of the face AppKit draws it in, and no
-/// more, at the terminal's size and at twice it: AppKit's own line, told to the page's measure
-/// (`FieldLine`), laid out by the kit and put in the field's box by the pane, so that the last row
-/// is not cut and a row of its text is not half a point off. The room is the box and the padding;
-/// the second field stands where the first's room ends and the gap goes on.
+/// A field of `rows` rows has a text box as tall as that many lines of the face AppKit draws it in,
+/// and no more, at the terminal's size and at twice it: AppKit's own line, told to the page's
+/// measure (`FieldLine`), laid out by the kit and put in the field's box by the pane, so that the
+/// last row is not cut and a row of its text is not half a point off. The room is the box and the
+/// padding (no border here), and the scroll view of the field is its padding box, which is the
+/// room; the second field stands where the first's room ends and the gap goes on.
 fn field_rows_stand_in_their_boxes(
     mtm: MainThreadMarker,
     window: &NSWindow,
@@ -3706,18 +3707,19 @@ fn field_rows_stand_in_their_boxes(
         let (pad, gap, margin) = (6.0 * zoom, 16.0 * zoom, 20.0 * zoom);
         eprintln!("pencere: Monaco at {size}: three rows {notes:?}, one row {one:?}");
         assert!(
-            (notes.size.height - 3.0 * line).abs() < 0.01 && (one.size.height - line).abs() < 0.01,
-            "Monaco at {size}: three rows are {} points and one row {}, not {} and {}",
+            (notes.size.height - (3.0 * line + 2.0 * pad)).abs() < 0.01
+                && (one.size.height - (line + 2.0 * pad)).abs() < 0.01,
+            "Monaco at {size}: three rows with their padding are {} points and one row {}, not {} and {}",
             notes.size.height,
             one.size.height,
-            3.0 * line,
-            line
+            3.0 * line + 2.0 * pad,
+            line + 2.0 * pad
         );
         assert!(
-            (notes.origin.y - (margin + pad)).abs() < 0.51,
-            "Monaco at {size}: the box starts {} points down, past the padding at {}",
+            (notes.origin.y - margin).abs() < 0.51,
+            "Monaco at {size}: the padding box starts {} points down, not at the margin {}",
             notes.origin.y,
-            margin + pad
+            margin
         );
         assert!(
             ((one.origin.y - notes.origin.y) - (3.0 * line + 2.0 * pad + gap)).abs() < 0.51,
@@ -3737,9 +3739,9 @@ fn field_rows_stand_in_their_boxes(
         manager.ensureLayoutForTextContainer(&container);
         let needs = manager.usedRectForTextContainer(&container).size.height;
         assert!(
-            needs <= notes.size.height + 0.01,
-            "Monaco at {size}: three lines need {needs} points of the box's {}",
-            notes.size.height
+            needs <= notes.size.height - 2.0 * pad + 0.01,
+            "Monaco at {size}: three lines need {needs} points of the text box's {}",
+            notes.size.height - 2.0 * pad
         );
         // The text is as wide as the box: the page broke the lines for it.
         let across = text

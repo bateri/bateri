@@ -2907,7 +2907,8 @@ return {
                 id: super::super::containers::FIELD,
                 kind: FieldKind::Line,
                 rect: field,
-                // No padding of its own: the text stands in all of the room.
+                // No border and no padding of its own: the text stands in all of the room.
+                padding_box: field,
                 text: field,
                 hint: Some(super::super::containers::FIELD_HINT.to_owned()),
                 label: None,

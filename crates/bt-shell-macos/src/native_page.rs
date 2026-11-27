@@ -59,9 +59,10 @@ use objc2_app_kit::{
     NSAccessibilityTableRole, NSAccessibilityTextAreaRole, NSAccessibilityValueChangedNotification,
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBorderType, NSColor, NSControl,
     NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSLayoutManager,
-    NSLayoutManagerDelegate, NSLineBreakMode, NSResponder, NSScrollView, NSScrollerStyle,
-    NSSecureTextField, NSText, NSTextContainer, NSTextField, NSTextStorage, NSTextView,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
+    NSLayoutManagerDelegate, NSLineBreakMode, NSResponder, NSScrollView, NSScroller,
+    NSScrollerPart, NSScrollerStyle, NSSecureTextField, NSText, NSTextContainer, NSTextField,
+    NSTextStorage, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -915,8 +916,9 @@ pub(crate) enum FieldView {
 }
 
 /// A field of lines: the text view, and the scroll view that shows as much of it as the box has room
-/// for. The scroll view is what stands in the host (the field's frame is its box); the text view
-/// takes the keyboard.
+/// for. The scroll view is what stands in the host, in the page's padding box (the room less the
+/// border: what scrolls is cut there, the padding going with the text); the text view takes the
+/// keyboard and holds the text in the text box, at the padding of each side.
 #[derive(Clone)]
 pub(crate) struct LinesView {
     scroll: Retained<NSScrollView>,
@@ -1197,33 +1199,88 @@ impl PageLinesText {
         self.breakUndoCoalescing();
     }
 
-    /// A press in the room's padding, outside the lines in view: it is the field's (`FieldsHost`),
-    /// and the caret goes to the nearest point of the lines in view, not to where the point is in
-    /// the text (a box scrolled down has a line past its edge there, which the caret would scroll
-    /// to). Whether it was one: no tracking of the press follows then.
+    /// A press in the room outside what the box shows (its border: the scroll view is the padding
+    /// box): it is the field's (`FieldsHost`), and the caret goes to the nearest point of the text
+    /// box in view, not to where the point is in the text (a box scrolled down has a line past its
+    /// edge there, and one at the edge of the padding box is shown only in part). Whether it was
+    /// one: no tracking of the press follows then.
     fn press_in_padding(&self, event: &NSEvent) -> bool {
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
         let seen = self.visibleRect();
         if inside(seen, at) || seen.size.width < 1.0 || seen.size.height < 1.0 {
             return false;
         }
+        // The nearest point of the text box in view, not of the padding box the box shows: the
+        // padding at the edge of a box scrolled to the middle shows a sliver of the line past it, and
+        // the caret goes to a line that is seen.
+        let [_, top, _, bottom] = self.ivars().pad.get();
+        let (low, high) = (
+            seen.origin.y + top,
+            seen.origin.y + seen.size.height - bottom,
+        );
+        let (low, high) = if high - low >= 1.0 {
+            (low, high)
+        } else {
+            (seen.origin.y, seen.origin.y + seen.size.height)
+        };
         let near = NSPoint::new(
             at.x.clamp(seen.origin.x, seen.origin.x + seen.size.width - 1.0),
-            at.y.clamp(seen.origin.y, seen.origin.y + seen.size.height - 1.0),
+            at.y.clamp(low, high - 1.0),
         );
         if let Some(window) = self.window() {
             let itself: &NSResponder = self;
             window.makeFirstResponder(Some(itself));
         }
         let index = self.characterIndexForInsertionAtPoint(near);
+        // A line in view, in part or whole, as it is for a press in the box: no scrolling.
         self.setSelectedRange(NSRange::new(index, 0));
-        self.scroll_to_caret();
         true
     }
 
-    /// The line the caret is in, in view.
+    /// The line the caret is in, in view, with the padding above and below it (the box's text
+    /// stands in its text box and the padding scrolls with it: the last line is scrolled to with
+    /// the padding under it, and the first with the padding over it). A box too short for the line
+    /// and its padding keeps the line whole and as much of the padding as is left.
     fn scroll_to_caret(&self) {
-        self.scrollRangeToVisible(self.selectedRange());
+        // SAFETY: the text view was made with its layout manager and container.
+        let (Some(manager), Some(container)) = (unsafe { self.layoutManager() }, unsafe {
+            self.textContainer()
+        }) else {
+            return;
+        };
+        // The line the caret is in, as laid out now: a layout still to be done (the text was just
+        // changed) would have the line break at the end of the text not yet in the last line.
+        manager.ensureLayoutForTextContainer(&container);
+        let at = self.selectedRange().location;
+        let length = self.string().length();
+        let line = if at >= length && manager.extraLineFragmentRect().size.height > 0.0 {
+            manager.extraLineFragmentRect()
+        } else if length == 0 {
+            return;
+        } else {
+            let glyph = manager.glyphIndexForCharacterAtIndex(at.min(length - 1));
+            // SAFETY: a null effective range is allowed.
+            unsafe {
+                manager.lineFragmentRectForGlyphAtIndex_effectiveRange(glyph, std::ptr::null_mut())
+            }
+        };
+        let [_, top, _, bottom] = self.ivars().pad.get();
+        let seen = self
+            .enclosingScrollView()
+            .map_or(0.0, |scroll| scroll.contentSize().height);
+        let spare = (seen - line.size.height).max(0.0);
+        let (above, below) = if top + bottom <= spare || top + bottom <= 0.0 {
+            (top, bottom)
+        } else {
+            let share = spare / (top + bottom);
+            (top * share, bottom * share)
+        };
+        let origin = self.textContainerOrigin();
+        let shown = NSRect::new(
+            NSPoint::new(0.0, line.origin.y + origin.y - above),
+            NSSize::new(1.0, line.size.height + above + below),
+        );
+        self.scrollRectToVisible(shown);
     }
 
     /// The hint is there while the text is not.
@@ -1270,6 +1327,10 @@ pub(crate) struct PageTextFieldIvars {
     /// the field has no place yet, and its text view's own lines stand.
     line: Cell<f64>,
     baseline: Cell<f64>,
+    /// How far a field of lines' text stands in from the edges of its box (the padding box: what the
+    /// scroll view shows), `[left, top, right, bottom]` in points, the page's: a text view insets
+    /// by one size on both sides, which is not what the page lays out ([`PageLinesText`]).
+    pad: Cell<[f64; 4]>,
 }
 
 /// Runs `body`, which is the part of a field's method that reaches the page or AppKit's views of
@@ -1592,8 +1653,39 @@ define_class!(
                 // answers whether the view took the keyboard.
                 unsafe { msg_send![super(self), becomeFirstResponder] }
             });
+            if took {
+                // As the editor of a field of text takes what is dropped on it while the field is
+                // typed in (text, a file as its path), and not before: the page takes a drop on a
+                // field that is not.
+                self.registerForDraggedTypes(&self.acceptableDragTypes());
+            }
             keyboard_taken(self.mtm(), self.ivars(), took);
             took
+        }
+
+        /// The keyboard leaves the field: what a drop on it is, is the page's again.
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            self.outlive_the_event();
+            let left = guarded(self.ivars(), "a field's keyboard", true, || {
+                // SAFETY: the superclass's own `resignFirstResponder`, which takes nothing and
+                // answers whether the view gave the keyboard up.
+                unsafe { msg_send![super(self), resignFirstResponder] }
+            });
+            if left {
+                self.unregisterDraggedTypes();
+            }
+            left
+        }
+
+        /// Where the text starts in the text view: the padding box's left and top padding. The
+        /// view's inset is the same on both sides (half of the two paddings, so that the frame is the
+        /// text, the paddings and no more, and the container the box's width); the text starts at
+        /// the padding of its own.
+        #[unsafe(method(textContainerOrigin))]
+        fn text_container_origin(&self) -> NSPoint {
+            let [left, top, ..] = self.ivars().pad.get();
+            NSPoint::new(left, top)
         }
 
         /// A press in the field ([`press_in`]).
@@ -2445,6 +2537,7 @@ fn field_of(
         undo: RefCell::new(None),
         line: Cell::new(0.0),
         baseline: Cell::new(0.0),
+        pad: Cell::new([0.0; 4]),
     };
     if kind == FieldKind::Lines {
         return FieldView::Lines(lines_of(mtm, ivars, family, size));
@@ -2546,7 +2639,9 @@ fn lines_of(
     text.setHorizontallyResizable(false);
     text.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     // A drop on the page is the page's (the files of a drag are its to take, `page_files`), as it is
-    // over a text field that is not being typed in; a text view would take the paths as text.
+    // over a text field that is not being typed in; a text view would take the paths as text. While
+    // the keyboard is in it, it takes what its editor does, as a text field's editor does
+    // ([`PageLinesText`]'s `becomeFirstResponder` and `resignFirstResponder`).
     text.unregisterDraggedTypes();
     let scroll = {
         let this = PageLinesScroll::alloc(mtm).set_ivars(());
@@ -2592,7 +2687,9 @@ fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
 /// Puts the field where the page's room for it is (the pane's points from its top), saying the
 /// page's hint while it is empty, and what it is to a screen reader. Its text stands in the box the
 /// page says (`Field::text`: the room less the element's padding and border), not in all of the
-/// room, which is the pointer's ([`FieldsHost`]): lines take that box, from its top; a line is as
+/// room, which is the pointer's ([`FieldsHost`]): lines take that box, from its top, in a scroll view
+/// the size of the padding box (`Field::padding_box`: the room less the border), which cuts what
+/// scrolls, the padding going with the text; a line is as
 /// tall as its own line (its font's, which AppKit draws from the top of the frame), so it is that
 /// line that is centred in the box, not a taller frame with the text at its top. The text is as
 /// large as the page is drawn (`zoom`). The field stands in the host ([`FieldsHost`]), whose axis
@@ -2723,7 +2820,6 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
                 NSAutoresizingMaskOptions::ViewWidthSizable
                     | NSAutoresizingMaskOptions::ViewHeightSizable,
             );
-            field.setFrame(view.bounds());
             view.addSubview(&field);
             (words.clone(), field)
         });
@@ -2732,8 +2828,37 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
         view.setAccessibilityPlaceholderValue(hint.as_deref());
     }
     view.setAccessibilityLabel(Some(&NSString::from_str(said)));
-    let line = lines_line(view).min(f64::from(room.h));
-    let frame = frame(f64::from(text.y), f64::from(text.h).max(line));
+    // The scroll view is the padding box (what scrolls is cut there, and the padding goes with the
+    // text); the text stands in it at the padding of each side, which are not all the same.
+    let shown = place.padding_box;
+    let pads = [
+        text.x - shown.x,
+        text.y - shown.y,
+        shown.x + shown.w - (text.x + text.w),
+        shown.y + shown.h - (text.y + text.h),
+    ]
+    .map(|pad| f64::from(pad.max(0.0)));
+    if view.ivars().pad.get() != pads {
+        view.ivars().pad.set(pads);
+        view.invalidateTextContainerOrigin();
+        changed = true;
+    }
+    // The inset is the same on both sides (the text view's frame is the text and its two paddings, and
+    // its container the width the text box has); where the text starts is the left and top padding
+    // alone ([`PageLinesText`]'s `textContainerOrigin`).
+    let inset = NSSize::new((pads[0] + pads[2]) / 2.0, (pads[1] + pads[3]) / 2.0);
+    if view.textContainerInset() != inset {
+        view.setTextContainerInset(inset);
+        changed = true;
+    }
+    // A box shorter than its first line (the padding is more than the room has over a line) still
+    // holds the line, as the room does.
+    let line = lines_line(view);
+    let height = f64::from(shown.h).max((pads[1] + line).min(f64::from(room.y + room.h - shown.y)));
+    let frame = NSRect::new(
+        NSPoint::new(f64::from(shown.x), f64::from(shown.y)),
+        NSSize::new(f64::from(shown.w), height),
+    );
     if scroll.frame() != frame {
         scroll.setFrame(frame);
         changed = true;
@@ -2747,11 +2872,20 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
         view.sizeToFit();
         view.scroll_to_caret();
     }
-    // The hint stands over the whole text view, as wide and as tall as the box.
-    if let Some((_, hint)) = view.ivars().hint.borrow().as_ref()
-        && hint.frame() != view.bounds()
-    {
-        hint.setFrame(view.bounds());
+    // The hint stands over the text box, from the padding of the box's top and left, as wide as the
+    // text box is and as tall as the text view is below the padding there.
+    if let Some((_, hint)) = view.ivars().hint.borrow().as_ref() {
+        let bounds = view.bounds();
+        let stands = NSRect::new(
+            NSPoint::new(pads[0], pads[1]),
+            NSSize::new(
+                f64::from(text.w),
+                (bounds.size.height - pads[1] - pads[3]).max(0.0),
+            ),
+        );
+        if hint.frame() != stands {
+            hint.setFrame(stands);
+        }
     }
     scroll.setHidden(place.covered);
 }
@@ -3020,6 +3154,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         id,
         kind,
         rect: room,
+        padding_box: room,
         text,
         hint: None,
         label: None,
@@ -3042,14 +3177,16 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
             zoom,
             Some("Monaco"),
         );
+        // The scroll view stands in the padding box (the room, here: no border), the text in its
+        // text box.
         let frame = view.frame();
-        if frame.origin.x != 20.0
-            || frame.origin.y != f64::from(text.y)
-            || frame.size.width != 200.0
-            || frame.size.height != f64::from(3.0 * line)
+        if frame.origin.x != f64::from(room.x)
+            || frame.origin.y != f64::from(room.y)
+            || frame.size.width != f64::from(room.w)
+            || frame.size.height != f64::from(room.h)
         {
             said(format!(
-                "rows = 3 at zoom {zoom}: the field stands at {frame:?}, not in its text box {text:?}"
+                "rows = 3 at zoom {zoom}: the field stands at {frame:?}, not in its padding box {room:?}"
             ));
         }
         // What the text needs of a box of this width, as the text view lays it out.
@@ -3144,14 +3281,22 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
                 "rows = 1 at padding 4 and 10, a {kind:?}: the capitals' middle is {middle}, the box's {aimed}"
             ));
         }
-        if frame.origin.x != 20.0 || frame.size.width != 200.0 {
+        // A field of text stands in its text box; the scroll view of a field of lines is its
+        // padding box (here the room: the box's 8 on each side), with the text in the box.
+        let (across, wide) = if matches!(view, FieldView::Lines(_)) {
+            (text.x - 8.0, text.w + 16.0)
+        } else {
+            (text.x, text.w)
+        };
+        if frame.origin.x != f64::from(across) || frame.size.width != f64::from(wide) {
             said(format!(
-                "a {kind:?}: the field stands across {frame:?}, not the box's {text:?}"
+                "a {kind:?}: the field stands across {frame:?}, not at {across} and {wide} wide"
             ));
         }
     }
-    // A box shorter than a line (padding 6 in a room of 24 leaves 12) still holds the line: the
-    // frame is a line tall, in the room, and its capitals stand in the box's middle.
+    // A box shorter than a line (padding 6 in a room of 24 leaves 12) still holds the line: a field
+    // of one line's frame is a line tall, in the room; the scroll view of lines is the padding box
+    // (the room), which holds the line below the padding over it; capitals in the box's middle.
     for kind in [FieldKind::Line, FieldKind::Lines] {
         let host = FieldsHost::with_frame(mtm, host_frame);
         let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
@@ -3160,11 +3305,18 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         let room = Rect::new(12.0, 30.0, 216.0, 24.0);
         place_field(&view, &field(kind, room, text, false), 1.0, Some("Monaco"));
         let frame = view.frame();
-        if frame.size.height != 16.0 {
+        let wanted = if kind == FieldKind::Lines { 24.0 } else { 16.0 };
+        if frame.size.height != wanted {
             said(format!(
-                "a {kind:?} in a box of 12 points is {} points tall, not its line of 16",
+                "a {kind:?} in a box of 12 points is {} points tall, not {wanted}",
                 frame.size.height
             ));
+        }
+        if let FieldView::Lines(lines) = &view {
+            // The first line stands whole in the frame: the padding over it and the line.
+            if lines.text.ivars().pad.get()[1] + 16.0 > frame.size.height {
+                said("a Lines in a box of 12 points holds less than its first line".to_owned());
+            }
         }
     }
     // A press in the room is the field's wherever the text is: in the padding above and below, and
@@ -3288,6 +3440,10 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
     }
     drop(said);
     lines_overflow_problems(mtm, &mut problems);
+    lines_padding_problems(mtm, &mut problems);
+    lines_changing_problems(mtm, &mut problems);
+    lines_drop_problems(mtm, &mut problems);
+    lines_bar_problems(mtm, &mut problems);
     lines_problems(mtm, &mut problems);
     problems
 }
@@ -3395,6 +3551,7 @@ fn lines_overflow_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
                         id,
                         kind: FieldKind::Lines,
                         rect: room,
+                        padding_box: room,
                         text,
                         hint: None,
                         label: None,
@@ -3445,6 +3602,560 @@ fn lines_overflow_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     }
 }
 
+/// The room of a field of three rows with a border and a padding of its own on each side, as the kit
+/// lays it out (`Field`: the room, its padding box — the room less the border — and the text box,
+/// that less the padding), the four paddings all different: `(room, padding box, text, [left, top,
+/// right, bottom])`, at `zoom` with `line` the page's line.
+fn padded_boxes(zoom: f32, line: f32) -> (Rect, Rect, Rect, [f32; 4]) {
+    let pads = [6.0 * zoom, 4.0 * zoom, 2.0 * zoom, 10.0 * zoom];
+    let text = Rect::new(20.0, 40.0, 200.0, 3.0 * line);
+    let padding_box = Rect::new(
+        text.x - pads[0],
+        text.y - pads[1],
+        text.w + pads[0] + pads[2],
+        text.h + pads[1] + pads[3],
+    );
+    let border = zoom;
+    let room = Rect::new(
+        padding_box.x - border,
+        padding_box.y - border,
+        padding_box.w + 2.0 * border,
+        padding_box.h + 2.0 * border,
+    );
+    (room, padding_box, text, pads)
+}
+
+/// Scrolls the text of a field of lines so that `y` of it is the top of what the box shows.
+fn scroll_lines_to(lines: &LinesView, y: f64) {
+    let clip = lines.scroll.contentView();
+    clip.scrollToPoint(NSPoint::new(0.0, y));
+    lines.scroll.reflectScrolledClipView(&clip);
+}
+
+/// A box of rows that scrolls is cut at its padding box, not at its text box, and the padding goes
+/// with the text (CSS: what scrolls is cut at the padding box): five lines in a box of three, with a
+/// border and a padding of each size, are drawn from the padding box's top to its bottom between the
+/// lines, at the top the first line is at the top of the text box and at the end the last line is
+/// at its bottom, with the padding below it; nothing is drawn over the border. And the text is
+/// wrapped at the width of the text box, which is not the padding box less the same padding on both
+/// sides when the two differ.
+fn lines_padding_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 31.0)] {
+        let (room, padding_box, text, pads) = padded_boxes(zoom, line);
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        place_field(
+            &view,
+            &Field {
+                id,
+                kind: FieldKind::Lines,
+                rect: room,
+                padding_box,
+                text,
+                hint: None,
+                label: None,
+                covered: false,
+            },
+            zoom,
+            Some("Monaco"),
+        );
+        let window = window_over(mtm, &host);
+        let FieldView::Lines(lines) = &view else {
+            continue;
+        };
+        view.set_text("XXXX\nXXXX\nXXXX\nXXXX\nXXXX");
+        let (top, bottom) = (
+            f64::from(padding_box.y),
+            f64::from(padding_box.y + padding_box.h),
+        );
+        let (text_top, text_bottom) = (f64::from(text.y), f64::from(text.y + text.h));
+        let (left, right) = (
+            f64::from(padding_box.x),
+            f64::from(padding_box.x + padding_box.w),
+        );
+        let frame = view.frame();
+        if (frame.origin.x - left).abs() > 0.01
+            || (frame.origin.y - top).abs() > 0.01
+            || (frame.size.width - f64::from(padding_box.w)).abs() > 0.01
+            || (frame.size.height - f64::from(padding_box.h)).abs() > 0.01
+        {
+            problems.push(format!(
+                "padding at zoom {zoom}: the scroll view stands at {frame:?}, not in the padding box {padding_box:?}"
+            ));
+        }
+        let longest = f64::from(pads[1] + pads[3]) + 5.0 * f64::from(line);
+        let end = longest - f64::from(padding_box.h);
+        for (what, at) in [
+            ("at the top", 0.0),
+            ("between lines", 0.75 * f64::from(line)),
+            ("at the end", end),
+        ] {
+            scroll_lines_to(lines, at);
+            let Some((x0, y0, x1, y1)) = ink_in(&host) else {
+                problems.push(format!("padding at zoom {zoom}, {what}: nothing is drawn"));
+                continue;
+            };
+            let said = format!("padding at zoom {zoom}, {what}: ink in ({x0}, {y0})–({x1}, {y1})");
+            if y0 < top - 0.5 || y1 > bottom + 0.5 || x0 < left - 0.5 || x1 > right + 0.5 {
+                problems.push(format!(
+                    "{said}, outside the padding box ({left}, {top})–({right}, {bottom})"
+                ));
+            }
+            match what {
+                "at the top" => {
+                    if y0 < text_top - 0.5 || y0 > text_top + f64::from(line) / 2.0 {
+                        problems.push(format!(
+                            "{said}: the first line is not at the top of the text box ({text_top})"
+                        ));
+                    }
+                }
+                "between lines" => {
+                    if y0 > text_top - 1.0 {
+                        problems.push(format!(
+                            "{said}: the padding above the text box shows no line ({text_top})"
+                        ));
+                    }
+                    if y1 < text_bottom + 1.0 {
+                        problems.push(format!(
+                            "{said}: the padding below the text box shows no line ({text_bottom})"
+                        ));
+                    }
+                }
+                _ => {
+                    if y1 > text_bottom + 0.5 || y1 < text_bottom - f64::from(line) / 2.0 {
+                        problems.push(format!(
+                            "{said}: the last line is not at the bottom of the text box ({text_bottom}), with the padding below it"
+                        ));
+                    }
+                }
+            }
+        }
+        // The caret's line is scrolled to with the padding beyond it, so that it stands in the text
+        // box: the box scrolled by a line to show the fourth, and back to the top to show the first
+        // (the text view's own inset is the mean of the two paddings, which is neither).
+        for (what, caret, from, wanted) in [
+            ("the fourth line", 15, 0.0, f64::from(line)),
+            ("the last line", 24, 0.0, end),
+            ("the first line", 0, end, 0.0),
+        ] {
+            scroll_lines_to(lines, from);
+            lines.text.setSelectedRange(NSRange::new(caret, 0));
+            lines.text.scroll_to_caret();
+            let at = lines.scroll.contentView().bounds().origin.y;
+            if (at - wanted).abs() > 0.5 {
+                problems.push(format!(
+                    "padding at zoom {zoom}: the caret in {what} scrolls the box to {at}, not {wanted}"
+                ));
+            }
+        }
+        // The text wraps at the text box's width: the box is `text.w` of the container, however the
+        // padding is shared, and a word that does not fit breaks where the width ends.
+        // SAFETY: the text view was made with its container.
+        let width = unsafe { lines.text.textContainer() }.map_or(0.0, |c| c.size().width);
+        if (width - f64::from(text.w)).abs() > 0.01 {
+            problems.push(format!(
+                "padding at zoom {zoom}: the text wraps at {width} points, the text box is {} wide",
+                text.w
+            ));
+        }
+        view.set_text(&"X".repeat(70));
+        scroll_lines_to(lines, 0.0);
+        if let Some((x0, _, x1, _)) = ink_in(&host) {
+            let (box_left, box_right) = (f64::from(text.x), f64::from(text.x + text.w));
+            if x0 < box_left - 0.5 || x1 > box_right + 0.5 {
+                problems.push(format!(
+                    "padding at zoom {zoom}: a long word is drawn from {x0} to {x1}, the text box is {box_left}–{box_right}"
+                ));
+            }
+        }
+        // Where the text is, by every way AppKit has of saying it: a press at a point of the text
+        // box is the character under it, the selection is painted from the text box's top left, and
+        // the caret's rectangle is where the character is — with the paddings all different, the
+        // text view's own inset is not where the text starts.
+        view.set_text("XXXX\nXXXX\nXXXX");
+        scroll_lines_to(lines, 0.0);
+        let font = lines.text.font();
+        let advance = font
+            .as_ref()
+            .map_or(7.5, |font| font.maximumAdvancement().width);
+        let (to_left, to_top) = (f64::from(pads[0]) + SIDE_PADDING, f64::from(pads[1]));
+        for (row, column) in [(0_usize, 0_usize), (1, 2), (2, 3)] {
+            let at = lines.text.convertPoint_fromView(
+                host.convertPoint_toView(
+                    NSPoint::new(
+                        f64::from(padding_box.x) + to_left + advance * (column as f64 + 0.4),
+                        f64::from(padding_box.y) + to_top + f64::from(line) * (row as f64 + 0.1),
+                    ),
+                    None,
+                ),
+                None,
+            );
+            let got = lines.text.characterIndexForInsertionAtPoint(at);
+            let wanted = row * 5 + column;
+            if got != wanted {
+                problems.push(format!(
+                    "padding at zoom {zoom}: a press at line {row}, column {column} + 0.4 is the character {got}, not {wanted}"
+                ));
+            }
+        }
+        window.makeFirstResponder(Some(view.inner()));
+        lines.text.setSelectedRange(NSRange::new(0, 4));
+        match ink_in(&host) {
+            Some((x0, y0, _, _)) => {
+                let (want_x, want_y) = (
+                    f64::from(padding_box.x) + to_left,
+                    f64::from(padding_box.y) + to_top,
+                );
+                if (x0 - want_x).abs() > 0.6 || (y0 - want_y).abs() > 0.6 {
+                    problems.push(format!(
+                        "padding at zoom {zoom}: the selection of the first four characters starts at ({x0}, {y0}), the text box's top left plus the line's padding is ({want_x}, {want_y})"
+                    ));
+                }
+            }
+            None => problems.push(format!("padding at zoom {zoom}: a selection draws nothing")),
+        }
+        lines.text.setSelectedRange(NSRange::new(7, 0));
+        // SAFETY: NSTextInputClient's `firstRectForCharacterRange:actualRange:`, which an
+        // `NSTextView` answers: a range, and a null for the actual range (not wanted).
+        let screen: NSRect = unsafe {
+            msg_send![&*lines.text, firstRectForCharacterRange: NSRange::new(7, 0), actualRange: std::ptr::null_mut::<NSRange>()]
+        };
+        let in_view = host.convertPoint_fromView(window.convertRectFromScreen(screen).origin, None);
+        // The caret's rectangle is in the screen's points, from the bottom: its top is the line's.
+        let top = in_view.y - screen.size.height;
+        let (want_x, want_y) = (
+            f64::from(padding_box.x) + to_left + advance * 2.0,
+            f64::from(padding_box.y) + to_top + f64::from(line),
+        );
+        if (in_view.x - want_x).abs() > 1.0 || (top - want_y).abs() > 1.0 {
+            problems.push(format!(
+                "padding at zoom {zoom}: the caret of the character 7 is at ({}, {top}), the text box's third character of the second line is at ({want_x}, {want_y})",
+                in_view.x
+            ));
+        }
+        window.makeFirstResponder(None);
+        window.setContentView(None);
+    }
+}
+
+/// A box of rows that scrolls has its bar, and a press on it is the bar's, which AppKit's own scroller
+/// then tracks (the knob dragged, the track paged): not the text's, which the room's press is
+/// (`FieldsHost`, where a point of the scroll view's own frame is asked of the scroll view first,
+/// and a point of the room outside it is the text's). The press itself is routed here, as the
+/// pointer is over the bar; what the scroller does with it is AppKit's, and dragging it is not
+/// measured without a mouse (a bar tracks the events of the system, which a test cannot send).
+fn lines_bar_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    let (room, padding_box, text, _) = padded_boxes(1.0, 16.0);
+    let host = FieldsHost::with_frame(mtm, host_frame);
+    let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+    host.addSubview(&view);
+    place_field(
+        &view,
+        &Field {
+            id,
+            kind: FieldKind::Lines,
+            rect: room,
+            padding_box,
+            text,
+            hint: None,
+            label: None,
+            covered: false,
+        },
+        1.0,
+        Some("Monaco"),
+    );
+    let window = window_over(mtm, &host);
+    let FieldView::Lines(lines) = &view else {
+        return;
+    };
+    view.set_text("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    lines.scroll.tile();
+    // The overlay bar is there while it is shown (it is shown as the text is scrolled, and where the
+    // pointer is over it).
+    lines.scroll.flashScrollers();
+    let Some(scroller) = lines.scroll.verticalScroller() else {
+        problems.push("bar: a field of lines has no vertical scroller".to_owned());
+        window.setContentView(None);
+        return;
+    };
+    // SAFETY: reading the superview, on the main thread.
+    let above = unsafe { host.superview() };
+    let hit = |at: NSPoint| host.hitTest(host.convertPoint_toView(at, above.as_deref()));
+    // The bar has a knob and a track to press: a measure of nothing would put every point at the
+    // bar's top.
+    let (knob, slot) = (
+        scroller.rectForPart(NSScrollerPart::Knob),
+        scroller.rectForPart(NSScrollerPart::KnobSlot),
+    );
+    if knob.size.height < 1.0 || slot.size.height <= knob.size.height + 1.0 {
+        problems.push(format!(
+            "bar: the bar has a knob of {knob:?} in a track of {slot:?}, which a press is not measured on"
+        ));
+    }
+    let centre_of = |part: NSScrollerPart| {
+        let rect = scroller.rectForPart(part);
+        host.convertPoint_fromView(
+            NSPoint::new(
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            ),
+            Some(&scroller),
+        )
+    };
+    // The text is scrolled to the end, where the knob is at the bottom of its track: the track
+    // above the knob is a press to page up.
+    for (what, part) in [
+        ("knob", NSScrollerPart::Knob),
+        ("track", NSScrollerPart::KnobSlot),
+    ] {
+        let at = if part == NSScrollerPart::KnobSlot {
+            // The middle of the track above the knob.
+            let (slot, knob) = (
+                scroller.rectForPart(NSScrollerPart::KnobSlot),
+                scroller.rectForPart(NSScrollerPart::Knob),
+            );
+            host.convertPoint_fromView(
+                NSPoint::new(
+                    slot.origin.x + slot.size.width / 2.0,
+                    slot.origin.y + (knob.origin.y - slot.origin.y) / 2.0,
+                ),
+                Some(&scroller),
+            )
+        } else {
+            centre_of(part)
+        };
+        let got = hit(at);
+        if !got
+            .as_ref()
+            .is_some_and(|view| view.downcast_ref::<NSScroller>().is_some())
+        {
+            problems.push(format!(
+                "bar: a press on the {what} of the bar at {at:?} is {:?}, not the bar's",
+                got.as_ref().map(|view| view.class())
+            ));
+        }
+    }
+    // In the room and outside the scroll view, on the border: the text's.
+    let border = hit(NSPoint::new(
+        f64::from(room.x) + 0.2,
+        f64::from(room.y + room.h / 2.0),
+    ));
+    if !border.is_some_and(|view| view.downcast_ref::<PageLinesText>().is_some()) {
+        problems.push("bar: a press on the border of the room is not the text's".to_owned());
+    }
+    window.setContentView(None);
+}
+
+/// A box of rows that the page lays out again, with the paddings changed (the text box moves in the
+/// padding box, and may not be as wide), shows its text where the new text box is: the text start,
+/// the width it wraps at and a display to draw it again; a caret after a line break at the end of the
+/// text is scrolled to with the empty line it is in, and a box shorter than its line (a border
+/// around it) holds the line and stays in its room.
+fn lines_changing_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    let field = |room: Rect, padding_box: Rect, text: Rect| Field {
+        id,
+        kind: FieldKind::Lines,
+        rect: room,
+        padding_box,
+        text,
+        hint: None,
+        label: None,
+        covered: false,
+    };
+    for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 31.0)] {
+        let (room, padding_box, text, pads) = padded_boxes(zoom, line);
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        place_field(&view, &field(room, padding_box, text), zoom, Some("Monaco"));
+        let window = window_over(mtm, &host);
+        let FieldView::Lines(lines) = &view else {
+            continue;
+        };
+        // A line break at the end of the text: the caret is in the empty line after it, which the
+        // box is scrolled to with the padding below.
+        let longest = f64::from(pads[1] + pads[3]) + 5.0 * f64::from(line);
+        let end = longest - f64::from(padding_box.h);
+        view.set_text("XXXX\nXXXX\nXXXX\nXXXX\n");
+        scroll_lines_to(lines, 0.0);
+        lines.text.setSelectedRange(NSRange::new(20, 0));
+        lines.text.scroll_to_caret();
+        let at = lines.scroll.contentView().bounds().origin.y;
+        if (at - end).abs() > 0.5 {
+            problems.push(format!(
+                "changing at zoom {zoom}: the caret in the empty line after the last line break scrolls the box to {at}, not {end}"
+            ));
+        }
+        // The paddings swapped (the same sums: the box and the text view are as large as they were)
+        // and then the sides more than the text box was: where the text starts, what it wraps at.
+        for (what, new) in [
+            ("swapped", [pads[2], pads[3], pads[0], pads[1]]),
+            (
+                "wider",
+                [pads[0] + 4.0 * zoom, pads[1], pads[2] + 4.0 * zoom, pads[3]],
+            ),
+        ] {
+            let text = Rect::new(
+                padding_box.x + new[0],
+                padding_box.y + new[1],
+                padding_box.w - new[0] - new[2],
+                padding_box.h - new[1] - new[3],
+            );
+            lines.text.setNeedsDisplay(false);
+            place_field(&view, &field(room, padding_box, text), zoom, Some("Monaco"));
+            if !lines.text.needsDisplay() {
+                problems.push(format!(
+                    "changing at zoom {zoom}, paddings {what}: the text is not to be drawn again"
+                ));
+            }
+            // SAFETY: the text view was made with its container.
+            let width = unsafe { lines.text.textContainer() }.map_or(0.0, |c| c.size().width);
+            if (width - f64::from(text.w)).abs() > 0.01 {
+                problems.push(format!(
+                    "changing at zoom {zoom}, paddings {what}: the text wraps at {width} points, the text box is {} wide",
+                    text.w
+                ));
+            }
+            view.set_text(&"X".repeat(70));
+            scroll_lines_to(lines, 0.0);
+            match ink_in(&host) {
+                Some((x0, y0, x1, _)) => {
+                    let (left, right) = (f64::from(text.x), f64::from(text.x + text.w));
+                    let top = f64::from(text.y);
+                    if x0 < left - 0.5
+                        || x1 > right + 0.5
+                        || y0 < top - 0.5
+                        || y0 > top + f64::from(line) / 2.0
+                    {
+                        problems.push(format!(
+                            "changing at zoom {zoom}, paddings {what}: ink from ({x0}, {y0}) to {x1} across, the text box is {left}–{right} from {top}"
+                        ));
+                    }
+                }
+                None => problems.push(format!(
+                    "changing at zoom {zoom}, paddings {what}: nothing is drawn"
+                )),
+            }
+        }
+        window.setContentView(None);
+    }
+    // A box shorter than its line, with a border: the scroll view holds the line below the padding
+    // over it and stays in the room (the border and what is below are not its), and the line is in
+    // view with the caret in it.
+    let host = FieldsHost::with_frame(mtm, host_frame);
+    let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+    host.addSubview(&view);
+    let room = Rect::new(12.0, 30.0, 216.0, 24.0);
+    let padding_box = Rect::new(13.0, 31.0, 214.0, 22.0);
+    let text = Rect::new(19.0, 40.0, 202.0, 4.0);
+    place_field(&view, &field(room, padding_box, text), 1.0, Some("Monaco"));
+    let window = window_over(mtm, &host);
+    if let FieldView::Lines(lines) = &view {
+        let frame = view.frame();
+        if frame.origin.y + frame.size.height > f64::from(room.y + room.h) + 0.01 {
+            problems.push(format!(
+                "short box: the scroll view stands at {frame:?}, past the room {room:?}"
+            ));
+        }
+        view.set_text("XXXX");
+        lines.text.setSelectedRange(NSRange::new(2, 0));
+        lines.text.scroll_to_caret();
+        let seen = lines.scroll.contentView().bounds();
+        let (top, bottom) = (9.0, 25.0);
+        if seen.origin.y > top + 0.5 || seen.origin.y + frame.size.height < bottom - 0.5 {
+            problems.push(format!(
+                "short box: the caret's line ({top}–{bottom} of the text) is not in view: {}–{}",
+                seen.origin.y,
+                seen.origin.y + frame.size.height
+            ));
+        }
+    }
+    window.setContentView(None);
+}
+
+/// What a field of lines takes of what is dropped on it is what a field of one line takes: nothing
+/// while the keyboard is elsewhere (a drop is the page's: its files are the page's to take), and
+/// what its editor takes while it is typed in (text, and a file as its path). The field's editor is
+/// AppKit's own text view, so what it has registered for is the measure; a field of one line is
+/// the control.
+fn lines_drop_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    let types = |view: &NSView| {
+        let mut names: Vec<String> = view
+            .registeredDraggedTypes()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    // What each kind has registered, `[elsewhere, typed in, elsewhere again]`.
+    let mut seen: Vec<(FieldKind, [Vec<String>; 3])> = Vec::new();
+    for kind in [FieldKind::Line, FieldKind::Lines] {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 48.0);
+        let room = Rect::new(12.0, 30.0, 216.0, 60.0);
+        place_field(
+            &view,
+            &Field {
+                id,
+                kind,
+                rect: room,
+                padding_box: room,
+                text,
+                hint: None,
+                label: None,
+                covered: false,
+            },
+            1.0,
+            Some("Monaco"),
+        );
+        let window = window_over(mtm, &host);
+        let own = |view: &FieldView| match view {
+            FieldView::Lines(lines) => types(&lines.text),
+            _ => view
+                .text_field()
+                .and_then(|field| field.currentEditor())
+                .and_then(|editor| editor.downcast_ref::<NSTextView>().map(|text| types(text)))
+                .unwrap_or_default(),
+        };
+        let away = (types(&view), types(view.inner()));
+        window.makeFirstResponder(Some(view.inner()));
+        let typed = own(&view);
+        window.makeFirstResponder(None);
+        let after = (types(&view), types(view.inner()));
+        if !away.0.is_empty() || !away.1.is_empty() || !after.0.is_empty() || !after.1.is_empty() {
+            problems.push(format!(
+                "drop on a {kind:?} with the keyboard elsewhere: registered {away:?}, {after:?} after"
+            ));
+        }
+        seen.push((kind, [away.1, typed, after.1]));
+        window.setContentView(None);
+    }
+    if let [(_, line), (_, lines)] = &seen[..] {
+        if line[1].is_empty() {
+            problems
+                .push("drop: a field of one line takes nothing while it is typed in".to_owned());
+        }
+        if line[1] != lines[1] {
+            problems.push(format!(
+                "drop while typed in: a field of lines takes {:?}, a field of one line {:?}",
+                lines[1], line[1]
+            ));
+        }
+    }
+}
+
 /// What a field of lines is, beside a field of text (the one it replaces): its text stands where a
 /// line's does and says its hint in the same ink; it is a text area to a screen reader, once, with
 /// the name and the hint of the page's; it is as wide as the box, whatever the scroll bar; the line of
@@ -3457,6 +4168,7 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         id,
         kind,
         rect: Rect::new(text.x - 8.0, text.y - 6.0, text.w + 16.0, text.h + 12.0),
+        padding_box: Rect::new(text.x - 8.0, text.y - 6.0, text.w + 16.0, text.h + 12.0),
         text,
         hint: hint.map(str::to_owned),
         label: label.map(str::to_owned),
@@ -3532,13 +4244,19 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
             unreachable!("a field of lines");
         };
         view.set_text("one\ntwo\nthree\nfour\nfive\nsix");
+        // The scroll view is the padding box (the room here: 8 across on each side), and the text
+        // wraps at the text box's width, whatever the bar.
         let across = lines.scroll.contentSize().width;
-        if (across - f64::from(text.w)).abs() > 0.01
-            || (lines.text.frame().size.width - f64::from(text.w)).abs() > 0.01
+        // SAFETY: the text view was made with its container.
+        let wraps = unsafe { lines.text.textContainer() }.map_or(0.0, |c| c.size().width);
+        if (across - f64::from(text.w + 16.0)).abs() > 0.01
+            || (lines.text.frame().size.width - f64::from(text.w + 16.0)).abs() > 0.01
+            || (wraps - f64::from(text.w)).abs() > 0.01
         {
             problems.push(format!(
-                "lines at zoom {zoom}: the text is {across} ({}) across, the box {}",
+                "lines at zoom {zoom}: the scroll view is {across} ({}) across and wraps at {wraps}, the box {} and its text box {}",
                 lines.text.frame().size.width,
+                text.w + 16.0,
                 text.w
             ));
         }
@@ -3752,11 +4470,13 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
                 ));
             }
         }
+        // Drawn in the padding box (the room: the text box and 8 across, 6 up and down), and the
+        // line the caret is in, the last, is in the text box with the padding below it.
         match ink_in(&host) {
             Some((x0, y0, x1, y1))
-                if x0 >= f64::from(text.x) - 0.5
-                    && y0 >= f64::from(text.y) - 0.5
-                    && x1 <= f64::from(text.x + text.w) + 0.5
+                if x0 >= f64::from(text.x) - 8.5
+                    && y0 >= f64::from(text.y) - 6.5
+                    && x1 <= f64::from(text.x + text.w) + 8.5
                     && y1 <= f64::from(text.y + text.h) + 0.5 => {}
             other => problems.push(format!(
                 "lines at zoom {zoom}: five lines typed in a box of three draw {other:?}, not within the box"
@@ -3799,13 +4519,13 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
             lines.scroll.setScrollerStyle(NSScrollerStyle::Legacy);
             place(&moved, Some("SF Mono"));
             if lines.scroll.scrollerStyle() != NSScrollerStyle::Overlay
-                || (lines.scroll.contentSize().width - f64::from(text.w)).abs() > 0.01
+                || (lines.scroll.contentSize().width - f64::from(text.w + 16.0)).abs() > 0.01
             {
                 problems.push(format!(
                     "lines: a scroll view the system moved to the classic bar is not the page's overlay again: its style is {:?} and the text {} wide, not {}",
                     lines.scroll.scrollerStyle(),
                     lines.scroll.contentSize().width,
-                    text.w
+                    text.w + 16.0
                 ));
             }
         }
@@ -3858,9 +4578,10 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         window.makeFirstResponder(None);
         window.setContentView(None);
     }
-    // A press in the padding of a box that is scrolled down puts the caret in the lines in view (the
-    // point is past the edge of the text there, on a line the box scrolled away from), a text the
-    // page may drop files on is not a text view's to take, and a field that left the page is freed.
+    // A press in the padding of a box that is scrolled down is where it is in the text, which the
+    // padding scrolls with (the lines in view are the caret's), and a press in the border, outside what
+    // the box shows, puts the caret in the lines in view, not on the line past the edge of the text there
+    // that the box scrolled away from; and a field that left the page is freed.
     {
         let host = FieldsHost::with_frame(mtm, host_frame);
         let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
@@ -3871,6 +4592,7 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
             id,
             kind: FieldKind::Lines,
             rect: room,
+            padding_box: Rect::new(15.0, 33.0, 210.0, 54.0),
             text,
             hint: None,
             label: None,
@@ -3887,32 +4609,43 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
             lines.text.setSelectedRange(NSRange::new(15, 0));
             lines.text.scroll_to_caret();
             let origin = lines.scroll.contentView().bounds().origin.y;
-            for (name, y, from, to) in [("below", 87.0, 10, 15), ("above", 33.0, 0, 11)] {
+            for (name, y, from, to) in [
+                ("below, in the border,", 89.0, 14, 15),
+                ("above, in the border,", 31.0, 10, 11),
+                ("below, in the padding,", 86.0, 14, 15),
+                ("above, in the padding,", 34.0, 8, 11),
+            ] {
                 let in_window = host.convertPoint_toView(NSPoint::new(100.0, y), None);
-                let press = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                    NSEventType::LeftMouseDown,
-                    in_window,
-                    NSEventModifierFlags::empty(),
-                    0.0,
-                    window.windowNumber(),
-                    None,
-                    0,
-                    1,
-                    1.0,
-                );
-                if let Some(press) = press {
+                let event = |kind| {
+                    NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                        kind,
+                        in_window,
+                        NSEventModifierFlags::empty(),
+                        0.0,
+                        window.windowNumber(),
+                        None,
+                        0,
+                        1,
+                        1.0,
+                    )
+                };
+                if let (Some(press), Some(release)) = (
+                    event(NSEventType::LeftMouseDown),
+                    event(NSEventType::LeftMouseUp),
+                ) {
+                    // A press the text view tracks (one in what the box shows) follows the mouse
+                    // until it is released: the release is in the queue before the press is.
+                    NSApplication::sharedApplication(mtm).postEvent_atStart(&release, true);
                     lines.text.setSelectedRange(NSRange::new(0, 0));
                     lines.text.mouseDown(&press);
                     let at = lines.text.selectedRange().location;
                     if at < from || at > to {
                         problems.push(format!(
-                            "lines: a press in the padding {name} the box, scrolled to the end, puts the caret at {at}, not in the lines in view ({from}..={to})"
+                            "lines: a press {name} of the box, scrolled to the end, puts the caret at {at}, not in the lines in view ({from}..={to})"
                         ));
                     }
                     if (lines.scroll.contentView().bounds().origin.y - origin).abs() > 0.5 {
-                        problems.push(format!(
-                            "lines: a press in the padding {name} the box scrolls it"
-                        ));
+                        problems.push(format!("lines: a press {name} of the box scrolls it"));
                     }
                     lines.text.scrollPoint(NSPoint::new(0.0, origin));
                 } else {
