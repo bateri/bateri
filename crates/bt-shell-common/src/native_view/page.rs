@@ -47,7 +47,7 @@ use pencere_drive::{FrameAt, Host, Outline, Page, Painted, Placement, Route, Set
 use pencere_sandbox::{Assets, ModuleLimits, Program, Script};
 use pencere_view::{
     Drawing as Drawn, Font, GesturePhase, Id, Input, Key, Measure, Menu, MenuEntry, Metrics, Mods,
-    Phase, Point, Rect, TerminalLook, WallTime,
+    Phase, Point, Rect, TerminalLook, WallTime, ZOOM_TEXT,
 };
 
 use super::containers::Demo;
@@ -109,10 +109,12 @@ impl Opening {
     /// lines shaped.
     fn setup(self, limits: ModuleLimits, assets: Option<Arc<dyn Assets>>) -> (Setup, Drawing) {
         let shaped = Rc::new(RefCell::new(Shaped::default()));
+        let line = FieldLine::default();
         let measure = PaneMeasure {
             renderer: Rc::clone(&self.renderer),
             terminal: self.terminal.clone(),
             shaped: Rc::clone(&shaped),
+            line: line.clone(),
         };
         let setup = setup(
             limits,
@@ -128,6 +130,7 @@ impl Opening {
         let drawing = Drawing {
             terminal: self.terminal,
             shaped,
+            line,
         };
         (setup, drawing)
     }
@@ -157,11 +160,14 @@ fn setup(
 struct Drawing {
     terminal: Option<String>,
     shaped: Rc<RefCell<Shaped>>,
+    /// What the shell says of its text field's line, which the page's measure reads
+    /// ([`PageHandle::field_line`]).
+    line: FieldLine,
 }
 
 impl Drawing {
     fn with(self, page: Page) -> (Box<dyn UiPage>, PageHandle) {
-        let handle = PageHandle::new(page);
+        let handle = PageHandle::new(page, self.line);
         let drawing = PageDrawing {
             handle: handle.clone(),
             terminal: self.terminal,
@@ -249,6 +255,34 @@ struct PaneMeasure {
     renderer: Rc<Renderer>,
     terminal: Option<String>,
     shaped: Rc<RefCell<Shaped>>,
+    line: FieldLine,
+}
+
+/// How tall one line of the shell's own text field is, in the page's points: what a text field is
+/// drawn with is the shell's (AppKit's cell, at the face and the size of the page's zoom), and a
+/// page that gives a field `rows` is laid out with that many of the shell's lines, so that the last
+/// is not cut by a measure of the renderer's that differs by a little ([`Measure::field_line`]).
+/// The shell says it where it makes its fields ([`PageHandle::field_line`]) and again when the
+/// zoom changes; the page's measure reads it each time it lays a frame out. Both are on the main
+/// thread (the measure holds the renderer, which is not `Send`), so the slot is no more than a cell.
+/// Not said yet, the kit measures the line itself.
+#[derive(Clone, Default)]
+pub struct FieldLine(Rc<Cell<Option<f32>>>);
+
+impl FieldLine {
+    /// One line of the shell's field is `points` tall, in the page's points (the host's points over
+    /// the page's zoom). Nothing that is not a height is taken.
+    pub fn set(&self, points: f32) {
+        self.0
+            .set((points.is_finite() && points > 0.0).then_some(points));
+    }
+
+    /// The line in the unit of the page's measure, for the field's `font` (the kit's, set at the
+    /// layout's scale: its size is [`ZOOM_TEXT`] times the scale, which is the display's pixels to a
+    /// point times the zoom), or `None` where the shell has not said.
+    fn in_unit_of(&self, font: &Font) -> Option<f32> {
+        self.0.get().map(|points| points * (font.size / ZOOM_TEXT))
+    }
 }
 
 impl PaneMeasure {
@@ -269,6 +303,10 @@ impl Measure for PaneMeasure {
 
     fn offsets(&mut self, font: &Font, text: &str, at: &[usize]) -> Vec<f32> {
         self.typeset(|typeset| typeset.offsets(font, text, at))
+    }
+
+    fn field_line(&mut self, font: &Font) -> Option<f32> {
+        self.line.in_unit_of(font)
     }
 }
 
@@ -393,6 +431,8 @@ pub struct PageHandle {
     failure: Rc<Failure>,
     /// Called at the start of each frame the link builds ([`PageHandle::watch_frame_start`]).
     on_frame_start: Rc<RefCell<Option<OnFrameStart>>>,
+    /// How tall a line of the shell's text field is, as the page's measure answers it.
+    field_line: FieldLine,
 }
 
 /// A page that failed: what was said of it, and who is told.
@@ -453,8 +493,9 @@ fn words_of(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 impl PageHandle {
-    fn new(page: Page) -> Self {
+    fn new(page: Page, field_line: FieldLine) -> Self {
         Self {
+            field_line,
             failure: Rc::new(Failure::default()),
             on_frame_start: Rc::new(RefCell::new(None)),
             page: Rc::new(RefCell::new(page)),
@@ -464,6 +505,12 @@ impl PageHandle {
             on_frame: Rc::new(RefCell::new(None)),
             surfaces: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Where the shell says how tall a line of its text field is: the page's measure answers a
+    /// page that gives a field rows with it ([`FieldLine`]).
+    pub fn field_line(&self) -> FieldLine {
+        self.field_line.clone()
     }
 
     /// Runs `call`, which is the page's own code or a host's on the page's behalf, in the page's
@@ -942,6 +989,7 @@ pub(super) mod tests {
     use pencere_sandbox::Fault;
     use pencere_view::{
         Button, Cursor, DrawList, Fill, Input, KeyConvention, Keyboard, Menu, Paint, Phase,
+        field_font,
     };
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
@@ -1070,7 +1118,7 @@ pub(super) mod tests {
                 assets,
                 Box::new(Even),
             );
-            let handle = PageHandle::new(Page::script(script, setup, || {}));
+            let handle = PageHandle::new(Page::script(script, setup, || {}), FieldLine::default());
             let log = Rc::new(RefCell::new(Transcript::default()));
             let told = Rc::clone(&log);
             handle.watch_outline(Box::new(move |outline| {
@@ -1378,6 +1426,35 @@ pub(super) mod tests {
             look: LookSlot::default(),
         };
         assert!((0..1000).all(|_| demo.may_say(64 << 10)));
+    }
+
+    /// The shell says how tall a line of its text field is in the page's points; the page's measure
+    /// answers in the unit of its own, the layout's pixels. The kit asks for the font it sets a field
+    /// in (`ZOOM_TEXT` times the layout's scale: the display's pixels to a point times the zoom), so
+    /// a line of 16 points is 32 pixels on a display of two to a point; at zoom 2 the shell measured
+    /// 31 points a line, which is 15.5 of the page's and 62 pixels there. Not said, or said as
+    /// what is no height, the kit measures the line itself.
+    #[test]
+    fn a_fields_line_is_answered_in_the_unit_of_the_layouts_pixels() {
+        let line = FieldLine::default();
+        assert_eq!(line.in_unit_of(&field_font(2.0)), None, "not said yet");
+        line.set(16.0);
+        assert_eq!(line.in_unit_of(&field_font(1.0)), Some(16.0));
+        assert_eq!(line.in_unit_of(&field_font(2.0)), Some(32.0));
+        // Zoom 2 on that display: the layout's scale is 4, the line the shell measured at twice
+        // the size is 31 points, which is 15.5 of the page's.
+        line.set(15.5);
+        assert_eq!(line.in_unit_of(&field_font(4.0)), Some(62.0));
+        // What is no height is the same as nothing said.
+        for not in [0.0, -3.0, f32::NAN, f32::INFINITY] {
+            line.set(not);
+            assert_eq!(line.in_unit_of(&field_font(4.0)), None, "{not}");
+        }
+        // A handle's slot is the one the measure reads: what the shell says to one the other hears.
+        let said = FieldLine::default();
+        let heard = said.clone();
+        said.set(20.0);
+        assert_eq!(heard.in_unit_of(&field_font(1.0)), Some(20.0));
     }
 
     /// The link's build of a frame hands the pane the frame's outline and then what the drive held
@@ -1699,6 +1776,54 @@ return {
         assert!(drained.redraw && drained.ended.is_none(), "{drained:?}");
         let list = build(&mut page, &renderer, &theme, 0.1);
         assert!(boxes(&list) >= 2, "the two boxes of the page");
+    }
+
+    /// What the shell says of its field's line reaches the page's layout: a field of three rows is
+    /// three of those lines tall, in the box the kit says of its text (`Field::text`), not three of
+    /// the renderer's own. The slot is the handle's, and the measure of the page reads the same.
+    #[test]
+    fn a_field_of_rows_is_as_tall_as_the_lines_the_shell_says() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let renderer = Rc::new(renderer);
+        let theme = Theme::BATERI;
+        for line in [16.0_f32, 20.0] {
+            let (wake, woken) = woken();
+            let (mut page, handle) = script_page(
+                Script {
+                    path: "page.lua".to_owned(),
+                    source: br#"return { render = function()
+                    return pencere.div():col():child(
+                        pencere.div():text_field("notes", "lines", { rows = 3 }):py(6):w(100))
+                end }"#
+                        .to_vec(),
+                    bundle: None,
+                },
+                ModuleLimits::default(),
+                opening(&renderer, None),
+                wake,
+            );
+            handle.field_line().set(line);
+            build(&mut page, &renderer, &theme, 0.0);
+            assert!(wait(&woken), "the script handed out no page");
+            handle.page().drain();
+            build(&mut page, &renderer, &theme, 0.1);
+            let field = handle.page().fields().first().cloned().expect("its field");
+            // The frames are at two pixels to a point and the page's own size: the box is the lines
+            // in the page's points, and the room is that and the padding above and below.
+            assert!(
+                (field.text.h - 3.0 * line).abs() < 0.01,
+                "three rows of {line} points: the box is {} points tall",
+                field.text.h
+            );
+            assert!(
+                (field.rect.h - (3.0 * line + 12.0)).abs() < 0.01,
+                "the room is {} points tall",
+                field.rect.h
+            );
+        }
     }
 
     /// The page of a real pane: a program (`demopen --lua-files`) opens a view of two files in a
@@ -2782,6 +2907,8 @@ return {
                 id: super::super::containers::FIELD,
                 kind: FieldKind::Line,
                 rect: field,
+                // No padding of its own: the text stands in all of the room.
+                text: field,
                 hint: Some(super::super::containers::FIELD_HINT.to_owned()),
                 label: None,
                 covered: false,

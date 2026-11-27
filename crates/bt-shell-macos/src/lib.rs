@@ -154,6 +154,14 @@ pub fn hotkey_row_problems(mtm: MainThreadMarker, shots: Option<&std::path::Path
     settings_window::SettingsWindow::new(mtm).hotkey_row_problems(shots)
 }
 
+/// What is wrong with how a page's text fields stand in their rooms (the line of the face, the rows
+/// a box holds, the capitals in the middle of a box, a press in the padding), measured on AppKit's
+/// own fields. Only for `tests/page_field.rs`.
+#[doc(hidden)]
+pub fn page_field_problems(mtm: MainThreadMarker) -> Vec<String> {
+    native_page::field_problems(mtm)
+}
+
 /// Opens the hotkey window's panel through the shell's own setup and lists what is wrong with it
 /// (class, style, standing flags, the frames the rules compute, hiding). Only for
 /// `tests/hotkey_panel.rs`.

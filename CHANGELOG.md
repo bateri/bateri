@@ -17,6 +17,7 @@ of every installed copy. A version without a section is not released.
 - **A hotkey window.** One shortcut slides a bateri window in from the edge of the screen over whatever you are doing, and the same shortcut sends it away; what runs in it keeps running. Settings ▸ Hotkey Window sets the shortcut, the edge and the size. A modifier tapped twice works too, with no permission to grant.
 - **Move a tab or a split to the hotkey window.** From the Window menu, a tab's right-click menu or the command palette. Drag its tab out and it becomes a window of its own.
 - **`bateri hotkey`** shows, hides, toggles and pins the hotkey window from a terminal, Raycast or Shortcuts.
+- **A program's text box can say how many lines tall it is.** A box of lines is as tall as that many lines of your terminal's font, its text stays inside the box's padding, and a click anywhere in the box starts typing in it.
 
 ### Fixed
 

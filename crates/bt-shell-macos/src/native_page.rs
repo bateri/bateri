@@ -30,12 +30,16 @@ use block2::RcBlock;
 use bt_core::Theme;
 use bt_shell_common::native_view::ax::{self, AxNode};
 use bt_shell_common::native_view::{
-    Accessible, AccessibleRole, Command, Field, FieldKind, FieldState, Fill, Id, Key, Mods,
-    Outline, PageHandle, Point, Role, Shortcut, Sort, Tip, ViewFiles, tone_linear,
+    Accessible, AccessibleRole, Command, Field, FieldKind, FieldLine, FieldState, Fill, Id, Key,
+    Mods, Outline, PageHandle, Point, Rect, Role, Shortcut, Sort, Tip, ViewFiles, ZOOM_TEXT,
+    tone_linear,
 };
 use objc2::rc::{Retained, Weak as WeakId};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
-use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
+    msg_send, sel,
+};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
     NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
@@ -50,9 +54,10 @@ use objc2_app_kit::{
     NSAccessibilitySortDirection, NSAccessibilityStaticTextRole, NSAccessibilitySubrole,
     NSAccessibilitySwitchSubrole, NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole,
     NSAccessibilityTableRole, NSAccessibilityTextAreaRole, NSAccessibilityValueChangedNotification,
-    NSApplication, NSAutoresizingMaskOptions, NSColor, NSControl, NSEvent, NSEventModifierFlags,
-    NSEventType, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder, NSSecureTextField,
-    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSControl, NSEvent,
+    NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder,
+    NSSecureTextField, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange,
@@ -125,7 +130,10 @@ define_class!(
             true
         }
 
-        /// Only the fields take a press; everywhere else the page under the host is hit.
+        /// Only the fields take a press; everywhere else the page under the host is hit. A field's
+        /// room is all its own to the pointer, and its text stands inside it (the element's
+        /// padding, the line in the middle of a taller room): a press in the room and outside
+        /// the field's frame is the field's too, and gives it the keyboard as one in its text does.
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
             // SAFETY: reading the superview; we are on the main thread.
@@ -135,26 +143,65 @@ define_class!(
             };
             let fields: Vec<_> = self.subviews().iter().collect();
             fields.into_iter().rev().find_map(|field| {
-                let frame = field.frame();
-                let inside = local.x >= frame.origin.x
-                    && local.y >= frame.origin.y
-                    && local.x < frame.origin.x + frame.size.width
-                    && local.y < frame.origin.y + frame.size.height;
-                if inside && !field.isHidden() {
-                    field.hitTest(local)
-                } else {
-                    None
+                if field.isHidden() {
+                    return None;
                 }
+                let frame = field.frame();
+                if inside(frame, local) {
+                    return field.hitTest(local);
+                }
+                // In the room and outside the text: the press is the nearest one in the frame, so
+                // that a field being typed in answers with its editor, as AppKit does for a press
+                // in it, and not with the field, which would end the editing and begin it again
+                // (the whole text selected, the page told the keyboard came a second time).
+                room_of(&field)
+                    .filter(|room| inside(*room, local))
+                    .and_then(|_| field.hitTest(nearest_in(frame, local)))
             })
         }
     }
 );
 
+/// Whether `point` is in `rect`.
+fn inside(rect: NSRect, point: NSPoint) -> bool {
+    point.x >= rect.origin.x
+        && point.y >= rect.origin.y
+        && point.x < rect.origin.x + rect.size.width
+        && point.y < rect.origin.y + rect.size.height
+}
+
+/// The point of `rect` nearest `point` (inside it, where `rect` is not empty).
+fn nearest_in(rect: NSRect, point: NSPoint) -> NSPoint {
+    let within = |at: f64, from: f64, across: f64| at.clamp(from, (from + across - 0.5).max(from));
+    NSPoint::new(
+        within(point.x, rect.origin.x, rect.size.width),
+        within(point.y, rect.origin.y, rect.size.height),
+    )
+}
+
+/// The room the page laid out for `view`, if it is one of the page's fields: all of it is the
+/// field's for the pointer, its text stands in a part of it (`place_field`).
+fn room_of(view: &NSView) -> Option<NSRect> {
+    let object: &AnyObject = view;
+    object
+        .downcast_ref::<PageTextField>()
+        .map(|field| field.ivars().room.get())
+        .or_else(|| {
+            object
+                .downcast_ref::<PageSecretField>()
+                .map(|field| field.ivars().room.get())
+        })
+}
+
 impl FieldsHost {
     fn new(pane: &TerminalPane) -> Retained<Self> {
-        let this = Self::alloc(pane.mtm()).set_ivars(());
+        Self::with_frame(pane.mtm(), pane.bounds())
+    }
+
+    fn with_frame(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
-        let host: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: pane.bounds()] };
+        let host: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         host.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -183,6 +230,9 @@ pub(crate) struct PageFields {
     theme: Cell<Theme>,
     family: Option<String>,
     zoom: Cell<f32>,
+    /// How tall one line of a field is at this zoom, in the page's points: said to the page's
+    /// measure ([`FieldLine`]), which lays out a field of rows with it.
+    line: FieldLine,
     fields: RefCell<Vec<PageField>>,
     /// The outline the fields were last put by: where they go again when the pane's height
     /// changes and the page's outline does not ([`PageFields::place_again`]).
@@ -216,15 +266,19 @@ impl PageFields {
         theme: Theme,
         family: Option<String>,
         zoom: f32,
+        line: FieldLine,
     ) -> Rc<Self> {
         let host = FieldsHost::new(pane);
         pane.add_page_fields_host(&host);
+        // Said before the page's first frame is laid out: it is made with the page.
+        line.set(line_of(pane.mtm(), family.as_deref(), zoom));
         Rc::new(Self {
             pane: WeakId::new(pane),
             host,
             theme: Cell::new(theme),
             family,
             zoom: Cell::new(zoom),
+            line,
             fields: RefCell::new(Vec::new()),
             outline: RefCell::new(None),
             accessible: RefCell::new(Vec::new()),
@@ -701,9 +755,18 @@ impl PageFields {
     }
 
     /// The page is drawn `zoom` times its own size now: the fields' text with it (they are put
-    /// where the next outline says).
+    /// where the next outline says), and the line the page lays its rows out with is measured again
+    /// (a face's line is not in proportion to its size). The pane's face does not change while a page
+    /// is up (the fields and the page's measure keep the one it was opened with), so the zoom is
+    /// all that moves it.
     pub(crate) fn set_zoom(&self, zoom: f32) {
-        self.zoom.set(zoom);
+        if self.zoom.replace(zoom) == zoom {
+            return;
+        }
+        if let Some(pane) = self.pane.load() {
+            self.line
+                .set(line_of(pane.mtm(), self.family.as_deref(), zoom));
+        }
     }
 
     /// The keyboard went into the field named `id`: the page is told, unless its own reply sent
@@ -895,6 +958,9 @@ pub(crate) struct PageTextFieldIvars {
     fields: RefCell<Weak<PageFields>>,
     /// The field is one line (a line or a secret, not lines): it takes no line break.
     one_line: Cell<bool>,
+    /// The room the page laid out for it, from the pane's top: the pointer's, whose text stands in
+    /// a part of it ([`FieldsHost`]'s hit test).
+    room: Cell<NSRect>,
 }
 
 /// Runs `body`, which is the part of a field's method that reaches the page or AppKit's views of
@@ -1791,9 +1857,6 @@ fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
 }
 
-/// The size of a field's text at the page's own size, points: the kit's text.
-const FIELD_TEXT: f64 = 12.5;
-
 /// A field of `kind` for `pane`: no border and no ground (the page draws the box), the
 /// terminal's face, the theme's ink. One line scrolls as it is typed and cuts a hint that does
 /// not fit with "…"; lines wrap; a secret shows no characters. The pane is its delegate
@@ -1805,14 +1868,50 @@ fn text_field(
     family: Option<&str>,
     fields: &Rc<PageFields>,
 ) -> FieldView {
-    let mtm = pane.mtm();
+    let view = field_of(
+        pane.mtm(),
+        kind,
+        Rc::downgrade(fields),
+        family,
+        f64::from(ZOOM_TEXT),
+    );
+    let field: &NSTextField = &view;
+    field.setTextColor(Some(&ink(theme, Role::Foreground)));
+    // SAFETY: the pane implements the text field's delegate methods it is given (`impl
+    // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
+    unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };
+    view
+}
+
+/// How tall one line of a field is at `zoom` times the kit's text ([`ZOOM_TEXT`], the page's own
+/// size), in the page's points: the line of the very cell a page's field is drawn with (a field made
+/// as a page's, which nobody sees), at the size the field is set in, over the zoom. The line of a
+/// face is not in proportion to its size (Monaco's 12.5 points has 16, its 25 has 31), so it is asked
+/// of AppKit at each zoom, not scaled.
+pub(crate) fn line_of(mtm: MainThreadMarker, family: Option<&str>, zoom: f32) -> f32 {
+    let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
+    let probe = field_of(mtm, FieldKind::Lines, Weak::new(), family, size);
+    (line_height(&probe) / f64::from(zoom)) as f32
+}
+
+/// A text field of `kind` as a page's are made, set in the terminal's face at `size` points: no
+/// border and no ground, the cell the way every field of a page has it. `fields` are told when the
+/// person clicks into it.
+fn field_of(
+    mtm: MainThreadMarker,
+    kind: FieldKind,
+    fields: Weak<PageFields>,
+    family: Option<&str>,
+    size: f64,
+) -> FieldView {
     let ivars = PageTextFieldIvars {
         id: Cell::new(None),
         selection: Cell::new(None),
         asked: Cell::new(None),
         given_by_press: Cell::new(None),
-        fields: RefCell::new(Rc::downgrade(fields)),
+        fields: RefCell::new(fields),
         one_line: Cell::new(kind != FieldKind::Lines),
+        room: Cell::new(NSRect::ZERO),
     };
     // SAFETY: `initWithFrame:` is NSTextField's designated initializer (NSSecureTextField's too),
     // and the ivars are set.
@@ -1831,7 +1930,7 @@ fn text_field(
     field.setEditable(true);
     field.setSelectable(true);
     field.setFocusRingType(NSFocusRingType::None);
-    field.setFont(Some(&face(family, FIELD_TEXT)));
+    field.setFont(Some(&face(family, size)));
     if let Some(cell) = field.cell() {
         // Not AppKit's single-line mode, for any kind: its cell draws the text at a baseline set
         // by the control's size whatever the face, and in most of the terminal's faces that stood
@@ -1859,16 +1958,12 @@ fn text_field(
     } else {
         NSLineBreakMode::ByTruncatingTail
     });
-    field.setTextColor(Some(&ink(theme, Role::Foreground)));
     // Pinned to the pane's top, where the page's rooms are measured from: the pane's own
     // coordinates grow upward, so a field with a fixed bottom margin would slide with the
     // pane's bottom edge while it is resized, until the next outline put it back.
     // The host is on the page's axis and covers the pane: a field keeps the frame its room gives
     // it, and AppKit moves nothing.
     field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
-    // SAFETY: the pane implements the text field's delegate methods it is given (`impl
-    // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
-    unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };
     view
 }
 
@@ -1880,17 +1975,25 @@ fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
 }
 
 /// Puts the field where the page's room for it is (the pane's points from its top), saying the
-/// page's hint while it is empty, and what it is to a screen reader. A line is as tall as its
-/// own line (its font's, which AppKit draws from the top of the frame), so it is that line that
-/// is centred in the room, not a taller frame with the text at its top; lines take the whole
-/// room. The text is as large as the page is drawn (`zoom`). The field stands in the host
-/// ([`FieldsHost`]), whose axis is the page's: its frame is its room, from the top.
-fn place_field(field: &NSTextField, place: &Field, zoom: f32, family: Option<&str>) {
+/// page's hint while it is empty, and what it is to a screen reader. Its text stands in the box the
+/// page says (`Field::text`: the room less the element's padding and border), not in all of the
+/// room, which is the pointer's ([`FieldsHost`]): lines take that box, from its top; a line is as
+/// tall as its own line (its font's, which AppKit draws from the top of the frame), so it is that
+/// line that is centred in the box, not a taller frame with the text at its top. The text is as
+/// large as the page is drawn (`zoom`). The field stands in the host ([`FieldsHost`]), whose axis
+/// is the page's: its frame is in the room, from the top.
+fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>) {
+    let room = place.rect;
+    field.ivars().room.set(NSRect::new(
+        NSPoint::new(f64::from(room.x), f64::from(room.y)),
+        NSSize::new(f64::from(room.w), f64::from(room.h)),
+    ));
+    let field: &NSTextField = field;
     // SAFETY: reading the superview; we are on the main thread.
     if unsafe { field.superview() }.is_none() {
         return;
     }
-    let size = FIELD_TEXT * f64::from(zoom);
+    let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
     if field
         .font()
         .is_none_or(|font| (font.pointSize() - size).abs() > 0.01)
@@ -1908,18 +2011,20 @@ fn place_field(field: &NSTextField, place: &Field, zoom: f32, family: Option<&st
     if let Some(cell) = field.cell() {
         cell.setAccessibilityLabel(Some(&NSString::from_str(said)));
     }
-    let room = place.rect;
+    let text = place.text;
+    // A box shorter than a line (the padding is more than the room has over a line) still holds
+    // the line, as the room does: the frame goes past the box, not the text out of the frame.
+    let line = line_height(field).min(f64::from(room.h));
     let (top, height) = if place.kind == FieldKind::Lines {
-        (f64::from(room.y), f64::from(room.h))
+        (f64::from(text.y), f64::from(text.h).max(line))
     } else {
-        let height = line_height(field).min(f64::from(room.h));
-        let middle = f64::from(room.y + room.h / 2.0);
-        (text_top(field, middle, height), height)
+        let middle = f64::from(text.y + text.h / 2.0);
+        (text_top(field, middle, line), line)
     };
     // The host's y is the page's, from the top.
     let frame = NSRect::new(
-        NSPoint::new(f64::from(room.x), top),
-        NSSize::new(f64::from(room.w), height),
+        NSPoint::new(f64::from(text.x), top),
+        NSSize::new(f64::from(text.w), height),
     );
     if field.frame() != frame {
         field.setFrame(frame);
@@ -1929,7 +2034,7 @@ fn place_field(field: &NSTextField, place: &Field, zoom: f32, family: Option<&st
     field.setHidden(place.covered);
 }
 
-/// Where the frame of a one-line `field` stands so that its capitals are centred on the room's
+/// Where the frame of a one-line `field` stands so that its capitals are centred on the text box's
 /// middle, as the page's own words are on theirs: AppKit's baseline is asked of the field
 /// (`firstBaselineOffsetFromTop`, not the font's ascent, which AppKit rounds up), and the frame goes
 /// where that baseline is half a capital below the middle. Centring the frame instead put the text a
@@ -2148,6 +2253,281 @@ fn event_key(characters: Option<&str>, ignoring: Option<&str>, mods: Mods) -> Op
         other => other.and_then(key_of),
     };
     key.or_else(|| mods.control.then(|| ignoring.and_then(key_of)).flatten())
+}
+
+/// What is wrong with how a page's fields stand in their rooms, as AppKit lays them out (the page
+/// itself is not here: the rooms are what the kit says of a one-line field, a box of lines and the
+/// padding of each): the line of the face the page's fields are set in, in the page's points at a
+/// zoom; the lines a box of rows holds without cutting the last; a one-line field's capitals in the
+/// middle of its box; and a press in the room, outside the field's frame, which is the field's.
+/// Only for `tests/page_field.rs`: a field is AppKit's and wants the main thread.
+pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut said = |words: String| problems.push(words);
+    let room_of_text = |text: &Rect, above: f32, below: f32| {
+        Rect::new(
+            text.x - 8.0,
+            text.y - above,
+            text.w + 16.0,
+            text.h + above + below,
+        )
+    };
+    // The line of a face is asked of AppKit, not scaled: Monaco has 16 points to a line at the kit's
+    // 12.5 and 31 at twice that (15.5 of the page's at zoom 2); and a field of any kind has the same.
+    for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 15.5)] {
+        let got = line_of(mtm, Some("Monaco"), zoom);
+        if (got - line).abs() > 0.01 {
+            said(format!(
+                "Monaco at zoom {zoom}: a line is {got} points, not {line}"
+            ));
+        }
+        let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
+        for kind in [FieldKind::Line, FieldKind::Lines, FieldKind::Secret] {
+            let field = field_of(mtm, kind, Weak::new(), Some("Monaco"), size);
+            let own = (line_height(&field) / f64::from(zoom)) as f32;
+            if (own - got).abs() > 0.01 {
+                said(format!(
+                    "Monaco at zoom {zoom}: a {kind:?} field has a line of {own}, the page is told {got}"
+                ));
+            }
+        }
+    }
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    let field = |kind: FieldKind, room: Rect, text: Rect, covered: bool| Field {
+        id,
+        kind,
+        rect: room,
+        text,
+        hint: None,
+        label: None,
+        covered,
+    };
+    // Three rows at padding 6, as the kit lays them out from the line the page was told: the box
+    // is three lines and the room is that and the padding. Each text of up to three rows is held
+    // whole in it (the cell's own measure of the text at the box's width), and one of four is not,
+    // which is what shows the measure sees a cut.
+    for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 31.0)] {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let pad = 6.0 * zoom;
+        let text = Rect::new(20.0, 30.0 + pad, 200.0, 3.0 * line);
+        let room = room_of_text(&text, pad, pad);
+        place_field(
+            &view,
+            &field(FieldKind::Lines, room, text, false),
+            zoom,
+            Some("Monaco"),
+        );
+        let frame = view.frame();
+        if frame.origin.x != 20.0
+            || frame.origin.y != f64::from(text.y)
+            || frame.size.width != 200.0
+            || frame.size.height != f64::from(3.0 * line)
+        {
+            said(format!(
+                "rows = 3 at zoom {zoom}: the field stands at {frame:?}, not in its text box {text:?}"
+            ));
+        }
+        let cell = view.cell().expect("a field has a cell");
+        let held = |words: &str, across: f64| {
+            view.setStringValue(&NSString::from_str(words));
+            cell.cellSizeForBounds(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(across, 1000.0),
+            ))
+            .height
+        };
+        for words in [
+            "one\ntwo\nthree",
+            "one\ntwo",
+            "a long line that breaks at words, and so is three",
+        ] {
+            let across = if words.starts_with("a long") {
+                160.0 * f64::from(zoom)
+            } else {
+                200.0
+            };
+            let needs = held(words, across);
+            if needs > f64::from(3.0 * line) + 0.01 {
+                said(format!(
+                    "rows = 3 at zoom {zoom}: {words:?} needs {needs} points of the box's {}",
+                    3.0 * line
+                ));
+            }
+            // The long one breaks at words into three rows, not two: it fills the box.
+            if words.starts_with("a long") && needs <= f64::from(2.0 * line) + 0.01 {
+                said(format!(
+                    "rows = 3 at zoom {zoom}: the long line breaks into {needs} points, not three rows"
+                ));
+            }
+        }
+        let four = held("one\ntwo\nthree\nfour", 200.0);
+        if four <= f64::from(3.0 * line) {
+            said(format!(
+                "rows = 3 at zoom {zoom}: four lines need {four} points, the measure does not see a cut"
+            ));
+        }
+    }
+    // One row with 4 above and 10 below (the room's middle is not the box's), and a field of one
+    // line in the same box: the capitals' middle is the box's middle, ±0.5 point, across the box's
+    // width and not the room's.
+    for kind in [FieldKind::Line, FieldKind::Lines, FieldKind::Secret] {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 16.0);
+        place_field(
+            &view,
+            &field(kind, room_of_text(&text, 4.0, 10.0), text, false),
+            1.0,
+            Some("Monaco"),
+        );
+        let frame = view.frame();
+        let font = view.font().expect("a font");
+        // SAFETY: NSView's `firstBaselineOffsetFromTop`, which takes nothing and gives a CGFloat.
+        let baseline: f64 = unsafe { msg_send![&*view, firstBaselineOffsetFromTop] };
+        let middle = frame.origin.y + baseline - font.capHeight() / 2.0;
+        let aimed = f64::from(text.y + text.h / 2.0);
+        if (middle - aimed).abs() > 0.5 {
+            said(format!(
+                "rows = 1 at padding 4 and 10, a {kind:?}: the capitals' middle is {middle}, the box's {aimed}"
+            ));
+        }
+        if frame.origin.x != 20.0 || frame.size.width != 200.0 {
+            said(format!(
+                "a {kind:?}: the field stands across {frame:?}, not the box's {text:?}"
+            ));
+        }
+    }
+    // A box shorter than a line (padding 6 in a room of 24 leaves 12) still holds the line: the
+    // frame is a line tall, in the room, and its capitals stand in the box's middle.
+    for kind in [FieldKind::Line, FieldKind::Lines] {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 12.0);
+        let room = Rect::new(12.0, 30.0, 216.0, 24.0);
+        place_field(&view, &field(kind, room, text, false), 1.0, Some("Monaco"));
+        let frame = view.frame();
+        if frame.size.height != 16.0 {
+            said(format!(
+                "a {kind:?} in a box of 12 points is {} points tall, not its line of 16",
+                frame.size.height
+            ));
+        }
+    }
+    // A press in the room is the field's wherever the text is: in the padding above and below, and
+    // beside it; a field the page covers takes none, and the pane's is where no room is.
+    for (kind, text) in [
+        (FieldKind::Lines, Rect::new(20.0, 36.0, 200.0, 48.0)),
+        (FieldKind::Line, Rect::new(20.0, 36.0, 200.0, 16.0)),
+        (FieldKind::Secret, Rect::new(20.0, 36.0, 200.0, 16.0)),
+    ] {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let room = room_of_text(&text, 6.0, 6.0);
+        place_field(&view, &field(kind, room, text, false), 1.0, Some("Monaco"));
+        // `isDescendantOf` is true of the view itself.
+        let mine = |at: NSPoint| {
+            host.hitTest(at)
+                .is_some_and(|hit| hit.isDescendantOf(&view))
+        };
+        let (left, top, right, bottom) = (
+            f64::from(room.x),
+            f64::from(room.y),
+            f64::from(room.x + room.w),
+            f64::from(room.y + room.h),
+        );
+        let across = (left + right) / 2.0;
+        for (what, at) in [
+            ("the padding above", NSPoint::new(across, top + 2.0)),
+            ("the padding below", NSPoint::new(across, bottom - 2.0)),
+            (
+                "the padding beside",
+                NSPoint::new(left + 2.0, (top + bottom) / 2.0),
+            ),
+            (
+                "the text",
+                NSPoint::new(across, f64::from(text.y + text.h / 2.0)),
+            ),
+        ] {
+            if !mine(at) {
+                said(format!(
+                    "a {kind:?}: a press in {what} ({at:?}) is not the field's"
+                ));
+            }
+        }
+        for (what, at) in [
+            ("above the room", NSPoint::new(across, top - 2.0)),
+            ("below the room", NSPoint::new(across, bottom + 2.0)),
+            (
+                "left of the room",
+                NSPoint::new(left - 2.0, (top + bottom) / 2.0),
+            ),
+        ] {
+            if host.hitTest(at).is_some() {
+                said(format!(
+                    "a {kind:?}: a press {what} ({at:?}) is taken by the field"
+                ));
+            }
+        }
+        // A field being typed in answers a press in its padding with its editor, as it does for
+        // one in its text: the field itself would end the editing and begin it again, with the
+        // whole text selected. It has an editor only in a window, where it can be the keyboard's.
+        // SAFETY: with `defer` false the window exists at once; the `Retained` is its owner.
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                host_frame,
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: only changes who owns the window; the `Retained` above does.
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setContentView(Some(&host));
+        if window.makeFirstResponder(Some(&view)) && view.currentEditor().is_some() {
+            let field_itself: &NSView = &view;
+            for at in [
+                NSPoint::new(across, top + 2.0),
+                NSPoint::new(across, bottom - 2.0),
+                NSPoint::new(left + 2.0, (top + bottom) / 2.0),
+            ] {
+                // `hitTest:` is asked in the superview's points, which the window's has turned.
+                // SAFETY: reading the superview, on the main thread.
+                let at = match unsafe { host.superview() } {
+                    Some(parent) => parent.convertPoint_fromView(at, Some(&host)),
+                    None => at,
+                };
+                match host.hitTest(at) {
+                    Some(hit) if std::ptr::eq(&*hit, field_itself) => said(format!(
+                        "a {kind:?} being typed in: a press in its padding ({at:?}) is the field, which ends the typing, not its editor"
+                    )),
+                    Some(_) => {}
+                    None => said(format!(
+                        "a {kind:?} being typed in: a press in its padding ({at:?}) is not the field's"
+                    )),
+                }
+            }
+            window.makeFirstResponder(None);
+        } else {
+            said(format!(
+                "a {kind:?} took no keyboard in a window of its own: its editor is not tried"
+            ));
+        }
+        window.setContentView(None);
+        place_field(&view, &field(kind, room, text, true), 1.0, Some("Monaco"));
+        if host.hitTest(NSPoint::new(across, top + 2.0)).is_some() {
+            said(format!(
+                "a {kind:?}: a press in the room of a field the page covers is taken by it"
+            ));
+        }
+    }
+    problems
 }
 
 #[cfg(test)]

@@ -1347,6 +1347,9 @@ fn run(dir: &Path) {
     section("a field's text on its baseline", &mut failures, || {
         field_text_on_its_baseline(mtm, &window, frame_rect, dir);
     });
+    section("a field of rows stands in its box", &mut failures, || {
+        field_rows_stand_in_their_boxes(mtm, &window, frame_rect, dir);
+    });
     section(
         "a screen reader reads a page as the pane's group",
         &mut failures,
@@ -3613,6 +3616,118 @@ fn field_text_on_its_baseline(
         assert!(
             worst <= 0.5,
             "{family} at {size}: a field's capitals stand off their middle: {offs:?}"
+        );
+        program.bye(&token);
+        until("the view to go", || !covered(&pane));
+        pane.close();
+    }
+    window.orderOut(None);
+}
+
+/// A page with a box of three rows and one of one row, each in a room with six points of padding
+/// above and below, at a width of 300.
+const ROWS_PAGE: &str = r#"return {
+    render = function()
+        return pencere.div():col():gap(16):p(20):w(420):h(300)
+            :child(pencere.div():text_field("notes", "lines", { rows = 3 }):py(6):w(300):child(pencere.text("NOTES")))
+            :child(pencere.div():text_field("one", "lines", { rows = 1 }):py(6):w(300):child(pencere.text("ONE")))
+    end,
+}"#;
+
+/// A field of `rows` rows is as tall as that many lines of the face AppKit draws it in, and no
+/// more, at the terminal's size and at twice it: AppKit's own line, told to the page's measure
+/// (`FieldLine`), laid out by the kit and put in the field's box by the pane, so that the last row
+/// is not cut and a row of its text is not half a point off. The room is the box and the padding;
+/// the second field stands where the first's room ends and the gap goes on.
+fn field_rows_stand_in_their_boxes(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    window.setLevel(objc2_app_kit::NSFloatingWindowLevel);
+    window.setFrameOrigin(NSPoint::new(40.0, 120.0));
+    window.orderFrontRegardless();
+    // Monaco has 16 points to a line at 12.5 (the kit's text, zoom 1) and 31 at 25 (zoom 2).
+    for (size, line, id) in [(12.5, 16.0, 70), (25.0, 31.0, 71)] {
+        let mut settings = Settings::default();
+        settings.font.family = Some("Monaco".to_owned());
+        settings.font.size = size;
+        let (pane, mut program) = open_hosted_pane(
+            mtm,
+            window,
+            frame_rect,
+            &dir.join(format!("rows-{id}")),
+            PANE + id,
+            Rc::new(Quiet::default()),
+            settings,
+        );
+        pane.set_visibility(true);
+        program.say(&format!("{ESC}[?1049h"));
+        let token = program.hello_kind("lua");
+        program.open_script(&token, ROWS_PAGE);
+        program.supply(&[("page.lua", "text/x-lua", ROWS_PAGE.as_bytes())]);
+        let fields = || {
+            let mut found: Vec<Retained<NSTextField>> = pane
+                .subviews()
+                .iter()
+                .flat_map(descendants)
+                .filter_map(|view| view.downcast::<NSTextField>().ok())
+                .filter(|field| field.isEditable())
+                .collect();
+            found.sort_by(|a, b| a.frame().origin.y.total_cmp(&b.frame().origin.y));
+            found
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fields().len() < 2 && Instant::now() < deadline {
+            spin(0.05);
+        }
+        let found = fields();
+        if found.len() < 2 {
+            eprintln!(
+                "pencere: the page was not drawn (window occlusion {:?}): its rows are not measured",
+                window.occlusionState()
+            );
+            program.bye(&token);
+            pane.close();
+            continue;
+        }
+        spin(0.2);
+        let found = fields();
+        let (notes, one) = (found[0].frame(), found[1].frame());
+        let zoom = size / 12.5;
+        let (pad, gap, margin) = (6.0 * zoom, 16.0 * zoom, 20.0 * zoom);
+        eprintln!("pencere: Monaco at {size}: three rows {notes:?}, one row {one:?}");
+        assert!(
+            (notes.size.height - 3.0 * line).abs() < 0.01 && (one.size.height - line).abs() < 0.01,
+            "Monaco at {size}: three rows are {} points and one row {}, not {} and {}",
+            notes.size.height,
+            one.size.height,
+            3.0 * line,
+            line
+        );
+        assert!(
+            (notes.origin.y - (margin + pad)).abs() < 0.51,
+            "Monaco at {size}: the box starts {} points down, past the padding at {}",
+            notes.origin.y,
+            margin + pad
+        );
+        assert!(
+            ((one.origin.y - notes.origin.y) - (3.0 * line + 2.0 * pad + gap)).abs() < 0.51,
+            "Monaco at {size}: the second field is {} points below the first, not a room and a gap ({})",
+            one.origin.y - notes.origin.y,
+            3.0 * line + 2.0 * pad + gap
+        );
+        // The text is not cut: three lines of it fit the box AppKit made.
+        found[0].setStringValue(&NSString::from_str("one\ntwo\nthree"));
+        let cell = found[0].cell().expect("a field has a cell");
+        let needs = cell
+            .cellSizeForBounds(NSRect::new(NSPoint::new(0.0, 0.0), notes.size))
+            .height;
+        assert!(
+            needs <= notes.size.height + 0.01,
+            "Monaco at {size}: three lines need {needs} points of the box's {}",
+            notes.size.height
         );
         program.bye(&token);
         until("the view to go", || !covered(&pane));

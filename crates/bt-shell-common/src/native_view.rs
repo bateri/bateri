@@ -57,8 +57,8 @@ pub use files::{
 pub use inspector::{Asked, Inspect, Responder, Subject, Target, inspect, inspector_page, tell};
 pub use look::{LookSlot, caret_width_pt, terminal_look};
 pub use page::{
-    Contain, MenuUp, Opening, PageEditors, PageHandle, ShownMenu, contain_with, contained,
-    containers_demo, script_page,
+    Contain, FieldLine, MenuUp, Opening, PageEditors, PageHandle, ShownMenu, contain_with,
+    contained, containers_demo, script_page,
 };
 pub use pencere_drive::{
     CarryOut, Drained, Field, Held, Host, Outline, Painted, Placement, Reading, ReadingInput,

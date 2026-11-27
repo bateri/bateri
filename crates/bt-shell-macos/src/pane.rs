@@ -5032,7 +5032,8 @@ impl TerminalPane {
         // A page is its own: what the one before it said of its text is not this one's.
         self.ivars().page_text_size.set(0);
         let zoom = self.page_zoom();
-        let fields = crate::native_page::PageFields::new(self, *theme, family, zoom);
+        let fields =
+            crate::native_page::PageFields::new(self, *theme, family, zoom, handle.field_line());
         // What AppKit says first, then the page borrowed: nothing of the pane runs while it is.
         let (scrolling, active) = (
             self.page_scrolling(),

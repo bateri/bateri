@@ -308,6 +308,13 @@ harness = false
 name = "hotkey_row"
 harness = false
 
+# The text fields a page's fields are, in their rooms: the line of the face in the page's points, the
+# rows a box holds without cutting the last, the capitals of a box's middle, a press in the padding.
+# Its own `main`, for the same reason as `embed`'s; no window and no pane.
+[[test]]
+name = "page_field"
+harness = false
+
 # Every page of the settings window laid out and measured: rows inside their group's box and
 # one under another, text beside its control. Its own `main`, for the same reason as `embed`'s;
 # with `BT_SETTINGS_SHOTS=<dir>` it also writes each page there as a PNG.
