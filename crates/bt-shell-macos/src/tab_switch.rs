@@ -1232,7 +1232,7 @@ impl TabBar {
             .max(LIST_MARGIN);
         let top = bar.y + button.origin.y + button.size.height + LIST_DROP;
         let scrim = &iv.scrim;
-        scrim.setFrame(root.bounds());
+        scrim.setFrame(crate::window::room_of(&root));
         scrim.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,

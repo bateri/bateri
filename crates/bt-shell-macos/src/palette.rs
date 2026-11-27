@@ -2095,7 +2095,7 @@ fn open(window: &TerminalWindow, start: Option<Scope>) {
         let this = PaletteScrim::alloc(mtm).set_ivars(ScrimIvars { card: card.clone() });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<PaletteScrim> =
-            unsafe { msg_send![super(this), initWithFrame: root.bounds()] };
+            unsafe { msg_send![super(this), initWithFrame: crate::window::room_of(root)] };
         this
     };
     scrim.addSubview(&card);

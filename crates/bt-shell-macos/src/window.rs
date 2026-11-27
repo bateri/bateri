@@ -95,6 +95,7 @@ use block2::RcBlock;
 use bt_core::{ConfirmClose, ContentEdge, PointerShape, Settings, TabPosition, Theme};
 use bt_gpu::GpuError;
 use bt_shell_common::floating::Layers;
+use bt_shell_common::full_screen;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -107,15 +108,16 @@ use objc2_app_kit::{
     NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSCursor, NSEvent, NSFloatingWindowLevel, NSFont, NSFontAttributeName,
     NSMenuItem, NSModalResponse, NSModalResponseCancel, NSStringDrawing, NSTitlebarSeparatorStyle,
-    NSToolbar, NSView, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode,
-    NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSToolbar, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowDidMoveNotification,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSAttributedStringKey, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSObject,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
-    ns_string,
+    NSAttributedStringKey, NSDictionary, NSKeyValueObservingOptions, NSNotification,
+    NSNotificationCenter, NSObject, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCATransitionFade};
 
@@ -695,6 +697,10 @@ pub(crate) struct WindowIvars {
     /// in full screen, where AppKit moves it into a window of its own over
     /// the bar ([`TerminalWindow`]'s full-screen hooks).
     toolbar: Retained<NSToolbar>,
+    /// In full screen, the system's window the traffic lights' strip is in (the "host"), whose
+    /// moves the content follows: set when the window has entered full screen and let go at its
+    /// exit or close ([`TerminalWindow::watch_strip`]).
+    strip: RefCell<Option<Retained<NSWindow>>>,
     /// The tabs' order and the selected one — the pure model
     /// (`tabs::Tabs`); [`WindowIvars::tabs`] holds the objects. Never empty
     /// while the window lives: closing the last tab closes the window.
@@ -932,10 +938,22 @@ define_class!(
         fn window_did_enter_full_screen(&self, _n: &NSNotification) {
             self.ivars().root.lay_out();
             self.refresh_corners();
+            // After the row is measured: the strip hides, slides down under the pointer at the
+            // top of the screen and goes back, and the content goes with it
+            // ([`TerminalWindow::watch_strip`]).
+            self.watch_strip();
+        }
+
+        /// The strip is let go and the content stands where it did, before the window begins
+        /// to leave: the way out is animated, and nothing of it should find the content moved.
+        #[unsafe(method(windowWillExitFullScreen:))]
+        fn window_will_exit_full_screen(&self, _n: &NSNotification) {
+            self.unwatch_strip();
         }
 
         #[unsafe(method(windowDidExitFullScreen:))]
         fn window_did_exit_full_screen(&self, _n: &NSNotification) {
+            self.unwatch_strip();
             self.ivars().toolbar.setVisible(true);
             self.ivars().root.lay_out();
             self.refresh_corners();
@@ -979,6 +997,8 @@ define_class!(
         /// on the main thread.
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _n: &NSNotification) {
+            // A window closed in full screen may not hear its exit.
+            self.unwatch_strip();
             // Closing the panes also removes the frame observers and drops the
             // panes from `AppDelegate::pane`'s lookup
             // (`TerminalPane::begin_close`). When the user closed the window the
@@ -1033,6 +1053,14 @@ define_class!(
     // own tab selectors before the chain reaches its delegate, so a shared
     // name would never arrive here.
     impl TerminalWindow {
+        /// The strip of full screen moved — one step of its slide, some twenty each way
+        /// (`NSWindowDidMoveNotification` of its window, [`TerminalWindow::watch_strip`]): the
+        /// content goes where it is. Only the root view's origin moves; nothing is laid out and no
+        /// pane's frame changes, so no program is resized.
+        #[unsafe(method(stripMoved:))]
+        fn strip_moved(&self, _n: &NSNotification) {
+            self.follow_strip();
+        }
 
         /// The window's first responder changed (`observe_focus`): if the
         /// keyboard moved to another pane the focus is that one's.
@@ -1846,6 +1874,14 @@ pub(crate) fn tabs_at_side(mtm: MainThreadMarker) -> bool {
     app::delegate(mtm).is_some_and(|app| app.settings().tab_position == TabPosition::Side)
 }
 
+/// The whole of `view` in its own space: its size from the origin, where what fills it is put.
+/// Not `bounds()`: the window's root view carries the strip's shift in its bounds' origin
+/// ([`RootView::set_shift`]), and what is placed by it would stand that much too high, and stay
+/// there when the shift ends.
+pub(crate) fn room_of(view: &NSView) -> NSRect {
+    NSRect::new(NSPoint::ZERO, view.bounds().size)
+}
+
 define_class!(
     // SAFETY: NSView is designed for subclassing; RootView implements no
     // `Drop` and is born with `initWithFrame:`.
@@ -1990,14 +2026,44 @@ impl RootView {
         self.ivars().shade.hold(secs);
     }
 
+    /// How far the content is pushed down by full screen's strip: the view's origin is above its
+    /// top by this much, and everything in it — what is drawn and where a press lands — is this
+    /// much lower, the last of it out under the window's bottom edge. Nothing in it changes
+    /// size or is laid out again: the view's frame and its subviews' are what they were.
+    pub(crate) fn shift(&self) -> f64 {
+        -self.bounds().origin.y
+    }
+
+    /// Pushes the content down by `by` (flipped space: the origin goes up), or back to its
+    /// place at nothing; whether it moved. Whole of a step's work; asked again with the same,
+    /// it does nothing.
+    pub(crate) fn set_shift(&self, by: f64) -> bool {
+        let by = by.max(0.0);
+        let moved = (self.shift() - by).abs() >= 0.01;
+        if moved {
+            self.setBoundsOrigin(NSPoint::new(0.0, -by));
+        }
+        moved
+    }
+
+    /// The whole of the view in its own space, the shift or not ([`room_of`]).
+    pub(crate) fn room(&self) -> NSRect {
+        room_of(self)
+    }
+
     /// The title row's height: the content layout rect's top inset — what
     /// the compact toolbar leaves above the content. Kept when the window
-    /// reports none (full screen with the toolbar hidden). Only outside a
-    /// frame change, where the rect is settled ([`RootIvars`]).
+    /// reports none (full screen with the toolbar hidden), and kept while the
+    /// strip pushes the content down: what the window reports then is the
+    /// system's to change, and a row that moved would resize every pane.
+    /// Only outside a frame change, where the rect is settled ([`RootIvars`]).
     pub(crate) fn title_row(&self) -> f64 {
         let Some(window) = self.window() else {
             return self.ivars().row.get();
         };
+        if self.shift() > 0.0 {
+            return self.ivars().row.get();
+        }
         let layout = window.contentLayoutRect();
         let inset = self.frame().size.height - (layout.origin.y + layout.size.height);
         if inset > 0.0 {
@@ -2101,7 +2167,7 @@ impl RootView {
     /// title row over the content — the row's band over them is claimed, so a press there is the
     /// pane's, and the column's last [`EDGE_GRIP`] is its resizing edge.
     fn place(&self, row: f64) {
-        let bounds = self.bounds();
+        let bounds = self.room();
         let row = row.min(bounds.size.height);
         // The whole view, the title row too: this view places its subviews
         // itself (`resizeSubviewsWithOldSize:`), so no autoresizing reaches it.
@@ -2199,7 +2265,7 @@ impl RootView {
         if let Some(view) = self.overview() {
             let content = self.content();
             view.refit(
-                self.bounds(),
+                self.room(),
                 content.size.height / content.size.width.max(1.0),
                 self.title_row(),
             );
@@ -2526,6 +2592,7 @@ impl TerminalWindow {
             window: window.clone(),
             root,
             toolbar,
+            strip: RefCell::new(None),
             order: RefCell::new(Tabs::new(tab.id())),
             groups: RefCell::new(Groups::new()),
             tabs: RefCell::new(vec![tab]),
@@ -2909,6 +2976,96 @@ impl TerminalWindow {
     /// distributions (scale, resigning key, the close question) reach them all.
     pub(crate) fn panes(&self) -> Vec<Retained<TerminalPane>> {
         self.tabs().iter().flat_map(|tab| tab.panes()).collect()
+    }
+
+    /// Full screen's strip is heard from the moment the window is in it: the content follows
+    /// where the system puts the strip ([`full_screen::strip_offset`]) so that it is seen below
+    /// it and not under it.
+    ///
+    /// The strip is a window of the system's own, the one the zoom button belongs to in full
+    /// screen (measured on macOS 26.4: the toolbar's full-screen window). Its frame moves with
+    /// every step of the slide and each step is a `NSWindowDidMoveNotification`, so nothing is
+    /// polled. One observer to a window: this removes the last one first
+    /// ([`TerminalWindow::unwatch_strip`]). Called at `windowDidEnterFullScreen:`, where the
+    /// offset is also asked once: a menu bar kept shown leaves the strip revealed and no move
+    /// ever comes. Without such a window (the zoom button is the window's own) nothing is
+    /// observed and the content stays where it is.
+    fn watch_strip(&self) {
+        self.unwatch_strip();
+        let window = &self.ivars().window;
+        let host = window
+            .standardWindowButton(NSWindowButton::ZoomButton)
+            .and_then(|button| button.window())
+            .filter(|host| !std::ptr::eq(Retained::as_ptr(host), Retained::as_ptr(window)));
+        let Some(host) = host else {
+            return;
+        };
+        // SAFETY: the selector is defined on this class and takes a single `&NSNotification`;
+        // the name is a constant AppKit exposes and the object is the strip's window, which
+        // this keeps (`WindowIvars::strip`) for as long as the observer is registered.
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                self,
+                sel!(stripMoved:),
+                Some(NSWindowDidMoveNotification),
+                Some(&host),
+            );
+        }
+        self.ivars().strip.replace(Some(host));
+        self.follow_strip();
+    }
+
+    /// The strip is let go — at the exit from full screen and at the close — and the content
+    /// stands where it did. The observer is removed by its object: the window's own delegate
+    /// hears this notification of this window, which is not this one's to remove.
+    fn unwatch_strip(&self) {
+        if let Some(host) = self.ivars().strip.take() {
+            // SAFETY: the registration was made in `watch_strip` for this observer, name and
+            // object.
+            unsafe {
+                NSNotificationCenter::defaultCenter().removeObserver_name_object(
+                    self,
+                    Some(NSWindowDidMoveNotification),
+                    Some(&host),
+                );
+            }
+        }
+        self.shift_content(0.0);
+    }
+
+    /// Pushes the content down by `by` ([`RootView::set_shift`]). A question up in the tab on
+    /// screen sits on a window of its own that does not follow by itself
+    /// (`sheets::fit_owner`, as `windowDidMove:` does).
+    fn shift_content(&self, by: f64) {
+        if self.ivars().root.set_shift(by)
+            && let Some(tab) = self.try_selected_tab()
+        {
+            sheets::fit_owner(tab.container());
+        }
+    }
+
+    /// Puts the content where the strip is: its frame read now, on the screen it is on.
+    /// The offset is rounded to a device pixel, so the panes' layers never sit on a fraction
+    /// and nothing is resampled during the slide.
+    fn follow_strip(&self) {
+        let iv = self.ivars();
+        let Some(host) = iv.strip.borrow().clone() else {
+            return;
+        };
+        let Some(screen) = host.screen().or_else(|| iv.window.screen()) else {
+            return;
+        };
+        let (all, usable, strip) = (screen.frame(), screen.visibleFrame(), host.frame());
+        let offset = full_screen::strip_offset(
+            all.origin.y + all.size.height,
+            usable.origin.y + usable.size.height,
+            strip.size.height,
+            strip.origin.y,
+        );
+        self.shift_content(full_screen::on_pixels(
+            offset,
+            iv.window.backingScaleFactor(),
+        ));
     }
 
     /// Watches the window's first responder (KVO; compatible since macOS
@@ -6364,5 +6521,129 @@ mod tests {
         let offers = code.matches(".offering_leave(").count();
         assert_eq!(asks, offers, "{asks} questions are asked, {offers} offer");
         assert!(asks >= 5, "the window, tab, tabs and pane paths ask");
+    }
+
+    /// The text of the function that begins with `signature`, to the first line that is only
+    /// `end` — the closing brace at the function's own indent. The source before the tests, so
+    /// that what the tests say is not what they find.
+    fn body_of<'a>(code: &'a str, signature: &str, end: &str) -> &'a str {
+        let start = code
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is in this file"));
+        let rest = &code[start..];
+        &rest[..rest
+            .find(&format!("\n{end}\n"))
+            .unwrap_or_else(|| panic!("{signature} ends"))]
+    }
+
+    /// Full screen's strip is heard from the hook that says the window is in full screen, and
+    /// let go of on the way out, at the exit and at the close — one observer to a window, and no
+    /// leak of the strip's window. A source scan: only AppKit knows what a move of the system's
+    /// own window does, and no test may drive it.
+    #[test]
+    fn the_strip_is_heard_in_full_screen_and_let_go_on_the_way_out() {
+        let (code, _) = include_str!("window.rs")
+            .split_once("#[cfg(test)]")
+            .expect("the tests are at the end");
+        let hook = |signature: &str| body_of(code, signature, "        }");
+        let method = |signature: &str| body_of(code, signature, "    }");
+
+        // In: after the row is measured, so what is revealed already is found at its place.
+        let enter = hook("fn window_did_enter_full_screen(");
+        let measured = enter.find("lay_out()").expect("the row is measured");
+        let watched = enter
+            .find("self.watch_strip()")
+            .expect("the strip is watched");
+        assert!(
+            measured < watched,
+            "the strip is watched once the row is measured"
+        );
+
+        // Out: before the window begins to leave, again where it is left, and at the close.
+        assert!(hook("fn window_will_exit_full_screen(").contains("self.unwatch_strip()"));
+        let left = hook("fn window_did_exit_full_screen(");
+        let freed = left
+            .find("self.unwatch_strip()")
+            .expect("let go at the exit");
+        assert!(
+            freed < left.find("lay_out()").expect("the row is measured"),
+            "the content is back before the row is measured"
+        );
+        assert!(hook("fn window_will_close(").contains("self.unwatch_strip()"));
+
+        // The observer: one of this window's strip's moves, and the one removal that matches it.
+        let watch = method("fn watch_strip(");
+        assert!(
+            watch
+                .trim_start_matches(|c: char| c != '{')
+                .contains("{\n        self.unwatch_strip();"),
+            "an observer is removed before another is added"
+        );
+        assert!(watch.contains("addObserver_selector_name_object("));
+        assert!(watch.contains("NSWindowDidMoveNotification"));
+        assert!(watch.contains("sel!(stripMoved:)"));
+        assert_eq!(code.matches("sel!(stripMoved:)").count(), 1);
+        assert_eq!(code.matches("addObserver_selector_name_object(").count(), 1);
+        let unwatch = method("fn unwatch_strip(");
+        assert!(unwatch.contains("removeObserver_name_object("));
+        assert!(
+            unwatch.contains("Some(&host)"),
+            "removed by the strip's window, not by name"
+        );
+        assert!(
+            unwatch.contains("self.shift_content(0.0)"),
+            "the content goes back"
+        );
+
+        // A step of the slide moves the root's origin and nothing else: no layout, no frame, so
+        // no pane is told a new size and no program a new window size.
+        for step in [
+            hook("fn strip_moved("),
+            method("fn follow_strip("),
+            method("fn shift_content("),
+            body_of(code, "pub(crate) fn set_shift(", "    }"),
+        ] {
+            for forbidden in [
+                "lay_out",
+                "place(",
+                "setFrame",
+                "setNeedsLayout",
+                "stepped_size",
+            ] {
+                assert!(
+                    !step.contains(forbidden),
+                    "a step of the slide calls {forbidden}"
+                );
+            }
+        }
+        assert!(body_of(code, "pub(crate) fn set_shift(", "    }").contains("setBoundsOrigin"));
+    }
+
+    /// With the content shifted the root's `bounds()` has an origin: what fills the view is put
+    /// by its size from zero (`room_of`), or it would come to stand that much too high and
+    /// stay there when the shift ended.
+    #[test]
+    fn what_fills_the_root_view_is_not_put_by_its_bounds() {
+        for (name, source) in [
+            ("window.rs", include_str!("window.rs")),
+            ("palette.rs", include_str!("palette.rs")),
+            ("tab_switch.rs", include_str!("tab_switch.rs")),
+            ("overview.rs", include_str!("overview.rs")),
+        ] {
+            let (code, _) = source.split_once("#[cfg(test)]").unwrap_or((source, ""));
+            for (at, _) in code.match_indices("root.bounds()") {
+                assert!(
+                    code[at + "root.bounds()".len()..].starts_with(".size"),
+                    "{name}: the root's bounds are used as a frame, near byte {at}"
+                );
+            }
+        }
+        let (code, _) = include_str!("window.rs")
+            .split_once("#[cfg(test)]")
+            .expect("the tests are at the end");
+        assert!(
+            !body_of(code, "    fn place(&self, row: f64) {", "    }").contains("self.bounds()"),
+            "the layout is put by the room, not by the bounds"
+        );
     }
 }

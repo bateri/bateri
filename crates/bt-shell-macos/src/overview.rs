@@ -2670,7 +2670,7 @@ pub(crate) fn open(window: &TerminalWindow) {
     let view = OverviewView::new(mtm, window.id(), state, &theme);
     let content = root.content();
     view.refit(
-        root.bounds(),
+        root.room(),
         content.size.height / content.size.width.max(1.0),
         root.title_row(),
     );

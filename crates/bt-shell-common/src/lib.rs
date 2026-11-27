@@ -7,7 +7,7 @@
 //! tab shows (`tabs`), how the tabs are gathered into named groups and what
 //! that does to opening, closing, numbering and selecting them (`groups`), the grid a pane's pixels make (`grid`), what a move of panes and tabs between tabs and windows
 //! comes to (`moves`), what Undo Move takes back (`undo`), temporary
-//! font size (`zoom`), the mouse gesture ledger (`gesture`), shell quoting
+//! font size (`zoom`), how far full screen's title strip pushes the content down (`full_screen`), the mouse gesture ledger (`gesture`), shell quoting
 //! (`quote`), key encoding (`keys`), what a ⌘-clicked link resolves to and
 //! what opening it does (`links`), the remote upload rules, processes and the
 //! two-way transfer queue (`upload`), the folder on a server that what is pasted or dropped for
@@ -63,6 +63,7 @@ pub mod environment;
 pub mod floating;
 pub mod focus;
 pub mod font_options;
+pub mod full_screen;
 pub mod gesture;
 pub mod grid;
 pub mod groups;
