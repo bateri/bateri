@@ -14,13 +14,13 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
-- **A hotkey window.** One shortcut slides a bateri window in from the edge of the screen over whatever you are doing, and the same shortcut sends it away. What runs in it keeps running. Settings ▸ Hotkey Window sets the shortcut (a key, or a modifier tapped twice; Remove takes it away), the edge, the size and what makes it hide.
-- **Move a tab or a split to the hotkey window.** Window ▸ Move Tab to Hotkey Window and Move Split to Hotkey Window, a tab's right-click menu and the command palette send what you are doing there, and while it is pinned a tab dropped on its bar joins it. Drag the single title of the hotkey window out and the tab becomes a window of its own.
-- **`bateri hotkey` opens it from a terminal or a launcher.** `show`, `hide`, `toggle`, `pin` and `unpin`, from a terminal or by the full path from Raycast or Shortcuts. `bateri ls` marks the window.
+- **A hotkey window.** One shortcut slides a bateri window in from the edge of the screen over whatever you are doing, and the same shortcut sends it away; what runs in it keeps running. Settings ▸ Hotkey Window sets the shortcut, the edge and the size. A modifier tapped twice works too, with no permission to grant.
+- **Move a tab or a split to the hotkey window.** From the Window menu, a tab's right-click menu or the command palette. Drag its tab out and it becomes a window of its own.
+- **`bateri hotkey`** shows, hides, toggles and pins the hotkey window from a terminal, Raycast or Shortcuts.
 
 ### Fixed
 
-- **Full screen no longer covers the top row.** Move the pointer to the top of the screen and the menu bar and the strip with the traffic lights slide down; the window slides down with them instead of being covered, and back up when they go. The programs keep their size.
+- **Full screen uses the whole top row.** The sidebar button no longer leaves room for the hidden traffic lights, and when the menu bar slides down the window slides down with it instead of being covered.
 
 ## [0.34.0] - 2026-11-25
 
