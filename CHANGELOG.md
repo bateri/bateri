@@ -22,6 +22,7 @@ of every installed copy. A version without a section is not released.
 ### Fixed
 
 - **Full screen uses the whole top row.** The sidebar button no longer leaves room for the hidden traffic lights, and when the menu bar slides down the window slides down with it instead of being covered.
+- **`bateri split` no longer leaves an empty shell behind.** When a program finished right away, as `ls` does, an empty shell took its pane. Now the pane closes with the program. Add `--keep-open` to keep its output on screen.
 
 ## [0.34.0] - 2026-11-25
 

@@ -826,12 +826,15 @@ fn service() -> Option<&'static Service> {
 /// whose child is a program started in a shell's place: it asks the moment it starts, so its
 /// questions are kept for the pane, which attaches a moment later
 /// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]), and it is a program somebody asked for
-/// ([`bt_shell_common::open_with::ask_for_program`]).
+/// ([`bt_shell_common::open_with::ask_for_program`]). `goes_with_it`: the pane goes when its
+/// terminal does, and a terminal it was to show that is gone ends it instead of being made again
+/// ([`LocalAsk::goes_with_its_terminal`]).
 pub(crate) fn open_local(
     pane: &PaneUuid,
     launch: &bt_core::ChildLaunch,
     history: u32,
     program: bool,
+    goes_with_it: bool,
 ) -> Option<bt_core::Stream> {
     let state = READY.0.lock().unwrap_or_else(|e| e.into_inner());
     let service = SERVICE.get();
@@ -844,7 +847,7 @@ pub(crate) fn open_local(
     }
     // A terminal the ledger has for the pane is shown again, and its stream starts with its past.
     let shown_again = ledger().local_terminal_of(pane).is_some();
-    let (stream, ask) = match LocalAsk::new(pane, spec, size, launch.clone(), shown_again) {
+    let (stream, mut ask) = match LocalAsk::new(pane, spec, size, launch.clone(), shown_again) {
         Ok(made) => made,
         Err(error) => {
             eprintln!(
@@ -854,6 +857,9 @@ pub(crate) fn open_local(
             return None;
         }
     };
+    if goes_with_it {
+        ask.goes_with_its_terminal();
+    }
     match (service, *state) {
         (Some(service), _) => {
             drop(state);
@@ -1035,12 +1041,12 @@ mod tests {
         );
 
         // No kablo is expected: an ordinary pane, with no stream, line or mark.
-        assert!(open_local(&pane, &launch, 1000, false).is_none());
+        assert!(open_local(&pane, &launch, 1000, false, false).is_none());
 
         // The service is on its way: the stream is the pane's at once, and what asked is queued.
         expect_service();
         let began = Instant::now();
-        let stream = open_local(&pane, &launch, 1000, false).expect("a stream at once");
+        let stream = open_local(&pane, &launch, 1000, false, false).expect("a stream at once");
         assert!(began.elapsed() < Duration::from_secs(1), "nothing waited");
         assert!(stream.pid.get().is_none() && !stream.status.is_ordinary());
         assert_eq!(QUEUED.lock().expect("lock").len(), 1);
@@ -1050,7 +1056,7 @@ mod tests {
         until("the shell", &|| stream.pid.get().is_some());
         assert!(stream.status.is_ordinary());
         assert!(QUEUED.lock().expect("lock").is_empty());
-        let next = open_local(&pane, &launch, 1000, false).expect("a stream");
+        let next = open_local(&pane, &launch, 1000, false, false).expect("a stream");
         until("its shell", &|| next.pid.get().is_some());
         assert!(next.status.is_ordinary());
 

@@ -290,13 +290,17 @@ pub trait PaneHost {
     /// shell of this process behind the stream, which says so ([`bt_core::StreamExit::is_ordinary`]).
     /// `program` is a terminal whose child is a program
     /// started in a shell's place: its first questions are kept for this pane
-    /// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]).
+    /// ([`bt_shell_common::open_with::CLIENT_WAIT_MS`]). `goes_with_it`: the pane goes when its
+    /// terminal does ([`bt_shell_common::child::PaneRuns::ends_with_its_terminal`]), so a terminal
+    /// it was to show that is not there any more ends it, and no other is made in its place
+    /// ([`bt_shell_common::kablo::service::LocalAsk::goes_with_its_terminal`]).
     fn open_local_terminal(
         &self,
         _pane: &PaneUuid,
         _launch: &bt_core::ChildLaunch,
         _history: u32,
         _program: bool,
+        _goes_with_it: bool,
     ) -> Option<bt_core::Stream> {
         None
     }
@@ -4241,11 +4245,15 @@ impl TerminalPane {
             return None;
         }
         let history = u32::try_from(options.terminal.scrollback).unwrap_or(u32::MAX);
+        // A program's pane goes with its terminal: one that is gone before the pane comes for it
+        // is not made again as a shell.
+        let goes_with_it = self.ivars().runs.borrow().ends_with_its_terminal();
         let stream = self.host().open_local_terminal(
             self.uuid(),
             &options.child_launch(),
             history,
             program,
+            goes_with_it,
         )?;
         *self.ivars().born_with.borrow_mut() = (
             options.working_directory.clone(),

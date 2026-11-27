@@ -7245,6 +7245,92 @@ fn a_terminal_whose_program_ended_while_the_bateri_was_away_is_made_again_for_th
     second.stop();
 }
 
+/// The pane's request as a program's pane makes it ([`LocalAsk::goes_with_its_terminal`]). The
+/// pane's ends are set up before the request is handed over: a stream whose far end is shut
+/// refuses the socket's options.
+fn ask_for_a_program(service: &Service, pane: &PaneUuid, shown_again: bool) -> Pane {
+    let (stream, mut ask) =
+        LocalAsk::new(pane, a_shell(), MAC, a_launch(), shown_again).expect("a request");
+    ask.goes_with_its_terminal();
+    let mac = Pane::of(stream);
+    service.submit_local(ask);
+    mac
+}
+
+/// The pane's stream ends — its bytes, then its exit signal — as a pane's whose program ended.
+fn ends(mac: &mut Pane) {
+    let mut rest = Vec::new();
+    mac.master
+        .read_to_end(&mut rest)
+        .expect("the stream ends, and is not given a terminal");
+    let mut signal = Vec::new();
+    mac.exit.read_to_end(&mut signal).expect("the exit signal");
+    assert!(!mac.status.is_ordinary(), "no ordinary shell either");
+}
+
+/// The twin of the one above for a program's pane (`bateri split -- ls`): the program ended
+/// before the pane came for its terminal, and the pane goes with it — it is not given a new
+/// terminal, which would be a shell nobody asked for under a number that is not the one the
+/// command said.
+#[test]
+fn a_programs_pane_whose_terminal_ended_before_it_came_goes_with_it_and_gets_no_shell() {
+    let back = Comeback::leaves("local-program-ended", b"x\r\n");
+    back.world.bridge().exit(&back.terminal, Exit::Code(3));
+    let second = back.arrives();
+    let mut mac = ask_for_a_program(&second, &back.pane, second.found_again(&back.pane));
+    ends(&mut mac);
+    // How the program ended, where the server said it before the pane asked.
+    let code = mac.status.status().and_then(|status| status.code());
+    assert!(matches!(code, None | Some(3)), "{code:?}");
+    assert_eq!(
+        back.ledger.local_terminal_of(&back.pane),
+        None,
+        "no terminal is made for the pane"
+    );
+    assert!(back.ledger.ending(local::ACCOUNT).contains(&back.terminal));
+    second.stop();
+}
+
+/// The same when the ledger let go of the terminal before the request was taken up: the pane
+/// was born to show a terminal (its stream has a past), and finds none.
+#[test]
+fn a_programs_pane_born_for_a_terminal_the_ledger_no_longer_has_goes_and_gets_no_shell() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-program-forgot",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = a_pane();
+    let mut mac = ask_for_a_program(&rig.service, &pane, true);
+    ends(&mut mac);
+    assert!(ledger.terminals_of(local::ACCOUNT).is_empty(), "none made");
+}
+
+/// A program's pane that was born for a new terminal (a path opened with a click, whose program
+/// the pane starts itself) has no terminal to miss: it is given its terminal as any pane is.
+#[test]
+fn a_programs_pane_born_for_a_new_terminal_is_given_one() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept(
+        "local-program-new",
+        world.clone(),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = a_pane();
+    let mac = ask_for_a_program(&rig.service, &pane, false);
+    until("its terminal, made", || {
+        ledger
+            .local_terminal_of(&pane)
+            .is_some_and(|made| world.bridge().has(&made))
+    });
+    drop(mac);
+}
+
 /// What a pane types while the terminal it shows again is not yet known to be there goes to the
 /// terminal it is given in its place, and none of it to the one the server does not have.
 #[test]

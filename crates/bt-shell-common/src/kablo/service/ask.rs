@@ -215,6 +215,8 @@ pub(super) struct Parts {
     /// The name its terminal is to have: the number a program that opened the pane was told
     /// ([`super::Service::expect_name`]), or the counter's ([`super::Core::local_numbered`]).
     pub(super) name: Option<SessionId>,
+    /// The pane goes when its terminal does ([`LocalAsk::goes_with_its_terminal`]).
+    pub(super) goes_with_its_terminal: bool,
 }
 
 impl LocalAsk {
@@ -267,6 +269,7 @@ impl LocalAsk {
             ticket,
             trace,
             name: None,
+            goes_with_its_terminal: false,
         };
         Ok((
             stream,
@@ -306,6 +309,19 @@ impl LocalAsk {
     pub(super) fn named(&mut self, name: Option<SessionId>) {
         if let Some(parts) = &mut self.parts {
             parts.name = name;
+        }
+    }
+
+    /// The pane's program is its terminal's, and the pane goes when the terminal does
+    /// ([`crate::child::PaneRuns::ends_with_its_terminal`]): a program a command started for it
+    /// (`bateri split -- ls`). The terminal it is to be shown that is not there any more — the
+    /// program ended before the pane came for it — ends the pane as the terminal's end would have:
+    /// no other terminal is made in its place, for that would be a shell nobody asked for, beside
+    /// a number that names a terminal it is not. A pane whose terminal is new is not concerned: it
+    /// has no terminal to miss.
+    pub fn goes_with_its_terminal(&mut self) {
+        if let Some(parts) = &mut self.parts {
+            parts.goes_with_its_terminal = true;
         }
     }
 

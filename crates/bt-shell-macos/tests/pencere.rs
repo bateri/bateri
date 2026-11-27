@@ -1424,6 +1424,7 @@ impl Host for Born {
         launch: &bt_core::ChildLaunch,
         history: u32,
         _program: bool,
+        _goes_with_it: bool,
     ) -> Option<bt_core::Stream> {
         let (spec, size) = bt_shell_common::kablo::local::new_session(launch, history);
         let (stream, ask) = LocalAsk::new(pane, spec, size, launch.clone(), self.found).ok()?;

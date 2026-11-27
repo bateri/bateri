@@ -4903,6 +4903,11 @@ impl Core {
         });
         match resume {
             Some(_) => self.local_open(hold, resume),
+            // A program's pane born to show a terminal that has gone since (its program ended
+            // before the pane came for it, and the ledger let go of it): the pane goes with it.
+            None if awaiting.parts.silence.is_some() && awaiting.parts.goes_with_its_terminal => {
+                self.program_gone(hold);
+            }
             None => {
                 // There is no past: what the stream carries is live from its first byte.
                 if let Some(silence) = &awaiting.parts.silence {
@@ -5194,7 +5199,8 @@ impl Core {
     /// The terminal a pane was to be shown again is not there (the server does not list it, or
     /// refused it): it is marked to end, and the pane is given a new one on the stream it has,
     /// as if it had asked for none — with what the earlier run left above it, if the pane has it
-    /// ([`bt_core::Stream::silence`]).
+    /// ([`bt_core::Stream::silence`]). A program's pane is given none: it goes with the terminal
+    /// ([`Core::program_gone`]).
     fn resumed_gone(&mut self, hold: HoldId) {
         let Some(awaiting) = self.awaiting.get_mut(&hold) else {
             return;
@@ -5203,12 +5209,16 @@ impl Core {
             return;
         };
         awaiting.terminal = None;
+        let goes = awaiting.parts.goes_with_its_terminal;
         if let Some(silence) = &awaiting.parts.silence {
             silence.close();
         }
         self.shared.ledger.end(local::ACCOUNT, &terminal);
         // What the ledger had of a view in it is not the new terminal's.
         self.views.remove(&terminal);
+        if goes {
+            return self.program_gone(hold);
+        }
         self.hub.let_go_raw(hold);
         if let Some(conn) = self.conns.get_mut(&hold) {
             conn.waits_for_input = true;
@@ -5220,6 +5230,34 @@ impl Core {
             awaiting.parts.pid.waits_again();
         }
         self.local_numbered(hold);
+    }
+
+    /// The terminal a program's pane was to show is not there any more
+    /// ([`LocalAsk::goes_with_its_terminal`]): its program ended before the pane came for it. The
+    /// pane goes as it would have gone with the terminal had it come in time — quietly, told how
+    /// the program ended if the server said it, and with no terminal made in its place: a
+    /// program's pane is the program's and never a shell.
+    fn program_gone(&mut self, hold: HoldId) {
+        let Some(awaiting) = self.awaiting.remove(&hold) else {
+            return;
+        };
+        let parts = awaiting.parts;
+        match self.hub.exit_of(hold) {
+            Some(Exit::Code(code)) => parts.status.code(code),
+            Some(Exit::Signal(signal)) => parts.status.signal(signal),
+            None => {}
+        }
+        self.hub.closed(hold);
+        if let Some(silence) = &parts.silence {
+            silence.close();
+        }
+        parts.pid.settle();
+        // The holder that carries the stream, if one does, closes it; a stream nobody carries yet
+        // closes with the request's ends of it, dropped here.
+        if let Some(conn) = self.conns.remove(&hold) {
+            let _ = conn.out.send(Out::Close);
+        }
+        self.panes.remove(&hold);
     }
 
     /// The holder of a pane that waited for its terminal is gone (the pane let go of its stream, or

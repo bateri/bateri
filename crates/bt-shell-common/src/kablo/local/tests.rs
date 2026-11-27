@@ -3539,6 +3539,107 @@ fn a_program_a_command_started_here_shows_its_view_in_the_pane_that_is_placed() 
     service.stop();
 }
 
+/// `bateri split -- PROGRAM` here for a program that ends at once (`ls`): it has ended before the
+/// pane the app makes for it comes for its terminal. The pane goes with it, as it would have had
+/// it come in time, and is given no terminal in its place — it was given one: an empty shell,
+/// under a number that named the program's terminal and not the one on the screen.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_a_command_started_here_that_ended_before_its_pane_came_takes_the_pane_with_it() {
+    use crate::kablo::service::LocalAsk;
+    use kablo_bateri::message::hex_word;
+    use std::os::unix::net::UnixStream;
+
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("placed-ended");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let channel = LocalChannel::new(ground.home.clone());
+    let installed = ensure_here(&channel, &bundle, true).expect("kablo, installed");
+    let kablo = ground.home.join(&installed.path);
+    ground.kept = Some(kablo.clone());
+    let backend = RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+        streams: Default::default(),
+        stand_in: StandIn::default(),
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+
+    let words = ["split", "--", "/bin/sh", "-c", "exit 3"].map(hex_word);
+    let ran = Command::new(&kablo)
+        .args(["bateri", "--hex-here"])
+        .args(&words)
+        .env(sockdir_variable(), &ground.sockets)
+        .env("HOME", &ground.home)
+        .env_remove("XDG_DATA_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("kablo");
+    let said = String::from_utf8_lossy(&ran.stdout).into_owned();
+    assert!(
+        ran.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let id = SessionId::new(said.trim().rsplit('\n').next().unwrap_or_default())
+        .expect("the number of the terminal");
+    ground.made.push(id.clone());
+    // The program has ended by the time the app makes the pane.
+    thread::sleep(Duration::from_millis(400));
+
+    // The pane the app makes for it, as it makes it: the terminal is written beside the pane
+    // first, and the pane is a program's. What a terminal made in its place would run lasts, so
+    // that one would be seen.
+    let options = plain_options("sleep 30", &ground.home);
+    let pane = options.pane_uuid.clone().expect("a pane");
+    ledger.shown(ACCOUNT, &id, Some(&pane));
+    let launch = options.child_launch();
+    let (spec, size) = new_session(&launch, 1000);
+    let (stream, mut ask) =
+        LocalAsk::new(&pane, spec, size, launch, service.found_again(&pane)).expect("a request");
+    ask.goes_with_its_terminal();
+    service.submit_local(ask);
+
+    // A socket whose far end is shut already refuses the options (macOS says `EINVAL`): the
+    // stream has ended then, and the reads below return at once.
+    let mut master = UnixStream::from(stream.master);
+    let _ = master.set_nonblocking(false);
+    let _ = master.set_read_timeout(Some(Duration::from_secs(20)));
+    let mut shown = Vec::new();
+    master
+        .read_to_end(&mut shown)
+        .expect("the pane's stream ends: it is given no terminal in place of the program's");
+    let mut exit = UnixStream::from(stream.exit);
+    let _ = exit.set_read_timeout(Some(Duration::from_secs(20)));
+    exit.read_to_end(&mut Vec::new()).expect("the exit signal");
+    assert!(!stream.status.is_ordinary(), "nor an ordinary shell");
+    let code = stream.status.status().and_then(|status| status.code());
+    assert!(matches!(code, None | Some(3)), "{code:?}");
+    assert!(
+        ledger
+            .terminals_of(ACCOUNT)
+            .iter()
+            .all(|terminal| *terminal == id),
+        "no terminal is made for the pane: {:?}",
+        ledger.terminals_of(ACCOUNT)
+    );
+    eprintln!(
+        "the pane was shown {:?} and ended with {code:?}",
+        String::from_utf8_lossy(&shown)
+    );
+    service.stop();
+}
+
 /// Has the program receive `size` bytes of a file the pane gives it, and says how long it took
 /// (from the call to its answer), the way the pane's turn drives the session.
 #[allow(clippy::too_many_arguments)]
