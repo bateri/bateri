@@ -38,13 +38,13 @@ var<immediate> imm: Immediates;
 //   shadow_color@48   the shadow; straight alpha, alpha 0 = none
 //   radii@64          top-left, top-right, bottom-right, bottom-left
 //   clip@80           x0, y0, x1, y1: nothing is drawn outside
-//   clip_round@160    x, y, width, height of the box whose rounded corners also cut
-//   clip_radii@176    its corners' radii (top-left, top-right, bottom-right, bottom-left);
-//                     all zero = square: the clip is the rectangle alone
 //   params@96         border width, shadow blur, shadow dx, shadow dy
 //   gradient_start@112 where a fill from one colour to another starts; straight alpha
 //   gradient_end@128  and where it ends
 //   gradient@144      the way it runs (x, y: a unit vector, y down), and z 1 where there is one
+//   clip_round@160    x, y, width, height of the box whose rounded corners also cut
+//   clip_radii@176    its corners' radii (top-left, top-right, bottom-right, bottom-left);
+//                     all zero = square: the clip is the rectangle alone
 //
 // A fill from one colour to another is a style sheet's `linear-gradient`: the line runs through
 // the middle of the box, as long as it takes for its ends to be the corners it points at, and the
@@ -295,10 +295,10 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
 //   radii@48 top-left, top-right, bottom-right, bottom-left
 //   clip@64  x0, y0, x1, y1
 //   params@80 opacity, tinted (0 or 1), turn, unused
-//   clip_round@96, clip_radii@112   as a box's: the box whose rounded corners also cut,
-//            and the radii of its corners (all zero = none)
 //            the turn: radians clockwise about the middle of the rectangle (0 for an image that
 //            does not spin); the clip stays where it is
+//   clip_round@96, clip_radii@112   as a box's: the box whose rounded corners also cut,
+//            and the radii of its corners (all zero = none)
 //
 // One draw per run of instances over ONE texture (each has its own bind group;
 // group 0 is the same layout the atlas planes have: texture @0, sampler @1).

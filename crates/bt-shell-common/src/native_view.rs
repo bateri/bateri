@@ -36,8 +36,8 @@ use std::sync::{Arc, Weak};
 use bt_core::pencere::AttachedFiles;
 use bt_core::{LinearRgba, Session, Theme};
 use bt_gpu::{
-    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiImage, UiList, UiQuad,
-    UiRect, tint,
+    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiClip, UiImage, UiList,
+    UiQuad, UiRect, UiRound, tint,
 };
 
 pub mod ax;
@@ -75,7 +75,8 @@ pub use pencere_view::{
     Saving, Shortcut, Sort, State, TerminalLook, WallTime, copy_key, go_refusal,
 };
 use pencere_view::{
-    Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,
+    Clip, Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run,
+    Source,
 };
 pub use pencere_view::{haptic, sound};
 pub use surfaces::Surfaces;
@@ -202,12 +203,26 @@ pub fn ink(theme: &Theme, run: &Run, minimum_contrast: f64) -> [f32; 4] {
     tint(held, opacity)
 }
 
+/// What the engine lets be drawn of an element as the renderer's clip, moved to `origin` pixels: the
+/// rectangle and, where the box that clips has round corners, their shape, which the renderer cuts
+/// with coverage.
+pub fn clip_at(clip: Clip, origin: (f32, f32)) -> UiClip {
+    let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
+    UiClip {
+        rect: at(clip.rect),
+        round: clip.round.map(|round| UiRound {
+            rect: at(round.rect),
+            radii: round.radii,
+        }),
+    }
+}
+
 /// The engine's box as the renderer's, moved to `origin` pixels.
 pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
     let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
     let mut out = UiQuad::new(at(quad.rect))
         .radii(quad.radii)
-        .clip(at(quad.clip));
+        .clipped(clip_at(quad.clip, origin));
     if let Some(fill) = quad.fill {
         out = out.fill(resolve(theme, fill));
     }
@@ -246,7 +261,7 @@ pub fn image(theme: &Theme, picture: &Picture, crop: Rect, origin: (f32, f32)) -
         .opacity(picture.opacity)
         .turn(picture.turn)
         .radii(picture.radii)
-        .clip(at(picture.clip));
+        .clipped(clip_at(picture.clip, origin));
     if let Some(color) = picture.tint {
         out = out.tint(resolve(theme, color));
     }
@@ -273,7 +288,7 @@ fn figure_image(figure: &Figure, key: FigureKey, origin: (f32, f32)) -> UiImage 
         key.width as f32,
         key.height as f32,
     );
-    UiImage::new(at(rect)).clip(at(figure.clip))
+    UiImage::new(at(rect)).clipped(clip_at(figure.clip, origin))
 }
 
 /// The files a page draws and requires: those of the open view's bundle, as a program sent them
@@ -446,18 +461,13 @@ fn to_list(
                 let Some(line) = typeset.shaped(&run.font, &run.text) else {
                     continue;
                 };
-                let clip = UiRect::new(
-                    run.clip.x + origin.0,
-                    run.clip.y + origin.1,
-                    run.clip.w,
-                    run.clip.h,
-                );
+                let clip = clip_at(run.clip, origin);
                 let color = ink(theme, run, minimum_contrast);
                 let at = [run.origin.x + origin.0, run.origin.y + origin.1];
-                renderer.ui_text(&mut list, line, at, color, clip);
+                renderer.ui_text_clipped(&mut list, line, at, color, clip);
                 for rule in decorations(run, line) {
                     let rule = UiRect::new(rule.x + at[0], rule.y + at[1], rule.w, rule.h);
-                    list.quad(UiQuad::new(rule).fill(color).clip(clip));
+                    list.quad(UiQuad::new(rule).fill(color).clipped(clip));
                 }
             }
             // The file's pixels, drawn at the size the page gave them (an SVG is drawn at it), and a
@@ -551,8 +561,9 @@ fn decorations(run: &Run, line: &ShapedText) -> Vec<Rect> {
 mod tests {
     use super::*;
     use bt_core::MINIMUM_CONTRAST;
+    use bt_gpu::UiItem;
     use containers::Containers;
-    use pencere_view::{Border, Gradient, Rect, Shadow, Size, path};
+    use pencere_view::{Border, Gradient, Rect, Round, Shadow, Size, path};
 
     const THEMES: [Theme; 3] = [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN];
 
@@ -679,7 +690,7 @@ mod tests {
             color,
             opacity: 1.0,
             grounds,
-            clip: Rect::new(0.0, 0.0, 100.0, 20.0),
+            clip: Clip::new(Rect::new(0.0, 0.0, 100.0, 20.0)),
             underline: false,
             strike: false,
         }
@@ -919,7 +930,7 @@ mod tests {
                 blur: 6.0,
                 color: Role::Shadow.alpha(0.4),
             }),
-            clip: Rect::new(0.0, 0.0, 100.0, 200.0),
+            clip: Clip::new(Rect::new(0.0, 0.0, 100.0, 200.0)),
             gradient: Some(Gradient {
                 angle: 90.0,
                 from: Role::Accent.solid(),
@@ -948,7 +959,7 @@ mod tests {
             rect: Rect::new(4.0, 6.0, 39.5, 40.0),
             scale: 2.0,
             paths: vec![ring],
-            clip: Rect::new(0.0, 0.0, 30.0, 30.0),
+            clip: Clip::new(Rect::new(0.0, 0.0, 30.0, 30.0)),
         };
         let figure = |theme: &Theme, drawn: &Figure, origin: (f32, f32)| {
             let key = figure_key(drawn, |color| figure_colour(theme, color)).expect("a key");
@@ -1004,7 +1015,7 @@ mod tests {
             tint: None,
             opacity: 1.0,
             radii: [0.0; 4],
-            clip: Rect::new(0.0, 0.0, 100.0, 100.0),
+            clip: Clip::new(Rect::new(0.0, 0.0, 100.0, 100.0)),
             turn,
         };
         let theme = Theme::BATERI;
@@ -1021,6 +1032,161 @@ mod tests {
         let spun = picture(90.0);
         assert_eq!(image(&theme, &spun, spun.crop, at), plain.turn(90.0));
         assert_ne!(image(&theme, &spun, spun.crop, at), plain);
+    }
+
+    /// The clip of a box that rounds its corners and clips what it holds: the rectangle where it
+    /// ends and, in it, the box (its padding box) whose top corners are rounded.
+    fn rounded_clip() -> Clip {
+        Clip {
+            rect: Rect::new(0.0, 0.0, 100.0, 200.0),
+            round: Some(Round {
+                rect: Rect::new(2.0, 2.0, 96.0, 196.0),
+                radii: [6.0, 6.0, 0.0, 0.0],
+            }),
+        }
+    }
+
+    /// [`rounded_clip`] as the renderer has it, moved by (3, 32).
+    fn rounded_clip_moved() -> UiClip {
+        UiClip {
+            rect: UiRect::new(3.0, 32.0, 100.0, 200.0),
+            round: Some(UiRound {
+                rect: UiRect::new(5.0, 34.0, 96.0, 196.0),
+                radii: [6.0, 6.0, 0.0, 0.0],
+            }),
+        }
+    }
+
+    #[test]
+    fn a_clip_goes_to_the_renderer_with_its_rectangle_and_its_corners_moved_by_the_origin() {
+        assert_eq!(clip_at(rounded_clip(), (3.0, 32.0)), rounded_clip_moved());
+        // A clip that does not round is the rectangle alone, as it was.
+        assert_eq!(
+            clip_at(Clip::new(Rect::new(1.0, 2.0, 30.0, 40.0)), (3.0, 32.0)),
+            UiClip::new(UiRect::new(4.0, 34.0, 30.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn a_box_a_picture_and_a_canvas_are_cut_at_the_corners_of_their_clip() {
+        let theme = Theme::BATERI;
+        let origin = (3.0, 32.0);
+        let square = UiClip::new(rounded_clip_moved().rect);
+
+        let drawn = Quad {
+            rect: Rect::new(10.0, 20.0, 30.0, 40.0),
+            radii: [0.0; 4],
+            fill: Some(Role::Accent.solid()),
+            border: None,
+            shadow: None,
+            clip: rounded_clip(),
+            gradient: None,
+        };
+        let cut = quad(&theme, &drawn, origin);
+        assert_eq!(
+            cut,
+            UiQuad::new(UiRect::new(13.0, 52.0, 30.0, 40.0))
+                .fill(resolve(&theme, Role::Accent.solid()))
+                .clipped(rounded_clip_moved())
+        );
+        assert_ne!(cut, cut.clipped(square), "the corners are in the box");
+
+        let picture = Picture {
+            src: "card.png".to_owned(),
+            page: 1,
+            rect: Rect::new(10.0, 20.0, 24.0, 8.0),
+            crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+            shown: Rect::new(0.0, 0.0, 1.0, 1.0),
+            tint: None,
+            opacity: 1.0,
+            radii: [0.0; 4],
+            clip: rounded_clip(),
+            turn: 0.0,
+        };
+        let cut = image(&theme, &picture, picture.crop, origin);
+        assert_eq!(
+            cut,
+            UiImage::new(UiRect::new(13.0, 52.0, 24.0, 8.0))
+                .crop(UiRect::new(0.0, 0.0, 1.0, 1.0))
+                .clipped(rounded_clip_moved())
+        );
+        assert_ne!(cut, cut.clipped(square), "the corners are in the image");
+
+        let figure = Figure {
+            rect: Rect::new(4.0, 6.0, 20.0, 20.0),
+            scale: 1.0,
+            paths: vec![path().circle(10.0, 10.0, 8.0).stroke(2.0, Role::Accent)],
+            clip: rounded_clip(),
+        };
+        let key = figure_key(&figure, |color| figure_colour(&theme, color)).expect("a key");
+        let cut = figure_image(&figure, key, origin);
+        assert_eq!(
+            cut,
+            UiImage::new(UiRect::new(7.0, 38.0, 20.0, 20.0)).clipped(rounded_clip_moved())
+        );
+        assert_ne!(cut, cut.clipped(square), "the corners are in the canvas");
+    }
+
+    /// The words of a box that rounds its corners and clips are cut at them, the glyphs and the
+    /// lines under them alike: the list comes out as the renderer makes it for that clip, and not as
+    /// it makes it for the clip's rectangle.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_words_of_a_box_with_round_corners_are_cut_at_the_corners() {
+        let renderer = Renderer::system_default().expect("a GPU");
+        let terminal = None;
+        let mut shaped = Shaped::default();
+        let theme = Theme::BATERI;
+        let origin = (3.0, 32.0);
+        let mut word = run(Role::Foreground.solid(), Vec::new());
+        word.origin = Point::new(4.0, 6.0);
+        word.font.family = Family::Terminal;
+        word.underline = true;
+        word.clip = rounded_clip();
+        let mut typeset = Typeset {
+            renderer: &renderer,
+            terminal: &terminal,
+            shaped: &mut shaped,
+        };
+        let draws = DrawList {
+            items: vec![Paint::Text(word.clone())],
+        };
+        let list = to_list(
+            &theme,
+            MINIMUM_CONTRAST,
+            &mut typeset,
+            None,
+            None,
+            &draws,
+            origin,
+        );
+        let line = typeset.shaped(&word.font, &word.text).expect("shaped");
+        let color = ink(&theme, &word, MINIMUM_CONTRAST);
+        let at = [word.origin.x + origin.0, word.origin.y + origin.1];
+        let made = |clip: UiClip| {
+            let mut list = UiList::new();
+            renderer.ui_text_clipped(&mut list, line, at, color, clip);
+            for rule in decorations(&word, line) {
+                let rule = UiRect::new(rule.x + at[0], rule.y + at[1], rule.w, rule.h);
+                list.quad(UiQuad::new(rule).fill(color).clipped(clip));
+            }
+            list
+        };
+        let glyphs = |list: &UiList| {
+            list.items()
+                .iter()
+                .filter(|item| matches!(item, UiItem::Glyph(_)))
+                .count()
+        };
+        let rounded = made(rounded_clip_moved());
+        assert!(glyphs(&rounded) > 0, "the words are drawn");
+        assert!(
+            rounded.items().len() > glyphs(&rounded),
+            "and the line under them"
+        );
+        assert_eq!(list.items(), rounded.items());
+        let square = made(UiClip::new(rounded_clip_moved().rect));
+        assert_ne!(list.items(), square.items(), "the corners are in the words");
     }
 
     #[test]

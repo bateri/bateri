@@ -400,15 +400,15 @@ impl Containers {
                 .items_center()
                 .gap(10.0)
                 .h(30.0)
-                .px(8.0)
+                .px(7.0)
                 .rounded(6.0)
                 .no_shrink()
                 .color(if current { Role::Foreground } else { Role::Dim })
-                .child(text(label).grow(1.0).truncate());
+                .child(text(label).grow(1.0).truncate())
+                // A border takes room: the one that is not current has it, clear.
+                .border(1.0, Role::Accent.alpha(if current { 0.24 } else { 0.0 }));
             if current {
-                row = row
-                    .bg(Role::Accent.alpha(0.13))
-                    .border(1.0, Role::Accent.alpha(0.24));
+                row = row.bg(Role::Accent.alpha(0.13));
             }
             match (badge, count) {
                 (Some(n), _) => row.child(
@@ -580,21 +580,27 @@ impl Containers {
                 .items_center()
                 .gap(6.0)
                 .h(24.0)
-                .px(9.0)
+                .px(8.0)
                 .rounded(6.0)
                 .press(id)
+                // A border takes room: the cell that is not the active one has it, clear.
+                .border(
+                    1.0,
+                    if active {
+                        Role::Border.solid()
+                    } else {
+                        Role::Border.alpha(0.0)
+                    },
+                )
                 .color(if active || glow > 0.0 {
                     Role::Foreground
                 } else {
                     Role::Dim
                 });
             if active {
-                cell = cell.bg(Role::Raised(2)).border(1.0, Role::Border).shadow(
-                    0.0,
-                    1.0,
-                    2.0,
-                    Role::Shadow.alpha(0.5),
-                );
+                cell = cell
+                    .bg(Role::Raised(2))
+                    .shadow(0.0, 1.0, 2.0, Role::Shadow.alpha(0.5));
             } else if glow > 0.0 {
                 cell = cell.bg(Role::Foreground.alpha(0.07 * glow));
             }
@@ -620,18 +626,18 @@ impl Containers {
                 .row()
                 .items_center()
                 .h(28.0)
-                .px(9.0)
+                .px(8.0)
                 .rounded(6.0)
                 .no_shrink()
+                // A border takes room: the one that is not pressed has it, clear.
+                .border(1.0, Role::Accent.alpha(if pressed { 0.4 } else { 0.0 }))
                 .color(if pressed || glow > 0.0 {
                     Role::Foreground
                 } else {
                     Role::Dim
                 });
             if pressed {
-                button = button
-                    .bg(Role::Accent.alpha(0.13))
-                    .border(1.0, Role::Accent.alpha(0.4));
+                button = button.bg(Role::Accent.alpha(0.13));
             } else if glow > 0.0 {
                 button = button.bg(Role::Foreground.alpha(0.07 * glow));
             }
@@ -778,11 +784,12 @@ struct Look {
 
 impl Look {
     /// The row dressed: a chosen one on the accent with its border, one the pointer is over
-    /// on a faint light.
+    /// on a faint light. A border takes room, so every row has the one, clear when it is not
+    /// chosen: what is in a row stays where it is as the row is chosen and let go.
     fn dress(self, row: Element) -> Element {
+        let row = row.border(1.0, Role::Accent.alpha(0.55 * self.chosen));
         if self.chosen > 0.0 {
             row.bg(Role::Accent.alpha(0.13 * self.chosen))
-                .border(1.0, Role::Accent.alpha(0.55 * self.chosen))
         } else if self.hovered > 0.0 {
             row.bg(Role::Foreground.alpha(0.055 * self.hovered))
         } else {
@@ -825,7 +832,7 @@ fn group_row(
             .gap(8.0)
             .h(ROW)
             .mt(GROUP_GAP)
-            .px(8.0)
+            .px(7.0)
             .rounded(6.0)
             .no_shrink()
             .press(id)
@@ -968,7 +975,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
         .gap_x(10.0)
         .items_center()
         .h(ROW)
-        .px(8.0)
+        .px(7.0)
         .rounded(6.0)
         .no_shrink()
         .press(id)
@@ -978,7 +985,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
         row = row.child(
             div()
                 .absolute()
-                .inset(Some(8.0), None, Some(8.0), Some(1.0))
+                .inset(Some(7.0), None, Some(7.0), Some(0.0))
                 .w(3.0)
                 .rounded(1.5)
                 .bg(Role::Accent),
@@ -1278,14 +1285,14 @@ mod tests {
                 let edge = width * scale;
                 for item in &list.items {
                     let (rect, clip) = match item {
-                        Paint::Quad(q) => (q.rect, q.clip),
-                        Paint::Image(p) => (p.rect, p.clip),
-                        Paint::Figure(f) => (f.rect, f.clip),
-                        Paint::Editor(e) => (e.rect, e.clip),
-                        Paint::Browser(b) => (b.rect, b.clip),
+                        Paint::Quad(q) => (q.rect, q.clip.rect),
+                        Paint::Image(p) => (p.rect, p.clip.rect),
+                        Paint::Figure(f) => (f.rect, f.clip.rect),
+                        Paint::Editor(e) => (e.rect, e.clip.rect),
+                        Paint::Browser(b) => (b.rect, b.clip.rect),
                         Paint::Text(r) => (
                             pencere_view::Rect::new(r.origin.x, r.origin.y, 1.0, 1.0),
-                            r.clip,
+                            r.clip.rect,
                         ),
                     };
                     // What is drawn is what the clip lets through.

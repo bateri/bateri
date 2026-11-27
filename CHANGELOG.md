@@ -19,8 +19,13 @@ of every installed copy. A version without a section is not released.
 - **`bateri hotkey`** shows, hides, toggles and pins the hotkey window from a terminal, Raycast or Shortcuts.
 - **A program's text box can say how many lines tall it is.** A box of lines is as tall as that many lines of your terminal's font, its text stays inside the box's padding, a click anywhere in the box starts typing in it, and when you type more lines than fit it scrolls, through the box's padding, and keeps the cursor in view.
 
+### Changed
+
+- **A border takes room inside its box in a program's screen**, as it does on a web page. A program's cards and fields can sit a pixel or two differently until the program updates.
+
 ### Fixed
 
+- **A program's rounded boxes cut what they hold at their corners.** A picture, a list or a canvas inside a card with rounded corners no longer pokes out of them; a web page in a card still has square corners.
 - **browserpen no longer asks for your keychain password.** Opening a page could bring up a macOS dialog about “Chromium Safe Storage”. After updating, you'll need to sign in to your sites in browserpen once more.
 - **Full screen uses the whole top row.** The sidebar button no longer leaves room for the hidden traffic lights, and when the menu bar slides down the window slides down with it instead of being covered.
 - **`bateri split` no longer leaves an empty shell behind.** When a program finished right away, as `ls` does, an empty shell took its pane. Now the pane closes with the program. Add `--keep-open` to keep its output on screen.

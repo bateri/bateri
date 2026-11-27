@@ -449,6 +449,58 @@ fn the_choice_fades_from_one_row_to_the_next() {
 }
 
 #[test]
+fn what_a_row_holds_stays_where_it_is_as_the_choice_comes_to_it() {
+    let mut page = Containers::fixture();
+    let cache = RowKey::Container("cache").id();
+    // What is inside the row's box: the border takes room, so a row that has it only when it is
+    // chosen would move what it holds by a point as it is chosen.
+    let inside = |laid: &Laid| {
+        let row = laid.bounds(cache).unwrap();
+        laid.rects()
+            .filter(|r| r.y > row.y && r.bottom() < row.bottom() && r.w > 0.0)
+            .collect::<Vec<_>>()
+    };
+    let before = lay(&mut page, 600.0);
+    let (row, held) = (before.bounds(cache).unwrap(), inside(&before));
+    assert!(held.len() > 3, "the row holds its cells: {held:?}");
+    key(&mut page, Key::Down);
+    let mut now = 1.0;
+    while page.advance(now, false) {
+        now += 1.0 / 60.0;
+    }
+    let after = lay(&mut page, 600.0);
+    assert_eq!(page.ui.fades.level(cache.role(CHOSEN)), 1.0);
+    assert_eq!(after.bounds(cache), Some(row));
+    assert_eq!(inside(&after), held);
+}
+
+#[test]
+fn a_project_row_holds_its_arrow_where_it_did_and_the_chips_stay_as_the_filter_goes_round() {
+    let mut page = Containers::fixture();
+    let before = lay(&mut page, 600.0);
+    // The arrow of a project's row is 8 points from its edge, as the cells of a container's row are.
+    let header = before.bounds(RowKey::Group(Some("shop")).id()).unwrap();
+    let arrow = before
+        .rects()
+        .filter(|r| r.w > 0.0 && r.y > header.y && r.bottom() < header.bottom() && r.x > header.x)
+        .map(|r| r.x)
+        .fold(f32::MAX, f32::min);
+    assert_eq!(arrow, header.x + 8.0, "{header:?}");
+    // The chips are where they were as another one is the active: the border takes room.
+    let chips = [
+        Status::All,
+        Status::Running,
+        Status::Stopped,
+        Status::Issues,
+    ];
+    let places = |laid: &Laid| chips.map(|chip| laid.bounds(chip.id()).unwrap());
+    let held = places(&before);
+    chars(&mut page, "f");
+    assert_eq!(page.status, Status::Running);
+    assert_eq!(places(&lay(&mut page, 600.0)), held);
+}
+
+#[test]
 fn a_right_click_chooses_the_row_and_opens_its_menu_whose_entries_act_on_the_list() {
     let mut page = Containers::fixture();
     let laid = lay(&mut page, 600.0);

@@ -246,11 +246,11 @@ impl UiQuad {
         self
     }
 
-    /// Nothing is drawn outside `clip`.
+    /// Nothing is drawn outside `clip`, a rectangle: it takes the place of a clip with round corners
+    /// that was given before.
     #[must_use]
-    pub const fn clip(mut self, clip: UiRect) -> Self {
-        self.clip = clip.corners();
-        self
+    pub const fn clip(self, clip: UiRect) -> Self {
+        self.clipped(UiClip::new(clip))
     }
 
     /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners.
@@ -398,11 +398,11 @@ impl UiImage {
         self
     }
 
-    /// Nothing is drawn outside `clip`.
+    /// Nothing is drawn outside `clip`, a rectangle: it takes the place of a clip with round corners
+    /// that was given before.
     #[must_use]
-    pub const fn clip(mut self, clip: UiRect) -> Self {
-        self.clip = clip.corners();
-        self
+    pub const fn clip(self, clip: UiRect) -> Self {
+        self.clipped(UiClip::new(clip))
     }
 
     /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners.

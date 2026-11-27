@@ -211,11 +211,13 @@ impl Surfaces for Pictures {
             slot.rect.w,
             slot.rect.h,
         );
+        // The browser's frame is a texture the engine draws as a whole: it is cut at the rectangle of
+        // its clip, and the corners of a rounded box around it are not cut in it.
         let visible = UiRect::new(
-            slot.clip.x + origin.0,
-            slot.clip.y + origin.1,
-            slot.clip.w,
-            slot.clip.h,
+            slot.clip.rect.x + origin.0,
+            slot.clip.rect.y + origin.1,
+            slot.clip.rect.w,
+            slot.clip.rect.h,
         );
         if let Some(texture) = &shown.view {
             // The frame at its own size, never stretched: while a resize waits for the frame of
