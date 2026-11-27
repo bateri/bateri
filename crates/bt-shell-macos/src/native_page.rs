@@ -8,7 +8,9 @@
 //!
 //! What the pane adds to the page for it to be used: the text fields over the page's boxes for
 //! them (AppKit's, in the terminal's face and the theme's ink — the text of the page is the
-//! page's own, a field is not text to draw), the tracking area that tells the page where the
+//! page's own, a field is not text to draw; a field of lines is a text view in a scroll view,
+//! which scrolls the lines the box has no room for where a wrapping text field cannot), the
+//! tracking area that tells the page where the
 //! pointer is whoever has the keyboard, and the handle the pane's input goes to the page by
 //! ([`bt_shell_common::native_view::PageHandle`]: pencere's drive of the page).
 //!
@@ -23,6 +25,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
@@ -35,7 +38,7 @@ use bt_shell_common::native_view::{
     tone_linear,
 };
 use objc2::rc::{Retained, Weak as WeakId};
-use objc2::runtime::{AnyObject, Bool, ProtocolObject};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{
     AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
     msg_send, sel,
@@ -54,14 +57,16 @@ use objc2_app_kit::{
     NSAccessibilitySortDirection, NSAccessibilityStaticTextRole, NSAccessibilitySubrole,
     NSAccessibilitySwitchSubrole, NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole,
     NSAccessibilityTableRole, NSAccessibilityTextAreaRole, NSAccessibilityValueChangedNotification,
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSControl, NSEvent,
-    NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder,
-    NSSecureTextField, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBorderType, NSColor, NSControl,
+    NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSLayoutManager,
+    NSLayoutManagerDelegate, NSLineBreakMode, NSResponder, NSScrollView, NSScrollerStyle,
+    NSSecureTextField, NSText, NSTextContainer, NSTextField, NSTextStorage, NSTextView,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
 };
+use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
     NSArray, NSDictionary, NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange,
-    NSRect, NSSize, NSString, ns_string,
+    NSRect, NSSize, NSString, NSUndoManager, ns_string,
 };
 
 use crate::pane::TerminalPane;
@@ -153,10 +158,17 @@ define_class!(
                 // In the room and outside the text: the press is the nearest one in the frame, so
                 // that a field being typed in answers with its editor, as AppKit does for a press
                 // in it, and not with the field, which would end the editing and begin it again
-                // (the whole text selected, the page told the keyboard came a second time).
+                // (the whole text selected, the page told the keyboard came a second time). A field
+                // of lines is its text view, which is its own editor: it takes the press itself, not
+                // what the nearest point of its frame holds (a scroller at the edge).
                 room_of(&field)
                     .filter(|room| inside(*room, local))
-                    .and_then(|_| field.hitTest(nearest_in(frame, local)))
+                    .and_then(|_| match lines_text_in(&field) {
+                        Some(text) => Some(Retained::into_super(Retained::into_super(
+                            Retained::into_super(text),
+                        ))),
+                        None => field.hitTest(nearest_in(frame, local)),
+                    })
             })
         }
     }
@@ -191,6 +203,17 @@ fn room_of(view: &NSView) -> Option<NSRect> {
                 .downcast_ref::<PageSecretField>()
                 .map(|field| field.ivars().room.get())
         })
+        .or_else(|| lines_text_in(view).map(|text| text.ivars().room.get()))
+}
+
+/// The text view of a field of lines, if `view` is the scroll view it stands in.
+fn lines_text_in(view: &NSView) -> Option<Retained<PageLinesText>> {
+    let object: &AnyObject = view;
+    object
+        .downcast_ref::<NSScrollView>()?
+        .documentView()?
+        .downcast::<PageLinesText>()
+        .ok()
 }
 
 impl FieldsHost {
@@ -305,12 +328,12 @@ impl PageFields {
         fields.retain(|field| {
             let stays = kept.contains(&(field.id, field.kind));
             if !stays {
-                if field.view.currentEditor().is_some()
+                if field.view.editing()
                     && let Some(window) = pane.window()
                 {
                     window.makeFirstResponder(Some(pane.view()));
                 }
-                field.view.removeFromSuperview();
+                field.view.take_away();
             }
             stays
         });
@@ -426,10 +449,7 @@ impl PageFields {
             .filter_map(|item| item.id)
             .collect();
         for field in self.fields.borrow().iter() {
-            // The cell is what is read of the field; the view stays what AppKit makes it (none).
-            if let Some(cell) = field.view.cell() {
-                cell.setAccessibilityElement(read.contains(&field.id));
-            }
+            field.view.set_read(read.contains(&field.id));
         }
     }
 
@@ -509,9 +529,9 @@ impl PageFields {
             return editor_element(pane, item).map(Made::Other);
         }
         if let AccessibleRole::Field(_) = item.role {
-            // What AppKit reads of the field, whichever class it is: its cell ([`read_of`]).
-            let field: Retained<NSTextField> = self.field(item.id?)?.retain();
-            return Some(Made::Other(read_of(&field)));
+            // What AppKit reads of the field, whichever class it is: its cell ([`read_of`]), or the
+            // text view of lines.
+            return Some(Made::Other(self.field(item.id?)?.read()));
         }
         let state = &item.state;
         let shape = shape_of(item, node);
@@ -634,14 +654,12 @@ impl PageFields {
     /// modal in front shuts out is not given back as the pane's.
     pub(crate) fn owned(&self) -> Vec<Retained<AnyObject>> {
         let mut all = self.owned.borrow().clone();
-        all.extend(self.fields.borrow().iter().flat_map(|field| {
-            let view: Retained<NSTextField> = field.view.retain();
-            let read = read_of(&view);
-            let object: Retained<AnyObject> = Retained::into_super(Retained::into_super(
-                Retained::into_super(Retained::into_super(Retained::into_super(view))),
-            ));
-            [object, read]
-        }));
+        all.extend(
+            self.fields
+                .borrow()
+                .iter()
+                .flat_map(|field| field.view.owned()),
+        );
         all
     }
 
@@ -681,10 +699,13 @@ impl PageFields {
             .borrow()
             .iter()
             .find(|field| {
-                std::ptr::eq(
-                    std::ptr::from_ref(control).cast::<()>(),
-                    std::ptr::from_ref(&*field.view).cast::<()>(),
-                )
+                let is = |view: &NSView| {
+                    std::ptr::eq(
+                        std::ptr::from_ref(control).cast::<()>(),
+                        std::ptr::from_ref(view).cast::<()>(),
+                    )
+                };
+                is(&field.view) || is(field.view.inner())
             })
             .map(|field| (field.id, field.kind))
     }
@@ -697,7 +718,7 @@ impl PageFields {
         if field.kind == FieldKind::Secret {
             return None;
         }
-        Some(field.view.stringValue().to_string())
+        Some(field.view.text())
     }
 
     /// Puts `text` in the field `id`, in place of what it holds, as the page's own reply does
@@ -711,9 +732,24 @@ impl PageFields {
     /// on the screen.
     pub(crate) fn append(&self, id: Id, text: &str) -> Option<String> {
         let field = self.field(id)?;
-        let now = field.held(&format!("{}{text}", field.stringValue()));
-        field.setStringValue(&NSString::from_str(&now));
+        let now = field.held(&format!("{}{text}", field.text()));
+        field.set_text(&now);
         Some(now)
+    }
+
+    /// Whether the pointer is in the room of a field that is shown: all of the room is the field's
+    /// to the pointer ([`FieldsHost`]), so is its cursor.
+    pub(crate) fn pointer_in_a_room(&self) -> bool {
+        let Some(window) = self.pane.load().and_then(|pane| pane.window()) else {
+            return false;
+        };
+        let at = self
+            .host
+            .convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+        self.fields
+            .borrow()
+            .iter()
+            .any(|field| !field.view.isHidden() && inside(field.view.ivars().room.get(), at))
     }
 
     /// The field the keyboard is in, where it is in one of the page's.
@@ -726,13 +762,13 @@ impl PageFields {
         self.fields
             .borrow()
             .iter()
-            .any(|field| field.view.currentEditor().is_some())
+            .any(|field| field.view.editing())
     }
 
     /// Every field is taken away (the page goes down).
     pub(crate) fn clear(&self) {
         for field in self.fields.take() {
-            field.view.removeFromSuperview();
+            field.view.take_away();
         }
         self.host.removeFromSuperview();
         self.outline.take();
@@ -750,7 +786,7 @@ impl PageFields {
     pub(crate) fn paint(&self, theme: &Theme) {
         self.theme.set(*theme);
         for field in self.fields.borrow().iter() {
-            field.view.setTextColor(Some(&ink(theme, Role::Foreground)));
+            field.view.set_ink(&ink(theme, Role::Foreground));
         }
     }
 
@@ -803,7 +839,7 @@ impl PageFields {
         self.moving.set(true);
         match to.and_then(|id| self.field(id)) {
             Some(field) => {
-                window.makeFirstResponder(Some(&field));
+                window.makeFirstResponder(Some(field.inner()));
                 field.select_waiting();
                 self.focused.set(to);
             }
@@ -830,10 +866,10 @@ impl PageFields {
         let text = match &fill.text {
             Some(text) => {
                 let text = field.held(text);
-                field.setStringValue(&NSString::from_str(&text));
+                field.set_text(&text);
                 text
             }
-            None => field.stringValue().to_string(),
+            None => field.text(),
         };
         let selected = match fill.selection_in(text.chars().count()) {
             Some(range) => Some(utf16_range(&text, range)),
@@ -866,22 +902,37 @@ fn one_line(text: &str) -> Option<String> {
 /// A field of the page's as AppKit has it: a field of text, or a secret's, which is an
 /// `NSSecureTextField`. That is the one class AppKit gives the editor that hides what is typed: it
 /// refuses it to a plain field that only has a secure cell, and the refusal is an exception, which
-/// ended bateri when a page sent the keyboard into a password field. To the page and the pane the
-/// two are one field ([`page_field_class`]): what they keep and do is the same, only AppKit's class
-/// differs.
+/// ended bateri when a page sent the keyboard into a password field. Lines are not a text field's:
+/// a wrapping `NSTextField` cannot scroll ("the cell wraps text and makes the cell non-scrollable"),
+/// so they are a text view in a scroll view ([`LinesView`]), which is its own editor. To the page and
+/// the pane the three are one field ([`page_field_class`]): what they keep and do is the same, only
+/// AppKit's class differs.
 #[derive(Clone)]
 pub(crate) enum FieldView {
     Text(Retained<PageTextField>),
     Secret(Retained<PageSecretField>),
+    Lines(LinesView),
 }
 
-impl std::ops::Deref for FieldView {
-    type Target = NSTextField;
+/// A field of lines: the text view, and the scroll view that shows as much of it as the box has room
+/// for. The scroll view is what stands in the host (the field's frame is its box); the text view
+/// takes the keyboard.
+#[derive(Clone)]
+pub(crate) struct LinesView {
+    scroll: Retained<NSScrollView>,
+    text: Retained<PageLinesText>,
+}
 
-    fn deref(&self) -> &NSTextField {
+/// What the page's field is to the host: the view it puts in its room (a field of lines is the
+/// scroll view).
+impl std::ops::Deref for FieldView {
+    type Target = NSView;
+
+    fn deref(&self) -> &NSView {
         match self {
             Self::Text(field) => field,
             Self::Secret(field) => field,
+            Self::Lines(lines) => &lines.scroll,
         }
     }
 }
@@ -892,7 +943,121 @@ impl FieldView {
         match self {
             Self::Text(field) => field.ivars(),
             Self::Secret(field) => field.ivars(),
+            Self::Lines(lines) => lines.text.ivars(),
         }
+    }
+
+    /// The field of AppKit's it is, unless it is lines.
+    fn text_field(&self) -> Option<&NSTextField> {
+        match self {
+            Self::Text(field) => Some(field),
+            Self::Secret(field) => Some(field),
+            Self::Lines(_) => None,
+        }
+    }
+
+    /// The view that takes the keyboard: the field itself, or the text view of lines.
+    pub(crate) fn inner(&self) -> &NSView {
+        match self {
+            Self::Lines(lines) => &lines.text,
+            _ => self,
+        }
+    }
+
+    /// The field leaves the page: what was typed in a field of lines is not undone in a field that is
+    /// not there.
+    pub(crate) fn take_away(&self) {
+        if let Self::Lines(lines) = self {
+            lines.text.forget_undo();
+        }
+        self.removeFromSuperview();
+    }
+
+    /// Whether the keyboard is in the field.
+    pub(crate) fn editing(&self) -> bool {
+        match self.text_field() {
+            Some(field) => field.currentEditor().is_some(),
+            None => first_responder(self.inner()),
+        }
+    }
+
+    /// What the field holds.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            Self::Text(field) => field.stringValue().to_string(),
+            Self::Secret(field) => field.stringValue().to_string(),
+            Self::Lines(lines) => lines.text.string().to_string(),
+        }
+    }
+
+    /// Puts `text` in the field in place of what it holds, as it is (see [`FieldView::held`]). The
+    /// page is not told of it. A field of lines has its caret at the end of it, in view.
+    fn set_text(&self, text: &str) {
+        match self {
+            Self::Text(field) => field.setStringValue(&NSString::from_str(text)),
+            Self::Secret(field) => field.setStringValue(&NSString::from_str(text)),
+            Self::Lines(lines) => {
+                if lines.text.string().to_string() != text {
+                    lines.text.setString(&NSString::from_str(text));
+                    lines.text.forget_undo();
+                }
+                lines
+                    .text
+                    .setSelectedRange(NSRange::new(text.encode_utf16().count(), 0));
+                lines.text.scroll_to_caret();
+                lines.text.show_hint();
+            }
+        }
+    }
+
+    /// The ink of what the field says.
+    fn set_ink(&self, color: &NSColor) {
+        match self {
+            Self::Text(field) => field.setTextColor(Some(color)),
+            Self::Secret(field) => field.setTextColor(Some(color)),
+            Self::Lines(lines) => {
+                lines.text.setTextColor(Some(color));
+                lines.text.setInsertionPointColor(Some(color));
+            }
+        }
+    }
+
+    /// Whether a screen reader reads the field (it does not where the page shut it out).
+    fn set_read(&self, read: bool) {
+        match self {
+            // The cell is what is read of the field; the view stays what AppKit makes it (none).
+            Self::Text(_) | Self::Secret(_) => {
+                if let Some(cell) = self.text_field().and_then(|field| field.cell()) {
+                    cell.setAccessibilityElement(read);
+                }
+            }
+            Self::Lines(lines) => lines.text.setAccessibilityElement(read),
+        }
+    }
+
+    /// What a screen reader is given of the field ([`read_of`]): the text view of lines, which is
+    /// a text area to it (the scroll view around it is no element).
+    fn read(&self) -> Retained<AnyObject> {
+        match self {
+            Self::Text(field) => read_of(field),
+            Self::Secret(field) => read_of(field),
+            // SAFETY: an upcast to the root class.
+            Self::Lines(lines) => unsafe { Retained::cast_unchecked(lines.text.clone()) },
+        }
+    }
+
+    /// Everything of the field that stands for the page to a screen reader: its view and what is
+    /// read of it.
+    fn owned(&self) -> Vec<Retained<AnyObject>> {
+        // SAFETY: an upcast to the root class.
+        let view: Retained<AnyObject> = unsafe { Retained::cast_unchecked(self.retain_view()) };
+        vec![view, self.read()]
+    }
+
+    /// The view the field puts in the host, retained.
+    fn retain_view(&self) -> Retained<NSView> {
+        let view: &NSView = self;
+        view.retain()
     }
 
     /// What the field holds of `text`: a field of one line its line breaks as spaces
@@ -909,9 +1074,18 @@ impl FieldView {
     /// Selects `(location, length)` (UTF-16 units) in the field: at once where the keyboard is in
     /// it (and kept as what the page asked, for a click still going on: see
     /// [`keep_asked_selection`]), else when the page sends it the keyboard
-    /// ([`FieldView::select_waiting`]).
+    /// ([`FieldView::select_waiting`]). Lines have their selection with or without the keyboard (a
+    /// text view is its own editor and AppKit selects nothing of it when it comes), and show it.
     fn select(&self, range: (usize, usize)) {
-        match self.currentEditor() {
+        if let Self::Lines(lines) = self {
+            lines.text.setSelectedRange(NSRange::new(range.0, range.1));
+            lines.text.scroll_to_caret();
+            if self.editing() {
+                self.ivars().asked.set(Some(range));
+            }
+            return;
+        }
+        match self.text_field().and_then(|field| field.currentEditor()) {
             Some(editor) => {
                 editor.setSelectedRange(NSRange::new(range.0, range.1));
                 self.ivars().asked.set(Some(range));
@@ -923,7 +1097,11 @@ impl FieldView {
     /// The selection a fill left for the keyboard, put where the keyboard now is: after AppKit made
     /// its own (it selects all of a field it gives the keyboard to).
     fn select_waiting(&self) {
-        if let (Some(range), Some(editor)) = (self.ivars().selection.take(), self.currentEditor()) {
+        let Some(field) = self.text_field() else {
+            return;
+        };
+        if let (Some(range), Some(editor)) = (self.ivars().selection.take(), field.currentEditor())
+        {
             editor.setSelectedRange(NSRange::new(range.0, range.1));
         }
     }
@@ -931,13 +1109,128 @@ impl FieldView {
     /// Where the keyboard is in the field, as the kit's rule of keys asks it ([`FieldState`]), in
     /// UTF-16 units; `None` where the keyboard is not in it.
     pub(crate) fn state(&self, kind: FieldKind) -> Option<FieldState> {
-        let editor = self.currentEditor()?;
+        let editor = match self {
+            Self::Lines(lines) => lines_editor(&lines.text)?,
+            _ => self.text_field()?.currentEditor()?,
+        };
         let range = editor.selectedRange();
         Some(FieldState {
             kind,
             length: editor.string().length(),
             selection: range.location..range.location + range.length,
         })
+    }
+
+    /// The height of one line of the field, as it draws it, points.
+    fn line_height(&self) -> f64 {
+        match self {
+            Self::Lines(lines) => lines_line(&lines.text),
+            _ => self.text_field().map_or(0.0, line_height),
+        }
+    }
+}
+
+/// Whether `view` is the window's first responder.
+fn first_responder(view: &NSView) -> bool {
+    view.window()
+        .and_then(|window| window.firstResponder())
+        .is_some_and(|responder| {
+            std::ptr::eq(
+                Retained::as_ptr(&responder).cast::<()>(),
+                std::ptr::from_ref(view).cast::<()>(),
+            )
+        })
+}
+
+/// The editor of a field of lines while the keyboard is in it: the text view itself.
+fn lines_editor(text: &PageLinesText) -> Option<Retained<NSText>> {
+    first_responder(text).then(|| Retained::into_super(Retained::into_super(text.retain())))
+}
+
+/// The height of one line of a field of lines: the page's ([`PageTextFieldIvars::line`]) once the
+/// field is placed, before that its text view's own, which has no leading (the cell of a text field
+/// has none either: Monaco's 12.5 points have 16 in both, and some faces a point less than the cell).
+fn lines_line(text: &PageLinesText) -> f64 {
+    match text.ivars().line.get() {
+        line if line > 0.0 => line,
+        _ => lines_natural_line(text),
+    }
+}
+
+/// The height of one line of a field of lines as its text view would lay it out.
+fn lines_natural_line(text: &PageLinesText) -> f64 {
+    let Some(font) = text.font() else {
+        return 0.0;
+    };
+    // SAFETY: the text view was made with its layout manager.
+    match unsafe { text.layoutManager() } {
+        Some(manager) => manager.defaultLineHeightForFont(&font),
+        None => 0.0,
+    }
+}
+
+/// The line of a text field's cell in `family` at `size`, and where its baseline stands in it:
+/// what a field of lines is laid out in, so that the two stand alike in every face.
+fn cell_line(mtm: MainThreadMarker, family: Option<&str>, size: f64) -> (f64, f64) {
+    let probe = field_of(mtm, FieldKind::Line, Weak::new(), family, size);
+    let line = probe.line_height();
+    probe.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(100.0, line)));
+    // SAFETY: NSView's `firstBaselineOffsetFromTop`, which takes nothing and gives a CGFloat.
+    let baseline: f64 = unsafe { msg_send![&*probe, firstBaselineOffsetFromTop] };
+    (line, baseline)
+}
+
+impl PageLinesText {
+    /// AppKit is in one of this view's methods (a key, a press) when the page is told, and the page
+    /// may answer by taking the field away (a reply to Esc that closes it): the view (and the text
+    /// it holds) lives to the end of the event, as a text field's editor outlives its field.
+    fn outlive_the_event(&self) {
+        let _ = Retained::autorelease_ptr(self.retain());
+    }
+
+    /// What was typed is no more to be undone: ⌘Z would replay a range of a text that is another now
+    /// and AppKit raises. The undo manager is the field's own (the window's would lose what the
+    /// other fields in it have typed too, and `removeAllActions` of an open group of the event
+    /// raises when the event ends): it is let go, and the next typing is in a new one.
+    fn forget_undo(&self) {
+        self.ivars().undo.replace(None);
+        self.breakUndoCoalescing();
+    }
+
+    /// A press in the room's padding, outside the lines in view: it is the field's (`FieldsHost`),
+    /// and the caret goes to the nearest point of the lines in view, not to where the point is in
+    /// the text (a box scrolled down has a line past its edge there, which the caret would scroll
+    /// to). Whether it was one: no tracking of the press follows then.
+    fn press_in_padding(&self, event: &NSEvent) -> bool {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let seen = self.visibleRect();
+        if inside(seen, at) || seen.size.width < 1.0 || seen.size.height < 1.0 {
+            return false;
+        }
+        let near = NSPoint::new(
+            at.x.clamp(seen.origin.x, seen.origin.x + seen.size.width - 1.0),
+            at.y.clamp(seen.origin.y, seen.origin.y + seen.size.height - 1.0),
+        );
+        if let Some(window) = self.window() {
+            let itself: &NSResponder = self;
+            window.makeFirstResponder(Some(itself));
+        }
+        let index = self.characterIndexForInsertionAtPoint(near);
+        self.setSelectedRange(NSRange::new(index, 0));
+        self.scroll_to_caret();
+        true
+    }
+
+    /// The line the caret is in, in view.
+    fn scroll_to_caret(&self) {
+        self.scrollRangeToVisible(self.selectedRange());
+    }
+
+    /// The hint is there while the text is not.
+    fn show_hint(&self) {
+        if let Some((_, hint)) = self.ivars().hint.borrow().as_ref() {
+            hint.setHidden(self.string().length() > 0);
+        }
     }
 }
 
@@ -961,6 +1254,22 @@ pub(crate) struct PageTextFieldIvars {
     /// The room the page laid out for it, from the pane's top: the pointer's, whose text stands in
     /// a part of it ([`FieldsHost`]'s hit test).
     room: Cell<NSRect>,
+    /// What a field of lines says while it is empty: a text view has no hint of its own, so a text
+    /// field with the words stands over its text, which is the one that draws them, as a field of
+    /// text's own are drawn (the ink of a hint is AppKit's, whatever the theme, and what a text
+    /// field draws it in is not a colour to name: the cell alone draws it lighter).
+    hint: RefCell<Option<(Retained<NSString>, Retained<PageHintField>)>>,
+    /// What a field of lines' text is held in: its text view does not hold the storage of a stack
+    /// made by hand (the storage holds the layout manager, which holds the container), and the text
+    /// view must not outlive it (a screen reader may ask it after the page took the field away).
+    storage: RefCell<Option<Retained<NSTextStorage>>>,
+    /// What a field of lines' typing is undone with ([`PageLinesText::forget_undo`]).
+    undo: RefCell<Option<Retained<NSUndoManager>>>,
+    /// How tall a line of a field of lines is, and where its baseline stands in it, points: the
+    /// cell's of a field of text in the same face, which the page was told ([`line_of`]); 0 while
+    /// the field has no place yet, and its text view's own lines stand.
+    line: Cell<f64>,
+    baseline: Cell<f64>,
 }
 
 /// Runs `body`, which is the part of a field's method that reaches the page or AppKit's views of
@@ -1010,11 +1319,16 @@ fn keyboard_came(ivars: &PageTextFieldIvars, took: bool) {
 /// selection, made from where it began in the text the field held then, is made last. Not for
 /// a press that went on to a drag (the dragged selection is the person's), nor for a click in
 /// a field that had the keyboard already (its caret is where it was put).
-fn keep_asked_selection(field: &NSTextField, ivars: &PageTextFieldIvars, down: NSPoint) {
+fn keep_asked_selection(
+    field: &NSView,
+    ivars: &PageTextFieldIvars,
+    down: NSPoint,
+    editor: Option<Retained<NSText>>,
+) {
     let Some(range) = ivars.asked.take() else {
         return;
     };
-    let (Some(window), Some(editor)) = (field.window(), field.currentEditor()) else {
+    let (Some(window), Some(editor)) = (field.window(), editor) else {
         return;
     };
     let now = window.mouseLocationOutsideOfEventStream();
@@ -1022,6 +1336,60 @@ fn keep_asked_selection(field: &NSTextField, ivars: &PageTextFieldIvars, down: N
     if !dragged && range.0 + range.1 <= editor.string().length() {
         editor.setSelectedRange(NSRange::new(range.0, range.1));
     }
+}
+
+/// The keyboard came to a field (`becomeFirstResponder` of its class answered `took`): taken by a
+/// press of the main button, that press's own end must not undo what the page selects in answer to
+/// the keyboard coming ([`press_in`]); and the page's fields are told which ([`keyboard_came`]).
+fn keyboard_taken(mtm: MainThreadMarker, ivars: &PageTextFieldIvars, took: bool) {
+    if took {
+        let press = NSApplication::sharedApplication(mtm)
+            .currentEvent()
+            .filter(|event| event.r#type() == NSEventType::LeftMouseDown)
+            .map(|event| event.timestamp());
+        ivars.given_by_press.set(press);
+        ivars.asked.set(None);
+    }
+    guarded(ivars, "a field's keyboard", (), || {
+        keyboard_came(ivars, took);
+    });
+}
+
+/// A press in a field (`mouseDown:`), `press` being its class's own. Where it gives the field the
+/// keyboard, the page is told (see [`keyboard_taken`]) and answers with the whole address filled in
+/// and selected, which arrives before the button is up; the press's own tracking would then end by
+/// selecting from where it began, so what the page selected is put back when it is over. `editor` is
+/// the field's editor: there while the keyboard is in the field.
+fn press_in(
+    view: &NSView,
+    ivars: &PageTextFieldIvars,
+    event: &NSEvent,
+    editor: &dyn Fn() -> Option<Retained<NSText>>,
+    press: &dyn Fn(),
+) {
+    let gave_the_keyboard = ivars.given_by_press.take() == Some(event.timestamp());
+    let had_the_keyboard = editor().is_some() && !gave_the_keyboard;
+    let down = event.locationInWindow();
+    if had_the_keyboard {
+        ivars.asked.set(None);
+    }
+    // In the page's boundary, as `becomeFirstResponder` is: the press's tracking is AppKit's and so
+    // is what it raises.
+    guarded(ivars, "a press in a field", (), press);
+    if !had_the_keyboard {
+        guarded(ivars, "a press in a field", (), || {
+            keep_asked_selection(view, ivars, down, editor());
+        });
+    }
+}
+
+/// The pane a field of the page is in.
+fn pane_of(ivars: &PageTextFieldIvars) -> Option<Retained<TerminalPane>> {
+    ivars
+        .fields
+        .borrow()
+        .upgrade()
+        .and_then(|fields| fields.pane.load())
 }
 
 /// What the editor of a field puts in place of `words`, where the field is one line and they hold
@@ -1065,48 +1433,18 @@ macro_rules! page_field_class {
                         // and answers whether the field took the keyboard.
                         unsafe { msg_send![super(self), becomeFirstResponder] }
                     });
-                    if took {
-                        // Taken by a press of the main button: that press's own end must not undo
-                        // what the page selects in answer to the keyboard coming (`mouse_down`).
-                        let press = NSApplication::sharedApplication(self.mtm())
-                            .currentEvent()
-                            .filter(|event| event.r#type() == NSEventType::LeftMouseDown)
-                            .map(|event| event.timestamp());
-                        self.ivars().given_by_press.set(press);
-                        self.ivars().asked.set(None);
-                    }
-                    guarded(self.ivars(), "a field's keyboard", (), || {
-                        keyboard_came(self.ivars(), took);
-                    });
+                    keyboard_taken(self.mtm(), self.ivars(), took);
                     took
                 }
 
-                /// A press in the field. Where it gives the field the keyboard, the page is told
-                /// (see `becomeFirstResponder`) and answers with the whole address filled in and
-                /// selected, which arrives before the button is up; the press's own tracking would
-                /// then end by selecting from where it began, so what the page selected is put back
-                /// when it is over.
+                /// A press in the field ([`press_in`]).
                 #[unsafe(method(mouseDown:))]
                 fn mouse_down(&self, event: &NSEvent) {
-                    let gave_the_keyboard =
-                        self.ivars().given_by_press.take() == Some(event.timestamp());
-                    let had_the_keyboard = self.currentEditor().is_some() && !gave_the_keyboard;
-                    let down = event.locationInWindow();
-                    if had_the_keyboard {
-                        self.ivars().asked.set(None);
-                    }
-                    // In the page's boundary, as `becomeFirstResponder` is: the press's tracking is
-                    // AppKit's and so is what it raises.
-                    guarded(self.ivars(), "a press in a field", (), || {
+                    press_in(self, self.ivars(), event, &|| self.currentEditor(), &|| {
                         // SAFETY: the superclass's own `mouseDown:`, which takes the event and
                         // tracks the press until the button is up.
                         let _: () = unsafe { msg_send![super(self), mouseDown: event] };
                     });
-                    if !had_the_keyboard {
-                        guarded(self.ivars(), "a press in a field", (), || {
-                            keep_asked_selection(self, self.ivars(), down);
-                        });
-                    }
                 }
 
                 /// What the person puts in a field of one line (a paste, a drop, what the keyboard
@@ -1166,6 +1504,188 @@ page_field_class!(
     NSView,
     NSResponder,
     NSObject
+);
+
+define_class!(
+    // SAFETY: NSTextField is designed for subclassing; the class implements no `Drop` and is born
+    // with `initWithFrame:`.
+    #[unsafe(super(NSTextField, NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPageHintField"]
+    #[ivars = ()]
+    /// The words a field of lines says while it is empty ([`PageTextFieldIvars::hint`]): a text
+    /// field over its text view that nothing reaches. A press goes through it to the text view, and
+    /// it takes no keyboard.
+    pub(crate) struct PageHintField;
+
+    impl PageHintField {
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            false
+        }
+    }
+);
+
+define_class!(
+    // SAFETY: NSScrollView is designed for subclassing; the class implements no `Drop` and is born
+    // with `initWithFrame:`.
+    #[unsafe(super(NSScrollView, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPageLinesScroll"]
+    #[ivars = ()]
+    /// The scroll view of a field of lines. A wheel over a box whose text fits is the page's to
+    /// scroll (a text field passes it up, and a scroll view would take it and bounce); a box that
+    /// overflows scrolls. And the bar is the overlay the page's rooms count on, whatever the
+    /// system's preference for scroll bars says.
+    pub(crate) struct PageLinesScroll;
+
+    impl PageLinesScroll {
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let overflows = self
+                .documentView()
+                .is_some_and(|text| text.frame().size.height > self.contentSize().height + 0.5);
+            // SAFETY: reading the next responder, on the main thread.
+            let next = unsafe { self.nextResponder() };
+            if overflows {
+                // SAFETY: the superclass's own `scrollWheel:`, which takes the event.
+                let _: () = unsafe { msg_send![super(self), scrollWheel: event] };
+            } else if let Some(next) = next {
+                next.scrollWheel(event);
+            }
+        }
+
+        #[unsafe(method(setScrollerStyle:))]
+        fn set_scroller_style(&self, _style: NSScrollerStyle) {
+            // SAFETY: the superclass's own `setScrollerStyle:`, which takes a style.
+            let _: () =
+                unsafe { msg_send![super(self), setScrollerStyle: NSScrollerStyle::Overlay] };
+        }
+    }
+);
+
+define_class!(
+    // SAFETY: NSTextView is designed for subclassing; the class implements no `Drop` and is born
+    // with `initWithFrame:textContainer:`.
+    #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPageLinesText"]
+    #[ivars = PageTextFieldIvars]
+    /// The text view of a field of lines: the same keyboard and press as the fields of text
+    /// ([`page_field_class`]), and what a field's delegate does for them, done here — a text view
+    /// is its own editor and sends its commands and changes to itself first.
+    pub(crate) struct PageLinesText;
+
+    impl PageLinesText {
+        /// The keyboard comes to the field: the page's fields are told which.
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            self.outlive_the_event();
+            let took = guarded(self.ivars(), "a field's keyboard", false, || {
+                crate::dev_fault::keyboard_handed(program_of(self.ivars()).as_deref());
+                // SAFETY: the superclass's own `becomeFirstResponder`, which takes nothing and
+                // answers whether the view took the keyboard.
+                unsafe { msg_send![super(self), becomeFirstResponder] }
+            });
+            keyboard_taken(self.mtm(), self.ivars(), took);
+            took
+        }
+
+        /// A press in the field ([`press_in`]).
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.outlive_the_event();
+            press_in(self, self.ivars(), event, &|| lines_editor(self), &|| {
+                if !self.press_in_padding(event) {
+                    // SAFETY: the superclass's own `mouseDown:`, which takes the event and tracks
+                    // the press until the button is up.
+                    let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+                }
+            });
+        }
+
+        /// A command of the keyboard (⏎, Tab, Esc, an arrow): the page's where the kit's rule of
+        /// the keys of a field says so (`TerminalPane::page_field_command`), else the text view's own.
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command(&self, command: Sel) {
+            self.outlive_the_event();
+            let handled = guarded(self.ivars(), "a field's command", false, || {
+                let control: &AnyObject = self;
+                pane_of(self.ivars())
+                    .and_then(|pane| pane.page_field_do_command(control, self, command))
+                    .unwrap_or(false)
+            });
+            if !handled {
+                guarded(self.ivars(), "a field's command", (), || {
+                    // SAFETY: the superclass's own `doCommandBySelector:`, which takes a selector.
+                    let _: () = unsafe { msg_send![super(self), doCommandBySelector: command] };
+                });
+            }
+        }
+
+        /// The field's own undo manager, which Edit's Undo asks of the keyboard's view.
+        #[unsafe(method_id(undoManager))]
+        fn undo_manager(&self) -> Option<Retained<NSUndoManager>> {
+            let mut own = self.ivars().undo.borrow_mut();
+            Some(own.get_or_insert_with(|| NSUndoManager::new(self.mtm())).clone())
+        }
+
+        /// The person changed the text (typing, a paste, an undo): the caret's line is in view, the
+        /// hint is drawn or not, and the page is told what the field holds.
+        #[unsafe(method(didChangeText))]
+        fn did_change_text(&self) {
+            self.outlive_the_event();
+            guarded(self.ivars(), "a field's text", (), || {
+                // SAFETY: the superclass's own `didChangeText`, which takes nothing.
+                let _: () = unsafe { msg_send![super(self), didChangeText] };
+                self.scroll_to_caret();
+                self.show_hint();
+            });
+            if let Some(pane) = pane_of(self.ivars()) {
+                let control: &AnyObject = self;
+                pane.page_field_changed(control);
+            }
+        }
+    }
+
+    unsafe impl NSObjectProtocol for PageLinesText {}
+
+    unsafe impl NSLayoutManagerDelegate for PageLinesText {
+        /// Every line of the text is as tall as the page was told a line is, with its baseline where
+        /// a text field's cell has it: a text view's line is the font's with its leading left out,
+        /// which is the cell's in some faces and a point less in others, and rows are laid out as
+        /// that many of the page's lines.
+        #[unsafe(method(layoutManager:shouldSetLineFragmentRect:lineFragmentUsedRect:baselineOffset:inTextContainer:forGlyphRange:))]
+        unsafe fn should_set_line_fragment(
+            &self,
+            _manager: &NSLayoutManager,
+            rect: NonNull<NSRect>,
+            used: NonNull<NSRect>,
+            baseline: NonNull<CGFloat>,
+            _container: &NSTextContainer,
+            _glyphs: NSRange,
+        ) -> bool {
+            let line = self.ivars().line.get();
+            // No `return`: `define_class!` converts the `bool` at the end of the body.
+            if line > 0.0 {
+                // SAFETY: AppKit gives pointers to values of its own that it takes back changed,
+                // when this answers `true`.
+                unsafe {
+                    (*rect.as_ptr()).size.height = line;
+                    (*used.as_ptr()).size.height = line;
+                    *baseline.as_ptr() = self.ivars().baseline.get();
+                }
+                true
+            } else {
+                false
+            }
+        }
+    }
 );
 
 /// What an element a screen reader is given keeps: where a press on it lands (a button's middle,
@@ -1859,8 +2379,9 @@ fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {
 
 /// A field of `kind` for `pane`: no border and no ground (the page draws the box), the
 /// terminal's face, the theme's ink. One line scrolls as it is typed and cuts a hint that does
-/// not fit with "…"; lines wrap; a secret shows no characters. The pane is its delegate
-/// (`TerminalPane::page_field_changed`, `page_field_command`).
+/// not fit with "…"; lines wrap and scroll; a secret shows no characters. The pane is its delegate
+/// (`TerminalPane::page_field_changed`, `page_field_command`), or, for lines, which are a text view
+/// and not a text field, hears of it from the view itself ([`PageLinesText`]).
 fn text_field(
     pane: &TerminalPane,
     kind: FieldKind,
@@ -1875,11 +2396,13 @@ fn text_field(
         family,
         f64::from(ZOOM_TEXT),
     );
-    let field: &NSTextField = &view;
-    field.setTextColor(Some(&ink(theme, Role::Foreground)));
-    // SAFETY: the pane implements the text field's delegate methods it is given (`impl
-    // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
-    unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };
+    view.set_ink(&ink(theme, Role::Foreground));
+    if let Some(field) = view.text_field() {
+        // SAFETY: the pane implements the text field's delegate methods it is given (`impl
+        // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the
+        // page.
+        unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };
+    }
     view
 }
 
@@ -1887,11 +2410,16 @@ fn text_field(
 /// size), in the page's points: the line of the very cell a page's field is drawn with (a field made
 /// as a page's, which nobody sees), at the size the field is set in, over the zoom. The line of a
 /// face is not in proportion to its size (Monaco's 12.5 points has 16, its 25 has 31), so it is asked
-/// of AppKit at each zoom, not scaled.
+/// of AppKit at each zoom, not scaled. A field of text and a field of lines each have theirs (the
+/// cell's and the text view's, which agree in the faces tried: `field_problems`); the page is told
+/// the taller, so that no box of rows is shorter than the lines it holds.
 pub(crate) fn line_of(mtm: MainThreadMarker, family: Option<&str>, zoom: f32) -> f32 {
     let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
-    let probe = field_of(mtm, FieldKind::Lines, Weak::new(), family, size);
-    (line_height(&probe) / f64::from(zoom)) as f32
+    let line = [FieldKind::Line, FieldKind::Lines]
+        .into_iter()
+        .map(|kind| field_of(mtm, kind, Weak::new(), family, size).line_height())
+        .fold(0.0, f64::max);
+    (line / f64::from(zoom)) as f32
 }
 
 /// A text field of `kind` as a page's are made, set in the terminal's face at `size` points: no
@@ -1912,7 +2440,15 @@ fn field_of(
         fields: RefCell::new(fields),
         one_line: Cell::new(kind != FieldKind::Lines),
         room: Cell::new(NSRect::ZERO),
+        hint: RefCell::new(None),
+        storage: RefCell::new(None),
+        undo: RefCell::new(None),
+        line: Cell::new(0.0),
+        baseline: Cell::new(0.0),
     };
+    if kind == FieldKind::Lines {
+        return FieldView::Lines(lines_of(mtm, ivars, family, size));
+    }
     // SAFETY: `initWithFrame:` is NSTextField's designated initializer (NSSecureTextField's too),
     // and the ivars are set.
     let view = if kind == FieldKind::Secret {
@@ -1923,7 +2459,7 @@ fn field_of(
         let this = PageTextField::alloc(mtm).set_ivars(ivars);
         FieldView::Text(unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] })
     };
-    let field: &NSTextField = &view;
+    let field = view.text_field().expect("a field of text");
     field.setBordered(false);
     field.setBezeled(false);
     field.setDrawsBackground(false);
@@ -1939,25 +2475,13 @@ fn field_of(
         // `text_top` centres. The one other thing that mode does, turning a pasted line break
         // into a space, the field does itself (`one_line`).
         cell.setUsesSingleLineMode(false);
-        match kind {
-            // One line: it scrolls as it is typed, and a hint that is too long for the room is
-            // cut with "…" (the break mode below), not wrapped onto a line below it that the room
-            // does not show (which left the first line high in the box).
-            FieldKind::Line | FieldKind::Secret => {
-                cell.setWraps(false);
-                cell.setScrollable(true);
-            }
-            FieldKind::Lines => {
-                cell.setWraps(true);
-                cell.setScrollable(false);
-            }
-        }
+        // One line: it scrolls as it is typed, and a hint that is too long for the room is cut with
+        // "…" (the break mode below), not wrapped onto a line below it that the room does not show
+        // (which left the first line high in the box).
+        cell.setWraps(false);
+        cell.setScrollable(true);
     }
-    field.setLineBreakMode(if kind == FieldKind::Lines {
-        NSLineBreakMode::ByWordWrapping
-    } else {
-        NSLineBreakMode::ByTruncatingTail
-    });
+    field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     // Pinned to the pane's top, where the page's rooms are measured from: the pane's own
     // coordinates grow upward, so a field with a fixed bottom margin would slide with the
     // pane's bottom edge while it is resized, until the next outline put it back.
@@ -1966,6 +2490,97 @@ fn field_of(
     field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
     view
 }
+
+/// A field of lines as a page's are made, set in the terminal's face at `size` points: a text view
+/// in a scroll view, which scrolls the lines the box has no room for ("the field scrolls the lines it
+/// has no room for", the kit's specification) where a wrapping `NSTextField` draws them past it.
+/// It is what AppKit's field is to the person: no border and no ground, the terminal's face, a
+/// caret that stays in view, a line of the very height of a text field's cell (no leading) and the
+/// two points before the text that its cell has, the same substitutions its editor has and a hint
+/// drawn in the same ink ([`PageLinesText`]). The scroll bar is the system's overlay one in every
+/// setting: a bar that takes room would wrap the text at a width the page did not lay it out for.
+fn lines_of(
+    mtm: MainThreadMarker,
+    ivars: PageTextFieldIvars,
+    family: Option<&str>,
+    size: f64,
+) -> LinesView {
+    let storage = NSTextStorage::new();
+    let manager = NSLayoutManager::new();
+    manager.setUsesFontLeading(false);
+    let container =
+        NSTextContainer::initWithSize(NSTextContainer::alloc(), NSSize::new(0.0, 1.0e7));
+    container.setWidthTracksTextView(true);
+    container.setLineFragmentPadding(SIDE_PADDING);
+    storage.addLayoutManager(&manager);
+    manager.addTextContainer(&container);
+    let this = PageLinesText::alloc(mtm).set_ivars(ivars);
+    // SAFETY: `initWithFrame:textContainer:` is NSTextView's designated initializer, and the ivars
+    // are set.
+    let text: Retained<PageLinesText> = unsafe {
+        msg_send![super(this), initWithFrame: NSRect::ZERO, textContainer: Some(&*container)]
+    };
+    manager.setDelegate(Some(ProtocolObject::from_ref(&*text)));
+    text.setFont(Some(&face(family, size)));
+    text.setRichText(false);
+    text.setImportsGraphics(false);
+    text.setDrawsBackground(false);
+    text.setAllowsUndo(true);
+    text.setUsesFontPanel(false);
+    text.setFocusRingType(NSFocusRingType::None);
+    text.setTextContainerInset(NSSize::ZERO);
+    // What a field's editor has of the substitutions: AppKit's own `NSTextField` editor, asked in
+    // `field_problems`' day, turned off quotes, dashes, links and spelling and left text
+    // replacements on.
+    text.setAutomaticQuoteSubstitutionEnabled(false);
+    text.setAutomaticDashSubstitutionEnabled(false);
+    text.setAutomaticTextReplacementEnabled(true);
+    text.setAutomaticLinkDetectionEnabled(false);
+    text.setAutomaticDataDetectionEnabled(false);
+    text.setContinuousSpellCheckingEnabled(false);
+    // The text grows downwards as far as it needs and is the width of the box, and no shorter
+    // than it, so that a press below its last line is still the text view's.
+    text.setMinSize(NSSize::ZERO);
+    text.setMaxSize(NSSize::new(1.0e7, 1.0e7));
+    text.setVerticallyResizable(true);
+    text.setHorizontallyResizable(false);
+    text.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    // A drop on the page is the page's (the files of a drag are its to take, `page_files`), as it is
+    // over a text field that is not being typed in; a text view would take the paths as text.
+    text.unregisterDraggedTypes();
+    let scroll = {
+        let this = PageLinesScroll::alloc(mtm).set_ivars(());
+        // SAFETY: `initWithFrame:` is NSView's designated initializer, which NSScrollView keeps.
+        let scroll: Retained<PageLinesScroll> =
+            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        scroll
+    };
+    scroll.setHasVerticalScroller(true);
+    scroll.setHasHorizontalScroller(false);
+    scroll.setAutohidesScrollers(true);
+    scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+    scroll.setBorderType(NSBorderType::NoBorder);
+    scroll.setDrawsBackground(false);
+    scroll.setAutomaticallyAdjustsContentInsets(false);
+    scroll.setFocusRingType(NSFocusRingType::None);
+    scroll.setDocumentView(Some(&text));
+    // The scroll view is no element for a screen reader: the text view is the text area it reads.
+    scroll.setAccessibilityElement(false);
+    // The host is on the page's axis and covers the pane: the field keeps the frame its box gives
+    // it, and AppKit moves nothing.
+    scroll.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+    // The text is held by the text view that shows it, as long as the view lives: what a text view
+    // made with its own stack is, and not one made with a stack of its own, which holds none of it.
+    text.ivars().storage.replace(Some(storage));
+    LinesView {
+        scroll: Retained::into_super(scroll),
+        text,
+    }
+}
+
+/// How far a field's text stands from the left of its frame, points: AppKit's cell of a text field
+/// has two (measured from what it draws), a text view five.
+const SIDE_PADDING: f64 = 2.0;
 
 /// The terminal's face (the system's monospaced one where it has none) at `size` points.
 fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
@@ -1988,50 +2603,157 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
         NSPoint::new(f64::from(room.x), f64::from(room.y)),
         NSSize::new(f64::from(room.w), f64::from(room.h)),
     ));
-    let field: &NSTextField = field;
     // SAFETY: reading the superview; we are on the main thread.
     if unsafe { field.superview() }.is_none() {
         return;
     }
     let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
-    if field
-        .font()
-        .is_none_or(|font| (font.pointSize() - size).abs() > 0.01)
-    {
-        field.setFont(Some(&face(family, size)));
-    }
     let hint = place.hint.as_deref().map(NSString::from_str);
-    field.setPlaceholderString(hint.as_deref());
     let said = place
         .label
         .as_deref()
         .or(place.hint.as_deref())
         .unwrap_or_default();
-    // On the cell, which is what a screen reader reads of the field ([`read_of`]).
-    if let Some(cell) = field.cell() {
-        cell.setAccessibilityLabel(Some(&NSString::from_str(said)));
-    }
     let text = place.text;
-    // A box shorter than a line (the padding is more than the room has over a line) still holds
-    // the line, as the room does: the frame goes past the box, not the text out of the frame.
-    let line = line_height(field).min(f64::from(room.h));
-    let (top, height) = if place.kind == FieldKind::Lines {
-        (f64::from(text.y), f64::from(text.h).max(line))
-    } else {
-        let middle = f64::from(text.y + text.h / 2.0);
-        (text_top(field, middle, line), line)
+    let frame = |top: f64, height: f64| {
+        // The host's y is the page's, from the top.
+        NSRect::new(
+            NSPoint::new(f64::from(text.x), top),
+            NSSize::new(f64::from(text.w), height),
+        )
     };
-    // The host's y is the page's, from the top.
-    let frame = NSRect::new(
-        NSPoint::new(f64::from(text.x), top),
-        NSSize::new(f64::from(text.w), height),
-    );
-    if field.frame() != frame {
-        field.setFrame(frame);
+    let lines = match field {
+        FieldView::Lines(lines) => lines,
+        _ => {
+            let Some(field) = field.text_field() else {
+                return;
+            };
+            if field
+                .font()
+                .is_none_or(|font| (font.pointSize() - size).abs() > 0.01)
+            {
+                field.setFont(Some(&face(family, size)));
+            }
+            field.setPlaceholderString(hint.as_deref());
+            // On the cell, which is what a screen reader reads of the field ([`read_of`]).
+            if let Some(cell) = field.cell() {
+                cell.setAccessibilityLabel(Some(&NSString::from_str(said)));
+            }
+            // A box shorter than a line (the padding is more than the room has over a line) still
+            // holds the line, as the room does: the frame goes past the box, not the text out of
+            // the frame.
+            let line = line_height(field).min(f64::from(room.h));
+            let middle = f64::from(text.y + text.h / 2.0);
+            let frame = frame(text_top(field, middle, line), line);
+            if field.frame() != frame {
+                field.setFrame(frame);
+            }
+            // AppKit draws the field above the page: one the page's popover or dialog lies over is
+            // not shown, or its text would stand over what covers it.
+            field.setHidden(place.covered);
+            return;
+        }
+    };
+    // Lines: the box, from its top, and no shorter than a line (as above). Its text view draws the
+    // hint, is the text area a screen reader reads, and keeps the caret's line in view whenever its
+    // box or its face changes.
+    let (scroll, view) = (&lines.scroll, &lines.text);
+    let mut changed = false;
+    // The system's preference for scroll bars (Always show) moves a scroll view to its own style, and
+    // the text would be narrower than the box by the bar: the page's rooms are not AppKit's to take.
+    if scroll.scrollerStyle() != NSScrollerStyle::Overlay {
+        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        changed = true;
     }
-    // AppKit draws the field above the page: one the page's popover or dialog lies over is not
-    // shown, or its text would stand over what covers it.
-    field.setHidden(place.covered);
+    let wanted = face(family, size);
+    // The face or its size changed, or the line was never measured: the line is the face's.
+    if view.ivars().line.get() <= 0.0 || view.font().is_none_or(|font| font != wanted) {
+        view.setFont(Some(&wanted));
+        if let Some((_, hint)) = view.ivars().hint.borrow().as_ref() {
+            hint.setFont(view.font().as_deref());
+        }
+        // The line of the page's and the cell's baseline in it, in this face at this size: what every
+        // line of the text is laid out in from now on.
+        let (cell, baseline) = cell_line(view.mtm(), family, size);
+        view.ivars().line.set(cell.max(lines_natural_line(view)));
+        view.ivars().baseline.set(baseline);
+        // SAFETY: the text view was made with its layout manager, and the range is the text's.
+        if let Some(manager) = unsafe { view.layoutManager() } {
+            let all = NSRange::new(0, view.string().length());
+            // SAFETY: a null actual range is allowed.
+            unsafe {
+                manager.invalidateLayoutForCharacterRange_actualCharacterRange(
+                    all,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+        changed = true;
+    }
+    if view.ivars().hint.borrow().as_ref().map(|(words, _)| words) != hint.as_ref() {
+        if let Some((_, old)) = view.ivars().hint.take() {
+            old.removeFromSuperview();
+        }
+        let made = hint.as_ref().map(|words| {
+            let this = PageHintField::alloc(view.mtm()).set_ivars(());
+            // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
+            let field: Retained<PageHintField> =
+                unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            field.setBordered(false);
+            field.setBezeled(false);
+            field.setDrawsBackground(false);
+            field.setEditable(true);
+            field.setSelectable(false);
+            field.setFocusRingType(NSFocusRingType::None);
+            field.setFont(view.font().as_deref());
+            field.setPlaceholderString(Some(words));
+            field.setAccessibilityElement(false);
+            if let Some(cell) = field.cell() {
+                // As the field of lines was a text field's before it was a text view's: its cell
+                // wraps at the box's width, from its top.
+                cell.setUsesSingleLineMode(false);
+                cell.setWraps(true);
+                cell.setScrollable(false);
+                // The cell is what a screen reader reads of a text field ([`read_of`]), and this
+                // one is not a field: the text view is, and says the hint.
+                cell.setAccessibilityElement(false);
+            }
+            field.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+            field.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            field.setFrame(view.bounds());
+            view.addSubview(&field);
+            (words.clone(), field)
+        });
+        view.ivars().hint.replace(made);
+        view.show_hint();
+        view.setAccessibilityPlaceholderValue(hint.as_deref());
+    }
+    view.setAccessibilityLabel(Some(&NSString::from_str(said)));
+    let line = lines_line(view).min(f64::from(room.h));
+    let frame = frame(f64::from(text.y), f64::from(text.h).max(line));
+    if scroll.frame() != frame {
+        scroll.setFrame(frame);
+        changed = true;
+    }
+    let shown = NSSize::new(0.0, scroll.contentSize().height);
+    if view.minSize() != shown {
+        view.setMinSize(shown);
+        changed = true;
+    }
+    if changed {
+        view.sizeToFit();
+        view.scroll_to_caret();
+    }
+    // The hint stands over the whole text view, as wide and as tall as the box.
+    if let Some((_, hint)) = view.ivars().hint.borrow().as_ref()
+        && hint.frame() != view.bounds()
+    {
+        hint.setFrame(view.bounds());
+    }
+    scroll.setHidden(place.covered);
 }
 
 /// Where the frame of a one-line `field` stands so that its capitals are centred on the text box's
@@ -2284,7 +3006,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
         for kind in [FieldKind::Line, FieldKind::Lines, FieldKind::Secret] {
             let field = field_of(mtm, kind, Weak::new(), Some("Monaco"), size);
-            let own = (line_height(&field) / f64::from(zoom)) as f32;
+            let own = (field.line_height() / f64::from(zoom)) as f32;
             if (own - got).abs() > 0.01 {
                 said(format!(
                     "Monaco at zoom {zoom}: a {kind:?} field has a line of {own}, the page is told {got}"
@@ -2330,14 +3052,28 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
                 "rows = 3 at zoom {zoom}: the field stands at {frame:?}, not in its text box {text:?}"
             ));
         }
-        let cell = view.cell().expect("a field has a cell");
+        // What the text needs of a box of this width, as the text view lays it out.
+        let FieldView::Lines(lines) = &view else {
+            unreachable!("a field of lines");
+        };
         let held = |words: &str, across: f64| {
-            view.setStringValue(&NSString::from_str(words));
-            cell.cellSizeForBounds(NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(across, 1000.0),
-            ))
-            .height
+            let text = Rect::new(20.0, 30.0 + pad, across as f32, 3.0 * line);
+            place_field(
+                &view,
+                &field(FieldKind::Lines, room_of_text(&text, pad, pad), text, false),
+                zoom,
+                Some("Monaco"),
+            );
+            lines.text.setString(&NSString::from_str(words));
+            // SAFETY: the text view was made with its layout manager and container.
+            let (manager, container) =
+                unsafe { (lines.text.layoutManager(), lines.text.textContainer()) };
+            let (manager, container) = (
+                manager.expect("a layout manager"),
+                container.expect("a container"),
+            );
+            manager.ensureLayoutForTextContainer(&container);
+            manager.usedRectForTextContainer(&container).size.height
         };
         for words in [
             "one\ntwo\nthree",
@@ -2385,12 +3121,25 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
             Some("Monaco"),
         );
         let frame = view.frame();
-        let font = view.font().expect("a font");
-        // SAFETY: NSView's `firstBaselineOffsetFromTop`, which takes nothing and gives a CGFloat.
-        let baseline: f64 = unsafe { msg_send![&*view, firstBaselineOffsetFromTop] };
-        let middle = frame.origin.y + baseline - font.capHeight() / 2.0;
+        let middle = if matches!(view, FieldView::Lines(_)) {
+            // A text view has no one baseline to ask of it as a field has: what it draws is measured
+            // (the capitals' ink, from the top of the one to the bottom).
+            view.set_text("XXXX");
+            let window = window_over(mtm, &host);
+            let ink = ink_in(&host);
+            window.setContentView(None);
+            ink.map_or(f64::NAN, |(_, top, _, bottom)| (top + bottom) / 2.0)
+        } else {
+            let font = view
+                .text_field()
+                .and_then(|field| field.font())
+                .expect("a font");
+            // SAFETY: NSView's `firstBaselineOffsetFromTop`, which takes nothing and gives a CGFloat.
+            let baseline: f64 = unsafe { msg_send![&*view, firstBaselineOffsetFromTop] };
+            frame.origin.y + baseline - font.capHeight() / 2.0
+        };
         let aimed = f64::from(text.y + text.h / 2.0);
-        if (middle - aimed).abs() > 0.5 {
+        if middle.is_nan() || (middle - aimed).abs() > 0.5 {
             said(format!(
                 "rows = 1 at padding 4 and 10, a {kind:?}: the capitals' middle is {middle}, the box's {aimed}"
             ));
@@ -2490,7 +3239,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         // SAFETY: only changes who owns the window; the `Retained` above does.
         unsafe { window.setReleasedWhenClosed(false) };
         window.setContentView(Some(&host));
-        if window.makeFirstResponder(Some(&view)) && view.currentEditor().is_some() {
+        if window.makeFirstResponder(Some(view.inner())) && view.editing() {
             let field_itself: &NSView = &view;
             for at in [
                 NSPoint::new(across, top + 2.0),
@@ -2507,6 +3256,16 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
                     Some(hit) if std::ptr::eq(&*hit, field_itself) => said(format!(
                         "a {kind:?} being typed in: a press in its padding ({at:?}) is the field, which ends the typing, not its editor"
                     )),
+                    // A field of lines is its own editor: its text view takes the press itself,
+                    // not whatever of the scroll view is nearest (a scroller).
+                    Some(hit)
+                        if matches!(view, FieldView::Lines(_))
+                            && !std::ptr::eq(&*hit, view.inner()) =>
+                    {
+                        said(format!(
+                            "a {kind:?}: a press in its padding ({at:?}) is {hit:?}, not its text view"
+                        ));
+                    }
                     Some(_) => {}
                     None => said(format!(
                         "a {kind:?} being typed in: a press in its padding ({at:?}) is not the field's"
@@ -2527,7 +3286,728 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
             ));
         }
     }
+    drop(said);
+    lines_overflow_problems(mtm, &mut problems);
+    lines_problems(mtm, &mut problems);
     problems
+}
+
+/// What is asked of a text view in `lines_problems`: one of its settings.
+type Ask = dyn Fn(&NSTextView) -> bool;
+
+/// A bare window of `frame`'s size over `host`: a field has a keyboard only in one.
+fn window_over(mtm: MainThreadMarker, host: &NSView) -> Retained<NSWindow> {
+    // SAFETY: with `defer` false the window exists at once; the `Retained` is its owner.
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            host.frame(),
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    // SAFETY: only changes who owns the window; the `Retained` above does.
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setContentView(Some(host));
+    window
+}
+
+/// Where `view` draws, in its own points: the box of every pixel that is not clear, as AppKit
+/// renders the view and what it holds (a field's editor too) without a screen to show it on.
+/// `None` where nothing is drawn.
+fn ink_in(view: &NSView) -> Option<(f64, f64, f64, f64)> {
+    ink_of(view).map(|(x0, y0, x1, y1, _)| (x0, y0, x1, y1))
+}
+
+/// [`ink_in`], and the strongest pixel of it (the first of the most opaque), as the bytes the
+/// rendering holds: the ink's own colour where a letter's stroke covers a whole pixel.
+fn ink_of(view: &NSView) -> Option<(f64, f64, f64, f64, [u8; 4])> {
+    let bounds = view.bounds();
+    let rep = view.bitmapImageRepForCachingDisplayInRect(bounds)?;
+    view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+    let (wide, high) = (rep.pixelsWide() as usize, rep.pixelsHigh() as usize);
+    let (per, row) = (rep.samplesPerPixel() as usize, rep.bytesPerRow() as usize);
+    let data = rep.bitmapData();
+    if data.is_null() || per < 4 {
+        return None;
+    }
+    let scale = wide as f64 / bounds.size.width;
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    let mut any = false;
+    let mut strongest = [0u8; 4];
+    for y in 0..high {
+        for x in 0..wide {
+            // SAFETY: inside the representation's own buffer: `row` bytes to a row, `per` to a pixel.
+            let pixel = unsafe { std::slice::from_raw_parts(data.add(y * row + x * per), per) };
+            let alpha = pixel[per - 1];
+            if alpha > 8 {
+                any = true;
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                if alpha > strongest[3] {
+                    strongest = [pixel[0], pixel[1], pixel[2], alpha];
+                }
+            }
+        }
+    }
+    any.then(|| {
+        (
+            x0 as f64 / scale,
+            y0 as f64 / scale,
+            (x1 + 1) as f64 / scale,
+            (y1 + 1) as f64 / scale,
+            strongest,
+        )
+    })
+}
+
+/// A box of rows draws no ink outside its text box, and the line the caret is in is in it: four lines
+/// in a box of three, the fourth is the caret's, so the box shows it (the page's `lines` "scrolls
+/// the lines it has no room for"). With the keyboard in the field and without it. The text is made
+/// of three empty lines and `XXXX` so that all the ink there is, is that line's; the same text in a
+/// box of four rows, and one line in a box of one, are the controls: they have ink where the
+/// measure reads it, which a measure that sees nothing would not.
+fn lines_overflow_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 31.0)] {
+        // (rows of the box, the text, whether the ink must be there at all)
+        for (rows, words, what) in [
+            (3.0_f32, "\n\n\nXXXX", "four lines in three rows"),
+            (4.0, "\n\n\nXXXX", "four lines in four rows"),
+            (1.0, "XXXX", "one line in one row"),
+        ] {
+            for keyboard in [false, true] {
+                let host = FieldsHost::with_frame(mtm, host_frame);
+                let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+                host.addSubview(&view);
+                let pad = 6.0 * zoom;
+                let text = Rect::new(20.0, 30.0 + pad, 200.0, rows * line);
+                let room = Rect::new(
+                    text.x - 8.0,
+                    text.y - pad,
+                    text.w + 16.0,
+                    text.h + 2.0 * pad,
+                );
+                place_field(
+                    &view,
+                    &Field {
+                        id,
+                        kind: FieldKind::Lines,
+                        rect: room,
+                        text,
+                        hint: None,
+                        label: None,
+                        covered: false,
+                    },
+                    zoom,
+                    Some("Monaco"),
+                );
+                let window = window_over(mtm, &host);
+                let end = words.encode_utf16().count();
+                view.set_text(words);
+                view.select((end, 0));
+                if keyboard {
+                    window.makeFirstResponder(Some(view.inner()));
+                    view.select_waiting();
+                }
+                let state = if keyboard {
+                    "with the keyboard"
+                } else {
+                    "without it"
+                };
+                match ink_in(&host) {
+                    None => problems.push(format!(
+                        "rows = {rows} at zoom {zoom}, {what}, {state}: nothing is drawn"
+                    )),
+                    Some((x0, y0, x1, y1)) => {
+                        let (left, top, right, bottom) = (
+                            f64::from(text.x),
+                            f64::from(text.y),
+                            f64::from(text.x + text.w),
+                            f64::from(text.y + text.h),
+                        );
+                        if x0 < left - 0.5
+                            || y0 < top - 0.5
+                            || x1 > right + 0.5
+                            || y1 > bottom + 0.5
+                        {
+                            problems.push(format!(
+                                "rows = {rows} at zoom {zoom}, {what}, {state}: ink in ({x0}, {y0})–({x1}, {y1}), outside the text box ({left}, {top})–({right}, {bottom})"
+                            ));
+                        }
+                    }
+                }
+                window.makeFirstResponder(None);
+                window.setContentView(None);
+            }
+        }
+    }
+}
+
+/// What a field of lines is, beside a field of text (the one it replaces): its text stands where a
+/// line's does and says its hint in the same ink; it is a text area to a screen reader, once, with
+/// the name and the hint of the page's; it is as wide as the box, whatever the scroll bar; the line of
+/// its text is the line the page is told in every face tried; it has the substitutions a field's
+/// editor has; and the caret stays in view as the person types.
+fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    let field = |kind: FieldKind, text: Rect, hint: Option<&str>, label: Option<&str>| Field {
+        id,
+        kind,
+        rect: Rect::new(text.x - 8.0, text.y - 6.0, text.w + 16.0, text.h + 12.0),
+        text,
+        hint: hint.map(str::to_owned),
+        label: label.map(str::to_owned),
+        covered: false,
+    };
+    let close = |one: f64, other: f64| (one - other).abs() <= 0.5;
+    // Standing beside a field of one line, in each face and at each size: the first letter and the
+    // hint, across and down (the capitals' middle is the box's middle, as `text_top` puts a line's;
+    // a box of one row is a line tall), and the colour of the hint.
+    for family in [Some("Monaco"), Some("SF Mono"), None] {
+        for zoom in [1.0_f32, 1.25, 2.0] {
+            let pad = 6.0 * zoom;
+            let line = (line_of(mtm, family, zoom) * zoom).round();
+            let text = Rect::new(20.0, 30.0 + pad, 200.0, line);
+            let ink = |kind: FieldKind, words: &str, hint: Option<&str>| {
+                let host = FieldsHost::with_frame(mtm, host_frame);
+                let view = field_of(mtm, kind, Weak::new(), family, 12.5);
+                host.addSubview(&view);
+                place_field(&view, &field(kind, text, hint, None), zoom, family);
+                view.set_text(words);
+                let window = window_over(mtm, &host);
+                let ink = ink_of(&host);
+                window.setContentView(None);
+                ink
+            };
+            for (what, words, hint) in [("its text", "XXXX", None), ("its hint", "", Some("XXXX"))]
+            {
+                let (Some(one), Some(many)) = (
+                    ink(FieldKind::Line, words, hint),
+                    ink(FieldKind::Lines, words, hint),
+                ) else {
+                    problems.push(format!(
+                        "{family:?} at zoom {zoom}: {what} of a field is not drawn"
+                    ));
+                    continue;
+                };
+                if !(close(one.0, many.0) && close(one.2, many.2)) {
+                    problems.push(format!(
+                        "{family:?} at zoom {zoom}: {what} of lines stands across {:?}, a line's across {:?}",
+                        (many.0, many.2),
+                        (one.0, one.2)
+                    ));
+                }
+                if !close((one.1 + one.3) / 2.0, (many.1 + many.3) / 2.0) {
+                    problems.push(format!(
+                        "{family:?} at zoom {zoom}: {what} of lines stands {:?} down, a line's {:?}",
+                        (many.1, many.3),
+                        (one.1, one.3)
+                    ));
+                }
+                if one.4.iter().zip(&many.4).any(|(a, b)| a.abs_diff(*b) > 8) {
+                    problems.push(format!(
+                        "{family:?} at zoom {zoom}: {what} of lines is in {:?}, a line's in {:?}",
+                        many.4, one.4
+                    ));
+                }
+            }
+        }
+    }
+    // The box: the text is as wide as it, the scroll bar the overlay one, the field a text area read once.
+    for zoom in [1.0_f32, 2.0] {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 48.0 * zoom);
+        place_field(
+            &view,
+            &field(FieldKind::Lines, text, Some("Write here"), Some("Notes")),
+            zoom,
+            Some("Monaco"),
+        );
+        let FieldView::Lines(lines) = &view else {
+            unreachable!("a field of lines");
+        };
+        view.set_text("one\ntwo\nthree\nfour\nfive\nsix");
+        let across = lines.scroll.contentSize().width;
+        if (across - f64::from(text.w)).abs() > 0.01
+            || (lines.text.frame().size.width - f64::from(text.w)).abs() > 0.01
+        {
+            problems.push(format!(
+                "lines at zoom {zoom}: the text is {across} ({}) across, the box {}",
+                lines.text.frame().size.width,
+                text.w
+            ));
+        }
+        if lines.scroll.scrollerStyle() != NSScrollerStyle::Overlay {
+            problems.push("lines: the scroll bar takes room of the text's".to_owned());
+        }
+        if lines.text.frame().size.height < f64::from(text.h) {
+            problems.push(format!(
+                "lines at zoom {zoom}: the text is {} tall, less than the box's {}",
+                lines.text.frame().size.height,
+                text.h
+            ));
+        }
+        // What a screen reader is given: the text view, as a text area, named and with the hint, and
+        // nothing of the scroll view; each object of the field once.
+        let read = view.read();
+        let said = || -> Option<String> {
+            // SAFETY: the object is one of AppKit's views, which answers NSAccessibility.
+            let words: Option<Retained<NSString>> =
+                unsafe { msg_send![&*read, accessibilityLabel] };
+            words.map(|words| words.to_string())
+        };
+        if said().as_deref() != Some("Notes") {
+            problems.push("lines: a screen reader is not told the field's name".to_owned());
+        }
+        // SAFETY: as above.
+        let (role, hint): (Option<Retained<NSString>>, Option<Retained<NSString>>) = unsafe {
+            (
+                msg_send![&*read, accessibilityRole],
+                msg_send![&*read, accessibilityPlaceholderValue],
+            )
+        };
+        if role.map(|role| role.to_string())
+            != Some(unsafe { NSAccessibilityTextAreaRole }.to_string())
+        {
+            problems.push("lines: a screen reader does not read a text area".to_owned());
+        }
+        if hint.map(|hint| hint.to_string()).as_deref() != Some("Write here") {
+            problems.push("lines: a screen reader is not told the field's hint".to_owned());
+        }
+        let owned = view.owned();
+        let has = |object: &AnyObject| {
+            owned
+                .iter()
+                .filter(|held| std::ptr::eq(&***held, object))
+                .count()
+        };
+        let (scroll, text_view): (&AnyObject, &AnyObject) = (&lines.scroll, &lines.text);
+        if has(scroll) != 1 || has(text_view) != 1 {
+            problems.push(format!(
+                "lines: the field holds its scroll view {} times and its text view {}, of the page's own",
+                has(scroll),
+                has(text_view)
+            ));
+        }
+        if lines.scroll.isAccessibilityElement() {
+            problems.push(
+                "lines: the scroll view is an element of its own to a screen reader".to_owned(),
+            );
+        }
+        let hint_is_read = lines
+            .text
+            .ivars()
+            .hint
+            .borrow()
+            .as_ref()
+            .and_then(|(_, hint)| hint.cell())
+            .is_none_or(|cell| cell.isAccessibilityElement())
+            || lines
+                .text
+                .ivars()
+                .hint
+                .borrow()
+                .as_ref()
+                .is_none_or(|(_, hint)| hint.isAccessibilityElement());
+        if hint_is_read {
+            problems.push(
+                "lines: the hint's own text field is an element of its own to a screen reader"
+                    .to_owned(),
+            );
+        }
+        view.set_read(false);
+        if lines.text.isAccessibilityElement() {
+            problems.push("lines: a field the page shut out is read".to_owned());
+        }
+        view.set_read(true);
+        if !lines.text.isAccessibilityElement() {
+            problems.push("lines: a field the page lets in is not read".to_owned());
+        }
+    }
+    // N rows of a field of lines are N of the lines the page is told (`line_of`), in the faces the
+    // terminal is set in, at the sizes the page is drawn at: the page lays its rows out with one
+    // number, and the text is laid out in it.
+    for family in [
+        Some("Monaco"),
+        Some("Menlo"),
+        Some("SF Mono"),
+        Some("Courier New"),
+        None,
+    ] {
+        for zoom in [1.0_f32, 1.25, 1.5, 2.0, 3.0] {
+            let told = f64::from(line_of(mtm, family, zoom)) * f64::from(zoom);
+            let host = FieldsHost::with_frame(mtm, host_frame);
+            let view = field_of(mtm, FieldKind::Lines, Weak::new(), family, 12.5);
+            host.addSubview(&view);
+            let text = Rect::new(20.0, 36.0, 200.0, (3.0 * told) as f32);
+            place_field(
+                &view,
+                &field(FieldKind::Lines, text, None, None),
+                zoom,
+                family,
+            );
+            let FieldView::Lines(lines) = &view else {
+                unreachable!("a field of lines");
+            };
+            lines.text.setString(&NSString::from_str("x\nx\nx"));
+            // SAFETY: the text view was made with its layout manager and container.
+            let (manager, container) =
+                unsafe { (lines.text.layoutManager(), lines.text.textContainer()) };
+            let (manager, container) = (
+                manager.expect("a layout manager"),
+                container.expect("a container"),
+            );
+            manager.ensureLayoutForTextContainer(&container);
+            let laid = manager.usedRectForTextContainer(&container).size.height;
+            if (laid - 3.0 * told).abs() > 0.01 {
+                problems.push(format!(
+                    "{family:?} at zoom {zoom}: three lines of lines are {laid} points, three of the page's {told}"
+                ));
+            }
+        }
+    }
+    // The substitutions of the field's editor, asked of one in a window: the text view has them.
+    {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Line, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        view.setFrame(NSRect::new(
+            NSPoint::new(20.0, 30.0),
+            NSSize::new(200.0, 16.0),
+        ));
+        let window = window_over(mtm, &host);
+        let editor = window
+            .makeFirstResponder(Some(view.inner()))
+            .then(|| view.text_field().and_then(|field| field.currentEditor()))
+            .flatten()
+            .and_then(|editor| editor.downcast::<NSTextView>().ok());
+        if let Some(editor) = editor {
+            let lines = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+            let FieldView::Lines(lines) = &lines else {
+                unreachable!("a field of lines");
+            };
+            let asks: [(&str, &Ask); 6] = [
+                ("quotes", &|text| text.isAutomaticQuoteSubstitutionEnabled()),
+                ("dashes", &|text| text.isAutomaticDashSubstitutionEnabled()),
+                ("text replacement", &|text| {
+                    text.isAutomaticTextReplacementEnabled()
+                }),
+                ("links", &|text| text.isAutomaticLinkDetectionEnabled()),
+                ("spelling", &|text| text.isContinuousSpellCheckingEnabled()),
+                ("undo", &|text| text.allowsUndo()),
+            ];
+            for (name, ask) in asks {
+                let (field, own) = (ask(&editor), ask(&lines.text));
+                if field != own {
+                    problems.push(format!(
+                        "lines: {name} are {own}, a field's editor's {field}"
+                    ));
+                }
+            }
+            window.makeFirstResponder(None);
+        } else {
+            problems.push(
+                "a line took no keyboard in a window of its own: its editor is not tried"
+                    .to_owned(),
+            );
+        }
+        window.setContentView(None);
+    }
+    // The caret stays in view as the person types: four lines typed in a box of three, the last is
+    // seen, the box scrolled by a line; a line more, and by two.
+    for zoom in [1.0_f32, 2.0] {
+        let line = (line_of(mtm, Some("Monaco"), zoom) * zoom).round();
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 3.0 * line);
+        place_field(
+            &view,
+            &field(FieldKind::Lines, text, None, None),
+            zoom,
+            Some("Monaco"),
+        );
+        let window = window_over(mtm, &host);
+        window.makeFirstResponder(Some(view.inner()));
+        let FieldView::Lines(lines) = &view else {
+            unreachable!("a field of lines");
+        };
+        for typed in 1..=5 {
+            let words = NSString::from_str(if typed == 1 { "X" } else { "\nX" });
+            // SAFETY: `insertText:replacementRange:` is NSTextInputClient's, which an `NSTextView`
+            // answers; `NSNotFound` as the location stands for the selection.
+            let _: () = unsafe {
+                msg_send![&*lines.text, insertText: &*words, replacementRange: NSRange::new(isize::MAX as usize, 0)]
+            };
+            let seen = lines.scroll.contentView().bounds().origin.y;
+            let low = f64::from(typed.max(3) - 3) * f64::from(line);
+            if (seen - low).abs() > 0.01 {
+                problems.push(format!(
+                    "lines at zoom {zoom}: {typed} lines typed in a box of three, the box is scrolled {seen} down, to {low}"
+                ));
+            }
+        }
+        match ink_in(&host) {
+            Some((x0, y0, x1, y1))
+                if x0 >= f64::from(text.x) - 0.5
+                    && y0 >= f64::from(text.y) - 0.5
+                    && x1 <= f64::from(text.x + text.w) + 0.5
+                    && y1 <= f64::from(text.y + text.h) + 0.5 => {}
+            other => problems.push(format!(
+                "lines at zoom {zoom}: five lines typed in a box of three draw {other:?}, not within the box"
+            )),
+        }
+        window.makeFirstResponder(None);
+        window.setContentView(None);
+    }
+    // A field that is told another face of the same size is laid out in that one's line, and one the
+    // system moved to the classic scroll bar is the page's overlay again.
+    {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let text = Rect::new(20.0, 36.0, 200.0, 48.0);
+        let place = |view: &FieldView, family: Option<&str>| {
+            place_field(
+                view,
+                &field(FieldKind::Lines, text, None, None),
+                1.25,
+                family,
+            );
+        };
+        let moved = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&moved);
+        place(&moved, Some("Monaco"));
+        place(&moved, Some("SF Mono"));
+        let fresh = field_of(mtm, FieldKind::Lines, Weak::new(), Some("SF Mono"), 12.5);
+        host.addSubview(&fresh);
+        place(&fresh, Some("SF Mono"));
+        let (a, b) = (moved.ivars(), fresh.ivars());
+        if a.line.get() != b.line.get() || a.baseline.get() != b.baseline.get() {
+            problems.push(format!(
+                "lines: a field moved from Monaco to SF Mono at the same size has a line of {} and a baseline of {}, one made in it {} and {}",
+                a.line.get(),
+                a.baseline.get(),
+                b.line.get(),
+                b.baseline.get()
+            ));
+        }
+        if let FieldView::Lines(lines) = &moved {
+            lines.scroll.setScrollerStyle(NSScrollerStyle::Legacy);
+            place(&moved, Some("SF Mono"));
+            if lines.scroll.scrollerStyle() != NSScrollerStyle::Overlay
+                || (lines.scroll.contentSize().width - f64::from(text.w)).abs() > 0.01
+            {
+                problems.push(format!(
+                    "lines: a scroll view the system moved to the classic bar is not the page's overlay again: its style is {:?} and the text {} wide, not {}",
+                    lines.scroll.scrollerStyle(),
+                    lines.scroll.contentSize().width,
+                    text.w
+                ));
+            }
+        }
+    }
+    // What the person typed is not undone onto a text the page put in after it.
+    {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 48.0);
+        place_field(
+            &view,
+            &field(FieldKind::Lines, text, None, None),
+            1.0,
+            Some("Monaco"),
+        );
+        let window = window_over(mtm, &host);
+        window.makeFirstResponder(Some(view.inner()));
+        let FieldView::Lines(lines) = &view else {
+            unreachable!("a field of lines");
+        };
+        let words = NSString::from_str("typed words");
+        // SAFETY: `insertText:replacementRange:` is NSTextInputClient's, which an `NSTextView`
+        // answers; `NSNotFound` as the location stands for the selection.
+        let _: () = unsafe {
+            msg_send![&*lines.text, insertText: &*words, replacementRange: NSRange::new(isize::MAX as usize, 0)]
+        };
+        view.set_text("x");
+        let typed = NSString::from_str("y");
+        // SAFETY: as above.
+        let _: () = unsafe {
+            msg_send![&*lines.text, insertText: &*typed, replacementRange: NSRange::new(isize::MAX as usize, 0)]
+        };
+        if let Some(manager) = lines.text.undoManager() {
+            // Only what is typed after the text was put in is undone, and without AppKit raising.
+            if manager.canUndo() {
+                manager.undo();
+            }
+        }
+        // The end of the event: what the managers have queued, with the field's old one let go.
+        objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(
+            &objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05),
+        );
+        if view.text() != "x" {
+            problems.push(format!(
+                "lines: undo after the page put a text in left {:?}, not that text",
+                view.text()
+            ));
+        }
+        window.makeFirstResponder(None);
+        window.setContentView(None);
+    }
+    // A press in the padding of a box that is scrolled down puts the caret in the lines in view (the
+    // point is past the edge of the text there, on a line the box scrolled away from), a text the
+    // page may drop files on is not a text view's to take, and a field that left the page is freed.
+    {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 48.0);
+        let room = Rect::new(12.0, 30.0, 216.0, 60.0);
+        let line = Field {
+            id,
+            kind: FieldKind::Lines,
+            rect: room,
+            text,
+            hint: None,
+            label: None,
+            covered: false,
+        };
+        place_field(&view, &line, 1.0, Some("Monaco"));
+        view.set_text("1\n2\n3\n4\n5\n6\n7\n8");
+        let window = window_over(mtm, &host);
+        if let FieldView::Lines(lines) = &view {
+            if lines.text.registeredDraggedTypes().count() != 0 {
+                problems.push("lines: the text view takes a drop of files itself".to_owned());
+            }
+            // Scrolled to the end: the first of the lines in view is the sixth.
+            lines.text.setSelectedRange(NSRange::new(15, 0));
+            lines.text.scroll_to_caret();
+            let origin = lines.scroll.contentView().bounds().origin.y;
+            for (name, y, from, to) in [("below", 87.0, 10, 15), ("above", 33.0, 0, 11)] {
+                let in_window = host.convertPoint_toView(NSPoint::new(100.0, y), None);
+                let press = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    NSEventType::LeftMouseDown,
+                    in_window,
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    window.windowNumber(),
+                    None,
+                    0,
+                    1,
+                    1.0,
+                );
+                if let Some(press) = press {
+                    lines.text.setSelectedRange(NSRange::new(0, 0));
+                    lines.text.mouseDown(&press);
+                    let at = lines.text.selectedRange().location;
+                    if at < from || at > to {
+                        problems.push(format!(
+                            "lines: a press in the padding {name} the box, scrolled to the end, puts the caret at {at}, not in the lines in view ({from}..={to})"
+                        ));
+                    }
+                    if (lines.scroll.contentView().bounds().origin.y - origin).abs() > 0.5 {
+                        problems.push(format!(
+                            "lines: a press in the padding {name} the box scrolls it"
+                        ));
+                    }
+                    lines.text.scrollPoint(NSPoint::new(0.0, origin));
+                } else {
+                    problems.push("lines: no mouse event to press the padding with".to_owned());
+                }
+            }
+        }
+        window.makeFirstResponder(None);
+        window.setContentView(None);
+    }
+    // Nor what was typed in a field that has left the page.
+    {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 48.0);
+        place_field(
+            &view,
+            &field(FieldKind::Lines, text, None, None),
+            1.0,
+            Some("Monaco"),
+        );
+        let window = window_over(mtm, &host);
+        window.makeFirstResponder(Some(view.inner()));
+        if let FieldView::Lines(lines) = &view {
+            let words = NSString::from_str("typed words");
+            // SAFETY: as above.
+            let _: () = unsafe {
+                msg_send![&*lines.text, insertText: &*words, replacementRange: NSRange::new(isize::MAX as usize, 0)]
+            };
+            if !lines
+                .text
+                .undoManager()
+                .is_some_and(|manager| manager.canUndo())
+            {
+                problems.push(
+                    "lines: typing registers nothing to undo, so the test below says nothing"
+                        .to_owned(),
+                );
+            }
+            view.take_away();
+            if lines
+                .text
+                .undoManager()
+                .is_some_and(|manager| manager.canUndo())
+            {
+                problems.push(
+                    "lines: what was typed in a field that was taken away can be undone".to_owned(),
+                );
+            }
+        }
+        window.makeFirstResponder(None);
+        window.setContentView(None);
+    }
+    // Where the caret is, for the kit's rule of keys (`FieldState`): none while the keyboard is
+    // elsewhere, the length and the selection in UTF-16 units while it is in the field; and a
+    // command the page did not take (⏎, here no page) is the text view's own, a line break.
+    {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        host.addSubview(&view);
+        let text = Rect::new(20.0, 36.0, 200.0, 48.0);
+        place_field(
+            &view,
+            &field(FieldKind::Lines, text, None, None),
+            1.0,
+            Some("Monaco"),
+        );
+        let window = window_over(mtm, &host);
+        view.set_text("a\u{e9}😀\nb");
+        if view.state(FieldKind::Lines).is_some() {
+            problems.push(
+                "lines: a field without the keyboard has a caret for the rule of keys".to_owned(),
+            );
+        }
+        window.makeFirstResponder(Some(view.inner()));
+        view.select((1, 3));
+        match view.state(FieldKind::Lines) {
+            Some(state) if state.length == 6 && state.selection == (1..4) => {}
+            other => problems.push(format!(
+                "lines: the state of a field with the keyboard is {other:?}, not 6 units long with 1..4 selected"
+            )),
+        }
+        view.select((6, 0));
+        // SAFETY: `doCommandBySelector:` is NSResponder's, which takes a selector.
+        let _: () = unsafe { msg_send![view.inner(), doCommandBySelector: sel!(insertNewline:)] };
+        if view.text() != "a\u{e9}😀\nb\n" {
+            problems.push(format!(
+                "lines: ⏎ the page did not take left {:?}, not a line break at the end",
+                view.text()
+            ));
+        }
+        window.makeFirstResponder(None);
+        window.setContentView(None);
+    }
 }
 
 #[cfg(test)]
@@ -2809,21 +4289,39 @@ mod tests {
         let keyboard = body("    pub(crate) fn send_keyboard(");
         assert!(
             keyboard
-                .find("window.makeFirstResponder(Some(&field))")
+                .find("window.makeFirstResponder(Some(field.inner()))")
                 .expect(keyboard)
                 < keyboard.find("field.select_waiting()").expect(keyboard),
             "{keyboard}"
         );
         let fill = body("    pub(crate) fn fill(");
         assert!(fill.contains("field.select(range)"), "{fill}");
-        assert!(fill.contains("field.setStringValue("), "{fill}");
+        assert!(fill.contains("field.set_text("), "{fill}");
         // The text is put in before it is selected in, and a text with none selected has its caret
         // at its end.
-        assert!(fill.find("setStringValue").unwrap() < fill.find("field.select(range)").unwrap());
+        assert!(fill.find("set_text").unwrap() < fill.find("field.select(range)").unwrap());
         assert!(fill.contains("text.encode_utf16().count(), 0"), "{fill}");
-        let responder = body("                fn become_first_responder(&self) -> bool {");
+        // Every class of field answers the keyboard and a press with the same functions, which are
+        // where the rule is: the keyboard comes, the page is told which field, and what the press
+        // gives is known by its event.
+        assert_eq!(
+            code.matches("keyboard_taken(self.mtm(), self.ivars(), took)")
+                .count(),
+            2,
+            "the text fields' class (once for both of its instances) and the text view of lines"
+        );
+        assert_eq!(
+            code.matches("press_in(self, self.ivars(), event,").count(),
+            2,
+            "the text fields' class (once for both of its instances) and the text view of lines"
+        );
+        let free = |signature: &str| {
+            let at = code.find(signature).expect(signature);
+            &code[at..at + code[at..].find("\n}\n").expect("its end")]
+        };
+        let responder = free("fn keyboard_taken(");
         assert!(
-            responder.contains("keyboard_came(self.ivars(), took)"),
+            responder.contains("keyboard_came(ivars, took)"),
             "{responder}"
         );
         let came = body("fn keyboard_came(");
@@ -2831,13 +4329,15 @@ mod tests {
         assert!(came.contains("selection.set(None)"), "{came}");
         // A press that gives the field the keyboard ends with what the page selected meanwhile, unless
         // it was a drag; one in a field that had the keyboard is AppKit's.
-        let press = body("                fn mouse_down(&self, event: &NSEvent) {");
-        assert!(press.contains("self.currentEditor().is_some()"), "{press}");
-        assert!(press.contains("self.ivars().asked.set(None)"), "{press}");
+        let press = free("fn press_in(");
+        assert!(press.contains("editor().is_some()"), "{press}");
+        assert!(press.contains("ivars.asked.set(None)"), "{press}");
         assert!(
-            press.find("mouseDown: event").expect(press)
+            press
+                .find("guarded(ivars, \"a press in a field\", (), press)")
+                .expect(press)
                 < press
-                    .find("keep_asked_selection(self, self.ivars(), down)")
+                    .find("keep_asked_selection(view, ivars, down, editor())")
                     .expect(press),
             "{press}"
         );
@@ -2848,7 +4348,7 @@ mod tests {
             press.contains("given_by_press.take() == Some(event.timestamp())"),
             "{press}"
         );
-        let kept = body("fn keep_asked_selection(");
+        let kept = free("fn keep_asked_selection(");
         assert!(kept.contains("let dragged ="), "{kept}");
         assert!(kept.contains("if !dragged"), "{kept}");
         assert!(
@@ -2871,6 +4371,55 @@ mod tests {
         assert!(command.contains("state.takes(key, mods)"), "{command}");
         assert!(command.contains("field_command_key("), "{command}");
         assert!(command.contains("field.state(kind)"), "{command}");
+    }
+
+    /// A field of lines is no text field and has no delegate: what its delegate hears of a text
+    /// field, the pane hears from the text view itself, by the same two entries, and the pane finds
+    /// the field by its text view. A source scan: the pane is what `page_field_of` is asked of.
+    #[test]
+    fn a_field_of_lines_tells_the_pane_what_a_text_fields_delegate_hears() {
+        let source = include_str!("native_page.rs");
+        let code = &source[..source.find("#[cfg(test)]").expect("the tests follow")];
+        let body = |signature: &str| {
+            let at = code.find(signature).expect(signature);
+            &code[at..at + code[at..].find("\n        }\n").expect("its end")]
+        };
+        let command = body("        fn do_command(&self, command: Sel) {");
+        assert!(
+            command.contains("page_field_do_command(control, self, command)"),
+            "{command}"
+        );
+        assert!(
+            command.contains("doCommandBySelector: command"),
+            "{command}"
+        );
+        let changed = body("        fn did_change_text(&self) {");
+        assert!(
+            changed.contains("pane.page_field_changed(control)"),
+            "{changed}"
+        );
+        let of = body("    pub(crate) fn of(&self, control: &AnyObject)");
+        assert!(of.contains("is(field.view.inner())"), "{of}");
+        let pane = include_str!("pane.rs");
+        let at = pane
+            .find("    pub(crate) fn page_field_do_command(")
+            .expect("page_field_do_command");
+        let route = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(
+            route.contains("self.page_field_command(id, kind, text_view, command)"),
+            "{route}"
+        );
+        // The delegate's own entry goes through the same one.
+        assert!(pane.contains("self.page_field_changed(&object);"));
+        // The writing cursor is the field's over the whole of its room.
+        let at = pane
+            .find("    fn cursor(&mut self, cursor: PageCursor) {")
+            .expect("cursor");
+        let cursor = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(
+            cursor.contains("PageCursor::Arrow if self.0.pointer_in_a_field_room()"),
+            "{cursor}"
+        );
     }
 
     /// A field of one line takes no line break, as AppKit's single-line cells take a paste: each

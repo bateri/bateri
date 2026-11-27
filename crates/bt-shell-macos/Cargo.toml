@@ -181,6 +181,10 @@ objc2-foundation = { workspace = true, features = [
 # three patterns, played only while a finger is on the glass. `NSSound`: a page's sounds, each
 # its samples as a WAV file in memory, at the system's volume and silence (`feel::Feel`). Only
 # header flags; `Cargo.lock` did not move.
+# A page's field of lines scrolls the lines its box has no room for, which a wrapping
+# `NSTextField` cannot (`native_page`): it is an `NSScrollView` over an `NSTextView`
+# (`NSTextContainer`, `NSLayoutManager` and `NSTextStorage` are the text system behind it).
+# Only header flags over headers already in the set; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSSegmentedControl", "NSSegmentedCell", "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -200,6 +204,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSGraphicsContext", "NSAffineTransform", "objc2-core-graphics", "NSGraphics", "NSImageRep",
     "NSBitmapImageRep", "NSAccessibilityElement", "NSTextInputContext", "NSColorList",
     "NSTableRowView", "NSHapticFeedback", "NSSound",
+    "NSTextView", "NSTextContainer", "NSLayoutManager", "NSTextStorage",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

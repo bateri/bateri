@@ -2883,7 +2883,9 @@ define_class!(
 
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, notification: &NSNotification) {
-            self.page_field_changed(notification);
+            if let Some(object) = notification.object() {
+                self.page_field_changed(&object);
+            }
         }
 
         /// The field's command hook: ⏎ the previous (older), ⇧⏎
@@ -8267,6 +8269,15 @@ impl TerminalPane {
         true
     }
 
+    /// Whether the pointer is in the room of a field the page shows (not one it covers).
+    pub(crate) fn pointer_in_a_field_room(&self) -> bool {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .is_some_and(|page| page.fields.pointer_in_a_room())
+    }
+
     /// The name and the kind of the page's field `control` is, if it is one.
     fn page_field_of(
         &self,
@@ -8280,6 +8291,20 @@ impl TerminalPane {
             .borrow()
             .as_ref()
             .and_then(|page| page.fields.of(control))
+    }
+
+    /// A command of AppKit's text (⏎, Tab, Esc, an arrow) in the page's field `control` when it is
+    /// the text view of a field of lines, which has no delegate to ask: whether the page took it
+    /// (`page_field_command`), `None` where `control` is no field of the page's.
+    pub(crate) fn page_field_do_command(
+        &self,
+        control: &AnyObject,
+        text_view: &AnyObject,
+        command: Sel,
+    ) -> Option<bool> {
+        self.note_interaction();
+        self.page_field_of(control)
+            .map(|(id, kind)| self.page_field_command(id, kind, text_view, command))
     }
 
     /// A key of a page's field that is the page's and not the field's, by the kit's rule of the keys a
@@ -8346,12 +8371,10 @@ impl TerminalPane {
         true
     }
 
-    /// The text of a page's field changed: the page is told which field and what it holds.
-    fn page_field_changed(&self, notification: &NSNotification) {
-        let Some(object) = notification.object() else {
-            return;
-        };
-        let Some((id, _)) = self.page_field_of(&object) else {
+    /// The text of a page's field `control` changed (a text field says it to its delegate, a field of
+    /// lines to itself): the page is told which field and what it holds.
+    pub(crate) fn page_field_changed(&self, control: &AnyObject) {
+        let Some((id, _)) = self.page_field_of(control) else {
             return;
         };
         let Some(handle) = self.page_handle() else {
@@ -8363,7 +8386,7 @@ impl TerminalPane {
             .borrow()
             .as_ref()
             .and_then(|page| page.fields.field(id))
-            .map(|field| field.stringValue().to_string())
+            .map(|field| field.text())
             .unwrap_or_default();
         handle.guard("a field's text", || handle.page().text(id, &text));
         self.drain_page();
@@ -10340,6 +10363,12 @@ impl PageDriveHost for PageHost<'_> {
         match cursor {
             PageCursor::Pointer => NSCursor::pointingHandCursor().set(),
             PageCursor::Text => NSCursor::IBeamCursor().set(),
+            // The room of a field is all the field's to the pointer, and the writing cursor is the
+            // field's: over its padding too, where AppKit's own cursor rects (the text's) do not
+            // reach and the page says the arrow.
+            PageCursor::Arrow if self.0.pointer_in_a_field_room() => {
+                NSCursor::IBeamCursor().set();
+            }
             PageCursor::Arrow => NSCursor::arrowCursor().set(),
             // Their replacements are macOS 15's; bateri runs on 14.
             #[allow(deprecated)]
@@ -11559,7 +11588,7 @@ mod tests {
                 "handle.guard(\"what the page said\"",
             ),
             (
-                "    fn page_field_changed(",
+                "    pub(crate) fn page_field_changed(",
                 "handle.guard(\"a field's text\"",
             ),
             (

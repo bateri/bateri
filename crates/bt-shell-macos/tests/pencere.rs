@@ -70,7 +70,7 @@ use objc2_app_kit::{
     NSBackingStoreType, NSBitmapImageFileType, NSBitmapImageRep, NSButton, NSEvent,
     NSEventModifierFlags, NSEventType, NSGraphicsContext, NSImage, NSMenu, NSMenuItem,
     NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSPasteboardWriting, NSTextField,
-    NSView, NSWindow, NSWindowStyleMask,
+    NSTextView, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -3667,15 +3667,22 @@ fn field_rows_stand_in_their_boxes(
         let token = program.hello_kind("lua");
         program.open_script(&token, ROWS_PAGE);
         program.supply(&[("page.lua", "text/x-lua", ROWS_PAGE.as_bytes())]);
+        // A field of lines is a text view in a scroll view, which is what stands in its box (a search
+        // for text fields finds none of them, and a test that looks for none passes by saying the
+        // page was not drawn).
         let fields = || {
-            let mut found: Vec<Retained<NSTextField>> = pane
+            let mut found: Vec<(Retained<NSTextView>, NSRect)> = pane
                 .subviews()
                 .iter()
                 .flat_map(descendants)
-                .filter_map(|view| view.downcast::<NSTextField>().ok())
-                .filter(|field| field.isEditable())
+                .filter_map(|view| view.downcast::<NSTextView>().ok())
+                .filter(|text| text.isEditable() && !text.isFieldEditor())
+                .filter_map(|text| {
+                    let frame = text.enclosingScrollView()?.frame();
+                    Some((text, frame))
+                })
                 .collect();
-            found.sort_by(|a, b| a.frame().origin.y.total_cmp(&b.frame().origin.y));
+            found.sort_by(|a, b| a.1.origin.y.total_cmp(&b.1.origin.y));
             found
         };
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3694,7 +3701,7 @@ fn field_rows_stand_in_their_boxes(
         }
         spin(0.2);
         let found = fields();
-        let (notes, one) = (found[0].frame(), found[1].frame());
+        let (notes, one) = (found[0].1, found[1].1);
         let zoom = size / 12.5;
         let (pad, gap, margin) = (6.0 * zoom, 16.0 * zoom, 20.0 * zoom);
         eprintln!("pencere: Monaco at {size}: three rows {notes:?}, one row {one:?}");
@@ -3719,15 +3726,29 @@ fn field_rows_stand_in_their_boxes(
             3.0 * line + 2.0 * pad + gap
         );
         // The text is not cut: three lines of it fit the box AppKit made.
-        found[0].setStringValue(&NSString::from_str("one\ntwo\nthree"));
-        let cell = found[0].cell().expect("a field has a cell");
-        let needs = cell
-            .cellSizeForBounds(NSRect::new(NSPoint::new(0.0, 0.0), notes.size))
-            .height;
+        let text = &found[0].0;
+        text.setString(&NSString::from_str("one\ntwo\nthree"));
+        // SAFETY: the text view was made with its layout manager and container.
+        let (manager, container) = unsafe { (text.layoutManager(), text.textContainer()) };
+        let (manager, container) = (
+            manager.expect("a layout manager"),
+            container.expect("a container"),
+        );
+        manager.ensureLayoutForTextContainer(&container);
+        let needs = manager.usedRectForTextContainer(&container).size.height;
         assert!(
             needs <= notes.size.height + 0.01,
             "Monaco at {size}: three lines need {needs} points of the box's {}",
             notes.size.height
+        );
+        // The text is as wide as the box: the page broke the lines for it.
+        let across = text
+            .enclosingScrollView()
+            .map(|scroll| scroll.contentSize().width);
+        assert!(
+            across.is_some_and(|across| (across - notes.size.width).abs() < 0.01),
+            "Monaco at {size}: the text is {across:?} points across, the box {}",
+            notes.size.width
         );
         program.bye(&token);
         until("the view to go", || !covered(&pane));
