@@ -229,6 +229,10 @@ impl FieldsHost {
         let this = Self::alloc(mtm).set_ivars(());
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let host: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        // The host follows the pane by its autoresizing and by nothing else: a frame written to it
+        // while the pane is being resized (the pane's size notification comes before AppKit gets to
+        // the host) is moved again by that resize, and a pane resized while it is hidden (a floating
+        // card in its capsule) stood its fields a row off their boxes until the page's outline changed.
         host.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -329,7 +333,6 @@ impl PageFields {
         let Some(pane) = self.pane.load() else {
             return;
         };
-        self.cover(&pane);
         // The fonts the page sets its fields in that were not measured: the page's measure answers
         // those with its own line until it is told, and is laid out again with the shell's once it
         // is. AppKit is asked here, on the main thread, for each font once.
@@ -477,15 +480,15 @@ impl PageFields {
         }
     }
 
-    /// The pane changed size or place: the host covers it again and each field stands where the
-    /// last outline says. The host's axis is the page's, so a field's frame does not depend on the
-    /// pane's height; this only settles a host whose frame was set while the pane was out of its
-    /// window. Nothing is made or taken away here.
+    /// The pane changed size or place: each field stands where the last outline says, and the
+    /// tooltips where its rooms are now. The host is not touched here: it follows the pane by its
+    /// autoresizing alone, and this runs inside the pane's own resize (from the terminal view's frame
+    /// notification, before AppKit has resized the host), where a frame written to the host is
+    /// moved again by the same resize. Nothing is made or taken away here.
     pub(crate) fn place_again(&self) {
         let Some(pane) = self.pane.load() else {
             return;
         };
-        self.cover(&pane);
         self.put_tips(&pane);
         let outline = self.outline.borrow();
         let Some(outline) = outline.as_ref() else {
@@ -499,15 +502,6 @@ impl PageFields {
             {
                 place_field(&field.view, said, self.family.as_deref());
             }
-        }
-    }
-
-    /// The host over the whole pane, as the pane is now (its autoresizing keeps it so; this
-    /// settles what a frame set while the pane was out of its window left).
-    fn cover(&self, pane: &TerminalPane) {
-        let bounds = pane.bounds();
-        if self.host.frame() != bounds {
-            self.host.setFrame(bounds);
         }
     }
 

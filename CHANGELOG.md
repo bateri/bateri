@@ -32,6 +32,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A program's text fields stay in their boxes after a floating pane comes back from its capsule.** If the pane had changed size while minimized, a field such as a browser's address bar stood a row above its box until you resized the pane.
 - **A program's rounded boxes cut what they hold at their corners.** A picture, a list or a canvas inside a card with rounded corners no longer pokes out of them; a web page in a card still has square corners.
 - **browserpen no longer asks for your keychain password.** Opening a page could bring up a macOS dialog about “Chromium Safe Storage”. After updating, you'll need to sign in to your sites in browserpen once more.
 - **Full screen uses the whole top row.** The sidebar button no longer leaves room for the hidden traffic lights, and when the menu bar slides down the window slides down with it instead of being covered.

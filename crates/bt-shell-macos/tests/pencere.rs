@@ -1351,6 +1351,13 @@ fn run(dir: &Path) {
         field_rows_stand_in_their_boxes(mtm, &window, frame_rect, dir);
     });
     section(
+        "a page's fields follow the pane's size",
+        &mut failures,
+        || {
+            fields_follow_the_pane_size(mtm, &window, frame_rect, dir);
+        },
+    );
+    section(
         "a screen reader reads a page as the pane's group",
         &mut failures,
         || {
@@ -3963,4 +3970,76 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// A page with a row of tabs over an address field, as a browser's.
+const FOLLOW_PAGE: &str = r#"return {
+    render = function()
+        return pencere.div():col():gap(10):p(20):w(420):h(300)
+            :child(pencere.div():w(300):h(24):child(pencere.text("TABS")))
+            :child(pencere.div():text_field("addr"):w(300):h(20):child(pencere.text("ADDRESS")))
+    end,
+}"#;
+
+/// The view the page's fields stand in, over the pane: its frame, if the page made it.
+fn fields_host(pane: &TerminalPane) -> Option<NSRect> {
+    pane.subviews()
+        .iter()
+        .find(|view| {
+            view.class()
+                .name()
+                .to_string_lossy()
+                .contains("BateriPageFieldsHost")
+        })
+        .map(|view| view.frame())
+}
+
+/// The page's fields are over the pane as the pane is, after every size it is given: a floating
+/// pane in its capsule is hidden and laid out again with the strip (the splits give it up), and
+/// its page is not drawn then, so no outline follows to put the fields back; the pane that comes
+/// out of its capsule stood its fields a row off their boxes (the host was moved by AppKit's
+/// autoresizing and again by the pane's own count of its size, in the same resize).
+fn fields_follow_the_pane_size(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    window.setLevel(objc2_app_kit::NSFloatingWindowLevel);
+    window.setFrameOrigin(NSPoint::new(40.0, 120.0));
+    window.orderFrontRegardless();
+    let (pane, mut program) = open_pane(mtm, window, frame_rect, &dir.join("follow"), PANE + 80);
+    pane.set_visibility(true);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello_kind("lua");
+    program.open_script(&token, FOLLOW_PAGE);
+    program.supply(&[("page.lua", "text/x-lua", FOLLOW_PAGE.as_bytes())]);
+    until("the page's fields to be over the pane", || {
+        fields_host(&pane).is_some()
+    });
+    let whole = pane.frame();
+    let shorter = NSRect::new(
+        whole.origin,
+        NSSize::new(whole.size.width - 30.0, whole.size.height - 20.0),
+    );
+    let steps: [(&str, bool, NSRect); 4] = [
+        ("shorter, shown", false, shorter),
+        ("whole again, shown", false, whole),
+        ("shorter, in its capsule", true, shorter),
+        ("whole again, out of its capsule", false, whole),
+    ];
+    for (what, hidden, frame) in steps {
+        pane.setHidden(hidden);
+        pane.refresh_visibility();
+        pane.setFrame(frame);
+        spin(0.1);
+        assert_eq!(
+            fields_host(&pane),
+            Some(pane.bounds()),
+            "the page's fields stand over the pane ({what})"
+        );
+    }
+    program.bye(&token);
+    until("the view to go", || !covered(&pane));
+    pane.close();
 }
