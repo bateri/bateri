@@ -428,6 +428,9 @@ impl Measure for Typeset<'_> {
             .map_or_else(Metrics::default, |line| Metrics {
                 width: line.width as f32,
                 height: line.height() as f32,
+                // Where the renderer sets the glyphs of the line, so that a row that stands on its
+                // baselines is drawn on them.
+                ascent: line.baseline() as f32,
             })
     }
 
@@ -795,6 +798,7 @@ mod tests {
                 Metrics {
                     width: text.chars().count() as f32 * font.size * 0.55,
                     height: font.size * 1.3,
+                    ascent: font.size,
                 }
             }
         }
@@ -1347,6 +1351,60 @@ mod tests {
         assert_eq!(list.items(), faded.items());
         let hard = made(UiClip::new(fading_clip_moved().rect));
         assert_ne!(list.items(), hard.items(), "the soft edge is in the words");
+    }
+
+    /// A row that stands on its baselines puts the words of two sizes on the baseline the renderer
+    /// sets them on: the layout is told the line's ascent by the same measure that shapes the line
+    /// the renderer draws.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn words_of_two_sizes_stand_on_one_baseline_where_the_renderer_draws_them() {
+        use pencere_view::{Element, div, layout, text};
+
+        let renderer = Renderer::system_default().expect("a GPU");
+        let terminal = None;
+        let mut shaped = Shaped::default();
+        let mut typeset = Typeset {
+            renderer: &renderer,
+            terminal: &terminal,
+            shaped: &mut shaped,
+        };
+        let row = |container: Element| {
+            container
+                .row()
+                .child(text("Title").text_size(28.0))
+                .child(text("Button").text_size(10.0))
+        };
+        // Where each run is drawn on, from the top of the page: its top and the line's baseline.
+        let mut baselines = |root: Element| -> Vec<f64> {
+            let size = Size::new(400.0, 200.0);
+            let drawn = layout(root, size, 1.0, &mut typeset).paint(&mut typeset);
+            drawn
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Paint::Text(run) => {
+                        let line = typeset.shaped(&run.font, &run.text).expect("shaped");
+                        Some(f64::from(run.origin.y) + line.baseline())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        // Each line's box lands on a whole pixel and the renderer sets its glyphs on a whole row,
+        // so two lines of a row stand a pixel apart at most.
+        let on_baseline = baselines(row(div()).items_baseline());
+        assert_eq!(on_baseline.len(), 2);
+        let (first, second) = (on_baseline[0].round(), on_baseline[1].round());
+        assert!((first - second).abs() <= 1.0, "{on_baseline:?}");
+        // Centred, the lines are, and their baselines are a few pixels apart: the guard is not the
+        // layout's luck.
+        let centred = baselines(row(div()).items_center());
+        let (first, second) = (centred[0].round(), centred[1].round());
+        assert!(
+            (first - second).abs() >= 2.0,
+            "centred baselines {centred:?}"
+        );
     }
 
     #[test]

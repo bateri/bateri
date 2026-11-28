@@ -1005,6 +1005,7 @@ pub(super) mod tests {
             Metrics {
                 width,
                 height: font.size * 1.25,
+                ascent: font.size,
             }
         }
     }
@@ -1378,6 +1379,11 @@ pub(super) mod tests {
         /// Every run of text the last frame drew, in the order it drew them.
         pub(in crate::native_view) fn words(&self) -> Vec<String> {
             drawn(&self.list)
+        }
+
+        /// What the last frame drew.
+        pub(in crate::native_view) fn list(&self) -> &DrawList {
+            &self.list
         }
 
         /// How many boxes the last frame drew.

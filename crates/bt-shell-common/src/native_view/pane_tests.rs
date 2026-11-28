@@ -2866,3 +2866,95 @@ fn a_command_an_element_lists_is_done_on_it_by_its_title_and_the_ones_it_does_no
         "{past}"
     );
 }
+
+/// A page of two boxes: a ring of 2 points a point off a box, and a box with a border that scrolls.
+const RINGED: &str = r#"return {
+    render = function()
+        local list = pencere.div():id("list"):w(120):h(80):border(2, "border"):scroll()
+        for n = 1, 20 do list:child(pencere.div():h(20):no_shrink()) end
+        return pencere.div():size_full():p(10):gap(12)
+            :child(pencere.div():id("ring"):w(40):h(20):outline(2, "accent", 1))
+            :child(list)
+    end,
+    handle = function(event) end,
+}"#;
+
+/// What the page draws as a ring and as the bars of a box that scrolls are boxes like any other: the
+/// ring a border and no fill a few points off the box, the bars (track and knob) in the padding box,
+/// 2 points in from the border. The renderer takes them as they are (`quad`), with no mapping of its
+/// own for either.
+#[test]
+fn a_ring_and_the_bars_of_a_box_with_a_border_reach_the_renderer_as_boxes() {
+    use bt_core::Theme;
+    use bt_gpu::{UiQuad, UiRect};
+    use pencere_view::{Paint, Rect, Role};
+
+    use super::{clip_at, quad, resolve};
+
+    let theme = Theme::BATERI;
+    let origin = (3.0, 32.0);
+    let mut rig = PaneRig::open(RINGED);
+    rig.set_scrolling(SCROLLING);
+    rig.frame(0.0);
+    rig.settle(0.0);
+    let quads: Vec<_> = rig
+        .list()
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Paint::Quad(quad) => Some(quad),
+            _ => None,
+        })
+        .collect();
+    // What the renderer is handed for a box of the page, as the page drew it.
+    let as_drawn = |drawn: &pencere_view::Quad| {
+        let mut out = UiQuad::new(UiRect::new(
+            drawn.rect.x + origin.0,
+            drawn.rect.y + origin.1,
+            drawn.rect.w,
+            drawn.rect.h,
+        ))
+        .radii(drawn.radii)
+        .clipped(clip_at(drawn.clip, origin));
+        if let Some(fill) = drawn.fill {
+            out = out.fill(resolve(&theme, fill));
+        }
+        if let Some(border) = drawn.border {
+            out = out.border(border.width, resolve(&theme, border.color));
+        }
+        out
+    };
+
+    // The ring: the box is at (10, 10), 40 by 20; the ring stands 3 points out of it (a point of
+    // offset and 2 of width) and has no fill.
+    let ring = quads
+        .iter()
+        .find(|quad| quad.rect == Rect::new(7.0, 7.0, 46.0, 26.0))
+        .expect("a ring");
+    assert!(ring.fill.is_none() && ring.border.is_some_and(|border| border.width == 2.0));
+    assert_eq!(quad(&theme, ring, origin), as_drawn(ring));
+    assert_eq!(
+        quad(&theme, ring, origin),
+        UiQuad::new(UiRect::new(10.0, 39.0, 46.0, 26.0))
+            .radii(ring.radii)
+            .clipped(clip_at(ring.clip, origin))
+            .border(2.0, resolve(&theme, Role::Accent.solid())),
+    );
+
+    // The bars of the box that scrolls, a box of (10, 42), 120 by 80, with a border of 2: they stand
+    // in its padding box, which ends at 128, 2 points in from there; the border is not under them.
+    let bars: Vec<_> = quads
+        .iter()
+        .filter(|quad| quad.fill.is_some() && quad.rect.x >= 100.0)
+        .collect();
+    assert_eq!(bars.len(), 2, "the track and the knob");
+    for bar in bars {
+        assert_eq!(bar.rect.right(), 126.0, "{:?}", bar.rect);
+        assert!(
+            bar.rect.y >= 46.0 && bar.rect.bottom() <= 118.0,
+            "{:?}",
+            bar.rect
+        );
+        assert_eq!(quad(&theme, bar, origin), as_drawn(bar));
+    }
+}

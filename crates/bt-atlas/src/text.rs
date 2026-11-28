@@ -84,6 +84,13 @@ impl ShapedText {
     pub fn height(&self) -> f64 {
         self.ascent + self.descent + self.leading
     }
+
+    /// How far down the line box the baseline is: the leading is split above and below the line, so
+    /// the glyphs stand half of it plus the ascent below the box's top. The one place that says it:
+    /// the renderer sets the glyphs on it and a page's layout is told it as the line's ascent.
+    pub fn baseline(&self) -> f64 {
+        self.leading / 2.0 + self.ascent
+    }
 }
 
 /// What a backend returns for a line, before the registry numbers its fonts.

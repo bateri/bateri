@@ -945,7 +945,7 @@ impl Renderer {
         };
         // The leading is split above and below the line, as the grid's cell
         // splits the line-height excess.
-        let baseline = (f64::from(at[1]) + line.leading / 2.0 + line.ascent).round();
+        let baseline = (f64::from(at[1]) + line.baseline()).round();
         for placed in &line.glyphs {
             let (whole, bucket) = subpixel(f64::from(at[0]) + placed.x);
             let Some(entry) = text.glyph(placed.font, placed.glyph, bucket) else {

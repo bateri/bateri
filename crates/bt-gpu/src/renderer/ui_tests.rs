@@ -732,6 +732,38 @@ fn text_thins_out_towards_the_soft_edge_of_its_clip_and_is_whole_before_it() {
 }
 
 #[test]
+fn a_line_stands_on_the_baseline_it_names() {
+    if !proportional() {
+        return;
+    }
+    let r = renderer();
+    let font = r
+        .ui_font(&style(Family::System, 32.0, 400))
+        .expect("the system face opens");
+    // Capitals with nothing below the baseline: the ink ends where the line's baseline is, which is
+    // what a page's layout is told (the line's ascent, as the kit asks it) and aligns rows by.
+    let line = r.ui_shape(font, "HHHH").expect("shapes");
+    for top in [12.0_f32, 30.5, 50.0] {
+        let mut list = UiList::new();
+        r.ui_text(
+            &mut list,
+            &line,
+            [10.0, top],
+            tint(WHITE, 1.0),
+            UiRect::UNBOUNDED,
+        );
+        let pixels = r.render_ui_offscreen(SHEET as u32, BACKGROUND, &list);
+        let (_, _, _, bottom) =
+            ink_box(&pixels, (0, 0, 0), (0, 0, SHEET, SHEET)).expect("the text painted something");
+        let baseline = (f64::from(top) + line.baseline()).round();
+        assert!(
+            (bottom as f64 + 1.0 - baseline).abs() <= 1.0,
+            "ink ends at row {bottom}, the baseline is {baseline}"
+        );
+    }
+}
+
+#[test]
 fn a_heavier_weight_paints_more_ink() {
     if !proportional() {
         return;

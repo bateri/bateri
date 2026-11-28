@@ -19,11 +19,14 @@ of every installed copy. A version without a section is not released.
 - **`bateri hotkey`** shows, hides, toggles and pins the hotkey window from a terminal, Raycast or Shortcuts.
 - **A program's text box can say how many lines tall it is.** A box of lines is as tall as that many lines of your terminal's font, its text stays inside the box's padding, a click anywhere in the box starts typing in it, and when you type more lines than fit it scrolls, through the box's padding, and keeps the cursor in view.
 - **A line too long for a program's text box fades out at the edge** instead of being cut, and so does a text the program asks to fade rather than end in “…”.
+- **A program's screen can put a ring around a box without giving it room**, and the library's focused buttons, inputs and tabs now wear one: their text no longer moves when they take the focus.
+- **Words of different sizes in a row can stand on one baseline**, as `align-items: baseline` does on a web page.
 
 ### Changed
 
 - **A border takes room inside its box in a program's screen**, as it does on a web page. A program's cards and fields can sit a pixel or two differently until the program updates.
 - **A program's text editor and web page stay inside the border and padding of their box**, as they do on a web page; the border and padding are no longer drawn under the text or the page.
+- **The scroll bars of a box with a border stand inside the border** in a program's screen, as on a web page.
 
 ### Fixed
 
