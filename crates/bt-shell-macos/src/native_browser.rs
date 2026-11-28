@@ -50,7 +50,7 @@ use bt_shell_common::browser::helper::Manager;
 use bt_shell_common::browser::rooms::{Effect, Frames, Rooms};
 use bt_shell_common::native_view::{
     BrowserAsk, BrowserSlot, BrowserState, Button, GesturePhase, Id, Input, Mods, Outline, Phase,
-    Point, Surfaces,
+    Point, Surfaces, browser_room,
 };
 use objc2_app_kit::NSEvent;
 
@@ -205,12 +205,7 @@ impl Surfaces for Pictures {
         let Some(shown) = slots.get_mut(&slot.id) else {
             return;
         };
-        let room = UiRect::new(
-            slot.rect.x + origin.0,
-            slot.rect.y + origin.1,
-            slot.rect.w,
-            slot.rect.h,
-        );
+        let room = browser_room(slot, origin);
         // The browser's frame is a texture the engine draws as a whole: it is cut at the rectangle of
         // its clip, and the corners of a rounded box around it are not cut in it.
         let visible = UiRect::new(

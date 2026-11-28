@@ -36,8 +36,8 @@ use std::sync::{Arc, Weak};
 use bt_core::pencere::AttachedFiles;
 use bt_core::{LinearRgba, Session, Theme};
 use bt_gpu::{
-    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiClip, UiImage, UiList,
-    UiQuad, UiRect, UiRound, tint,
+    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiClip, UiFade, UiImage,
+    UiList, UiQuad, UiRect, UiRound, tint,
 };
 
 pub mod ax;
@@ -79,7 +79,7 @@ use pencere_view::{
     Source,
 };
 pub use pencere_view::{haptic, sound};
-pub use surfaces::Surfaces;
+pub use surfaces::{Surfaces, browser_room};
 pub use transfers::Waits;
 
 /// The greatest level of `raised` that is drawn (the kit's specification, §3.1): the interface
@@ -204,8 +204,9 @@ pub fn ink(theme: &Theme, run: &Run, minimum_contrast: f64) -> [f32; 4] {
 }
 
 /// What the engine lets be drawn of an element as the renderer's clip, moved to `origin` pixels: the
-/// rectangle and, where the box that clips has round corners, their shape, which the renderer cuts
-/// with coverage.
+/// rectangle and, where the box that clips has round corners, their shape, and where what it holds
+/// thins out at an edge, that soft edge (its box moved with the rest, its widths as they are): the
+/// renderer cuts both with coverage.
 pub fn clip_at(clip: Clip, origin: (f32, f32)) -> UiClip {
     let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
     UiClip {
@@ -213,6 +214,10 @@ pub fn clip_at(clip: Clip, origin: (f32, f32)) -> UiClip {
         round: clip.round.map(|round| UiRound {
             rect: at(round.rect),
             radii: round.radii,
+        }),
+        fade: clip.fade.map(|fade| UiFade {
+            rect: at(fade.rect),
+            widths: fade.widths,
         }),
     }
 }
@@ -1043,6 +1048,7 @@ mod tests {
                 rect: Rect::new(2.0, 2.0, 96.0, 196.0),
                 radii: [6.0, 6.0, 0.0, 0.0],
             }),
+            fade: None,
         }
     }
 
@@ -1054,6 +1060,26 @@ mod tests {
                 rect: UiRect::new(5.0, 34.0, 96.0, 196.0),
                 radii: [6.0, 6.0, 0.0, 0.0],
             }),
+            fade: None,
+        }
+    }
+
+    /// The clip of a box whose right edge thins what it holds out over 22 points, and whose left
+    /// edge does not: the box that fades is smaller than the rectangle that cuts.
+    fn fading_clip() -> Clip {
+        Clip::new(Rect::new(0.0, 0.0, 100.0, 200.0))
+            .faded(Rect::new(2.0, 4.0, 90.0, 180.0), [0.0, 0.0, 22.0, 0.0])
+    }
+
+    /// [`fading_clip`] as the renderer has it, moved by (3, 32): the box that fades moves, how far
+    /// in it fades does not.
+    fn fading_clip_moved() -> UiClip {
+        UiClip {
+            fade: Some(UiFade {
+                rect: UiRect::new(5.0, 36.0, 90.0, 180.0),
+                widths: [0.0, 0.0, 22.0, 0.0],
+            }),
+            ..UiClip::new(UiRect::new(3.0, 32.0, 100.0, 200.0))
         }
     }
 
@@ -1064,6 +1090,89 @@ mod tests {
         assert_eq!(
             clip_at(Clip::new(Rect::new(1.0, 2.0, 30.0, 40.0)), (3.0, 32.0)),
             UiClip::new(UiRect::new(4.0, 34.0, 30.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn a_clip_goes_to_the_renderer_with_its_soft_edge_moved_by_the_origin_and_its_widths_as_they_are()
+     {
+        assert_eq!(clip_at(fading_clip(), (3.0, 32.0)), fading_clip_moved());
+        // A clip whose edges all have no width is no soft edge: the engine does not carry one.
+        let none = Clip::new(Rect::new(1.0, 2.0, 30.0, 40.0))
+            .faded(Rect::new(1.0, 2.0, 30.0, 40.0), [0.0; 4]);
+        assert_eq!(
+            clip_at(none, (3.0, 32.0)),
+            UiClip::new(UiRect::new(4.0, 34.0, 30.0, 40.0))
+        );
+        // A box that rounds and fades hands the renderer both.
+        let both = rounded_clip().faded(Rect::new(2.0, 2.0, 96.0, 196.0), [0.0, 0.0, 22.0, 0.0]);
+        let seen = clip_at(both, (3.0, 32.0));
+        assert_eq!(seen.round, rounded_clip_moved().round);
+        assert_eq!(
+            seen.fade,
+            Some(UiFade {
+                rect: UiRect::new(5.0, 34.0, 96.0, 196.0),
+                widths: [0.0, 0.0, 22.0, 0.0],
+            })
+        );
+    }
+
+    #[test]
+    fn a_box_a_picture_and_a_canvas_are_thinned_out_at_the_soft_edge_of_their_clip() {
+        let theme = Theme::BATERI;
+        let origin = (3.0, 32.0);
+        let drawn = Quad {
+            rect: Rect::new(10.0, 20.0, 30.0, 40.0),
+            radii: [0.0; 4],
+            fill: Some(Role::Accent.solid()),
+            border: None,
+            shadow: None,
+            clip: fading_clip(),
+            gradient: None,
+        };
+        let faded = quad(&theme, &drawn, origin);
+        assert_eq!(
+            faded,
+            UiQuad::new(UiRect::new(13.0, 52.0, 30.0, 40.0))
+                .fill(resolve(&theme, Role::Accent.solid()))
+                .clipped(fading_clip_moved())
+        );
+        assert_ne!(
+            faded,
+            faded.clipped(UiClip::new(fading_clip_moved().rect)),
+            "the soft edge is in the box"
+        );
+
+        let picture = Picture {
+            src: "card.png".to_owned(),
+            page: 1,
+            rect: Rect::new(10.0, 20.0, 24.0, 8.0),
+            crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+            shown: Rect::new(0.0, 0.0, 1.0, 1.0),
+            tint: None,
+            opacity: 1.0,
+            radii: [0.0; 4],
+            clip: fading_clip(),
+            turn: 0.0,
+        };
+        let faded = image(&theme, &picture, picture.crop, origin);
+        assert_eq!(
+            faded,
+            UiImage::new(UiRect::new(13.0, 52.0, 24.0, 8.0))
+                .crop(UiRect::new(0.0, 0.0, 1.0, 1.0))
+                .clipped(fading_clip_moved())
+        );
+
+        let figure = Figure {
+            rect: Rect::new(4.0, 6.0, 20.0, 20.0),
+            scale: 1.0,
+            paths: vec![path().circle(10.0, 10.0, 8.0).stroke(2.0, Role::Accent)],
+            clip: fading_clip(),
+        };
+        let key = figure_key(&figure, |color| figure_colour(&theme, color)).expect("a key");
+        assert_eq!(
+            figure_image(&figure, key, origin),
+            UiImage::new(UiRect::new(7.0, 38.0, 20.0, 20.0)).clipped(fading_clip_moved())
         );
     }
 
@@ -1187,6 +1296,57 @@ mod tests {
         assert_eq!(list.items(), rounded.items());
         let square = made(UiClip::new(rounded_clip_moved().rect));
         assert_ne!(list.items(), square.items(), "the corners are in the words");
+    }
+
+    /// The words of a box whose clip has a soft edge are thinned out at it, the glyphs and the lines
+    /// under them alike: the list comes out as the renderer makes it for that clip.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_words_of_a_box_with_a_soft_edge_are_thinned_out_at_it() {
+        let renderer = Renderer::system_default().expect("a GPU");
+        let terminal = None;
+        let mut shaped = Shaped::default();
+        let theme = Theme::BATERI;
+        let origin = (3.0, 32.0);
+        let mut word = run(Role::Foreground.solid(), Vec::new());
+        word.origin = Point::new(4.0, 6.0);
+        word.font.family = Family::Terminal;
+        word.underline = true;
+        word.clip = fading_clip();
+        let mut typeset = Typeset {
+            renderer: &renderer,
+            terminal: &terminal,
+            shaped: &mut shaped,
+        };
+        let draws = DrawList {
+            items: vec![Paint::Text(word.clone())],
+        };
+        let list = to_list(
+            &theme,
+            MINIMUM_CONTRAST,
+            &mut typeset,
+            None,
+            None,
+            &draws,
+            origin,
+        );
+        let line = typeset.shaped(&word.font, &word.text).expect("shaped");
+        let color = ink(&theme, &word, MINIMUM_CONTRAST);
+        let at = [word.origin.x + origin.0, word.origin.y + origin.1];
+        let made = |clip: UiClip| {
+            let mut list = UiList::new();
+            renderer.ui_text_clipped(&mut list, line, at, color, clip);
+            for rule in decorations(&word, line) {
+                let rule = UiRect::new(rule.x + at[0], rule.y + at[1], rule.w, rule.h);
+                list.quad(UiQuad::new(rule).fill(color).clipped(clip));
+            }
+            list
+        };
+        let faded = made(fading_clip_moved());
+        assert!(!faded.items().is_empty(), "the words are drawn");
+        assert_eq!(list.items(), faded.items());
+        let hard = made(UiClip::new(fading_clip_moved().rect));
+        assert_ne!(list.items(), hard.items(), "the soft edge is in the words");
     }
 
     #[test]

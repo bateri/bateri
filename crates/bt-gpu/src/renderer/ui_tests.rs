@@ -11,7 +11,7 @@ use bt_atlas::{Family, TextStyle};
 use bt_core::LinearRgba;
 
 use super::tests::{BACKGROUND, MIDTONE, WHITE, pixel_at, renderer};
-use super::ui::{UiBitmap, UiClip, UiImage, UiList, UiQuad, UiRect, UiRound, tint};
+use super::ui::{UiBitmap, UiClip, UiFade, UiImage, UiList, UiQuad, UiRect, UiRound, tint};
 use crate::Renderer;
 
 const EDGE: usize = 64;
@@ -244,6 +244,7 @@ fn round_clip() -> UiClip {
             rect,
             radii: [12.0; 4],
         }),
+        fade: None,
     }
 }
 
@@ -299,6 +300,147 @@ fn a_clip_with_round_corners_leaves_the_corners_of_a_box_inside_it_as_they_are()
     let pixels = paint(MIDTONE, &list);
     assert_eq!(at(&pixels, 24, 24), (255, 255, 255));
     assert_eq!(at(&pixels, 17, 24), (255, 255, 255));
+}
+
+/// A clip that is the rectangle (8, 8, 32, 32) whose edges fade by `widths` (left, top, right,
+/// bottom) from that same rectangle.
+fn fading_clip(widths: [f32; 4]) -> UiClip {
+    let rect = UiRect::new(8.0, 8.0, 32.0, 32.0);
+    UiClip {
+        fade: Some(UiFade { rect, widths }),
+        ..UiClip::new(rect)
+    }
+}
+
+/// A byte of sRGB as the light it stands for.
+fn light(byte: u8) -> f32 {
+    let s = f32::from(byte) / 255.0;
+    if s <= 0.040_45 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// How much of a white thing over `GROUND` shows at the pixel, as light: `0.0` is the ground, `1.0`
+/// white. A clip's cover is what a thing is multiplied by, and the blend is in linear light.
+fn shown(pixels: &[u8], x: usize, y: usize) -> f32 {
+    let ground = light(GROUND.0);
+    (light(at(pixels, x, y).0) - ground) / (1.0 - ground)
+}
+
+#[test]
+fn a_clip_with_a_soft_edge_thins_a_box_out_towards_that_edge_and_leaves_the_others() {
+    let draw = |clip: UiClip| {
+        let mut list = UiList::new();
+        list.quad(
+            UiQuad::new(UiRect::new(0.0, 0.0, 64.0, 64.0))
+                .fill(tint(WHITE, 1.0))
+                .clipped(clip),
+        );
+        paint(MIDTONE, &list)
+    };
+    // Only the right edge fades, over 16 pixels: whole up to there, then a straight line to nothing
+    // at the edge. The pixel's middle is what is measured: the edge is at 40.
+    let pixels = draw(fading_clip([0.0, 0.0, 16.0, 0.0]));
+    for x in [8, 12, 23] {
+        assert!((shown(&pixels, x, 24) - 1.0).abs() < 0.02, "whole at {x}");
+    }
+    for x in [24, 28, 31, 35, 39] {
+        let want = (40.0 - (x as f32 + 0.5)) / 16.0;
+        let seen = shown(&pixels, x, 24);
+        assert!((seen - want).abs() < 0.03, "at {x}: {seen} for {want}");
+    }
+    // The other three edges stay as they were: the top row and the left column are whole.
+    assert!((shown(&pixels, 12, 8) - 1.0).abs() < 0.02);
+    assert!((shown(&pixels, 8, 24) - 1.0).abs() < 0.02);
+    assert!((shown(&pixels, 12, 39) - 1.0).abs() < 0.02);
+    // And the rectangle still cuts: nothing is past it.
+    assert!(shown(&pixels, 40, 24).abs() < 0.02);
+}
+
+#[test]
+fn where_two_edges_fade_the_two_are_multiplied_and_the_box_is_not_the_clips_rectangle() {
+    let draw = |clip: UiClip| {
+        let mut list = UiList::new();
+        list.quad(
+            UiQuad::new(UiRect::new(0.0, 0.0, 64.0, 64.0))
+                .fill(tint(WHITE, 1.0))
+                .clipped(clip),
+        );
+        paint(MIDTONE, &list)
+    };
+    // The clip's rectangle is the whole sheet, the box that fades is (8, 8, 32, 32), eight pixels
+    // in from every edge: inside it, whole; at a corner, the two edges' shares multiplied; past it,
+    // nothing, though the rectangle would let it be drawn.
+    let sheet = UiRect::new(0.0, 0.0, 64.0, 64.0);
+    let pixels = draw(UiClip {
+        fade: Some(UiFade {
+            rect: UiRect::new(8.0, 8.0, 32.0, 32.0),
+            widths: [8.0; 4],
+        }),
+        ..UiClip::new(sheet)
+    });
+    assert!((shown(&pixels, 24, 24) - 1.0).abs() < 0.02, "the middle");
+    let side = (12.5 - 8.0) / 8.0;
+    assert!((shown(&pixels, 12, 24) - side).abs() < 0.03, "a side");
+    assert!(
+        (shown(&pixels, 12, 12) - side * side).abs() < 0.03,
+        "a corner is the product of two"
+    );
+    assert!(shown(&pixels, 4, 24).abs() < 0.02, "left of the box");
+    assert!(shown(&pixels, 24, 44).abs() < 0.02, "below the box");
+}
+
+#[test]
+fn a_soft_edge_and_round_corners_both_cut_what_a_clip_holds() {
+    let rect = UiRect::new(8.0, 8.0, 32.0, 32.0);
+    let clip = UiClip {
+        rect,
+        round: Some(UiRound {
+            rect,
+            radii: [12.0; 4],
+        }),
+        fade: Some(UiFade {
+            rect,
+            widths: [0.0, 0.0, 16.0, 0.0],
+        }),
+    };
+    let mut list = UiList::new();
+    list.quad(
+        UiQuad::new(UiRect::new(0.0, 0.0, 64.0, 64.0))
+            .fill(tint(WHITE, 1.0))
+            .clipped(clip),
+    );
+    let pixels = paint(MIDTONE, &list);
+    // The corner is the curve's, and the side that fades fades.
+    assert!(shown(&pixels, 8, 8).abs() < 0.02, "a corner is cut");
+    assert!((shown(&pixels, 12, 24) - 1.0).abs() < 0.02, "the left side");
+    let want = (40.0 - 35.5) / 16.0;
+    assert!(
+        (shown(&pixels, 35, 24) - want).abs() < 0.03,
+        "the right side"
+    );
+}
+
+#[test]
+fn an_image_thins_out_at_the_soft_edge_of_its_clip() {
+    let r = renderer();
+    let white = bitmap(7, 1, &[opaque((255, 255, 255))]);
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &white,
+        UiImage::new(UiRect::new(0.0, 0.0, 64.0, 64.0)).clipped(fading_clip([0.0, 0.0, 16.0, 0.0])),
+    ));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert!((shown(&pixels, 12, 24) - 1.0).abs() < 0.02, "whole inside");
+    for x in [28, 35, 39] {
+        let want = (40.0 - (x as f32 + 0.5)) / 16.0;
+        let seen = shown(&pixels, x, 24);
+        assert!((seen - want).abs() < 0.03, "at {x}: {seen} for {want}");
+    }
 }
 
 #[test]
@@ -527,8 +669,66 @@ fn text_is_cut_by_the_round_corners_of_its_clip() {
             rect: whole,
             radii: [64.0; 4],
         }),
+        fade: None,
     };
     assert_eq!(ink(round), None);
+}
+
+#[test]
+fn text_thins_out_towards_the_soft_edge_of_its_clip_and_is_whole_before_it() {
+    if !proportional() {
+        return;
+    }
+    let r = renderer();
+    let font = r
+        .ui_font(&style(Family::System, 32.0, 700))
+        .expect("the system face opens");
+    let line = r.ui_shape(font, "HHHHHH").expect("shapes");
+    let whole = UiRect::new(0.0, 0.0, SHEET as f32, SHEET as f32);
+    // The box that fades ends at 100, and 48 pixels in from it the text is whole.
+    let faded = UiClip {
+        fade: Some(UiFade {
+            rect: UiRect::new(0.0, 0.0, 100.0, SHEET as f32),
+            widths: [0.0, 0.0, 48.0, 0.0],
+        }),
+        ..UiClip::new(whole)
+    };
+    let draw = |clip: UiClip| {
+        let mut list = UiList::new();
+        r.ui_text_clipped(&mut list, &line, [4.0, 4.0], tint(WHITE, 1.0), clip);
+        r.render_ui_offscreen(SHEET as u32, BACKGROUND, &list)
+    };
+    // The strongest ink of a column, as light, on the black the sheet is cleared to.
+    let peak = |pixels: &[u8], x: usize| {
+        (0..SHEET)
+            .map(|y| light(pixel_at(pixels, SHEET, x, y).0))
+            .fold(0.0_f32, f32::max)
+    };
+    let plain = draw(UiClip::new(whole));
+    let soft = draw(faded);
+    // Where the text is not faded, it is what it was; where it is, no column is stronger than the
+    // fade lets it be, and the stems that were whole there are less than that.
+    for x in 4..52 {
+        assert!(
+            (peak(&soft, x) - peak(&plain, x)).abs() < 0.01,
+            "column {x} is not faded"
+        );
+    }
+    assert!((52..100).any(|x| peak(&plain, x) > 0.9), "a stem to fade");
+    for x in 52..100 {
+        let allowed = (100.0 - (x as f32 + 0.5)) / 48.0;
+        assert!(
+            peak(&soft, x) <= allowed + 0.03,
+            "column {x}: {} over {allowed}",
+            peak(&soft, x)
+        );
+    }
+    assert!(
+        (52..100).any(|x| peak(&soft, x) > 0.0),
+        "faded is not gone before the edge"
+    );
+    // Past the box nothing shows.
+    assert!((100..SHEET).all(|x| peak(&soft, x) < 0.005));
 }
 
 #[test]

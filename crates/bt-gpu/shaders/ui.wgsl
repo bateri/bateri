@@ -31,7 +31,7 @@ var<immediate> imm: Immediates;
 // Boxes
 // ---------------------------------------------------------------------------
 //
-// Rust twin: `UiQuad`, #[repr(C)], twelve `[f32; 4]`, stride 192:
+// Rust twin: `UiQuad`, #[repr(C)], fourteen `[f32; 4]`, stride 224:
 //   rect@0            x, y, width, height of the box
 //   fill@16           the background; straight alpha
 //   border_color@32   the border; straight alpha
@@ -45,6 +45,9 @@ var<immediate> imm: Immediates;
 //   clip_round@160    x, y, width, height of the box whose rounded corners also cut
 //   clip_radii@176    its corners' radii (top-left, top-right, bottom-right, bottom-left);
 //                     all zero = square: the clip is the rectangle alone
+//   clip_fade@192     x, y, width, height of the box whose edges also thin what is drawn out
+//   clip_fade_widths@208 how far in from its left, top, right and bottom edge it does;
+//                     all zero = no soft edge
 //
 // A fill from one colour to another is a style sheet's `linear-gradient`: the line runs through
 // the middle of the box, as long as it takes for its ends to be the corners it points at, and the
@@ -68,6 +71,8 @@ struct QuadIn {
     @location(9) gradient: vec4<f32>,
     @location(10) clip_round: vec4<f32>,
     @location(11) clip_radii: vec4<f32>,
+    @location(12) clip_fade: vec4<f32>,
+    @location(13) clip_fade_widths: vec4<f32>,
 }
 
 struct QuadOut {
@@ -85,6 +90,8 @@ struct QuadOut {
     @location(9) @interpolate(flat) gradient: vec4<f32>,
     @location(10) @interpolate(flat) clip_round: vec4<f32>,
     @location(11) @interpolate(flat) clip_radii: vec4<f32>,
+    @location(12) @interpolate(flat) clip_fade: vec4<f32>,
+    @location(13) @interpolate(flat) clip_fade_widths: vec4<f32>,
 }
 
 @vertex
@@ -121,6 +128,8 @@ fn ui_quad_vertex(@builtin(vertex_index) vid: u32, it: QuadIn) -> QuadOut {
     o.gradient = it.gradient;
     o.clip_round = it.clip_round;
     o.clip_radii = it.clip_radii;
+    o.clip_fade = it.clip_fade;
+    o.clip_fade_widths = it.clip_fade_widths;
     return o;
 }
 
@@ -155,17 +164,38 @@ fn corner_radius(p: vec2<f32>, radii: vec4<f32>) -> f32 {
     );
 }
 
-// How much of the pixel at `p` a clip with round corners lets be drawn: 1 inside the corners, 0 outside
-// them, the edge soft as a box's is. A clip whose radii are all zero lets all of it be drawn: the
-// rectangle (tested apart, in `clip`) is its whole.
-fn clip_cover(p: vec2<f32>, round: vec4<f32>, radii: vec4<f32>) -> f32 {
-    if radii.x <= 0.0 && radii.y <= 0.0 && radii.z <= 0.0 && radii.w <= 0.0 {
-        return 1.0;
+// How much of what is `far` pixels in from an edge a soft edge of `width` lets be drawn: all of it a
+// width in, none at the edge or past it, a straight line between. A width of nothing is no soft edge.
+fn fade_edge(far: f32, width: f32) -> f32 {
+    if width > 0.0 {
+        return clamp(far / width, 0.0, 1.0);
     }
-    let half_size = round.zw * 0.5;
-    let rel = p - (round.xy + half_size);
-    let d = rounded_box_sdf(rel, half_size, corner_radius(rel, radii));
-    return 1.0 - smoothstep(-0.5, 0.5, d);
+    return 1.0;
+}
+
+// How much of the pixel at `p` a clip lets be drawn: what its round corners let (1 inside the corners,
+// 0 outside them, the edge soft as a box's is), times what its soft edge lets (the share of each
+// edge that fades, multiplied where two meet). A clip whose radii and widths are all zero lets all of
+// it be drawn: the rectangle (tested apart, in `clip`) is its whole.
+fn clip_cover(
+    p: vec2<f32>,
+    round: vec4<f32>,
+    radii: vec4<f32>,
+    fade: vec4<f32>,
+    widths: vec4<f32>,
+) -> f32 {
+    var cover = 1.0;
+    if radii.x > 0.0 || radii.y > 0.0 || radii.z > 0.0 || radii.w > 0.0 {
+        let half_size = round.zw * 0.5;
+        let rel = p - (round.xy + half_size);
+        let d = rounded_box_sdf(rel, half_size, corner_radius(rel, radii));
+        cover = 1.0 - smoothstep(-0.5, 0.5, d);
+    }
+    return cover
+        * fade_edge(p.x - fade.x, widths.x)
+        * fade_edge(p.y - fade.y, widths.y)
+        * fade_edge(fade.x + fade.z - p.x, widths.z)
+        * fade_edge(fade.y + fade.w - p.y, widths.w);
 }
 
 @fragment
@@ -174,7 +204,7 @@ fn ui_quad_fragment(in: QuadOut) -> @location(0) vec4<f32> {
     if p.x < in.clip.x || p.y < in.clip.y || p.x > in.clip.z || p.y > in.clip.w {
         discard;
     }
-    let cover = clip_cover(p, in.clip_round, in.clip_radii);
+    let cover = clip_cover(p, in.clip_round, in.clip_radii, in.clip_fade, in.clip_fade_widths);
     if cover <= 0.0 {
         discard;
     }
@@ -220,8 +250,8 @@ fn ui_quad_fragment(in: QuadOut) -> @location(0) vec4<f32> {
         a = a + shadow_a * (1.0 - a);
     }
 
-    // Back to straight alpha for the pipeline's `SrcAlpha` blend; what the clip's corners cut is
-    // less of all of it, the shadow's too.
+    // Back to straight alpha for the pipeline's `SrcAlpha` blend; what the clip's corners and soft
+    // edge cut is less of all of it, the shadow's too.
     return vec4<f32>(rgb / max(a, 0.00001), a * cover);
 }
 
@@ -230,13 +260,15 @@ fn ui_quad_fragment(in: QuadOut) -> @location(0) vec4<f32> {
 // ---------------------------------------------------------------------------
 //
 // Rust twin: `UiGlyph`, #[repr(C)], three `[f32; 4]`, a `[f32; 2]` with its
-// explicit pad and two `[f32; 4]`, stride 96:
+// explicit pad and four `[f32; 4]`, stride 128:
 //   rect@0   x, y, width, height of the quad on the surface (whole pixels)
 //   color@16 linear straight RGBA of the text
 //   clip@32  x0, y0, x1, y1
 //   src@48   the bitmap's top-left corner in the atlas, texels
 //   clip_round@64, clip_radii@80   as a box's: the box whose rounded corners also cut,
 //            and the radii of its corners (all zero = none)
+//   clip_fade@96, clip_fade_widths@112   as a box's: the box whose edges also thin what is drawn
+//            out, and how far in from each (all zero = none)
 
 struct GlyphIn {
     @location(0) rect: vec4<f32>,
@@ -245,6 +277,8 @@ struct GlyphIn {
     @location(3) src: vec4<f32>,
     @location(4) clip_round: vec4<f32>,
     @location(5) clip_radii: vec4<f32>,
+    @location(6) clip_fade: vec4<f32>,
+    @location(7) clip_fade_widths: vec4<f32>,
 }
 
 struct GlyphOut {
@@ -254,6 +288,8 @@ struct GlyphOut {
     @location(2) @interpolate(flat) clip: vec4<f32>,
     @location(3) @interpolate(flat) clip_round: vec4<f32>,
     @location(4) @interpolate(flat) clip_radii: vec4<f32>,
+    @location(5) @interpolate(flat) clip_fade: vec4<f32>,
+    @location(6) @interpolate(flat) clip_fade_widths: vec4<f32>,
 }
 
 @vertex
@@ -269,6 +305,8 @@ fn ui_glyph_vertex(@builtin(vertex_index) vid: u32, it: GlyphIn) -> GlyphOut {
     o.clip = it.clip;
     o.clip_round = it.clip_round;
     o.clip_radii = it.clip_radii;
+    o.clip_fade = it.clip_fade;
+    o.clip_fade_widths = it.clip_fade_widths;
     return o;
 }
 
@@ -279,7 +317,7 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
         discard;
     }
     let coverage = textureLoad(atlas, vec2<i32>(floor(in.texel)), 0).r;
-    let cover = clip_cover(p, in.clip_round, in.clip_radii);
+    let cover = clip_cover(p, in.clip_round, in.clip_radii, in.clip_fade, in.clip_fade_widths);
     return vec4<f32>(in.color.rgb, in.color.a * coverage * cover);
 }
 
@@ -287,7 +325,7 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
 // Images
 // ---------------------------------------------------------------------------
 //
-// Rust twin: `UiImage`, #[repr(C)], eight `[f32; 4]`, stride 128:
+// Rust twin: `UiImage`, #[repr(C)], ten `[f32; 4]`, stride 160:
 //   rect@0   x, y, width, height of the rectangle the image is drawn in
 //   uv@16    u0, v0, u1, v1: the part of the texture the rectangle shows,
 //            shares of it (rows run top down, like the window's)
@@ -299,6 +337,8 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
 //            does not spin); the clip stays where it is
 //   clip_round@96, clip_radii@112   as a box's: the box whose rounded corners also cut,
 //            and the radii of its corners (all zero = none)
+//   clip_fade@128, clip_fade_widths@144   as a box's: the box whose edges also thin what is drawn
+//            out, and how far in from each (all zero = none)
 //
 // One draw per run of instances over ONE texture (each has its own bind group;
 // group 0 is the same layout the atlas planes have: texture @0, sampler @1).
@@ -330,6 +370,8 @@ struct ImageIn {
     @location(5) params: vec4<f32>,
     @location(6) clip_round: vec4<f32>,
     @location(7) clip_radii: vec4<f32>,
+    @location(8) clip_fade: vec4<f32>,
+    @location(9) clip_fade_widths: vec4<f32>,
 }
 
 struct ImageOut {
@@ -342,6 +384,8 @@ struct ImageOut {
     @location(5) @interpolate(flat) params: vec4<f32>,
     @location(6) @interpolate(flat) clip_round: vec4<f32>,
     @location(7) @interpolate(flat) clip_radii: vec4<f32>,
+    @location(8) @interpolate(flat) clip_fade: vec4<f32>,
+    @location(9) @interpolate(flat) clip_fade_widths: vec4<f32>,
 }
 
 @group(0) @binding(0) var picture: texture_2d<f32>;
@@ -370,6 +414,8 @@ fn ui_image_vertex(@builtin(vertex_index) vid: u32, it: ImageIn) -> ImageOut {
     o.params = it.params;
     o.clip_round = it.clip_round;
     o.clip_radii = it.clip_radii;
+    o.clip_fade = it.clip_fade;
+    o.clip_fade_widths = it.clip_fade_widths;
     return o;
 }
 
@@ -432,7 +478,8 @@ fn ui_image_fragment(in: ImageOut) -> @location(0) vec4<f32> {
     let texel = textureSampleLevel(picture, picture_sampler, at, lod);
 
     var rgb = in.tint.rgb;
-    var alpha = texel.a * in.params.x * inside * clip_cover(p, in.clip_round, in.clip_radii);
+    let cover = clip_cover(p, in.clip_round, in.clip_radii, in.clip_fade, in.clip_fade_widths);
+    var alpha = texel.a * in.params.x * inside * cover;
     if in.params.y > 0.5 {
         alpha = alpha * in.tint.a;
     } else {

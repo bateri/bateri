@@ -90,18 +90,34 @@ pub struct UiRound {
     pub radii: [f32; 4],
 }
 
+/// The soft edge of a clip: the box that fades and how far in from each of its edges the fade goes,
+/// pixels: left, top, right, bottom (a width of nothing leaves that edge as it is). What is drawn is
+/// whole at that distance from an edge and gone at the edge, in a straight line between; where two
+/// edges fade, at a corner, the two are multiplied. Outside the box nothing is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiFade {
+    pub rect: UiRect,
+    pub widths: [f32; 4],
+}
+
 /// What is drawn through: a rectangle and, where a box with round corners clips, the shape of its
-/// corners too. Nothing is drawn outside the rectangle, nor outside the corners.
+/// corners too, and where what it clips thins out at an edge, that soft edge. Nothing is drawn
+/// outside the rectangle, nor outside the corners.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiClip {
     pub rect: UiRect,
     pub round: Option<UiRound>,
+    pub fade: Option<UiFade>,
 }
 
 impl UiClip {
-    /// A rectangle's clip: square.
+    /// A rectangle's clip: square, with no soft edge.
     pub const fn new(rect: UiRect) -> Self {
-        Self { rect, round: None }
+        Self {
+            rect,
+            round: None,
+            fade: None,
+        }
     }
 
     /// The box and radii the shader reads: all zero where the clip is square.
@@ -110,6 +126,17 @@ impl UiClip {
             Some(round) => (
                 [round.rect.x, round.rect.y, round.rect.w, round.rect.h],
                 round.radii,
+            ),
+            None => ([0.0; 4], [0.0; 4]),
+        }
+    }
+
+    /// The box and widths the shader reads: all zero where no edge is soft.
+    const fn fading(self) -> ([f32; 4], [f32; 4]) {
+        match self.fade {
+            Some(fade) => (
+                [fade.rect.x, fade.rect.y, fade.rect.w, fade.rect.h],
+                fade.widths,
             ),
             None => ([0.0; 4], [0.0; 4]),
         }
@@ -132,7 +159,7 @@ pub fn tint(color: LinearRgba, alpha: f32) -> [f32; 4] {
 /// below; a box with only a rectangle draws nothing (transparent, no border,
 /// no shadow).
 ///
-/// `#[repr(C)]`, twelve `[f32; 4]`, stride 192, no padding.
+/// `#[repr(C)]`, fourteen `[f32; 4]`, stride 224, no padding.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiQuad {
@@ -154,11 +181,17 @@ pub struct UiQuad {
     /// those corners: all zero where the clip is square.
     clip_round: [f32; 4],
     clip_radii: [f32; 4],
+    /// The box whose edges also thin out what is drawn (x, y, width, height), and how far in from
+    /// each edge (left, top, right, bottom): all zero where no edge is soft.
+    clip_fade: [f32; 4],
+    clip_fade_widths: [f32; 4],
 }
 
-const _: () = assert!(size_of::<UiQuad>() == 192);
+const _: () = assert!(size_of::<UiQuad>() == 224);
 const _: () = assert!(std::mem::offset_of!(UiQuad, clip_round) == 160);
 const _: () = assert!(std::mem::offset_of!(UiQuad, clip_radii) == 176);
+const _: () = assert!(std::mem::offset_of!(UiQuad, clip_fade) == 192);
+const _: () = assert!(std::mem::offset_of!(UiQuad, clip_fade_widths) == 208);
 const _: () = assert!(std::mem::offset_of!(UiQuad, gradient_start) == 112);
 const _: () = assert!(std::mem::offset_of!(UiQuad, gradient_end) == 128);
 const _: () = assert!(std::mem::offset_of!(UiQuad, gradient) == 144);
@@ -170,7 +203,7 @@ const _: () = assert!(std::mem::offset_of!(UiQuad, clip) == 80);
 const _: () = assert!(std::mem::offset_of!(UiQuad, params) == 96);
 
 // SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields
-// (the `size_of`/`offset_of` asserts above: 192, no gaps).
+// (the `size_of`/`offset_of` asserts above: 224, no gaps).
 unsafe impl GpuBytes for UiQuad {}
 
 impl UiQuad {
@@ -189,6 +222,8 @@ impl UiQuad {
             gradient: [0.0; 4],
             clip_round: [0.0; 4],
             clip_radii: [0.0; 4],
+            clip_fade: [0.0; 4],
+            clip_fade_widths: [0.0; 4],
         }
     }
 
@@ -247,17 +282,19 @@ impl UiQuad {
     }
 
     /// Nothing is drawn outside `clip`, a rectangle: it takes the place of a clip with round corners
-    /// that was given before.
+    /// or a soft edge that was given before.
     #[must_use]
     pub const fn clip(self, clip: UiRect) -> Self {
         self.clipped(UiClip::new(clip))
     }
 
-    /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners.
+    /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners and
+    /// its soft edge.
     #[must_use]
     pub const fn clipped(mut self, clip: UiClip) -> Self {
         self.clip = clip.rect.corners();
         (self.clip_round, self.clip_radii) = clip.rounding();
+        (self.clip_fade, self.clip_fade_widths) = clip.fading();
         self
     }
 }
@@ -266,8 +303,8 @@ impl UiQuad {
 /// Made by [`Renderer::ui_text`], never by hand — its source rectangle is a
 /// place in the text atlas.
 ///
-/// `#[repr(C)]`: three `[f32; 4]`, a `[f32; 2]` with its explicit pad and two `[f32; 4]`,
-/// stride 96.
+/// `#[repr(C)]`: three `[f32; 4]`, a `[f32; 2]` with its explicit pad and four `[f32; 4]`,
+/// stride 128.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiGlyph {
@@ -282,17 +319,23 @@ pub struct UiGlyph {
     /// the clip is square.
     clip_round: [f32; 4],
     clip_radii: [f32; 4],
+    /// The box whose edges also thin out what is drawn, and how far in from each edge: all zero
+    /// where no edge is soft.
+    clip_fade: [f32; 4],
+    clip_fade_widths: [f32; 4],
 }
 
-const _: () = assert!(size_of::<UiGlyph>() == 96);
+const _: () = assert!(size_of::<UiGlyph>() == 128);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, clip_round) == 64);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, clip_radii) == 80);
+const _: () = assert!(std::mem::offset_of!(UiGlyph, clip_fade) == 96);
+const _: () = assert!(std::mem::offset_of!(UiGlyph, clip_fade_widths) == 112);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, color) == 16);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, clip) == 32);
 const _: () = assert!(std::mem::offset_of!(UiGlyph, src) == 48);
 
 // SAFETY: `repr(C)`, `f32` fields only; the `pad` is explicit, size
-// 96 is asserted.
+// 128 is asserted.
 unsafe impl GpuBytes for UiGlyph {}
 
 /// The pixels of an image a page draws, as its decoder made them: what [`Renderer::ui_image`]
@@ -312,7 +355,7 @@ pub struct UiBitmap<'a> {
 /// An image: `ui.wgsl`'s `ImageIn` and its Rust twin. A textured rectangle, with the corners and
 /// the clip a [`UiQuad`] has, drawn by [`Renderer::ui_image`].
 ///
-/// `#[repr(C)]`, eight `[f32; 4]`, stride 128, no padding.
+/// `#[repr(C)]`, ten `[f32; 4]`, stride 160, no padding.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiImage {
@@ -329,11 +372,17 @@ pub struct UiImage {
     /// the clip is square.
     clip_round: [f32; 4],
     clip_radii: [f32; 4],
+    /// The box whose edges also thin out what is drawn, and how far in from each edge: all zero
+    /// where no edge is soft.
+    clip_fade: [f32; 4],
+    clip_fade_widths: [f32; 4],
 }
 
-const _: () = assert!(size_of::<UiImage>() == 128);
+const _: () = assert!(size_of::<UiImage>() == 160);
 const _: () = assert!(std::mem::offset_of!(UiImage, clip_round) == 96);
 const _: () = assert!(std::mem::offset_of!(UiImage, clip_radii) == 112);
+const _: () = assert!(std::mem::offset_of!(UiImage, clip_fade) == 128);
+const _: () = assert!(std::mem::offset_of!(UiImage, clip_fade_widths) == 144);
 const _: () = assert!(std::mem::offset_of!(UiImage, uv) == 16);
 const _: () = assert!(std::mem::offset_of!(UiImage, tint) == 32);
 const _: () = assert!(std::mem::offset_of!(UiImage, radii) == 48);
@@ -341,7 +390,7 @@ const _: () = assert!(std::mem::offset_of!(UiImage, clip) == 64);
 const _: () = assert!(std::mem::offset_of!(UiImage, params) == 80);
 
 // SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields (the asserts above:
-// 128, no gaps).
+// 160, no gaps).
 unsafe impl GpuBytes for UiImage {}
 
 impl UiImage {
@@ -356,6 +405,8 @@ impl UiImage {
             params: [1.0, 0.0, 0.0, 0.0],
             clip_round: [0.0; 4],
             clip_radii: [0.0; 4],
+            clip_fade: [0.0; 4],
+            clip_fade_widths: [0.0; 4],
         }
     }
 
@@ -399,17 +450,19 @@ impl UiImage {
     }
 
     /// Nothing is drawn outside `clip`, a rectangle: it takes the place of a clip with round corners
-    /// that was given before.
+    /// or a soft edge that was given before.
     #[must_use]
     pub const fn clip(self, clip: UiRect) -> Self {
         self.clipped(UiClip::new(clip))
     }
 
-    /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners.
+    /// Nothing is drawn outside `clip`: its rectangle and, where it has them, its round corners and
+    /// its soft edge.
     #[must_use]
     pub const fn clipped(mut self, clip: UiClip) -> Self {
         self.clip = clip.rect.corners();
         (self.clip_round, self.clip_radii) = clip.rounding();
+        (self.clip_fade, self.clip_fade_widths) = clip.fading();
         self
     }
 }
@@ -515,7 +568,7 @@ const _: () = assert!(size_of::<UiImmediates>() as u32 <= super::IMMEDIATE_BUDGE
 // SAFETY: `repr(C)`, two `f32`s, size 8 asserted.
 unsafe impl GpuBytes for UiImmediates {}
 
-const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 12] = [
+const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 14] = [
     attribute(0, 0),
     attribute(16, 1),
     attribute(32, 2),
@@ -528,10 +581,12 @@ const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 12] = [
     attribute(144, 9),
     attribute(160, 10),
     attribute(176, 11),
+    attribute(192, 12),
+    attribute(208, 13),
 ];
 
-/// The image's eight attributes, one `vec4` each, at the offsets of `UiImage`'s fields.
-const IMAGE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
+/// The image's ten attributes, one `vec4` each, at the offsets of `UiImage`'s fields.
+const IMAGE_ATTRIBUTES: [wgpu::VertexAttribute; 10] = [
     attribute(0, 0),
     attribute(16, 1),
     attribute(32, 2),
@@ -540,17 +595,21 @@ const IMAGE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
     attribute(80, 5),
     attribute(96, 6),
     attribute(112, 7),
+    attribute(128, 8),
+    attribute(144, 9),
 ];
 
-/// The glyph's six attributes: rect@0, colour@16, clip@32, src@48 (read as a `vec4`: the explicit
-/// pad is its tail), the clip's round box@64 and radii@80.
-const GLYPH_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
+/// The glyph's eight attributes: rect@0, colour@16, clip@32, src@48 (read as a `vec4`: the explicit
+/// pad is its tail), the clip's round box@64 and radii@80, its soft edge's box@96 and widths@112.
+const GLYPH_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
     attribute(0, 0),
     attribute(16, 1),
     attribute(32, 2),
     attribute(48, 3),
     attribute(64, 4),
     attribute(80, 5),
+    attribute(96, 6),
+    attribute(112, 7),
 ];
 
 const fn attribute(offset: u64, location: u32) -> wgpu::VertexAttribute {
@@ -879,6 +938,7 @@ impl Renderer {
         clip: UiClip,
     ) -> f32 {
         let (clip_round, clip_radii) = clip.rounding();
+        let (clip_fade, clip_fade_widths) = clip.fading();
         let mut ui = self.ui.borrow_mut();
         let Some(text) = ui.text.as_mut() else {
             return 0.0;
@@ -904,6 +964,8 @@ impl Renderer {
                 pad: [0.0; 2],
                 clip_round,
                 clip_radii,
+                clip_fade,
+                clip_fade_widths,
             }));
         }
         self.write_text(&mut ui);
