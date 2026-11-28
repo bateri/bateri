@@ -47,7 +47,7 @@ use pencere_drive::{FrameAt, Host, Outline, Page, Painted, Placement, Route, Set
 use pencere_sandbox::{Assets, ModuleLimits, Program, Script};
 use pencere_view::{
     Drawing as Drawn, Font, GesturePhase, Id, Input, Key, Measure, Menu, MenuEntry, Metrics, Mods,
-    Phase, Point, Rect, TerminalLook, WallTime, ZOOM_TEXT,
+    Phase, Point, Rect, TerminalLook, WallTime,
 };
 
 use super::containers::Demo;
@@ -116,6 +116,7 @@ impl Opening {
             shaped: Rc::clone(&shaped),
             line: line.clone(),
         };
+        let again = measure.clone();
         let setup = setup(
             limits,
             self.inset,
@@ -131,6 +132,7 @@ impl Opening {
             terminal: self.terminal,
             shaped,
             line,
+            measure: again,
         };
         (setup, drawing)
     }
@@ -163,11 +165,15 @@ struct Drawing {
     /// What the shell says of its text field's line, which the page's measure reads
     /// ([`PageHandle::field_line`]).
     line: FieldLine,
+    /// The page's measure again: what the page is given when the line of a font was said after its
+    /// layout ([`PageHandle::lay_out_again`]).
+    measure: PaneMeasure,
 }
 
 impl Drawing {
     fn with(self, page: Page) -> (Box<dyn UiPage>, PageHandle) {
-        let handle = PageHandle::new(page, self.line);
+        let mut handle = PageHandle::new(page, self.line);
+        handle.measure = Some(self.measure);
         let drawing = PageDrawing {
             handle: handle.clone(),
             terminal: self.terminal,
@@ -251,6 +257,7 @@ fn local_utc_offset(unix: f64) -> i32 {
 /// The renderer as a page's measure, in frames and between them: it opens and shapes through the
 /// renderer and keeps the lines it shaped, which the link's list draws ([`PageDrawing`]) without
 /// shaping them again.
+#[derive(Clone)]
 struct PaneMeasure {
     renderer: Rc<Renderer>,
     terminal: Option<String>,
@@ -258,30 +265,124 @@ struct PaneMeasure {
     line: FieldLine,
 }
 
-/// How tall one line of the shell's own text field is, in the page's points: what a text field is
-/// drawn with is the shell's (AppKit's cell, at the face and the size of the page's zoom), and a
-/// page that gives a field `rows` is laid out with that many of the shell's lines, so that the last
-/// is not cut by a measure of the renderer's that differs by a little ([`Measure::field_line`]).
-/// The shell says it where it makes its fields ([`PageHandle::field_line`]) and again when the
-/// zoom changes; the page's measure reads it each time it lays a frame out. Both are on the main
-/// thread (the measure holds the renderer, which is not `Send`), so the slot is no more than a cell.
-/// Not said yet, the kit measures the line itself.
+/// How tall one line of the shell's own text field is, for each font the shell has measured: what a
+/// text field is drawn with is the shell's (AppKit's cell, in the font the page says), and a page
+/// that gives a field `rows` is laid out with that many of the shell's lines, so that the last is not
+/// cut by a measure of the renderer's that differs by a little ([`Measure::field_line`]). The line of
+/// a font is not in proportion to its size (Monaco's 12.5 points has 16, its 25 has 31), so each font
+/// is measured, not scaled from another.
+///
+/// The shell says a font's line where it makes its fields ([`PageHandle::field_line`]), in the
+/// **host's points** as [`pencere_drive::Field::font`] says the font: its size and the line. The
+/// page's measure is asked in the layout's pixels (the font of [`pencere_view::Field::font`]), and
+/// turns them with the display's scale, which is the one place the two meet. Both are on the main
+/// thread (the measure holds the renderer, which is not `Send`), so the table is no more than a
+/// cell. A font the shell has not said is answered `None`, the kit measures its line itself; when
+/// the shell says one, the page is laid out again with it.
 #[derive(Clone, Default)]
-pub struct FieldLine(Rc<Cell<Option<f32>>>);
+pub struct FieldLine(Rc<RefCell<Lines>>);
+
+#[derive(Default)]
+struct Lines {
+    /// The display's pixels to a host point, as the last frame laid the page out; nothing before the
+    /// first.
+    scale: f32,
+    /// A font, its size in host points, and the height of its line in host points.
+    lines: Vec<(Font, f32)>,
+    /// A line was said that the layout may not have had when it was made.
+    changed: bool,
+}
+
+/// How many fonts the table keeps: a box that zooms by the pinch is set in another size every frame,
+/// and the oldest line after the page's own (the first, which every field outside the box is set in)
+/// makes room for the newest.
+const MOST_FONTS: usize = 32;
+
+/// A fraction of a point: what two sizes may differ by and still be the one font, which is what the
+/// two ways to a size (the shell's points, the layout's pixels over the scale) come out as.
+const SAME_SIZE: f32 = 0.01;
+
+impl Lines {
+    fn at(&self, font: &Font) -> Option<usize> {
+        self.lines.iter().position(|(known, _)| {
+            known.family == font.family
+                && known.weight == font.weight
+                && known.italic == font.italic
+                && (known.size - font.size).abs() < SAME_SIZE
+        })
+    }
+}
 
 impl FieldLine {
-    /// One line of the shell's field is `points` tall, in the page's points (the host's points over
-    /// the page's zoom). Nothing that is not a height is taken.
-    pub fn set(&self, points: f32) {
-        self.0
-            .set((points.is_finite() && points > 0.0).then_some(points));
+    /// Whether the shell has said the line of `font` (its size in the host's points).
+    pub fn knows(&self, font: &Font) -> bool {
+        self.0.borrow().at(font).is_some()
     }
 
-    /// The line in the unit of the page's measure, for the field's `font` (the kit's, set at the
-    /// layout's scale: its size is [`ZOOM_TEXT`] times the scale, which is the display's pixels to a
-    /// point times the zoom), or `None` where the shell has not said.
-    fn in_unit_of(&self, font: &Font) -> Option<f32> {
-        self.0.get().map(|points| points * (font.size / ZOOM_TEXT))
+    /// One line of the shell's field set in `font` (its size in the host's points) is `points` tall,
+    /// in the host's points. Nothing that is not a height is taken.
+    pub fn set(&self, font: &Font, points: f32) {
+        if !(points.is_finite() && points > 0.0) || !(font.size.is_finite() && font.size > 0.0) {
+            return;
+        }
+        let mut table = self.0.borrow_mut();
+        match table.at(font) {
+            Some(at) if (table.lines[at].1 - points).abs() < SAME_SIZE => {}
+            Some(at) => {
+                table.lines[at].1 = points;
+                table.changed = true;
+            }
+            None => {
+                if table.lines.len() >= MOST_FONTS {
+                    table.lines.remove(1);
+                }
+                table.lines.push((*font, points));
+                table.changed = true;
+            }
+        }
+    }
+
+    /// Begins the table again with one font, the page's own, said before the page's first frame or
+    /// when the zoom changed (the size of every font changed with it, and the page is laid out at the
+    /// new zoom by itself): the page is not laid out again for this. The others are measured as the
+    /// shell makes the fields that are set in them.
+    pub fn restart(&self, font: &Font, points: f32) {
+        let mut table = self.0.borrow_mut();
+        table.lines.clear();
+        if points.is_finite() && points > 0.0 && font.size.is_finite() && font.size > 0.0 {
+            table.lines.push((*font, points));
+        }
+    }
+
+    /// A frame is laid out at `scale` display pixels to a point.
+    fn begin(&self, scale: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        let scale = scale as f32;
+        let mut table = self.0.borrow_mut();
+        if scale.is_finite() && scale > 0.0 {
+            table.scale = scale;
+        }
+    }
+
+    /// Whether a line was said since the page was last laid out with them all (the shell measures a
+    /// font as it makes the field, from the outline the frame told, after the frame's layout): the
+    /// layout did not have it.
+    fn take_changed(&self) -> bool {
+        std::mem::take(&mut self.0.borrow_mut().changed)
+    }
+
+    /// The line in the unit of the page's measure, for the field's `font` (the kit's, in the
+    /// layout's pixels), or `None` where the shell has not said that font's.
+    fn in_pixels(&self, font: &Font) -> Option<f32> {
+        let table = self.0.borrow();
+        if table.scale <= 0.0 {
+            return None;
+        }
+        let host = Font {
+            size: font.size / table.scale,
+            ..*font
+        };
+        table.at(&host).map(|at| table.lines[at].1 * table.scale)
     }
 }
 
@@ -306,7 +407,7 @@ impl Measure for PaneMeasure {
     }
 
     fn field_line(&mut self, font: &Font) -> Option<f32> {
-        self.line.in_unit_of(font)
+        self.line.in_pixels(font)
     }
 }
 
@@ -357,6 +458,7 @@ impl PageDrawing {
             }
         }
         let surfaces = self.handle.surfaces();
+        self.handle.field_line.begin(cx.scale);
         let (list, mut painted) = {
             let mut page = self.handle.page();
             let painted = page.frame(FrameAt {
@@ -390,6 +492,7 @@ impl PageDrawing {
         // (`Painted::deliver_held`) is given to the pane, once its fields exist. Not only when the
         // outline changed: what is held can wait for a frame whose outline is the one the pane has.
         self.handle.tell_frame(&mut painted);
+        self.handle.lay_out_again();
         // A frame the link drew, as the person sees it: not a layout made for a reader that asked
         // for one (`lay_out_unseen`), which draws nothing and counts as no frame.
         self.handle.frame_drawn();
@@ -433,6 +536,9 @@ pub struct PageHandle {
     on_frame_start: Rc<RefCell<Option<OnFrameStart>>>,
     /// How tall a line of the shell's text field is, as the page's measure answers it.
     field_line: FieldLine,
+    /// What measures the page, to give it again ([`PageHandle::lay_out_again`]); none for a page
+    /// that is not a pane's.
+    measure: Option<PaneMeasure>,
 }
 
 /// A page that failed: what was said of it, and who is told.
@@ -496,6 +602,7 @@ impl PageHandle {
     fn new(page: Page, field_line: FieldLine) -> Self {
         Self {
             field_line,
+            measure: None,
             failure: Rc::new(Failure::default()),
             on_frame_start: Rc::new(RefCell::new(None)),
             page: Rc::new(RefCell::new(page)),
@@ -753,9 +860,32 @@ impl PageHandle {
     /// a frame. A pane that is seen has its frames and is not laid out by this.
     pub fn lay_out_unseen(&self, at: FrameAt) {
         self.guard("a layout", || {
-            let mut painted = self.page().frame(at);
-            self.tell_frame(&mut painted);
+            self.field_line.begin(at.scale);
+            // No frame comes for a pane nobody sees: a font the shell measured after the layout is
+            // laid out here, once more, so that what a reader takes of the page is the page as it
+            // is drawn when it is seen.
+            for _ in 0..2 {
+                let mut painted = self.page().frame(at);
+                self.tell_frame(&mut painted);
+                if !self.lay_out_again() {
+                    break;
+                }
+            }
         });
+    }
+
+    /// The shell said the line of a font of its fields after the frame was laid out (it measures a
+    /// field's font as it makes the field, from the outline the frame told): the page is laid out
+    /// again, at its next frame, with that line. Said once, a font is known and nothing here runs for
+    /// it again. The page is not borrowed.
+    fn lay_out_again(&self) -> bool {
+        if self.field_line.take_changed()
+            && let Some(measure) = &self.measure
+        {
+            self.page().set_measure(Box::new(measure.clone()));
+            return true;
+        }
+        false
     }
 
     /// A frame's outline if it changed, then what the drive held for its fields: the order a pane
@@ -989,7 +1119,7 @@ pub(super) mod tests {
     use pencere_sandbox::Fault;
     use pencere_view::{
         Button, Cursor, DrawList, Fill, Input, KeyConvention, Keyboard, Menu, Paint, Phase,
-        field_font,
+        ZOOM_TEXT,
     };
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
@@ -1434,33 +1564,154 @@ pub(super) mod tests {
         assert!((0..1000).all(|_| demo.may_say(64 << 10)));
     }
 
-    /// The shell says how tall a line of its text field is in the page's points; the page's measure
-    /// answers in the unit of its own, the layout's pixels. The kit asks for the font it sets a field
-    /// in (`ZOOM_TEXT` times the layout's scale: the display's pixels to a point times the zoom), so
-    /// a line of 16 points is 32 pixels on a display of two to a point; at zoom 2 the shell measured
-    /// 31 points a line, which is 15.5 of the page's and 62 pixels there. Not said, or said as
-    /// what is no height, the kit measures the line itself.
+    /// The font of a field as the shell says it and as the kit asks it: the terminal's face, regular,
+    /// `points` large (the host's, and so the size the shell measures it at).
+    fn terminal(points: f32) -> Font {
+        Font {
+            family: pencere_view::Family::Terminal,
+            size: points,
+            weight: 400,
+            italic: false,
+        }
+    }
+
+    /// The font the kit asks of the page's measure for a field the shell has in `font`: the layout's
+    /// pixels, which are the host's points times the display's scale.
+    fn asked(font: Font, scale: f32) -> Font {
+        Font {
+            size: font.size * scale,
+            ..font
+        }
+    }
+
+    /// The shell says how tall a line of its text field is for each font, in the host's points; the
+    /// page's measure answers in the unit of its own, the layout's pixels, for the font the kit asks
+    /// (the host's size times the display's scale). The line of a font is not in proportion to its
+    /// size (Monaco has 16 points at 12.5 and 31 at 25, not 32), so each is its own, and a font that
+    /// differs in anything else is another. Not said, or said as what is no height, the kit measures
+    /// the line itself.
     #[test]
-    fn a_fields_line_is_answered_in_the_unit_of_the_layouts_pixels() {
+    fn a_fields_line_is_kept_for_each_font_and_answered_in_the_layouts_pixels() {
         let line = FieldLine::default();
-        assert_eq!(line.in_unit_of(&field_font(2.0)), None, "not said yet");
-        line.set(16.0);
-        assert_eq!(line.in_unit_of(&field_font(1.0)), Some(16.0));
-        assert_eq!(line.in_unit_of(&field_font(2.0)), Some(32.0));
-        // Zoom 2 on that display: the layout's scale is 4, the line the shell measured at twice
-        // the size is 31 points, which is 15.5 of the page's.
-        line.set(15.5);
-        assert_eq!(line.in_unit_of(&field_font(4.0)), Some(62.0));
+        let (small, large) = (terminal(12.5), terminal(25.0));
+        assert_eq!(
+            line.in_pixels(&asked(small, 2.0)),
+            None,
+            "no frame yet: no scale"
+        );
+        line.begin(2.0);
+        assert_eq!(line.in_pixels(&asked(small, 2.0)), None, "not said yet");
+        line.set(&small, 16.0);
+        line.set(&large, 31.0);
+        assert!(line.knows(&small) && line.knows(&large) && !line.knows(&terminal(13.5)));
+        // Two pixels to a point: the line of 16 points is 32 pixels, and the larger font's is not
+        // twice that.
+        assert_eq!(line.in_pixels(&asked(small, 2.0)), Some(32.0));
+        assert_eq!(line.in_pixels(&asked(large, 2.0)), Some(62.0));
+        // Another display says its own scale at its next frame, and the same lines are that many
+        // pixels.
+        line.begin(3.0);
+        assert_eq!(line.in_pixels(&asked(small, 3.0)), Some(48.0));
+        // What differs in the face, the weight or the italic is another font.
+        let bold = Font {
+            weight: 700,
+            ..small
+        };
+        let slanted = Font {
+            italic: true,
+            ..small
+        };
+        let system = Font {
+            family: pencere_view::Family::System,
+            ..small
+        };
+        for other in [bold, slanted, system] {
+            assert_eq!(line.in_pixels(&asked(other, 3.0)), None, "{other:?}");
+            line.set(&other, 17.0);
+            assert_eq!(line.in_pixels(&asked(other, 3.0)), Some(51.0), "{other:?}");
+        }
+        assert_eq!(line.in_pixels(&asked(small, 3.0)), Some(48.0));
+        // A box that zooms by the pinch is another size each frame: the table keeps the newest.
+        let many = FieldLine::default();
+        many.restart(&terminal(12.5), 16.0);
+        for at in 0..100 {
+            many.set(&terminal(30.0 + at as f32), 12.0);
+        }
+        assert!(many.knows(&terminal(129.0)) && !many.knows(&terminal(30.0)));
+        assert!(many.knows(&terminal(12.5)), "the page's own stays");
+        assert!(many.0.borrow().lines.len() <= MOST_FONTS);
         // What is no height is the same as nothing said.
         for not in [0.0, -3.0, f32::NAN, f32::INFINITY] {
-            line.set(not);
-            assert_eq!(line.in_unit_of(&field_font(4.0)), None, "{not}");
+            line.set(&terminal(30.0), not);
+            assert!(!line.knows(&terminal(30.0)), "{not}");
         }
-        // A handle's slot is the one the measure reads: what the shell says to one the other hears.
+        // A handle's table is the one the measure reads: what the shell says to one the other hears.
         let said = FieldLine::default();
         let heard = said.clone();
-        said.set(20.0);
-        assert_eq!(heard.in_unit_of(&field_font(1.0)), Some(20.0));
+        said.begin(1.0);
+        said.set(&small, 20.0);
+        assert_eq!(heard.in_pixels(&small), Some(20.0));
+        // Taken back, a font is measured again.
+        said.restart(&large, 31.0);
+        assert_eq!(heard.in_pixels(&small), None);
+    }
+
+    /// The layout asks a font in pixels the shell measured in points: at a zoom that is not a whole
+    /// number, on a display of any scale, and in a box that scrolls and zooms (its text is the page's
+    /// size times a scale that moves continuously), the two come out the one font, which is the line
+    /// the shell said, not a miss that would keep the page at the kit's own line.
+    #[test]
+    fn a_font_the_shell_measured_is_found_by_the_font_the_layout_asks_at_any_zoom_and_scale() {
+        for display in [1.0_f32, 2.0, 3.0, 1.5] {
+            for zoom in [1.0_f32, 1.1, 1.25, 1.5, 1.7, 2.0, 0.9, 1.0 / 3.0] {
+                for size in [10.0_f32, 12.5, 13.5, 15.0, 20.0] {
+                    let line = FieldLine::default();
+                    line.begin(f64::from(display));
+                    // The shell: the page's points times its zoom. The kit: the page's points times
+                    // the layout's scale (the display's times the zoom), however it got there.
+                    let measured = terminal(size * zoom);
+                    line.set(&measured, 17.0);
+                    let layout = display * zoom;
+                    let wanted = terminal(size * layout);
+                    let got = line
+                        .in_pixels(&wanted)
+                        .unwrap_or_else(|| panic!("{size} at zoom {zoom} on {display}: not found"));
+                    assert!(
+                        (got - 17.0 * display).abs() < 0.01,
+                        "{size} at zoom {zoom} on {display}: {got}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A line said after the frame was laid out is what the page is laid out again with, once; the
+    /// page's own, said as the fields are made or the zoom changes, is not (the page is laid out at
+    /// the new zoom by itself), and a line said again as it was is nothing new.
+    #[test]
+    fn a_line_said_for_a_font_is_taken_once_and_the_pages_own_is_not_news() {
+        let line = FieldLine::default();
+        let font = terminal(12.5);
+        line.restart(&font, 16.0);
+        line.begin(2.0);
+        assert!(!line.take_changed(), "what the page began with");
+        assert!(line.knows(&font));
+        // The shell measures another font as it makes a field.
+        line.set(&terminal(13.5), 18.0);
+        assert!(line.take_changed());
+        assert!(!line.take_changed(), "once");
+        line.set(&terminal(13.5), 18.0);
+        line.set(&terminal(13.5), 18.001);
+        assert!(!line.take_changed(), "said as it was is nothing new");
+        line.set(&terminal(13.5), 19.0);
+        assert!(line.take_changed(), "a line that changed is");
+        // Zoom: every size changed, one is given again, and the others are measured as they come.
+        line.restart(&terminal(25.0), 31.0);
+        assert!(!line.take_changed());
+        assert!(!line.knows(&font) && !line.knows(&terminal(13.5)) && line.knows(&terminal(25.0)));
+        // What is no height is no line.
+        line.restart(&terminal(25.0), 0.0);
+        assert!(!line.knows(&terminal(25.0)));
     }
 
     /// The link's build of a frame hands the pane the frame's outline and then what the drive held
@@ -1811,7 +2062,7 @@ return {
                 opening(&renderer, None),
                 wake,
             );
-            handle.field_line().set(line);
+            handle.field_line().restart(&terminal(ZOOM_TEXT), line);
             build(&mut page, &renderer, &theme, 0.0);
             assert!(wait(&woken), "the script handed out no page");
             handle.page().drain();
@@ -1828,6 +2079,231 @@ return {
                 (field.rect.h - (3.0 * line + 12.0)).abs() < 0.01,
                 "the room is {} points tall",
                 field.rect.h
+            );
+        }
+    }
+
+    /// A pane nobody sees is laid out once for a reader (`lay_out_unseen`), and no frame comes for it:
+    /// a font of a field the shell measures after that layout is laid out again there, so that what
+    /// the reader takes of the page is the page as it is drawn when it is seen.
+    #[test]
+    fn a_page_laid_out_unseen_has_the_line_of_a_font_the_shell_measured_in_it() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let renderer = Rc::new(renderer);
+        let (wake, woken) = woken();
+        let (mut page, handle) = script_page(
+            Script {
+                path: "page.lua".to_owned(),
+                source: br#"return { render = function()
+                return pencere.div():text_field("notes", "lines", { rows = 3 }):text_size(13.5):py(6):w(100)
+            end }"#
+                    .to_vec(),
+                bundle: None,
+            },
+            ModuleLimits::default(),
+            opening(&renderer, None),
+            wake,
+        );
+        let line = handle.field_line();
+        line.restart(&terminal(ZOOM_TEXT), 16.0);
+        {
+            let line = line.clone();
+            handle.watch_outline(Box::new(move |outline| {
+                for field in &outline.fields {
+                    if !line.knows(&field.font) {
+                        line.set(&field.font, 19.0);
+                    }
+                }
+            }));
+        }
+        // Drawn once so that the module hands its page out, then laid out for a reader alone.
+        build(&mut page, &renderer, &Theme::BATERI, 0.0);
+        assert!(wait(&woken), "the script handed out no page");
+        handle.page().drain();
+        handle.lay_out_unseen(FrameAt {
+            size: (2000, 1200),
+            scale: 2.0,
+            now: 0.1,
+            reduce_motion: false,
+        });
+        let height = handle
+            .page()
+            .fields()
+            .first()
+            .map(|field| field.text.h)
+            .expect("its field");
+        assert!(
+            (height - 57.0).abs() < 0.01,
+            "three lines of 19, in the one layout: {height}"
+        );
+    }
+
+    /// A field in a row that stands its children on one baseline (`items_baseline`) is put where the
+    /// kit puts the field's own baseline: from the line the shell says for the field's font, not from
+    /// a line of the page's own font scaled to it. A field of lines starts its text at the top of its
+    /// box: a taller line of the field's font puts its baseline lower in the field by half the
+    /// difference, and the field higher by as much beside a label that stays where it is. (A field of
+    /// one line has its line in the middle of its box, where the line cancels out of the baseline.
+    /// The kit has no way to take the baseline AppKit draws at, only the line; where in its line the
+    /// host draws is its to keep to.)
+    #[test]
+    fn a_fields_baseline_in_a_row_is_placed_from_the_line_the_shell_says_for_its_font() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let renderer = Rc::new(renderer);
+        let theme = Theme::BATERI;
+        let field_top = |line: f32| -> f32 {
+            let (wake, woken) = woken();
+            let (mut page, handle) = script_page(
+                Script {
+                    path: "page.lua".to_owned(),
+                    source: br#"return { render = function()
+                    return pencere.div():row():items_baseline():child(
+                        pencere.text("Name"):text_size(40)):child(
+                        pencere.div():text_field("name", "lines"):text_size(10):h(60):w(100))
+                end }"#
+                        .to_vec(),
+                    bundle: None,
+                },
+                ModuleLimits::default(),
+                opening(&renderer, None),
+                wake,
+            );
+            handle.field_line().restart(&terminal(ZOOM_TEXT), 16.0);
+            handle.field_line().set(&terminal(10.0), line);
+            build(&mut page, &renderer, &theme, 0.0);
+            assert!(wait(&woken), "the script handed out no page");
+            handle.page().drain();
+            build(&mut page, &renderer, &theme, 0.1);
+            let field = handle.page().fields().first().cloned().expect("its field");
+            field.rect.y
+        };
+        let (short, tall) = (field_top(12.0), field_top(20.0));
+        // Eight points more in the line is four more above the baseline, so the field stands four
+        // higher beside a label that does not move (the page's half points: a half either way).
+        assert!(
+            (short - tall - 4.0).abs() <= 0.5,
+            "a line of 12 puts the field at {short}, one of 20 at {tall}: four higher, not {}",
+            short - tall
+        );
+    }
+
+    /// A field set in a font the shell has not measured is laid out with the kit's own line, and
+    /// with the shell's once it has: the shell measures what the frame's outline names as it makes
+    /// the fields (`PageHandle::watch_outline`), and the page is laid out again, once. What the
+    /// page's default font is has its line before the first frame (the shell seeds it), so an
+    /// ordinary page is laid out once. At a zoom the drive's font is the host's points (the page's
+    /// times the zoom) and the kit asks in pixels (the display's scale times the zoom), and the
+    /// font the shell measured is the one the kit asks for, or the page would keep the kit's line.
+    #[test]
+    fn a_field_in_a_font_the_shell_has_not_measured_is_laid_out_once_more_with_its_line() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let renderer = Rc::new(renderer);
+        let theme = Theme::BATERI;
+        for zoom in [1.0_f32, 1.5, 0.8] {
+            let (wake, woken) = woken();
+            let (mut page, handle) = script_page(
+                Script {
+                    path: "page.lua".to_owned(),
+                    source: br#"return { render = function()
+                    return pencere.div():col():child(
+                        pencere.div():text_field("notes", "lines", { rows = 3 }):text_size(13.5):py(6):w(100))
+                    :child(pencere.div():text_field("plain", "lines", { rows = 3 }):py(6):w(100))
+                end }"#
+                        .to_vec(),
+                    bundle: None,
+                },
+                ModuleLimits::default(),
+                opening(&renderer, None),
+                wake,
+            );
+            handle.page().set_zoom(zoom);
+            let line = handle.field_line();
+            // What the shell does when the page is made: the page's own font.
+            line.restart(&terminal(ZOOM_TEXT * zoom), 16.0);
+            let (told, measured) = (
+                Rc::new(Cell::new(0)),
+                Rc::new(RefCell::new(Vec::<f32>::new())),
+            );
+            {
+                // What the shell does when the outline is told: the fonts of its fields it has not
+                // measured, at the line AppKit would give them.
+                let (line, told, measured) = (line.clone(), Rc::clone(&told), Rc::clone(&measured));
+                handle.watch_outline(Box::new(move |outline| {
+                    if outline.fields.is_empty() {
+                        return;
+                    }
+                    told.set(told.get() + 1);
+                    for field in &outline.fields {
+                        if !line.knows(&field.font) {
+                            measured.borrow_mut().push(field.font.size);
+                            line.set(&field.font, 19.0);
+                        }
+                    }
+                }));
+            }
+            build(&mut page, &renderer, &theme, 0.0);
+            assert!(wait(&woken), "the script handed out no page");
+            handle.page().drain();
+            build(&mut page, &renderer, &theme, 0.1);
+            let heights = |handle: &PageHandle| -> Vec<f32> {
+                handle
+                    .page()
+                    .fields()
+                    .iter()
+                    .map(|field| field.text.h)
+                    .collect()
+            };
+            let sizes = || measured.borrow().clone();
+            let said = |sizes: Vec<f32>| sizes.len() == 1 && (sizes[0] - 13.5 * zoom).abs() < 0.01;
+            // The first layout: the plain field has the shell's line (3 x 16), the 13.5-point one the
+            // kit's own, and the shell was told of it and measured the one font, in the host's
+            // points.
+            let first = heights(&handle);
+            assert!(
+                (first[1] - 48.0).abs() < 0.01,
+                "zoom {zoom}: the page's own font: {first:?}"
+            );
+            assert!(
+                (first[0] - 57.0).abs() > 0.5,
+                "zoom {zoom}: not yet the shell's line: {first:?}"
+            );
+            assert!(
+                told.get() == 1 && said(sizes()),
+                "zoom {zoom}: {:?}",
+                sizes()
+            );
+            // The next frame lays the page out again with it, and nothing is measured twice.
+            build(&mut page, &renderer, &theme, 0.2);
+            let second = heights(&handle);
+            assert!(
+                (second[0] - 57.0).abs() < 0.01,
+                "zoom {zoom}: three lines of 19: {second:?}"
+            );
+            assert!(
+                (second[1] - 48.0).abs() < 0.01,
+                "zoom {zoom}: the other is as it was: {second:?}"
+            );
+            assert!(
+                told.get() == 2 && said(sizes()),
+                "zoom {zoom}: {:?}",
+                sizes()
+            );
+            for now in [0.3, 0.4, 0.5] {
+                build(&mut page, &renderer, &theme, now);
+            }
+            assert_eq!(heights(&handle), second, "zoom {zoom}: it stays");
+            assert!(
+                told.get() == 2 && measured.borrow().len() == 1,
+                "zoom {zoom}: no layout, no measuring more"
             );
         }
     }
@@ -2916,6 +3392,8 @@ return {
                 // No border and no padding of its own: the text stands in all of the room.
                 padding_box: field,
                 text: field,
+                // The page's own font, in the host's points at zoom 1.
+                font: terminal(ZOOM_TEXT),
                 hint: Some(super::super::containers::FIELD_HINT.to_owned()),
                 label: None,
                 covered: false,

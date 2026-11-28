@@ -93,7 +93,8 @@ pub struct UiRound {
 /// The soft edge of a clip: the box that fades and how far in from each of its edges the fade goes,
 /// pixels: left, top, right, bottom (a width of nothing leaves that edge as it is). What is drawn is
 /// whole at that distance from an edge and gone at the edge, in a straight line between; where two
-/// edges fade, at a corner, the two are multiplied. Outside the box nothing is drawn.
+/// edges fade, at a corner, the two are multiplied. An edge with no width leaves what is drawn up to
+/// that edge as it is: the clip's own rectangle is what ends it there.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiFade {
     pub rect: UiRect,

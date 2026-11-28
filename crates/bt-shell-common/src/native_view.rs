@@ -75,9 +75,10 @@ pub use pencere_view::{
     Saving, Shortcut, Sort, State, TerminalLook, WallTime, copy_key, go_refusal,
 };
 use pencere_view::{
-    Clip, Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run,
-    Source,
+    Clip, Color, DrawList, Figure, Measure, Metrics, Paint, Picture, Quad, Run, Source,
 };
+// The font of a text field as the page says it ([`Field::font`]): the shell sets its own field in it.
+pub use pencere_view::{Family, Font};
 pub use pencere_view::{haptic, sound};
 pub use surfaces::{Surfaces, browser_room};
 pub use transfers::Waits;

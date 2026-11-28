@@ -27,6 +27,8 @@ of every installed copy. A version without a section is not released.
 - **A border takes room inside its box in a program's screen**, as it does on a web page. A program's cards and fields can sit a pixel or two differently until the program updates.
 - **A program's text editor and web page stay inside the border and padding of their box**, as they do on a web page; the border and padding are no longer drawn under the text or the page.
 - **The scroll bars of a box with a border stand inside the border** in a program's screen, as on a web page.
+- **A program's text field is set in the text its box says.** Its size, face, weight and italic are the box's, as on a web page (a field in a 13.5-point box is drawn in 13.5), and a box of rows is as tall as that many lines of the field's own font.
+- **A text field's words start at the edge of its box**, where the program's own text does, not a couple of points in from it.
 
 ### Fixed
 

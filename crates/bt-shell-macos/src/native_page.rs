@@ -33,9 +33,9 @@ use block2::RcBlock;
 use bt_core::Theme;
 use bt_shell_common::native_view::ax::{self, AxNode};
 use bt_shell_common::native_view::{
-    Accessible, AccessibleRole, Command, Field, FieldKind, FieldLine, FieldState, Fill, Id, Key,
-    Mods, Outline, PageHandle, Point, Rect, Role, Shortcut, Sort, Tip, ViewFiles, ZOOM_TEXT,
-    tone_linear,
+    Accessible, AccessibleRole, Command, Family, Field, FieldKind, FieldLine, FieldState, Fill,
+    Font, Id, Key, Mods, Outline, PageHandle, Point, Rect, Role, Shortcut, Sort, Tip, ViewFiles,
+    ZOOM_TEXT, tone_linear,
 };
 use objc2::rc::{Retained, Weak as WeakId};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
@@ -58,11 +58,11 @@ use objc2_app_kit::{
     NSAccessibilitySwitchSubrole, NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole,
     NSAccessibilityTableRole, NSAccessibilityTextAreaRole, NSAccessibilityValueChangedNotification,
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBorderType, NSColor, NSControl,
-    NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSLayoutManager,
-    NSLayoutManagerDelegate, NSLineBreakMode, NSResponder, NSScrollView, NSScroller,
-    NSScrollerPart, NSScrollerStyle, NSSecureTextField, NSText, NSTextContainer, NSTextField,
-    NSTextStorage, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont,
+    NSFontDescriptorSymbolicTraits, NSLayoutManager, NSLayoutManagerDelegate, NSLineBreakMode,
+    NSResponder, NSScrollView, NSScroller, NSScrollerPart, NSScrollerStyle, NSSecureTextField,
+    NSText, NSTextContainer, NSTextField, NSTextStorage, NSTextView, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -153,7 +153,11 @@ define_class!(
                     return None;
                 }
                 let frame = field.frame();
-                if inside(frame, local) {
+                let room = room_of(&field);
+                // A one-line field's frame is wider than its text box by the cell's own inset
+                // ([`CELL_INSET`]), which a room with no padding or border does not have to give: what
+                // is outside the room is a neighbour's press, not the field's.
+                if inside(frame, local) && room.is_none_or(|room| inside(room, local)) {
                     return field.hitTest(local);
                 }
                 // In the room and outside the text: the press is the nearest one in the frame, so
@@ -162,8 +166,7 @@ define_class!(
                 // (the whole text selected, the page told the keyboard came a second time). A field
                 // of lines is its text view, which is its own editor: it takes the press itself, not
                 // what the nearest point of its frame holds (a scroller at the edge).
-                room_of(&field)
-                    .filter(|room| inside(*room, local))
+                room.filter(|room| inside(*room, local))
                     .and_then(|_| match lines_text_in(&field) {
                         Some(text) => Some(Retained::into_super(Retained::into_super(
                             Retained::into_super(text),
@@ -294,8 +297,11 @@ impl PageFields {
     ) -> Rc<Self> {
         let host = FieldsHost::new(pane);
         pane.add_page_fields_host(&host);
-        // Said before the page's first frame is laid out: it is made with the page.
-        line.set(line_of(pane.mtm(), family.as_deref(), zoom));
+        // Said before the page's first frame is laid out: it is made with the page. The page's own
+        // font, which a field that says nothing of its text is set in; the others are measured as the
+        // page's outline names them ([`PageFields::apply`]).
+        let own = default_font(zoom);
+        line.restart(&own, line_of(pane.mtm(), family.as_deref(), &own));
         Rc::new(Self {
             pane: WeakId::new(pane),
             host,
@@ -324,6 +330,22 @@ impl PageFields {
             return;
         };
         self.cover(&pane);
+        // The fonts the page sets its fields in that were not measured: the page's measure answers
+        // those with its own line until it is told, and is laid out again with the shell's once it
+        // is. AppKit is asked here, on the main thread, for each font once.
+        let mut measured = false;
+        for said in &outline.fields {
+            if !self.line.knows(&said.font) {
+                self.line.set(
+                    &said.font,
+                    line_of(pane.mtm(), self.family.as_deref(), &said.font),
+                );
+                measured = true;
+            }
+        }
+        if measured && let Some(link) = pane.link() {
+            link.poke_page();
+        }
         let mut fields = self.fields.borrow_mut();
         let kept: Vec<(Id, FieldKind)> = outline.fields.iter().map(|f| (f.id, f.kind)).collect();
         fields.retain(|field| {
@@ -351,6 +373,7 @@ impl PageFields {
                         &self.theme.get(),
                         self.family.as_deref(),
                         self,
+                        &said.font,
                     );
                     view.ivars().id.set(Some(said.id));
                     self.host.addSubview(&view);
@@ -363,7 +386,7 @@ impl PageFields {
                 }
             };
             if let Some(field) = fields.get(index) {
-                place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
+                place_field(&field.view, said, self.family.as_deref());
             }
         }
         drop(fields);
@@ -474,7 +497,7 @@ impl PageFields {
                 .iter()
                 .find(|field| field.id == said.id && field.kind == said.kind)
             {
-                place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
+                place_field(&field.view, said, self.family.as_deref());
             }
         }
     }
@@ -801,8 +824,11 @@ impl PageFields {
             return;
         }
         if let Some(pane) = self.pane.load() {
+            // Every font of the page is another size now: the page's own is said again, and the
+            // others are measured as the outline brings them.
+            let own = default_font(zoom);
             self.line
-                .set(line_of(pane.mtm(), self.family.as_deref(), zoom));
+                .restart(&own, line_of(pane.mtm(), self.family.as_deref(), &own));
         }
     }
 
@@ -1173,8 +1199,8 @@ fn lines_natural_line(text: &PageLinesText) -> f64 {
 
 /// The line of a text field's cell in `family` at `size`, and where its baseline stands in it:
 /// what a field of lines is laid out in, so that the two stand alike in every face.
-fn cell_line(mtm: MainThreadMarker, family: Option<&str>, size: f64) -> (f64, f64) {
-    let probe = field_of(mtm, FieldKind::Line, Weak::new(), family, size);
+fn cell_line(mtm: MainThreadMarker, family: Option<&str>, font: &Font) -> (f64, f64) {
+    let probe = field_of(mtm, FieldKind::Line, Weak::new(), family, font);
     let line = probe.line_height();
     probe.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(100.0, line)));
     // SAFETY: NSView's `firstBaselineOffsetFromTop`, which takes nothing and gives a CGFloat.
@@ -2469,8 +2495,8 @@ fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
 }
 
-/// A field of `kind` for `pane`: no border and no ground (the page draws the box), the
-/// terminal's face, the theme's ink. One line scrolls as it is typed and cuts a hint that does
+/// A field of `kind` for `pane`, set in `font` (the page's, [`Field::font`]): no border and no ground
+/// (the page draws the box), the theme's ink. One line scrolls as it is typed and cuts a hint that does
 /// not fit with "…"; lines wrap and scroll; a secret shows no characters. The pane is its delegate
 /// (`TerminalPane::page_field_changed`, `page_field_command`), or, for lines, which are a text view
 /// and not a text field, hears of it from the view itself ([`PageLinesText`]).
@@ -2480,14 +2506,9 @@ fn text_field(
     theme: &Theme,
     family: Option<&str>,
     fields: &Rc<PageFields>,
+    font: &Font,
 ) -> FieldView {
-    let view = field_of(
-        pane.mtm(),
-        kind,
-        Rc::downgrade(fields),
-        family,
-        f64::from(ZOOM_TEXT),
-    );
+    let view = field_of(pane.mtm(), kind, Rc::downgrade(fields), family, font);
     view.set_ink(&ink(theme, Role::Foreground));
     if let Some(field) = view.text_field() {
         // SAFETY: the pane implements the text field's delegate methods it is given (`impl
@@ -2498,31 +2519,47 @@ fn text_field(
     view
 }
 
-/// How tall one line of a field is at `zoom` times the kit's text ([`ZOOM_TEXT`], the page's own
-/// size), in the page's points: the line of the very cell a page's field is drawn with (a field made
-/// as a page's, which nobody sees), at the size the field is set in, over the zoom. The line of a
-/// face is not in proportion to its size (Monaco's 12.5 points has 16, its 25 has 31), so it is asked
-/// of AppKit at each zoom, not scaled. A field of text and a field of lines each have theirs (the
-/// cell's and the text view's, which agree in the faces tried: `field_problems`); the page is told
-/// the taller, so that no box of rows is shorter than the lines it holds.
-pub(crate) fn line_of(mtm: MainThreadMarker, family: Option<&str>, zoom: f32) -> f32 {
-    let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
-    let line = [FieldKind::Line, FieldKind::Lines]
-        .into_iter()
-        .map(|kind| field_of(mtm, kind, Weak::new(), family, size).line_height())
-        .fold(0.0, f64::max);
-    (line / f64::from(zoom)) as f32
+/// The font a page's fields are set in where it says nothing of their text, at `zoom` times the kit's
+/// text ([`ZOOM_TEXT`], the page's own size): the terminal's face, regular, in the host's points.
+pub(crate) fn default_font(zoom: f32) -> Font {
+    terminal(f64::from(ZOOM_TEXT) * f64::from(zoom))
 }
 
-/// A text field of `kind` as a page's are made, set in the terminal's face at `size` points: no
-/// border and no ground, the cell the way every field of a page has it. `fields` are told when the
+/// The terminal's face, regular, `points` large.
+#[allow(clippy::cast_possible_truncation)]
+fn terminal(points: f64) -> Font {
+    Font {
+        family: Family::Terminal,
+        size: points as f32,
+        weight: 400,
+        italic: false,
+    }
+}
+
+/// How tall one line of a field set in `font` is, in the host's points: the line of the very cell a
+/// page's field is drawn with (a field made as a page's, which nobody sees), at the size the field is
+/// set in. The line of a face is not in proportion to its size (Monaco's 12.5 points has 16, its 25
+/// has 31), so it is asked of AppKit for each font, not scaled. A field of text and a field of lines
+/// each have theirs (the cell's and the text view's, which agree in the faces tried:
+/// `field_problems`); the page is told the taller, so that no box of rows is shorter than the lines it
+/// holds.
+pub(crate) fn line_of(mtm: MainThreadMarker, family: Option<&str>, font: &Font) -> f32 {
+    let line = [FieldKind::Line, FieldKind::Lines]
+        .into_iter()
+        .map(|kind| field_of(mtm, kind, Weak::new(), family, font).line_height())
+        .fold(0.0, f64::max);
+    line as f32
+}
+
+/// A text field of `kind` as a page's are made, set in `font` (its size in points): no border and no
+/// ground, the cell the way every field of a page has it. `fields` are told when the
 /// person clicks into it.
 fn field_of(
     mtm: MainThreadMarker,
     kind: FieldKind,
     fields: Weak<PageFields>,
     family: Option<&str>,
-    size: f64,
+    font: &Font,
 ) -> FieldView {
     let ivars = PageTextFieldIvars {
         id: Cell::new(None),
@@ -2540,7 +2577,7 @@ fn field_of(
         pad: Cell::new([0.0; 4]),
     };
     if kind == FieldKind::Lines {
-        return FieldView::Lines(lines_of(mtm, ivars, family, size));
+        return FieldView::Lines(lines_of(mtm, ivars, family, font));
     }
     // SAFETY: `initWithFrame:` is NSTextField's designated initializer (NSSecureTextField's too),
     // and the ivars are set.
@@ -2559,7 +2596,7 @@ fn field_of(
     field.setEditable(true);
     field.setSelectable(true);
     field.setFocusRingType(NSFocusRingType::None);
-    field.setFont(Some(&face(family, size)));
+    field.setFont(Some(&face(family, font)));
     if let Some(cell) = field.cell() {
         // Not AppKit's single-line mode, for any kind: its cell draws the text at a baseline set
         // by the control's size whatever the face, and in most of the terminal's faces that stood
@@ -2584,19 +2621,20 @@ fn field_of(
     view
 }
 
-/// A field of lines as a page's are made, set in the terminal's face at `size` points: a text view
+/// A field of lines as a page's are made, set in `font` (its size in points): a text view
 /// in a scroll view, which scrolls the lines the box has no room for ("the field scrolls the lines it
 /// has no room for", the kit's specification) where a wrapping `NSTextField` draws them past it.
-/// It is what AppKit's field is to the person: no border and no ground, the terminal's face, a
-/// caret that stays in view, a line of the very height of a text field's cell (no leading) and the
-/// two points before the text that its cell has, the same substitutions its editor has and a hint
-/// drawn in the same ink ([`PageLinesText`]). The scroll bar is the system's overlay one in every
+/// It is what AppKit's field is to the person: no border and no ground, the page's font, a caret
+/// that stays in view, a line of the very height of a text field's cell (no leading), the same
+/// substitutions its editor has and a hint drawn in the same ink ([`PageLinesText`]). Its text
+/// starts at the edge of the box (the text view has no padding of its own, so the box's width is the
+/// width the kit broke the rows at). The scroll bar is the system's overlay one in every
 /// setting: a bar that takes room would wrap the text at a width the page did not lay it out for.
 fn lines_of(
     mtm: MainThreadMarker,
     ivars: PageTextFieldIvars,
     family: Option<&str>,
-    size: f64,
+    font: &Font,
 ) -> LinesView {
     let storage = NSTextStorage::new();
     let manager = NSLayoutManager::new();
@@ -2604,7 +2642,7 @@ fn lines_of(
     let container =
         NSTextContainer::initWithSize(NSTextContainer::alloc(), NSSize::new(0.0, 1.0e7));
     container.setWidthTracksTextView(true);
-    container.setLineFragmentPadding(SIDE_PADDING);
+    container.setLineFragmentPadding(0.0);
     storage.addLayoutManager(&manager);
     manager.addTextContainer(&container);
     let this = PageLinesText::alloc(mtm).set_ivars(ivars);
@@ -2614,7 +2652,7 @@ fn lines_of(
         msg_send![super(this), initWithFrame: NSRect::ZERO, textContainer: Some(&*container)]
     };
     manager.setDelegate(Some(ProtocolObject::from_ref(&*text)));
-    text.setFont(Some(&face(family, size)));
+    text.setFont(Some(&face(family, font)));
     text.setRichText(false);
     text.setImportsGraphics(false);
     text.setDrawsBackground(false);
@@ -2673,15 +2711,54 @@ fn lines_of(
     }
 }
 
-/// How far a field's text stands from the left of its frame, points: AppKit's cell of a text field
-/// has two (measured from what it draws), a text view five.
-const SIDE_PADDING: f64 = 2.0;
+/// How far AppKit's cell of a text field stands its text from the left of its frame, points: two, at
+/// rest and with the field's editor in it, at every zoom (`first_glyph_problems` measures it from what
+/// is drawn). A page's text starts at the edge of its text box, so a field's frame is that much wider
+/// on each side than the box, and a text view (whose own padding, `lineFragmentPadding`, is five
+/// points until it is set) has none.
+const CELL_INSET: f64 = 2.0;
 
-/// The terminal's face (the system's monospaced one where it has none) at `size` points.
-fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
-    family
-        .and_then(|name| NSFont::fontWithName_size(&NSString::from_str(name), size))
-        .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0))
+/// `font` as AppKit's: the system's interface face for `Family::System`, the terminal's own (the
+/// system's monospaced one where it has none) for `Family::Terminal`, at the font's size in points, in
+/// its weight (the CSS scale) and its italic. A face the person named is regular or bold (from 600 on):
+/// it has the weights it has, and a named face is asked for no others.
+fn face(family: Option<&str>, font: &Font) -> Retained<NSFont> {
+    let size = f64::from(font.size);
+    let weight = weight_of(font.weight);
+    let mut traits = NSFontDescriptorSymbolicTraits::empty();
+    let face = match font.family {
+        Family::System => NSFont::systemFontOfSize_weight(size, weight),
+        Family::Terminal => family
+            .and_then(|name| NSFont::fontWithName_size(&NSString::from_str(name), size))
+            .inspect(|_| {
+                // A face the person named has its own bold, not a weight to ask of it.
+                if font.weight >= 600 {
+                    traits |= NSFontDescriptorSymbolicTraits::TraitBold;
+                }
+            })
+            .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, weight)),
+    };
+    if font.italic {
+        traits |= NSFontDescriptorSymbolicTraits::TraitItalic;
+    }
+    if traits.is_empty() {
+        return face;
+    }
+    let descriptor = face
+        .fontDescriptor()
+        .fontDescriptorWithSymbolicTraits(face.fontDescriptor().symbolicTraits() | traits);
+    NSFont::fontWithDescriptor_size(&descriptor, size).unwrap_or(face)
+}
+
+/// A weight on the CSS scale (100–900) as AppKit's (`NSFontWeight`, -1 to 1): the system's own
+/// weights at the hundreds, in between by proportion.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn weight_of(css: u16) -> f64 {
+    const WEIGHTS: [f64; 9] = [-0.8, -0.6, -0.4, 0.0, 0.23, 0.3, 0.4, 0.56, 0.62];
+    let at = (f64::from(css.clamp(100, 900)) - 100.0) / 100.0;
+    let (below, share) = (at.floor() as usize, at.fract());
+    let above = (below + 1).min(WEIGHTS.len() - 1);
+    WEIGHTS[below] + (WEIGHTS[above] - WEIGHTS[below]) * share
 }
 
 /// Puts the field where the page's room for it is (the pane's points from its top), saying the
@@ -2691,10 +2768,10 @@ fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
 /// the size of the padding box (`Field::padding_box`: the room less the border), which cuts what
 /// scrolls, the padding going with the text; a line is as
 /// tall as its own line (its font's, which AppKit draws from the top of the frame), so it is that
-/// line that is centred in the box, not a taller frame with the text at its top. The text is as
-/// large as the page is drawn (`zoom`). The field stands in the host ([`FieldsHost`]), whose axis
+/// line that is centred in the box, not a taller frame with the text at its top. The text is set in
+/// the font the page says (`Field::font`), at the size the page is drawn. The field stands in the host ([`FieldsHost`]), whose axis
 /// is the page's: its frame is in the room, from the top.
-fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>) {
+fn place_field(field: &FieldView, place: &Field, family: Option<&str>) {
     let room = place.rect;
     field.ivars().room.set(NSRect::new(
         NSPoint::new(f64::from(room.x), f64::from(room.y)),
@@ -2704,7 +2781,7 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
     if unsafe { field.superview() }.is_none() {
         return;
     }
-    let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
+    let wanted = face(family, &place.font);
     let hint = place.hint.as_deref().map(NSString::from_str);
     let said = place
         .label
@@ -2713,10 +2790,11 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
         .unwrap_or_default();
     let text = place.text;
     let frame = |top: f64, height: f64| {
-        // The host's y is the page's, from the top.
+        // The host's y is the page's, from the top. The cell stands its text [`CELL_INSET`] in from
+        // the frame's edge, so the frame is that much wider on each side than the text box is.
         NSRect::new(
-            NSPoint::new(f64::from(text.x), top),
-            NSSize::new(f64::from(text.w), height),
+            NSPoint::new(f64::from(text.x) - CELL_INSET, top),
+            NSSize::new(f64::from(text.w) + 2.0 * CELL_INSET, height),
         )
     };
     let lines = match field {
@@ -2725,11 +2803,8 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
             let Some(field) = field.text_field() else {
                 return;
             };
-            if field
-                .font()
-                .is_none_or(|font| (font.pointSize() - size).abs() > 0.01)
-            {
-                field.setFont(Some(&face(family, size)));
+            if field.font().is_none_or(|font| font != wanted) {
+                field.setFont(Some(&wanted));
             }
             field.setPlaceholderString(hint.as_deref());
             // On the cell, which is what a screen reader reads of the field ([`read_of`]).
@@ -2762,7 +2837,6 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
         scroll.setScrollerStyle(NSScrollerStyle::Overlay);
         changed = true;
     }
-    let wanted = face(family, size);
     // The face or its size changed, or the line was never measured: the line is the face's.
     if view.ivars().line.get() <= 0.0 || view.font().is_none_or(|font| font != wanted) {
         view.setFont(Some(&wanted));
@@ -2771,7 +2845,7 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
         }
         // The line of the page's and the cell's baseline in it, in this face at this size: what every
         // line of the text is laid out in from now on.
-        let (cell, baseline) = cell_line(view.mtm(), family, size);
+        let (cell, baseline) = cell_line(view.mtm(), family, &place.font);
         view.ivars().line.set(cell.max(lines_natural_line(view)));
         view.ivars().baseline.set(baseline);
         // SAFETY: the text view was made with its layout manager, and the range is the text's.
@@ -2877,9 +2951,9 @@ fn place_field(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>
     if let Some((_, hint)) = view.ivars().hint.borrow().as_ref() {
         let bounds = view.bounds();
         let stands = NSRect::new(
-            NSPoint::new(pads[0], pads[1]),
+            NSPoint::new(pads[0] - CELL_INSET, pads[1]),
             NSSize::new(
-                f64::from(text.w),
+                f64::from(text.w) + 2.0 * CELL_INSET,
                 (bounds.size.height - pads[1] - pads[3]).max(0.0),
             ),
         );
@@ -3111,6 +3185,25 @@ fn event_key(characters: Option<&str>, ignoring: Option<&str>, mods: Mods) -> Op
     key.or_else(|| mods.control.then(|| ignoring.and_then(key_of)).flatten())
 }
 
+/// `place_field`, with the fixture's font put at the page's own size at `zoom` (the tests' fixtures
+/// say a font at zoom 1, and a page at a zoom is drawn that many times larger).
+fn place_at(field: &FieldView, place: &Field, zoom: f32, family: Option<&str>) {
+    let font = default_font(zoom);
+    place_field(
+        field,
+        &Field {
+            font,
+            ..place.clone()
+        },
+        family,
+    );
+}
+
+/// [`line_of`] for the page's own font at `zoom`, in the page's points (the host's over the zoom).
+fn line_at_zoom(mtm: MainThreadMarker, family: Option<&str>, zoom: f32) -> f32 {
+    line_of(mtm, family, &default_font(zoom)) / zoom
+}
+
 /// What is wrong with how a page's fields stand in their rooms, as AppKit lays them out (the page
 /// itself is not here: the rooms are what the kit says of a one-line field, a box of lines and the
 /// padding of each): the line of the face the page's fields are set in, in the page's points at a
@@ -3131,7 +3224,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
     // The line of a face is asked of AppKit, not scaled: Monaco has 16 points to a line at the kit's
     // 12.5 and 31 at twice that (15.5 of the page's at zoom 2); and a field of any kind has the same.
     for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 15.5)] {
-        let got = line_of(mtm, Some("Monaco"), zoom);
+        let got = line_at_zoom(mtm, Some("Monaco"), zoom);
         if (got - line).abs() > 0.01 {
             said(format!(
                 "Monaco at zoom {zoom}: a line is {got} points, not {line}"
@@ -3139,7 +3232,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         }
         let size = f64::from(ZOOM_TEXT) * f64::from(zoom);
         for kind in [FieldKind::Line, FieldKind::Lines, FieldKind::Secret] {
-            let field = field_of(mtm, kind, Weak::new(), Some("Monaco"), size);
+            let field = field_of(mtm, kind, Weak::new(), Some("Monaco"), &terminal(size));
             let own = (field.line_height() / f64::from(zoom)) as f32;
             if (own - got).abs() > 0.01 {
                 said(format!(
@@ -3156,6 +3249,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         rect: room,
         padding_box: room,
         text,
+        font: terminal(12.5),
         hint: None,
         label: None,
         covered,
@@ -3166,12 +3260,18 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
     // which is what shows the measure sees a cut.
     for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 31.0)] {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         let pad = 6.0 * zoom;
         let text = Rect::new(20.0, 30.0 + pad, 200.0, 3.0 * line);
         let room = room_of_text(&text, pad, pad);
-        place_field(
+        place_at(
             &view,
             &field(FieldKind::Lines, room, text, false),
             zoom,
@@ -3195,7 +3295,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         };
         let held = |words: &str, across: f64| {
             let text = Rect::new(20.0, 30.0 + pad, across as f32, 3.0 * line);
-            place_field(
+            place_at(
                 &view,
                 &field(FieldKind::Lines, room_of_text(&text, pad, pad), text, false),
                 zoom,
@@ -3248,10 +3348,10 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
     // width and not the room's.
     for kind in [FieldKind::Line, FieldKind::Lines, FieldKind::Secret] {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), &terminal(12.5));
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 16.0);
-        place_field(
+        place_at(
             &view,
             &field(kind, room_of_text(&text, 4.0, 10.0), text, false),
             1.0,
@@ -3283,10 +3383,13 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         }
         // A field of text stands in its text box; the scroll view of a field of lines is its
         // padding box (here the room: the box's 8 on each side), with the text in the box.
+        // The cell of a field of text stands its text [`CELL_INSET`] in, so its frame is wider than
+        // the text box by that on each side.
+        let inset = CELL_INSET as f32;
         let (across, wide) = if matches!(view, FieldView::Lines(_)) {
             (text.x - 8.0, text.w + 16.0)
         } else {
-            (text.x, text.w)
+            (text.x - inset, text.w + 2.0 * inset)
         };
         if frame.origin.x != f64::from(across) || frame.size.width != f64::from(wide) {
             said(format!(
@@ -3299,11 +3402,11 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
     // (the room), which holds the line below the padding over it; capitals in the box's middle.
     for kind in [FieldKind::Line, FieldKind::Lines] {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), &terminal(12.5));
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 12.0);
         let room = Rect::new(12.0, 30.0, 216.0, 24.0);
-        place_field(&view, &field(kind, room, text, false), 1.0, Some("Monaco"));
+        place_at(&view, &field(kind, room, text, false), 1.0, Some("Monaco"));
         let frame = view.frame();
         let wanted = if kind == FieldKind::Lines { 24.0 } else { 16.0 };
         if frame.size.height != wanted {
@@ -3327,10 +3430,10 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         (FieldKind::Secret, Rect::new(20.0, 36.0, 200.0, 16.0)),
     ] {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), &terminal(12.5));
         host.addSubview(&view);
         let room = room_of_text(&text, 6.0, 6.0);
-        place_field(&view, &field(kind, room, text, false), 1.0, Some("Monaco"));
+        place_at(&view, &field(kind, room, text, false), 1.0, Some("Monaco"));
         // `isDescendantOf` is true of the view itself.
         let mine = |at: NSPoint| {
             host.hitTest(at)
@@ -3431,7 +3534,7 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
             ));
         }
         window.setContentView(None);
-        place_field(&view, &field(kind, room, text, true), 1.0, Some("Monaco"));
+        place_at(&view, &field(kind, room, text, true), 1.0, Some("Monaco"));
         if host.hitTest(NSPoint::new(across, top + 2.0)).is_some() {
             said(format!(
                 "a {kind:?}: a press in the room of a field the page covers is taken by it"
@@ -3439,6 +3542,9 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
         }
     }
     drop(said);
+    first_glyph_problems(mtm, &mut problems);
+    field_font_problems(mtm, &mut problems);
+    field_reach_problems(mtm, &mut problems);
     lines_overflow_problems(mtm, &mut problems);
     lines_padding_problems(mtm, &mut problems);
     lines_changing_problems(mtm, &mut problems);
@@ -3446,6 +3552,274 @@ pub(crate) fn field_problems(mtm: MainThreadMarker) -> Vec<String> {
     lines_bar_problems(mtm, &mut problems);
     lines_problems(mtm, &mut problems);
     problems
+}
+
+/// Where the first glyph of a field's text is drawn from the left of the text box the page gave it,
+/// points, by every way a field is drawn: a field of one line and one of lines, at rest and with the
+/// editor of the field in it, with its host in a window (the display's own scale) and in none (one to
+/// a point), at two zooms, and with the padding the page gave it.
+fn first_glyph_starts(mtm: MainThreadMarker) -> Vec<(String, f64)> {
+    let mut starts = Vec::new();
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    for zoom in [1.0_f32, 2.0] {
+        let line = line_at_zoom(mtm, Some("Monaco"), zoom) * zoom;
+        for kind in [FieldKind::Line, FieldKind::Lines] {
+            for (editing, windowed) in [(false, false), (false, true), (true, true)] {
+                let host = FieldsHost::with_frame(mtm, host_frame);
+                let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), &default_font(zoom));
+                host.addSubview(&view);
+                let text = Rect::new(40.0, 30.0 + 6.0 * zoom, 200.0, line);
+                let room = Rect::new(
+                    text.x - 6.0 * zoom,
+                    text.y - 6.0 * zoom,
+                    text.w + 12.0 * zoom,
+                    text.h + 12.0 * zoom,
+                );
+                place_at(
+                    &view,
+                    &Field {
+                        id,
+                        kind,
+                        rect: room,
+                        padding_box: room,
+                        text,
+                        font: terminal(12.5),
+                        hint: None,
+                        label: None,
+                        covered: false,
+                    },
+                    zoom,
+                    Some("Monaco"),
+                );
+                view.set_text("XXXX");
+                let window = windowed.then(|| window_over(mtm, &host));
+                if editing {
+                    let Some(window) = &window else { continue };
+                    if !(window.makeFirstResponder(Some(view.inner())) && view.editing()) {
+                        continue;
+                    }
+                    // The caret at the end: the whole text selected would paint from where the text
+                    // starts, which is what is being measured, not the glyph.
+                    match &view {
+                        FieldView::Lines(lines) => lines.text.setSelectedRange(NSRange::new(4, 0)),
+                        other => {
+                            if let Some(editor) = other.text_field().and_then(|f| f.currentEditor())
+                            {
+                                editor.setSelectedRange(NSRange::new(4, 0));
+                            }
+                        }
+                    }
+                }
+                if let Some((x0, ..)) = ink_in(&host) {
+                    let rep = host.bitmapImageRepForCachingDisplayInRect(host.bounds());
+                    let scale = rep.map_or(0.0, |rep| rep.pixelsWide() as f64 / 400.0);
+                    let state = if editing { "being typed in" } else { "at rest" };
+                    let at = if windowed {
+                        "in a window"
+                    } else {
+                        "in no window"
+                    };
+                    starts.push((
+                        format!(
+                            "{kind:?} at zoom {zoom}, {state}, {at}, {scale} pixels to a point"
+                        ),
+                        x0 - f64::from(text.x),
+                    ));
+                }
+                if let Some(window) = window {
+                    window.makeFirstResponder(None);
+                    window.setContentView(None);
+                }
+            }
+        }
+    }
+    starts
+}
+
+/// The first glyph of a field's text is drawn where the first glyph of the page's own text is in the
+/// same box: at the text box's edge, and not [`CELL_INSET`] (AppKit's cell) or five points (a text
+/// view's own padding) in from it. A glyph has a bearing of its own, a fraction of a point at these
+/// sizes, which is all that is allowed: the tolerance is the least that tells it from the two
+/// points it was.
+fn first_glyph_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let starts = first_glyph_starts(mtm);
+    // Two zooms, two kinds, three states each: a case that was not measured (no keyboard in the
+    // window, nothing drawn) is not a pass.
+    if starts.len() != 12 {
+        problems.push(format!(
+            "the first glyph was measured in {} of 12 cases",
+            starts.len()
+        ));
+    }
+    for (what, start) in starts {
+        if !(-0.26..=0.76).contains(&start) {
+            problems.push(format!(
+                "{what}: the first glyph is drawn {start:.2} points from the text box's edge"
+            ));
+        }
+    }
+}
+
+/// A field is set in the font the page says, not in the page's own at a zoom: the size (13.5 points
+/// is drawn at 13.5), the line the page is told for that font (each its own, asked of AppKit: the
+/// field's own line is the one the page lays its rows out with), a box of three rows of it holds
+/// three lines and not four, and the face, the weight and the italic.
+fn field_font_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    for size in [9.0_f64, 13.5, 20.0] {
+        let font = terminal(size);
+        let told = line_of(mtm, Some("Monaco"), &font);
+        for kind in [FieldKind::Line, FieldKind::Secret, FieldKind::Lines] {
+            let host = FieldsHost::with_frame(mtm, host_frame);
+            let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), &terminal(12.5));
+            host.addSubview(&view);
+            let text = Rect::new(20.0, 40.0, 200.0, 3.0 * told);
+            let room = Rect::new(8.0, 30.0, 224.0, 3.0 * told + 20.0);
+            place_field(
+                &view,
+                &Field {
+                    id,
+                    kind,
+                    rect: room,
+                    padding_box: room,
+                    text,
+                    font,
+                    hint: None,
+                    label: None,
+                    covered: false,
+                },
+                Some("Monaco"),
+            );
+            let drawn = match &view {
+                FieldView::Lines(lines) => lines.text.font(),
+                other => other.text_field().and_then(|field| field.font()),
+            };
+            let drawn = drawn.map_or(0.0, |font| font.pointSize());
+            if (drawn - size).abs() > 0.01 {
+                problems.push(format!(
+                    "a {kind:?} the page sets in {size} points is drawn in {drawn}"
+                ));
+            }
+            let own = view.line_height() as f32;
+            if (own - told).abs() > 0.01 {
+                problems.push(format!(
+                    "a {kind:?} in {size} points has a line of {own}, the page is told {told}"
+                ));
+            }
+            // Three rows of the told line hold three lines, and not four.
+            if let FieldView::Lines(lines) = &view {
+                let needs = |words: &str| {
+                    lines.text.setString(&NSString::from_str(words));
+                    // SAFETY: the text view was made with its layout manager and container.
+                    let (manager, container) =
+                        unsafe { (lines.text.layoutManager(), lines.text.textContainer()) };
+                    let (manager, container) = (
+                        manager.expect("a layout manager"),
+                        container.expect("a container"),
+                    );
+                    manager.ensureLayoutForTextContainer(&container);
+                    manager.usedRectForTextContainer(&container).size.height
+                };
+                let (three, four) = (needs("one\ntwo\nthree"), needs("one\ntwo\nthree\nfour"));
+                if three > f64::from(3.0 * told) + 0.01 || four <= f64::from(3.0 * told) {
+                    problems.push(format!(
+                        "rows = 3 in {size} points: three lines need {three}, four need {four}, the box has {}",
+                        3.0 * told
+                    ));
+                }
+            }
+        }
+    }
+    // The face: the system's interface font is not the terminal's, and the weight and the italic the
+    // page says are the font's.
+    let system = face(
+        None,
+        &Font {
+            family: Family::System,
+            ..terminal(13.0)
+        },
+    );
+    let terminal_face = face(Some("Menlo"), &terminal(13.0));
+    if system.isFixedPitch() || !terminal_face.isFixedPitch() {
+        problems.push(format!(
+            "the system's face is {system:?}, the terminal's {terminal_face:?}: not told apart by their pitch"
+        ));
+    }
+    let both = face(
+        Some("Menlo"),
+        &Font {
+            weight: 700,
+            italic: true,
+            ..terminal(13.0)
+        },
+    );
+    let traits = both.fontDescriptor().symbolicTraits();
+    if !traits.contains(NSFontDescriptorSymbolicTraits::TraitBold)
+        || !traits.contains(NSFontDescriptorSymbolicTraits::TraitItalic)
+    {
+        problems.push(format!(
+            "a bold italic face is {both:?}, with traits {traits:?}"
+        ));
+    }
+    let heavy = weight_of(900) > weight_of(700) && weight_of(700) > weight_of(400);
+    if !heavy || weight_of(400) != 0.0 || (weight_of(450) - 0.115).abs() > 1e-9 {
+        problems.push("the weights of the CSS scale are not AppKit's, in order".to_owned());
+    }
+}
+
+/// A field of one line is wider than its text box by the cell's inset on each side, and the room the
+/// page gave it may have no padding or border to hold that: a press just outside the room is the
+/// page's (a neighbour's), and one in it, at the edge, is the field's.
+fn field_reach_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
+    let host_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+    let id = Id::named("a field");
+    for kind in [FieldKind::Line, FieldKind::Secret] {
+        let host = FieldsHost::with_frame(mtm, host_frame);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), &terminal(12.5));
+        host.addSubview(&view);
+        // The text box is all of the room: no padding, no border.
+        let room = Rect::new(40.0, 30.0, 200.0, 16.0);
+        place_field(
+            &view,
+            &Field {
+                id,
+                kind,
+                rect: room,
+                padding_box: room,
+                text: room,
+                font: terminal(12.5),
+                hint: None,
+                label: None,
+                covered: false,
+            },
+            Some("Monaco"),
+        );
+        let middle = f64::from(room.y + room.h / 2.0);
+        for (what, x, mine) in [
+            ("just left of the room", f64::from(room.x) - 1.0, false),
+            (
+                "just right of the room",
+                f64::from(room.x + room.w) + 0.5,
+                false,
+            ),
+            ("the room's left edge", f64::from(room.x) + 0.5, true),
+            (
+                "the room's right edge",
+                f64::from(room.x + room.w) - 0.5,
+                true,
+            ),
+        ] {
+            let hit = host.hitTest(NSPoint::new(x, middle)).is_some();
+            if hit != mine {
+                problems.push(format!(
+                    "a {kind:?} with no padding: a press at {what} is {} the field's",
+                    if hit { "taken as" } else { "not" }
+                ));
+            }
+        }
+    }
 }
 
 /// What is asked of a text view in `lines_problems`: one of its settings.
@@ -3535,7 +3909,13 @@ fn lines_overflow_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         ] {
             for keyboard in [false, true] {
                 let host = FieldsHost::with_frame(mtm, host_frame);
-                let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+                let view = field_of(
+                    mtm,
+                    FieldKind::Lines,
+                    Weak::new(),
+                    Some("Monaco"),
+                    &terminal(12.5),
+                );
                 host.addSubview(&view);
                 let pad = 6.0 * zoom;
                 let text = Rect::new(20.0, 30.0 + pad, 200.0, rows * line);
@@ -3545,7 +3925,7 @@ fn lines_overflow_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
                     text.w + 16.0,
                     text.h + 2.0 * pad,
                 );
-                place_field(
+                place_at(
                     &view,
                     &Field {
                         id,
@@ -3553,6 +3933,7 @@ fn lines_overflow_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
                         rect: room,
                         padding_box: room,
                         text,
+                        font: terminal(12.5),
                         hint: None,
                         label: None,
                         covered: false,
@@ -3645,9 +4026,15 @@ fn lines_padding_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 31.0)] {
         let (room, padding_box, text, pads) = padded_boxes(zoom, line);
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
-        place_field(
+        place_at(
             &view,
             &Field {
                 id,
@@ -3655,6 +4042,7 @@ fn lines_padding_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
                 rect: room,
                 padding_box,
                 text,
+                font: terminal(12.5),
                 hint: None,
                 label: None,
                 covered: false,
@@ -3781,7 +4169,7 @@ fn lines_padding_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         let advance = font
             .as_ref()
             .map_or(7.5, |font| font.maximumAdvancement().width);
-        let (to_left, to_top) = (f64::from(pads[0]) + SIDE_PADDING, f64::from(pads[1]));
+        let (to_left, to_top) = (f64::from(pads[0]), f64::from(pads[1]));
         for (row, column) in [(0_usize, 0_usize), (1, 2), (2, 3)] {
             let at = lines.text.convertPoint_fromView(
                 host.convertPoint_toView(
@@ -3852,9 +4240,15 @@ fn lines_bar_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     let id = Id::named("a field");
     let (room, padding_box, text, _) = padded_boxes(1.0, 16.0);
     let host = FieldsHost::with_frame(mtm, host_frame);
-    let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+    let view = field_of(
+        mtm,
+        FieldKind::Lines,
+        Weak::new(),
+        Some("Monaco"),
+        &terminal(12.5),
+    );
     host.addSubview(&view);
-    place_field(
+    place_at(
         &view,
         &Field {
             id,
@@ -3862,6 +4256,7 @@ fn lines_bar_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
             rect: room,
             padding_box,
             text,
+            font: terminal(12.5),
             hint: None,
             label: None,
             covered: false,
@@ -3965,6 +4360,7 @@ fn lines_changing_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         rect: room,
         padding_box,
         text,
+        font: terminal(12.5),
         hint: None,
         label: None,
         covered: false,
@@ -3972,9 +4368,15 @@ fn lines_changing_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     for (zoom, line) in [(1.0_f32, 16.0_f32), (2.0, 31.0)] {
         let (room, padding_box, text, pads) = padded_boxes(zoom, line);
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
-        place_field(&view, &field(room, padding_box, text), zoom, Some("Monaco"));
+        place_at(&view, &field(room, padding_box, text), zoom, Some("Monaco"));
         let window = window_over(mtm, &host);
         let FieldView::Lines(lines) = &view else {
             continue;
@@ -4009,7 +4411,7 @@ fn lines_changing_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
                 padding_box.h - new[1] - new[3],
             );
             lines.text.setNeedsDisplay(false);
-            place_field(&view, &field(room, padding_box, text), zoom, Some("Monaco"));
+            place_at(&view, &field(room, padding_box, text), zoom, Some("Monaco"));
             if !lines.text.needsDisplay() {
                 problems.push(format!(
                     "changing at zoom {zoom}, paddings {what}: the text is not to be drawn again"
@@ -4050,12 +4452,18 @@ fn lines_changing_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // over it and stays in the room (the border and what is below are not its), and the line is in
     // view with the caret in it.
     let host = FieldsHost::with_frame(mtm, host_frame);
-    let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+    let view = field_of(
+        mtm,
+        FieldKind::Lines,
+        Weak::new(),
+        Some("Monaco"),
+        &terminal(12.5),
+    );
     host.addSubview(&view);
     let room = Rect::new(12.0, 30.0, 216.0, 24.0);
     let padding_box = Rect::new(13.0, 31.0, 214.0, 22.0);
     let text = Rect::new(19.0, 40.0, 202.0, 4.0);
-    place_field(&view, &field(room, padding_box, text), 1.0, Some("Monaco"));
+    place_at(&view, &field(room, padding_box, text), 1.0, Some("Monaco"));
     let window = window_over(mtm, &host);
     if let FieldView::Lines(lines) = &view {
         let frame = view.frame();
@@ -4101,11 +4509,11 @@ fn lines_drop_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     let mut seen: Vec<(FieldKind, [Vec<String>; 3])> = Vec::new();
     for kind in [FieldKind::Line, FieldKind::Lines] {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(mtm, kind, Weak::new(), Some("Monaco"), &terminal(12.5));
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 48.0);
         let room = Rect::new(12.0, 30.0, 216.0, 60.0);
-        place_field(
+        place_at(
             &view,
             &Field {
                 id,
@@ -4113,6 +4521,7 @@ fn lines_drop_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
                 rect: room,
                 padding_box: room,
                 text,
+                font: terminal(12.5),
                 hint: None,
                 label: None,
                 covered: false,
@@ -4170,6 +4579,7 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         rect: Rect::new(text.x - 8.0, text.y - 6.0, text.w + 16.0, text.h + 12.0),
         padding_box: Rect::new(text.x - 8.0, text.y - 6.0, text.w + 16.0, text.h + 12.0),
         text,
+        font: terminal(12.5),
         hint: hint.map(str::to_owned),
         label: label.map(str::to_owned),
         covered: false,
@@ -4181,13 +4591,13 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     for family in [Some("Monaco"), Some("SF Mono"), None] {
         for zoom in [1.0_f32, 1.25, 2.0] {
             let pad = 6.0 * zoom;
-            let line = (line_of(mtm, family, zoom) * zoom).round();
+            let line = (line_at_zoom(mtm, family, zoom) * zoom).round();
             let text = Rect::new(20.0, 30.0 + pad, 200.0, line);
             let ink = |kind: FieldKind, words: &str, hint: Option<&str>| {
                 let host = FieldsHost::with_frame(mtm, host_frame);
-                let view = field_of(mtm, kind, Weak::new(), family, 12.5);
+                let view = field_of(mtm, kind, Weak::new(), family, &terminal(12.5));
                 host.addSubview(&view);
-                place_field(&view, &field(kind, text, hint, None), zoom, family);
+                place_at(&view, &field(kind, text, hint, None), zoom, family);
                 view.set_text(words);
                 let window = window_over(mtm, &host);
                 let ink = ink_of(&host);
@@ -4231,10 +4641,16 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // The box: the text is as wide as it, the scroll bar the overlay one, the field a text area read once.
     for zoom in [1.0_f32, 2.0] {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 48.0 * zoom);
-        place_field(
+        place_at(
             &view,
             &field(FieldKind::Lines, text, Some("Write here"), Some("Notes")),
             zoom,
@@ -4358,12 +4774,12 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         None,
     ] {
         for zoom in [1.0_f32, 1.25, 1.5, 2.0, 3.0] {
-            let told = f64::from(line_of(mtm, family, zoom)) * f64::from(zoom);
+            let told = f64::from(line_at_zoom(mtm, family, zoom)) * f64::from(zoom);
             let host = FieldsHost::with_frame(mtm, host_frame);
-            let view = field_of(mtm, FieldKind::Lines, Weak::new(), family, 12.5);
+            let view = field_of(mtm, FieldKind::Lines, Weak::new(), family, &terminal(12.5));
             host.addSubview(&view);
             let text = Rect::new(20.0, 36.0, 200.0, (3.0 * told) as f32);
-            place_field(
+            place_at(
                 &view,
                 &field(FieldKind::Lines, text, None, None),
                 zoom,
@@ -4392,7 +4808,13 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // The substitutions of the field's editor, asked of one in a window: the text view has them.
     {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Line, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Line,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         view.setFrame(NSRect::new(
             NSPoint::new(20.0, 30.0),
@@ -4405,7 +4827,13 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
             .flatten()
             .and_then(|editor| editor.downcast::<NSTextView>().ok());
         if let Some(editor) = editor {
-            let lines = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+            let lines = field_of(
+                mtm,
+                FieldKind::Lines,
+                Weak::new(),
+                Some("Monaco"),
+                &terminal(12.5),
+            );
             let FieldView::Lines(lines) = &lines else {
                 unreachable!("a field of lines");
             };
@@ -4439,12 +4867,18 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // The caret stays in view as the person types: four lines typed in a box of three, the last is
     // seen, the box scrolled by a line; a line more, and by two.
     for zoom in [1.0_f32, 2.0] {
-        let line = (line_of(mtm, Some("Monaco"), zoom) * zoom).round();
+        let line = (line_at_zoom(mtm, Some("Monaco"), zoom) * zoom).round();
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 3.0 * line);
-        place_field(
+        place_at(
             &view,
             &field(FieldKind::Lines, text, None, None),
             zoom,
@@ -4491,18 +4925,30 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
         let host = FieldsHost::with_frame(mtm, host_frame);
         let text = Rect::new(20.0, 36.0, 200.0, 48.0);
         let place = |view: &FieldView, family: Option<&str>| {
-            place_field(
+            place_at(
                 view,
                 &field(FieldKind::Lines, text, None, None),
                 1.25,
                 family,
             );
         };
-        let moved = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let moved = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&moved);
         place(&moved, Some("Monaco"));
         place(&moved, Some("SF Mono"));
-        let fresh = field_of(mtm, FieldKind::Lines, Weak::new(), Some("SF Mono"), 12.5);
+        let fresh = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("SF Mono"),
+            &terminal(12.5),
+        );
         host.addSubview(&fresh);
         place(&fresh, Some("SF Mono"));
         let (a, b) = (moved.ivars(), fresh.ivars());
@@ -4533,10 +4979,16 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // What the person typed is not undone onto a text the page put in after it.
     {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 48.0);
-        place_field(
+        place_at(
             &view,
             &field(FieldKind::Lines, text, None, None),
             1.0,
@@ -4584,7 +5036,13 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // that the box scrolled away from; and a field that left the page is freed.
     {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 48.0);
         let room = Rect::new(12.0, 30.0, 216.0, 60.0);
@@ -4594,11 +5052,12 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
             rect: room,
             padding_box: Rect::new(15.0, 33.0, 210.0, 54.0),
             text,
+            font: terminal(12.5),
             hint: None,
             label: None,
             covered: false,
         };
-        place_field(&view, &line, 1.0, Some("Monaco"));
+        place_at(&view, &line, 1.0, Some("Monaco"));
         view.set_text("1\n2\n3\n4\n5\n6\n7\n8");
         let window = window_over(mtm, &host);
         if let FieldView::Lines(lines) = &view {
@@ -4659,10 +5118,16 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // Nor what was typed in a field that has left the page.
     {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 48.0);
-        place_field(
+        place_at(
             &view,
             &field(FieldKind::Lines, text, None, None),
             1.0,
@@ -4705,10 +5170,16 @@ fn lines_problems(mtm: MainThreadMarker, problems: &mut Vec<String>) {
     // command the page did not take (⏎, here no page) is the text view's own, a line break.
     {
         let host = FieldsHost::with_frame(mtm, host_frame);
-        let view = field_of(mtm, FieldKind::Lines, Weak::new(), Some("Monaco"), 12.5);
+        let view = field_of(
+            mtm,
+            FieldKind::Lines,
+            Weak::new(),
+            Some("Monaco"),
+            &terminal(12.5),
+        );
         host.addSubview(&view);
         let text = Rect::new(20.0, 36.0, 200.0, 48.0);
-        place_field(
+        place_at(
             &view,
             &field(FieldKind::Lines, text, None, None),
             1.0,
